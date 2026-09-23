@@ -2813,7 +2813,7 @@ struct ActiveIssuesSheet: View {
             guard chosenID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
             loadedID = chosenID
 
-            if let asset = ContentView.reportAsset(from: chosenID) {
+            if let asset = ContentView.reportAsset(from: chosenID) ?? ContentView.reportAsset(fromPath: chosenID) {
                 let px = max(120, 56 * UIScreen.currentScale * 2.0)
                 if let cached = cache.cachedThumbnail(for: asset, pixelSize: px) {
                     thumbnail = cached
@@ -2844,7 +2844,7 @@ struct ActiveIssuesSheet: View {
                 }
                 DispatchQueue.main.async {
                     guard self.loadedID == chosenID else { return }
-                    guard let asset = ContentView.reportAsset(from: chosenID) else {
+                    guard let asset = ContentView.reportAsset(from: chosenID) ?? ContentView.reportAsset(fromPath: chosenID) else {
                         self.thumbnail = nil
                         self.isThumbnailLoading = false
                         return
@@ -2869,7 +2869,7 @@ struct ActiveIssuesSheet: View {
         private func cachedThumbnailForCurrentSource(pixelSize: CGFloat) -> UIImage? {
             let chosenID = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !chosenID.isEmpty,
-                  let asset = ContentView.reportAsset(from: chosenID) else {
+                  let asset = ContentView.reportAsset(from: chosenID) ?? ContentView.reportAsset(fromPath: chosenID) else {
                 return nil
             }
             return cache.cachedThumbnail(for: asset, pixelSize: pixelSize)

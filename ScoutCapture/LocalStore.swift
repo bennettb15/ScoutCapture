@@ -2676,7 +2676,6 @@ final class LocalStore {
                     switch status {
                     case .active:
                         if before.status == .pendingReview || overlay.reopensResolved {
-                            observations[index].resolutionPhotoRef = nil
                             observations[index].resolutionStatement = nil
                             observations[index].historyEvents.append(
                                 ObservationHistoryEvent(
@@ -2959,6 +2958,24 @@ final class LocalStore {
 
     func loadSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
         try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    func fetchSessionMetadataIDs(propertyID: UUID) throws -> [UUID] {
+        let sessionsURL = sessionsFolderURL(propertyID: propertyID)
+        guard fileManager.fileExists(atPath: sessionsURL.path) else { return [] }
+        let sessionFolderURLs = try fileManager.contentsOfDirectory(
+            at: sessionsURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        return sessionFolderURLs.compactMap { sessionFolderURL in
+            guard (try? sessionFolderURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                return nil
+            }
+            let metadataURL = sessionFolderURL.appendingPathComponent("session.json", isDirectory: false)
+            guard fileManager.fileExists(atPath: metadataURL.path) else { return nil }
+            return UUID(uuidString: sessionFolderURL.lastPathComponent)
+        }
     }
 
     func saveSessionMetadataAtomically(propertyID: UUID, sessionID: UUID, metadata: SessionMetadata) throws {
@@ -4894,6 +4911,18 @@ final class LocalStore {
             let currentMetaShot = issueShots.sorted {
                 LocalConflictRules.currentIssueShotSortPrecedes($0, $1, linkedShotID: nil)
             }.first
+            let resolvedMetaShot = issueShots.filter { shot in
+                let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+                let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+                return issueStatus == "pending_review" ||
+                    issueStatus == "resolved" ||
+                    captureKind == "resolved_capture"
+            }
+            .sorted {
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                return $0.createdAt > $1.createdAt
+            }
+            .first
             let shots = issueShots
                 .sorted { $0.createdAt < $1.createdAt }
                 .map { shot in
@@ -4943,7 +4972,7 @@ final class LocalStore {
                 statement: trimmedNonEmpty(issue.detailNote) ?? "",
                 status: status,
                 linkedShotID: linkedShot,
-                resolutionPhotoRef: nil,
+                resolutionPhotoRef: resolvedMetaShot.map(shotPath(for:)) ?? existing?.resolutionPhotoRef,
                 resolutionStatement: nil,
                 updatedInSessionID: effectiveSessionID,
                 resolvedInSessionID: status == .resolved || status == .pendingReview ? effectiveSessionID : nil,
@@ -5051,6 +5080,18 @@ final class LocalStore {
                 let latestShot = orderedShots.sorted {
                     LocalConflictRules.currentIssueShotSortPrecedes($0, $1, linkedShotID: nil)
                 }.first
+                let resolvedShot = orderedShots.filter { shot in
+                    let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+                    let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+                    return issueStatus == "pending_review" ||
+                        issueStatus == "resolved" ||
+                        captureKind == "resolved_capture"
+                }
+                .sorted {
+                    if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                    return $0.createdAt > $1.createdAt
+                }
+                .first
                 let issue = metadata.issues.first(where: { $0.issueID == issueID })
                 let createdAt = issue?.firstSeenAt ?? orderedShots.first?.createdAt ?? metadata.startedAt
                 let updatedAt = issue?.lastSeenAt ?? issue?.resolvedAt ?? latestShot?.updatedAt ?? metadata.startedAt
@@ -5105,6 +5146,9 @@ final class LocalStore {
                 next.resolvedInSessionID = status == .resolved || status == .pendingReview
                     ? (issue?.lastCaptureSessionId ?? sessionID)
                     : nil
+                if let resolvedShot {
+                    next.resolutionPhotoRef = shotPath(for: resolvedShot)
+                }
                 next.building = latestShot?.building ?? next.building
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
                 next.detailType = latestShot?.detailType ?? next.detailType

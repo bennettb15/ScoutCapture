@@ -53439,7 +53439,10 @@ final class AppState: ObservableObject {
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let sortedObservations = observations.sorted { lhs, rhs in
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let sortedObservations = observations
+            .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
+            .sorted { lhs, rhs in
             if lhs.updatedAt != rhs.updatedAt {
                 return lhs.updatedAt > rhs.updatedAt
             }
@@ -53462,7 +53465,10 @@ final class AppState: ObservableObject {
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let sortedObservations = observations.sorted { lhs, rhs in
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let sortedObservations = observations
+            .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
+            .sorted { lhs, rhs in
             if lhs.updatedAt != rhs.updatedAt {
                 return lhs.updatedAt > rhs.updatedAt
             }
@@ -53497,6 +53503,100 @@ final class AppState: ObservableObject {
             guidedShots: activeGuided,
             retiredGuidedShots: retiredGuided
         )
+    }
+
+    private struct FastRuntimeIssueResolvedReference {
+        let shot: ShotMetadata
+        let sessionID: UUID
+        let resolvedPath: String?
+    }
+
+    private func fastRuntimeResolvedIssueReferencesByObservationID(
+        propertyID: UUID
+    ) -> [UUID: FastRuntimeIssueResolvedReference] {
+        let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
+        let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
+        let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
+        var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
+        for sessionID in sessionIDs {
+            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+                continue
+            }
+            for shot in metadata.shots {
+                guard let observationID = shot.issueID else { continue }
+                let issueStatus = (shot.issueStatus ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let captureKind = (shot.captureKind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let isResolvedEvidence = issueStatus == Observation.Status.pendingReview.issueStatusValue ||
+                    issueStatus == Observation.Status.resolved.issueStatusValue ||
+                    captureKind == "resolved_capture"
+                guard isResolvedEvidence else { continue }
+
+                let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedPath: String?
+                if !relativePath.isEmpty,
+                   let url = localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    relativePath: relativePath
+                   ) {
+                    resolvedPath = url.path
+                } else if !relativePath.isEmpty {
+                    resolvedPath = localStore
+                        .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                        .appendingPathComponent(relativePath, isDirectory: false)
+                        .path
+                } else {
+                    resolvedPath = nil
+                }
+
+                let reference = FastRuntimeIssueResolvedReference(
+                    shot: shot,
+                    sessionID: sessionID,
+                    resolvedPath: resolvedPath
+                )
+                if let existing = referencesByObservationID[observationID] {
+                    if fastRuntimeResolvedReference(reference, isNewerThan: existing) {
+                        referencesByObservationID[observationID] = reference
+                    }
+                } else {
+                    referencesByObservationID[observationID] = reference
+                }
+            }
+        }
+        return referencesByObservationID
+    }
+
+    private func fastRuntimeResolvedReference(
+        _ lhs: FastRuntimeIssueResolvedReference,
+        isNewerThan rhs: FastRuntimeIssueResolvedReference
+    ) -> Bool {
+        if lhs.shot.updatedAt != rhs.shot.updatedAt {
+            return lhs.shot.updatedAt > rhs.shot.updatedAt
+        }
+        return lhs.shot.createdAt > rhs.shot.createdAt
+    }
+
+    private func fastRuntimeObservationWithResolvedReferenceIfAvailable(
+        _ observation: Observation,
+        resolvedReferences: [UUID: FastRuntimeIssueResolvedReference]
+    ) -> Observation {
+        guard let reference = resolvedReferences[observation.id] else { return observation }
+
+        var updated = observation
+        if reference.resolvedPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            updated.resolutionPhotoRef = reference.resolvedPath
+        }
+        if !updated.shots.contains(where: { $0.id == reference.shot.shotID }) {
+            updated.shots.append(
+                Shot(
+                    id: reference.shot.shotID,
+                    capturedAt: reference.shot.createdAt,
+                    imageLocalIdentifier: reference.resolvedPath,
+                    note: reference.shot.noteText
+                )
+            )
+        }
+        return updated
     }
 
     func fastRuntimeGuidedPanelMediaHydrationRequests(
@@ -53576,8 +53676,10 @@ final class AppState: ObservableObject {
         guard canAccessProperty(propertyID), !observations.isEmpty else { return [] }
         let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
             .sorted { $0.startedAt > $1.startedAt }
-        guard !sessions.isEmpty else { return [] }
+        let hasSessionMetadata = !(((try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []).isEmpty)
+        guard !sessions.isEmpty || hasSessionMetadata else { return [] }
 
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
         var requests = Set<OperationalMediaHydrationRequest>()
         for observation in observations {
             let explicitSessionIDs = [
@@ -53585,6 +53687,48 @@ final class AppState: ObservableObject {
                 observation.updatedInSessionID,
                 observation.resolvedInSessionID
             ]
+            if let resolvedReference = resolvedReferences[observation.id] {
+                let relativePath = resolvedReference.shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedPathExists = fastRuntimePathExists(resolvedReference.resolvedPath)
+                let resolvedRelativePathExists: Bool
+                if !relativePath.isEmpty,
+                   localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: resolvedReference.sessionID,
+                    relativePath: relativePath
+                   ) != nil {
+                    resolvedRelativePathExists = true
+                } else {
+                    resolvedRelativePathExists = false
+                }
+                if !resolvedPathExists && !resolvedRelativePathExists {
+                    requests.insert(OperationalMediaHydrationRequest(
+                        propertyID: propertyID,
+                        sessionID: resolvedReference.sessionID,
+                        shotID: resolvedReference.shot.shotID,
+                        relativePathOverride: relativePath.isEmpty ? nil : relativePath
+                    ))
+                    continue
+                }
+            }
+            if let resolutionPhotoRef = observation.resolutionPhotoRef?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !resolutionPhotoRef.isEmpty,
+               let resolutionShot = observation.shots.first(where: {
+                   ($0.imageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == resolutionPhotoRef
+               }),
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: resolutionShot.id,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    observation.resolutionPhotoRef,
+                    resolutionShot.imageLocalIdentifier
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
             if let linkedShotID = observation.linkedShotID,
                let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
                let request = fastRuntimePanelMediaHydrationRequest(

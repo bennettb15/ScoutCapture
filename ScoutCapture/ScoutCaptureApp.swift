@@ -16122,7 +16122,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         scoped.linkedShotID = localObservation.linkedShotID ?? scoped.linkedShotID
         scoped.updatedInSessionID = localObservation.updatedInSessionID ?? scoped.updatedInSessionID
         scoped.resolvedInSessionID = localObservation.resolvedInSessionID ?? scoped.resolvedInSessionID
-        scoped.resolutionPhotoRef = localObservation.resolutionPhotoRef ?? scoped.resolutionPhotoRef
+        if fastLaneTrimmedNonEmpty(scoped.resolutionPhotoRef) == nil {
+            scoped.resolutionPhotoRef = localObservation.resolutionPhotoRef
+        }
         if fastLaneTrimmedNonEmpty(scoped.resolutionStatement) == nil {
             scoped.resolutionStatement = localObservation.resolutionStatement
         }
@@ -16624,14 +16626,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneIssueDisplayImagePath(for observation: Observation) -> String? {
-        if let linkedShotID = observation.linkedShotID,
-           let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
-           let path = fastLaneExistingLocalPath(linkedShot.imageLocalIdentifier) {
-            return path
+        if fastLaneTrimmedNonEmpty(observation.resolutionPhotoRef) != nil,
+           fastLaneExistingLocalPath(observation.resolutionPhotoRef) == nil {
+            return nil
         }
 
         if let resolutionPath = fastLaneExistingLocalPath(observation.resolutionPhotoRef) {
             return resolutionPath
+        }
+
+        if let latestShotPath = observation.shots
+            .sorted(by: { lhs, rhs in
+                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            })
+            .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
+            .first {
+            return latestShotPath
         }
 
         if let guidedReference = observation.guidedShots
@@ -16640,13 +16651,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return guidedReference
         }
 
-        return observation.shots
-            .sorted { lhs, rhs in
-                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-            .compactMap { fastLaneExistingLocalPath($0.imageLocalIdentifier) }
-            .first
+        if let linkedShotID = observation.linkedShotID,
+           let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
+           let path = fastLaneExistingLocalPath(linkedShot.imageLocalIdentifier) {
+            return path
+        }
+        return nil
     }
 
     private func scheduleFastLaneGuidedPanelMediaHydrationIfNeeded() {
@@ -16763,6 +16773,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .appendingPathComponent(filename, isDirectory: false)
             if FileManager.default.fileExists(atPath: candidate.path) {
                 return candidate.path
+            }
+
+            let fastRuntimeCandidate = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
+                .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+                .appendingPathComponent("Originals", isDirectory: true)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: fastRuntimeCandidate.path) {
+                return fastRuntimeCandidate.path
             }
         }
         return nil
