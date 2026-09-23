@@ -219,6 +219,13 @@ private struct CloudBackupSheet: View {
     @State private var restoreErrorMessage: String? = nil
     @State private var isRestoring: Bool = false
     @State private var showRestoreSuccess: Bool = false
+    @State private var showLegacyCloudCleanupConfirmation: Bool = false
+    @State private var isClearingLegacyCloudStorage: Bool = false
+    @State private var legacyCloudCleanupResult: StorageRoot.LegacyCloudStorageCleanupResult?
+    @State private var legacyCloudCleanupErrorMessage: String? = nil
+    @State private var isScanningLocalStorage: Bool = false
+    @State private var localStorageBreakdown: StorageRoot.LocalStorageBreakdownResult?
+    @State private var localStorageBreakdownErrorMessage: String? = nil
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -234,7 +241,8 @@ private struct CloudBackupSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 18) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     Color.clear
                         .frame(width: 76, height: 36)
@@ -369,7 +377,53 @@ private struct CloudBackupSheet: View {
                     }
                 }
 
-                Spacer()
+                VStack(alignment: .leading, spacing: 6) {
+                    Button(action: {
+                        showLegacyCloudCleanupConfirmation = true
+                    }) {
+                        Text(isClearingLegacyCloudStorage ? "Clearing..." : "Clear Legacy iCloud Storage")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .foregroundColor(.white)
+                            .background(appState.cloudBackupStatus.iCloudAvailable ? Color.red : Color.gray)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!appState.cloudBackupStatus.iCloudAvailable || isClearingLegacyCloudStorage || isRestoring || appState.cloudBackupStatus.isRunning)
+
+                    Text("Deletes old ScoutCapture iCloud storage created before Supabase became canonical. Current local App Support data is not deleted.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Button(action: {
+                        scanLocalStorage()
+                    }) {
+                        Text(isScanningLocalStorage ? "Scanning..." : "Scan Local Storage")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .foregroundColor(.white)
+                            .background(isScanningLocalStorage ? Color.gray : Color.blue)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isScanningLocalStorage)
+
+                    Text("Read-only size breakdown for local App Support storage, archives, fast-lane drafts, and originals.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+
+                    if let localStorageBreakdown {
+                        VStack(spacing: 8) {
+                            ForEach(localStorageBreakdown.items) { item in
+                                localStorageBreakdownRow(item)
+                            }
+                        }
+                    }
+                }
+
+                }
             }
             .padding(16)
         }
@@ -388,12 +442,53 @@ private struct CloudBackupSheet: View {
         } message: {
             Text("This restores missing app-level data from the latest iCloud backup. For one property/session only, use Restore Session Snapshot.")
         }
+        .alert("Clear Legacy iCloud Storage?", isPresented: $showLegacyCloudCleanupConfirmation) {
+            Button("Clear iCloud Storage", role: .destructive) {
+                isClearingLegacyCloudStorage = true
+                appState.clearLegacyCloudStorage { result in
+                    isClearingLegacyCloudStorage = false
+                    switch result {
+                    case .success(let cleanupResult):
+                        legacyCloudCleanupResult = cleanupResult
+                    case .failure(let error):
+                        legacyCloudCleanupErrorMessage = error.localizedDescription
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This removes legacy ScoutCapture files from iCloud Drive for this app, including old SCOUT data and iCloud backup blobs. It does not delete the current local App Support store or Supabase records.")
+        }
         .alert("Restore Complete", isPresented: $showRestoreSuccess) {
             Button("OK", role: .cancel) {
                 dismiss()
             }
         } message: {
             Text("App backup restore finished successfully.")
+        }
+        .alert("Legacy iCloud Storage Cleared", isPresented: Binding(
+            get: { legacyCloudCleanupResult != nil },
+            set: { if !$0 { legacyCloudCleanupResult = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(legacyCloudCleanupSummary)
+        }
+        .alert("Legacy iCloud Cleanup Failed", isPresented: Binding(
+            get: { legacyCloudCleanupErrorMessage != nil },
+            set: { if !$0 { legacyCloudCleanupErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(legacyCloudCleanupErrorMessage ?? "Unable to clear legacy iCloud storage.")
+        }
+        .alert("Local Storage Scan Failed", isPresented: Binding(
+            get: { localStorageBreakdownErrorMessage != nil },
+            set: { if !$0 { localStorageBreakdownErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(localStorageBreakdownErrorMessage ?? "Unable to scan local storage.")
         }
         .alert("Restore Failed", isPresented: Binding(
             get: { restoreErrorMessage != nil },
@@ -406,6 +501,57 @@ private struct CloudBackupSheet: View {
         .onAppear {
             appState.refreshBackupStatus()
         }
+    }
+
+    private func scanLocalStorage() {
+        isScanningLocalStorage = true
+        appState.loadLocalStorageBreakdown { result in
+            isScanningLocalStorage = false
+            switch result {
+            case .success(let breakdown):
+                localStorageBreakdown = breakdown
+            case .failure(let error):
+                localStorageBreakdownErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private var legacyCloudCleanupSummary: String {
+        guard let legacyCloudCleanupResult else {
+            return "Legacy iCloud storage was cleared."
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let sizeString = formatter.string(fromByteCount: Int64(legacyCloudCleanupResult.removedByteCount))
+        return "Removed \(legacyCloudCleanupResult.removedItemCount) items (\(sizeString)) from legacy iCloud storage."
+    }
+
+    @ViewBuilder
+    private func localStorageBreakdownRow(_ item: StorageRoot.StorageBreakdownItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("\(item.itemCount) items")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            Text(localStorageSizeString(item.byteCount))
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.primary)
+                .monospacedDigit()
+        }
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func localStorageSizeString(_ byteCount: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(byteCount))
     }
 
     private var canRestore: Bool {
@@ -743,6 +889,7 @@ struct SessionHubView: View {
     @State private var hubTransientStatusToastToken: Int = 0
     @State private var isSearchExpanded: Bool = false
     @State private var searchQuery: String = ""
+    @State private var manualRefreshRotation: Double = 0
     @FocusState private var isSearchFieldFocused: Bool
     @State private var propertyListFilter: PropertyListFilter = .all
     @State private var showCalendarComingSoonPopup: Bool = false
@@ -760,7 +907,6 @@ struct SessionHubView: View {
     @State private var dismissedPendingInvitationIDs: Set<UUID> = []
     @State private var isPendingInviteActionInFlight: Bool = false
     @State private var pendingInvitePromptErrorMessage: String? = nil
-    @State private var isManualPropertyRefreshInFlight: Bool = false
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
@@ -1291,11 +1437,11 @@ struct SessionHubView: View {
     }
 
     private func runManualPropertyRefresh() {
-        guard !isManualPropertyRefreshInFlight else { return }
-        isManualPropertyRefreshInFlight = true
+        withAnimation(.linear(duration: 0.9)) {
+            manualRefreshRotation += 360
+        }
         Task {
             await appState.refreshPropertiesAwaitingForegroundRefresh()
-            isManualPropertyRefreshInFlight = false
         }
     }
 
@@ -1934,27 +2080,19 @@ struct SessionHubView: View {
                         Button {
                             runManualPropertyRefresh()
                         } label: {
-                            Group {
-                                if isManualPropertyRefreshInFlight {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
-                                        .scaleEffect(0.82)
-                                } else {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 18, weight: .medium))
-                                }
-                            }
-                            .foregroundColor(buttonLabel)
-                            .frame(width: 42, height: 42)
-                            .background(buttonFill)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(buttonStroke, lineWidth: 1)
-                            )
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 20, weight: .medium))
+                                .rotationEffect(.degrees(manualRefreshRotation))
+                                .foregroundColor(buttonLabel)
+                                .frame(width: 42, height: 42)
+                                .background(buttonFill)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(buttonStroke, lineWidth: 1)
+                                )
                         }
                         .buttonStyle(.plain)
-                        .disabled(isManualPropertyRefreshInFlight)
                         .accessibilityLabel("Refresh properties")
 
                         Spacer(minLength: 0)

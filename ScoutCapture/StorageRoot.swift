@@ -7,6 +7,25 @@ enum StorageRoot {
         let modifiedAt: Date?
     }
 
+    struct LegacyCloudStorageCleanupResult: Equatable {
+        let rootPath: String
+        let removedItemCount: Int
+        let removedByteCount: Int
+    }
+
+    struct StorageBreakdownItem: Equatable, Identifiable {
+        let id: String
+        let title: String
+        let path: String
+        let itemCount: Int
+        let byteCount: Int
+    }
+
+    struct LocalStorageBreakdownResult: Equatable {
+        let generatedAt: Date
+        let items: [StorageBreakdownItem]
+    }
+
     private struct Resolution {
         let cloudRoot: URL?
         let localRoot: URL
@@ -50,6 +69,57 @@ enum StorageRoot {
 
     nonisolated static func cloudBackupRootURL() -> URL? {
         resolve().cloudRoot?.appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    nonisolated static func clearLegacyCloudStorage() throws -> LegacyCloudStorageCleanupResult {
+        guard let cloudRoot = resolve().cloudRoot else {
+            return LegacyCloudStorageCleanupResult(rootPath: "", removedItemCount: 0, removedByteCount: 0)
+        }
+
+        let snapshot = try legacyCloudStorageSnapshot(at: cloudRoot)
+        guard fileManager.fileExists(atPath: cloudRoot.path) else {
+            return snapshot
+        }
+
+        let children = try fileManager.contentsOfDirectory(
+            at: cloudRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        for child in children {
+            try fileManager.removeItem(at: child)
+        }
+        return snapshot
+    }
+
+    nonisolated static func localStorageBreakdown() throws -> LocalStorageBreakdownResult {
+        let resolution = resolve()
+        let appSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let activeRoot = resolution.activeRoot
+        let scoutRoot = activeRoot.appendingPathComponent("SCOUT", isDirectory: true)
+        let propertiesRoot = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
+        let archivesRoot = scoutRoot.appendingPathComponent("Archives", isDirectory: true)
+        let fastLaneDraftRoot = appSupportRoot.appendingPathComponent("ScoutCaptureFastRuntimeDrafts", isDirectory: true)
+        let fastLaneTempRoot = fileManager.temporaryDirectory.appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
+
+        var items: [StorageBreakdownItem] = []
+        items.append(try storageBreakdownItem(title: "Active Local Store", id: "active", url: activeRoot))
+        items.append(try storageBreakdownItem(title: "SCOUT Data", id: "scout", url: scoutRoot))
+        items.append(try storageBreakdownItem(title: "Live Property Files", id: "properties", url: propertiesRoot))
+        items.append(try storageBreakdownItem(title: "Completed Archives", id: "archives", url: archivesRoot))
+        items.append(try storageBreakdownItem(title: "Fast-Lane Drafts", id: "fastLaneDrafts", url: fastLaneDraftRoot))
+        items.append(try storageBreakdownItem(title: "Fast-Lane Temp", id: "fastLaneTemp", url: fastLaneTempRoot))
+        items.append(try storageBreakdownItem(
+            title: "All Originals",
+            id: "originals",
+            urls: [propertiesRoot, archivesRoot, fastLaneDraftRoot],
+            matchingPathComponent: "Originals"
+        ))
+
+        return LocalStorageBreakdownResult(
+            generatedAt: Date(),
+            items: items
+        )
     }
 
     @discardableResult
@@ -120,6 +190,85 @@ enum StorageRoot {
         return fileManager.url(forUbiquityContainerIdentifier: nil)?
             .appendingPathComponent("Documents", isDirectory: true)
             .appendingPathComponent("ScoutCapture", isDirectory: true)
+    }
+
+    private nonisolated static func legacyCloudStorageSnapshot(at root: URL) throws -> LegacyCloudStorageCleanupResult {
+        guard fileManager.fileExists(atPath: root.path) else {
+            return LegacyCloudStorageCleanupResult(rootPath: root.path, removedItemCount: 0, removedByteCount: 0)
+        }
+
+        let metrics = storageMetrics(in: root)
+
+        return LegacyCloudStorageCleanupResult(
+            rootPath: root.path,
+            removedItemCount: metrics.itemCount,
+            removedByteCount: metrics.byteCount
+        )
+    }
+
+    private nonisolated static func storageBreakdownItem(
+        title: String,
+        id: String,
+        url: URL
+    ) throws -> StorageBreakdownItem {
+        let metrics = storageMetrics(in: url)
+        return StorageBreakdownItem(
+            id: id,
+            title: title,
+            path: url.path,
+            itemCount: metrics.itemCount,
+            byteCount: metrics.byteCount
+        )
+    }
+
+    private nonisolated static func storageBreakdownItem(
+        title: String,
+        id: String,
+        urls: [URL],
+        matchingPathComponent: String
+    ) throws -> StorageBreakdownItem {
+        var itemCount = 0
+        var byteCount = 0
+        let normalizedComponent = matchingPathComponent.lowercased()
+        for url in urls {
+            let metrics = storageMetrics(in: url) { fileURL in
+                fileURL.pathComponents.contains { $0.lowercased() == normalizedComponent }
+            }
+            itemCount += metrics.itemCount
+            byteCount += metrics.byteCount
+        }
+
+        return StorageBreakdownItem(
+            id: id,
+            title: title,
+            path: urls.map(\.path).joined(separator: "\n"),
+            itemCount: itemCount,
+            byteCount: byteCount
+        )
+    }
+
+    private nonisolated static func storageMetrics(
+        in root: URL,
+        include: (URL) -> Bool = { _ in true }
+    ) -> (itemCount: Int, byteCount: Int) {
+        guard fileManager.fileExists(atPath: root.path) else { return (0, 0) }
+        var itemCount = 0
+        var byteCount = 0
+        let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey]
+        if let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: resourceKeys,
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator where include(fileURL) {
+                itemCount += 1
+                let values = try? fileURL.resourceValues(forKeys: Set(resourceKeys))
+                if values?.isRegularFile == true {
+                    byteCount += values?.totalFileAllocatedSize ?? values?.fileSize ?? 0
+                }
+            }
+        }
+        return (itemCount, byteCount)
     }
 
     nonisolated static func makeSessionExportRootFolder(propertyFolderName: String, sessionID: UUID) throws -> URL {

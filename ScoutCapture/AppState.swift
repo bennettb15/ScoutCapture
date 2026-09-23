@@ -56264,6 +56264,37 @@ final class AppState: ObservableObject {
         }
     }
 
+    func clearLegacyCloudStorage(completion: @escaping (Result<StorageRoot.LegacyCloudStorageCleanupResult, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let result = try StorageRoot.clearLegacyCloudStorage()
+                DispatchQueue.main.async { [weak self] in
+                    self?.cloudBackupManager?.refreshStatus()
+                    completion(.success(result))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func loadLocalStorageBreakdown(completion: @escaping (Result<StorageRoot.LocalStorageBreakdownResult, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try StorageRoot.localStorageBreakdown()
+                DispatchQueue.main.async {
+                    completion(.success(result))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
     func triggerBackupForLifecycleEvent(after delay: TimeInterval = 0) {
         guard delay > 0 else {
             deferredLifecycleBackupWorkItem?.cancel()
