@@ -36917,30 +36917,34 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
     private func releasePropertySessionOccupancyIfOwned(
         propertyID: UUID,
         sessionID: UUID? = nil,
         emitReleasedEvent: Bool = false,
         ownershipState: PropertySessionOccupancyState? = nil
-    ) async {
+    ) async -> Bool {
         guard backendFeatureFlags.sessionCoordinationEnabled,
               let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
               let orgID = property.orgId else {
-            return
+            return false
         }
 
         let state = ownershipState ?? propertySessionOccupancyByPropertyID[propertyID]
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
         let sameOccupancyDevice = normalizedSupabaseText(state?.occupiedByDeviceID) == currentDeviceID
-        let sameOrUnknownOccupancyUser =
-            state?.occupiedByUserID == nil ||
-            currentUserID == nil ||
+        let occupancyHasExplicitOwner =
+            state?.occupiedByUserID != nil ||
+            normalizedSupabaseText(state?.occupiedByDeviceID) != nil
+        let sameOccupancyUser = state?.occupiedByUserID != nil &&
+            currentUserID != nil &&
             state?.occupiedByUserID == currentUserID
         let ownsOccupancy =
-            sameOccupancyDevice &&
-            sameOrUnknownOccupancyUser
-        guard ownsOccupancy else { return }
+            !occupancyHasExplicitOwner ||
+            sameOccupancyUser ||
+            (sameOccupancyDevice && state?.occupiedByUserID == nil)
+        guard ownsOccupancy else { return false }
 
         setPropertySessionOccupancyState(
             propertyID: propertyID,
@@ -36961,7 +36965,7 @@ final class AppState: ObservableObject {
                     payload: [:]
                 )
             }
-            return
+            return true
         }
 #endif
 
@@ -36987,7 +36991,10 @@ final class AppState: ObservableObject {
                     payload: [:]
                 )
             }
-        } catch {}
+            return true
+        } catch {
+            return false
+        }
     }
 
     @MainActor
@@ -54125,6 +54132,7 @@ final class AppState: ObservableObject {
     func remoteSoftDeleteProperty(id: UUID) async -> Bool {
         do {
             try await performRemoteSoftDeleteProperty(id: id)
+            hubTransientStatusMessage = "Property moved to Recently Deleted."
             return true
         } catch {
             let message = softDeleteErrorMessage(for: error)
@@ -54196,12 +54204,27 @@ final class AppState: ObservableObject {
             occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
         )
         if propertySessionOccupancyIsActive(occupancy) {
-            return PropertyDeletePreflightSnapshot(
-                occupancyCount: 1,
-                lockCount: 0,
-                isBlocked: true,
-                blockedReason: "occupancy"
+            let didReleaseOwnedOccupancy = await releasePropertySessionOccupancyIfOwned(
+                propertyID: propertyID,
+                ownershipState: PropertySessionOccupancyState(
+                    occupiedByUserID: occupancy?.occupiedByUserID,
+                    occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
+                    occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                )
             )
+            if didReleaseOwnedOccupancy {
+                print(
+                    "[PropertySoftDelete] event=released_owned_occupancy_before_delete " +
+                    "propertyID=\(propertyID.uuidString)"
+                )
+            } else {
+                return PropertyDeletePreflightSnapshot(
+                    occupancyCount: 1,
+                    lockCount: 0,
+                    isBlocked: true,
+                    blockedReason: "occupancy"
+                )
+            }
         } else if occupancy != nil {
             setPropertySessionOccupancyState(
                 propertyID: propertyID,
@@ -54398,13 +54421,30 @@ final class AppState: ObservableObject {
             occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
         )
         if propertySessionOccupancyIsActive(occupancy) {
-            return SessionDeletePreflightSnapshot(
-                deletedAt: sessionRecord.deletedAt,
-                occupancyCount: 1,
-                lockCount: sessionDeletePreflightLockFieldsPresent(sessionRecord) ? 1 : 0,
-                isBlocked: true,
-                blockedReason: "property_occupancy"
+            let didReleaseOwnedOccupancy = await releasePropertySessionOccupancyIfOwned(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                ownershipState: PropertySessionOccupancyState(
+                    occupiedByUserID: occupancy?.occupiedByUserID,
+                    occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
+                    occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                )
             )
+            if didReleaseOwnedOccupancy {
+                print(
+                    "[SessionSoftDelete] event=released_owned_occupancy_before_delete " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString)"
+                )
+            } else {
+                return SessionDeletePreflightSnapshot(
+                    deletedAt: sessionRecord.deletedAt,
+                    occupancyCount: 1,
+                    lockCount: sessionDeletePreflightLockFieldsPresent(sessionRecord) ? 1 : 0,
+                    isBlocked: true,
+                    blockedReason: "property_occupancy"
+                )
+            }
         } else if occupancy != nil {
             setPropertySessionOccupancyState(
                 propertyID: propertyID,
