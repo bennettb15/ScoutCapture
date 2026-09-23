@@ -211,14 +211,9 @@ struct ScoutCaptureApp: App {
 }
 
 private struct CloudBackupSheet: View {
-    let onOpenSessionRestore: (() -> Void)?
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @State private var showRestoreConfirmation: Bool = false
-    @State private var restoreErrorMessage: String? = nil
-    @State private var isRestoring: Bool = false
-    @State private var showRestoreSuccess: Bool = false
     @State private var showLegacyCloudCleanupConfirmation: Bool = false
     @State private var isClearingLegacyCloudStorage: Bool = false
     @State private var legacyCloudCleanupResult: StorageRoot.LegacyCloudStorageCleanupResult?
@@ -249,7 +244,7 @@ private struct CloudBackupSheet: View {
 
                     Spacer(minLength: 0)
 
-                    Text("iCloud Backup")
+                    Text("Storage")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -271,111 +266,23 @@ private struct CloudBackupSheet: View {
                     .buttonStyle(.plain)
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(statusTitle)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Local Storage")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.primary)
-                    Text(appState.backupStatusSubtitle())
+                    Text("Supabase is the source of truth for completed uploads. This screen manages local app storage and legacy iCloud cleanup only.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    iCloudAvailabilityRow
+                    legacyICloudAvailabilityRow
                     backupRow(
-                        title: "Status",
-                        value: statusLine
+                        title: "Current Store",
+                        value: "Local App Support"
                     )
-                    if let snapshotSummary {
-                        backupRow(
-                            title: "Snapshot",
-                            value: snapshotSummary
-                        )
-                    }
-                    if let lastRunSummary {
-                        backupRow(
-                            title: "Last Delta",
-                            value: lastRunSummary
-                        )
-                    }
-                    if let lastFailureMessage = appState.cloudBackupStatus.lastFailureMessage,
-                       !lastFailureMessage.isEmpty {
-                        backupRow(title: "Last Error", value: lastFailureMessage)
-                    }
-                    if appState.cloudBackupStatus.isRunning,
-                       let progressCompleted = appState.cloudBackupStatus.progressCompleted,
-                       let progressTotal = appState.cloudBackupStatus.progressTotal,
-                       progressTotal > 0 {
-                        backupRow(
-                            title: appState.cloudBackupStatus.progressPhase ?? "Progress",
-                            value: "\(Int((Double(progressCompleted) / Double(progressTotal)) * 100))% (\(progressCompleted)/\(progressTotal))"
-                        )
-                        backupRow(
-                            title: "Remaining",
-                            value: "\(max(progressTotal - progressCompleted, 0)) entries"
-                        )
-                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
                 .background(Color(uiColor: .secondarySystemBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                Button(action: {
-                    appState.backupNow()
-                }) {
-                    Text(appState.cloudBackupStatus.isRunning ? "Backing Up..." : "Back Up Now")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .foregroundColor(.white)
-                        .background(Color.blue.opacity(appState.cloudBackupStatus.iCloudAvailable ? 1.0 : 0.45))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(!appState.cloudBackupStatus.iCloudAvailable || appState.cloudBackupStatus.isRunning || isRestoring)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Button(action: {
-                        showRestoreConfirmation = true
-                    }) {
-                        Text(isRestoring ? "Restoring..." : "Restore Full App Backup")
-                            .font(.system(size: 16, weight: .semibold))
-                            .frame(maxWidth: .infinity, minHeight: 50)
-                            .foregroundColor(.white)
-                            .background(canRestore ? Color.green : Color.gray)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canRestore || isRestoring || appState.cloudBackupStatus.isRunning)
-
-                    Text("Restores missing app-level data from the latest iCloud backup.")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-
-                if let onOpenSessionRestore {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Button(action: {
-                            dismiss()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                onOpenSessionRestore()
-                            }
-                        }) {
-                            Text("Restore Session Snapshot")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                                .foregroundColor(.white)
-                                .background(Color.orange)
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isRestoring || appState.cloudBackupStatus.isRunning)
-
-                        Text("Opens per-session recovery for a specific property/session snapshot.")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Button(action: {
@@ -389,7 +296,7 @@ private struct CloudBackupSheet: View {
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!appState.cloudBackupStatus.iCloudAvailable || isClearingLegacyCloudStorage || isRestoring || appState.cloudBackupStatus.isRunning)
+                    .disabled(!appState.cloudBackupStatus.iCloudAvailable || isClearingLegacyCloudStorage)
 
                     Text("Deletes old ScoutCapture iCloud storage created before Supabase became canonical. Current local App Support data is not deleted.")
                         .font(.system(size: 12, weight: .medium))
@@ -427,21 +334,6 @@ private struct CloudBackupSheet: View {
             }
             .padding(16)
         }
-        .alert("Restore Full App Backup?", isPresented: $showRestoreConfirmation) {
-            Button("Restore", role: .destructive) {
-                isRestoring = true
-                appState.restoreLatestBackup { errorMessage in
-                    isRestoring = false
-                    restoreErrorMessage = errorMessage
-                    if errorMessage == nil {
-                        showRestoreSuccess = true
-                    }
-                }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This restores missing app-level data from the latest iCloud backup. For one property/session only, use Restore Session Snapshot.")
-        }
         .alert("Clear Legacy iCloud Storage?", isPresented: $showLegacyCloudCleanupConfirmation) {
             Button("Clear iCloud Storage", role: .destructive) {
                 isClearingLegacyCloudStorage = true
@@ -458,13 +350,6 @@ private struct CloudBackupSheet: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This removes legacy ScoutCapture files from iCloud Drive for this app, including old SCOUT data and iCloud backup blobs. It does not delete the current local App Support store or Supabase records.")
-        }
-        .alert("Restore Complete", isPresented: $showRestoreSuccess) {
-            Button("OK", role: .cancel) {
-                dismiss()
-            }
-        } message: {
-            Text("App backup restore finished successfully.")
         }
         .alert("Legacy iCloud Storage Cleared", isPresented: Binding(
             get: { legacyCloudCleanupResult != nil },
@@ -489,14 +374,6 @@ private struct CloudBackupSheet: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(localStorageBreakdownErrorMessage ?? "Unable to scan local storage.")
-        }
-        .alert("Restore Failed", isPresented: Binding(
-            get: { restoreErrorMessage != nil },
-            set: { if !$0 { restoreErrorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(restoreErrorMessage ?? "Unable to restore the backup.")
         }
         .onAppear {
             appState.refreshBackupStatus()
@@ -554,69 +431,6 @@ private struct CloudBackupSheet: View {
         return formatter.string(fromByteCount: Int64(byteCount))
     }
 
-    private var canRestore: Bool {
-        appState.cloudBackupStatus.iCloudAvailable &&
-        appState.cloudBackupStatus.hasBackup &&
-        !appState.cloudBackupStatus.isRunning
-    }
-
-    private var statusTitle: String {
-        switch appState.cloudBackupStatus.state {
-        case .backedUp:
-            return "Backed Up"
-        case .pending:
-            return appState.cloudBackupStatus.isRunning ? "Backup Running" : "Backup Pending"
-        case .unavailable:
-            return "iCloud Unavailable"
-        }
-    }
-
-    private var statusLine: String {
-        if let pauseUntil = appState.cloudBackupStatus.safetyPauseUntil, pauseUntil > Date() {
-            let minutesRemaining = max(1, Int(ceil(pauseUntil.timeIntervalSinceNow / 60)))
-            let reason = appState.cloudBackupStatus.safetyPauseReason ?? "after a destructive action"
-            return "Automatic backup paused \(reason) (\(minutesRemaining)m left)."
-        }
-        switch appState.cloudBackupStatus.state {
-        case .backedUp:
-            return "Latest local data is backed up."
-        case .pending:
-            return appState.cloudBackupStatus.isRunning
-                ? "Backup is running now."
-                : "Changes are queued for backup."
-        case .unavailable:
-            return "Sign in to iCloud or re-enable iCloud Drive."
-        }
-    }
-
-    private var snapshotSummary: String? {
-        guard let fileCount = appState.cloudBackupStatus.snapshotFileCount,
-              let byteCount = appState.cloudBackupStatus.snapshotByteCount else {
-            return nil
-        }
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        let sizeString = formatter.string(fromByteCount: Int64(byteCount))
-        return "\(fileCount) files • \(sizeString)"
-    }
-
-    private var lastRunSummary: String? {
-        guard let added = appState.cloudBackupStatus.lastRunAddedCount,
-              let updated = appState.cloudBackupStatus.lastRunUpdatedCount,
-              let pruned = appState.cloudBackupStatus.lastRunPrunedCount else {
-            return nil
-        }
-        let sizeString: String
-        if let changedBytes = appState.cloudBackupStatus.lastRunChangedByteCount {
-            let formatter = ByteCountFormatter()
-            formatter.countStyle = .file
-            sizeString = formatter.string(fromByteCount: Int64(changedBytes))
-        } else {
-            sizeString = "n/a"
-        }
-        return "+\(added) • ~\(updated) • -\(pruned) • \(sizeString)"
-    }
-
     @ViewBuilder
     private func backupRow(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -630,9 +444,9 @@ private struct CloudBackupSheet: View {
     }
 
     @ViewBuilder
-    private var iCloudAvailabilityRow: some View {
+    private var legacyICloudAvailabilityRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("iCloud")
+            Text("Legacy iCloud")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.secondary)
             HStack(spacing: 8) {
@@ -881,6 +695,8 @@ struct SessionHubView: View {
     @State private var pendingExportChecklist = ExportChecklistState()
     @State private var pendingExportErrorMessage: String? = nil
     @State private var showPendingExportError: Bool = false
+    @State private var propertyUploadRetryAlert: PropertyUploadRetryAlert? = nil
+    @State private var retryingPropertyUploadIDs: Set<UUID> = []
     @State private var mapLookupPropertyID: UUID? = nil
     @State private var showMapsErrorToast: Bool = false
     @State private var mapsErrorToastToken: Int = 0
@@ -896,7 +712,6 @@ struct SessionHubView: View {
     @State private var showTemporaryMigrationExport: Bool = false
     @State private var showTemporaryMigrationImport: Bool = false
     @State private var showCloudBackupSheet: Bool = false
-    @State private var showSessionRestoreSheet: Bool = false
     @State private var showDebugTools: Bool = false
     @State private var hiddenDebugTapCount: Int = 0
     @State private var lastHiddenDebugTapAt: Date? = nil
@@ -928,6 +743,12 @@ struct SessionHubView: View {
         let propertyID: UUID
         let sessionID: UUID
         let url: URL
+    }
+
+    private struct PropertyUploadRetryAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
     }
 
     private struct ExportChecklistState {
@@ -1114,6 +935,9 @@ struct SessionHubView: View {
                             onDelete: { property in
                                 requestDeleteProperty(property)
                             },
+                            onRetryUpload: { property in
+                                retryUploadOrExport(for: property)
+                            },
                             onMaps: { property in
                                 openMaps(for: property)
                             },
@@ -1191,13 +1015,7 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showCloudBackupSheet) {
-                CloudBackupSheet(
-                    onOpenSessionRestore: { showSessionRestoreSheet = true }
-                )
-                    .environmentObject(appState)
-            }
-            .sheet(isPresented: $showSessionRestoreSheet) {
-                SessionArchiveRestoreSheet()
+                CloudBackupSheet()
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showSettingsSheet) {
@@ -1346,6 +1164,13 @@ struct SessionHubView: View {
                 Button("Cancel", role: .cancel) { }
             } message: {
                 Text(pendingExportErrorMessage ?? "Unable to prepare export.")
+            }
+            .alert(item: $propertyUploadRetryAlert) { alert in
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("OK"))
+                )
             }
             .overlay {
                 if pendingExportPromptSession != nil, pendingExportPromptProperty != nil {
@@ -1614,6 +1439,7 @@ struct SessionHubView: View {
         let rowLockBadges = appState.propertyRowLockBadgeByPropertyID
         let rowSubtitles = appState.propertyRowSubtitleByPropertyID
         let rowCloudGlyphs = appState.propertyRowCloudGlyphByPropertyID
+        let rowStatusChips = appState.propertyRowStatusChipByPropertyID
         var sections: [PropertyListTableSection] = []
 
         if !filteredActiveProperties.isEmpty {
@@ -1626,7 +1452,8 @@ struct SessionHubView: View {
                         rowDraftBadges: rowDraftBadges,
                         rowLockBadges: rowLockBadges,
                         rowSubtitles: rowSubtitles,
-                        rowCloudGlyphs: rowCloudGlyphs
+                        rowCloudGlyphs: rowCloudGlyphs,
+                        rowStatusChips: rowStatusChips
                     )
                 )
             )
@@ -1642,7 +1469,8 @@ struct SessionHubView: View {
                         rowDraftBadges: rowDraftBadges,
                         rowLockBadges: rowLockBadges,
                         rowSubtitles: rowSubtitles,
-                        rowCloudGlyphs: rowCloudGlyphs
+                        rowCloudGlyphs: rowCloudGlyphs,
+                        rowStatusChips: rowStatusChips
                     )
                 )
             )
@@ -1656,17 +1484,20 @@ struct SessionHubView: View {
         rowDraftBadges: [UUID: Bool],
         rowLockBadges: [UUID: Bool],
         rowSubtitles: [UUID: String],
-        rowCloudGlyphs: [UUID: AppState.PropertyRowCloudGlyphState]
+        rowCloudGlyphs: [UUID: AppState.PropertyRowCloudGlyphState],
+        rowStatusChips: [UUID: AppState.PropertyRowStatusChipState]
     ) -> [PropertyListTableRowModel] {
         properties.map { property in
-            PropertyListTableRowModel(
+            let cloudGlyph = rowCloudGlyphs[property.id]
+            return PropertyListTableRowModel(
                 property: property,
                 title: property.name,
                 subtitle: rowSubtitles[property.id],
                 address: propertyAddressLine(property) ?? property.address,
                 hasDraft: rowDraftBadges[property.id] == true,
                 isLocked: rowLockBadges[property.id] == true,
-                cloudGlyph: rowCloudGlyphs[property.id],
+                cloudGlyph: cloudGlyph,
+                canRetryUpload: rowStatusChips[property.id] != nil || cloudGlyph == .warning,
                 canOpenMaps: mapsAddressQuery(for: property) != nil,
                 canMessage: hasValidPhoneNumber(property),
                 canCall: hasValidPhoneNumber(property)
@@ -2482,8 +2313,8 @@ struct SessionHubView: View {
                                 .tint(.blue)
                         }
 
-                        Section("Backup") {
-                            Button("iCloud Backup") {
+                        Section("Storage") {
+                            Button("Manage Local Storage") {
                                 dismiss()
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                                     onOpenCloudBackup?()
@@ -4538,6 +4369,21 @@ struct SessionHubView: View {
         }
     }
 
+    private func retryUploadOrExport(for property: Property) {
+        guard !retryingPropertyUploadIDs.contains(property.id) else { return }
+        retryingPropertyUploadIDs.insert(property.id)
+        Task {
+            let result = await appState.retryPropertyUploadAndExport(propertyID: property.id)
+            await MainActor.run {
+                retryingPropertyUploadIDs.remove(property.id)
+                propertyUploadRetryAlert = PropertyUploadRetryAlert(
+                    title: result.success ? "Retry Started" : "Retry Not Ready",
+                    message: result.message
+                )
+            }
+        }
+    }
+
     private func buildPendingSessionExportArchive(
         property: Property,
         session: Session,
@@ -5604,6 +5450,7 @@ private struct PropertyListTableRowModel: Identifiable {
     let hasDraft: Bool
     let isLocked: Bool
     let cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    let canRetryUpload: Bool
     let canOpenMaps: Bool
     let canMessage: Bool
     let canCall: Bool
@@ -5622,6 +5469,7 @@ extension PropertyListTableRowModel: Equatable {
             lhs.hasDraft == rhs.hasDraft &&
             lhs.isLocked == rhs.isLocked &&
             lhs.cloudGlyph == rhs.cloudGlyph &&
+            lhs.canRetryUpload == rhs.canRetryUpload &&
             lhs.canOpenMaps == rhs.canOpenMaps &&
             lhs.canMessage == rhs.canMessage &&
             lhs.canCall == rhs.canCall
@@ -5635,6 +5483,7 @@ private struct PropertyListTableView: UIViewRepresentable {
     let onEditContact: (Property) -> Void
     let onArchiveToggle: (Property) -> Void
     let onDelete: (Property) -> Void
+    let onRetryUpload: (Property) -> Void
     let onMaps: (Property) -> Void
     let onMessage: (Property) -> Void
     let onCall: (Property) -> Void
@@ -5647,6 +5496,7 @@ private struct PropertyListTableView: UIViewRepresentable {
             onEditContact: onEditContact,
             onArchiveToggle: onArchiveToggle,
             onDelete: onDelete,
+            onRetryUpload: onRetryUpload,
             onMaps: onMaps,
             onMessage: onMessage,
             onCall: onCall
@@ -5675,6 +5525,7 @@ private struct PropertyListTableView: UIViewRepresentable {
         context.coordinator.onEditContact = onEditContact
         context.coordinator.onArchiveToggle = onArchiveToggle
         context.coordinator.onDelete = onDelete
+        context.coordinator.onRetryUpload = onRetryUpload
         context.coordinator.onMaps = onMaps
         context.coordinator.onMessage = onMessage
         context.coordinator.onCall = onCall
@@ -5691,6 +5542,7 @@ private struct PropertyListTableView: UIViewRepresentable {
         var onEditContact: (Property) -> Void
         var onArchiveToggle: (Property) -> Void
         var onDelete: (Property) -> Void
+        var onRetryUpload: (Property) -> Void
         var onMaps: (Property) -> Void
         var onMessage: (Property) -> Void
         var onCall: (Property) -> Void
@@ -5702,6 +5554,7 @@ private struct PropertyListTableView: UIViewRepresentable {
             onEditContact: @escaping (Property) -> Void,
             onArchiveToggle: @escaping (Property) -> Void,
             onDelete: @escaping (Property) -> Void,
+            onRetryUpload: @escaping (Property) -> Void,
             onMaps: @escaping (Property) -> Void,
             onMessage: @escaping (Property) -> Void,
             onCall: @escaping (Property) -> Void
@@ -5712,6 +5565,7 @@ private struct PropertyListTableView: UIViewRepresentable {
             self.onEditContact = onEditContact
             self.onArchiveToggle = onArchiveToggle
             self.onDelete = onDelete
+            self.onRetryUpload = onRetryUpload
             self.onMaps = onMaps
             self.onMessage = onMessage
             self.onCall = onCall
@@ -5812,6 +5666,9 @@ private struct PropertyListTableView: UIViewRepresentable {
                 let edit = UIAction(title: "Edit Contact", image: UIImage(systemName: "person.crop.circle")) { _ in
                     self.onEditContact(property)
                 }
+                let retryUpload = UIAction(title: "Retry Upload", image: UIImage(systemName: "arrow.clockwise.icloud")) { _ in
+                    self.onRetryUpload(property)
+                }
                 let archiveTitle = property.isArchived ? "Unarchive Property" : "Archive Property"
                 let archiveImage = property.isArchived ? "archivebox" : "archivebox.fill"
                 let archive = UIAction(title: archiveTitle, image: UIImage(systemName: archiveImage)) { _ in
@@ -5824,7 +5681,12 @@ private struct PropertyListTableView: UIViewRepresentable {
                 ) { _ in
                     self.onDelete(property)
                 }
-                return UIMenu(children: [manage, edit, archive, delete])
+                var menuItems: [UIMenuElement] = [manage, edit]
+                if row.canRetryUpload {
+                    menuItems.append(retryUpload)
+                }
+                menuItems.append(contentsOf: [archive, delete])
+                return UIMenu(children: menuItems)
             }
         }
     }

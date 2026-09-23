@@ -863,6 +863,11 @@ final class AppState: ObservableObject {
         let message: String?
     }
 
+    struct PropertyUploadRetryResult: Equatable {
+        let success: Bool
+        let message: String
+    }
+
     struct SessionSnapshotAuthPreflightRemoteParentStatus: Equatable {
         var propertyExists: Bool = false
         var sessionExists: Bool = false
@@ -17692,7 +17697,9 @@ final class AppState: ObservableObject {
     @discardableResult
     private func performSessionSnapshotUploadRetry(
         source: String,
-        now: Date = Date()
+        now: Date = Date(),
+        propertyID: UUID? = nil,
+        ignoreBackoff: Bool = false
     ) async -> SessionSnapshotUploadRetryRunSummary {
         guard beginSessionSnapshotUploadRetryRun() else {
             return SessionSnapshotUploadRetryRunSummary(
@@ -17729,8 +17736,11 @@ final class AppState: ObservableObject {
                 skippedIneligibleCount: 0
             )
         }
+        let scopedStatusRecords = propertyID.map { propertyID in
+            statusRecords.filter { $0.propertyID == propertyID }
+        } ?? statusRecords
         let recoveredMissingRetryCount = recoverMissingSessionSnapshotUploadRetryItems(
-            statusRecords: statusRecords,
+            statusRecords: scopedStatusRecords,
             retryItems: initialItems,
             now: now
         )
@@ -17741,13 +17751,16 @@ final class AppState: ObservableObject {
             activeItems = initialItems
         }
 
-        let supersededUploadedItems = activeItems.filter {
+        let scopedActiveItems = propertyID.map { propertyID in
+            activeItems.filter { $0.propertyID == propertyID }
+        } ?? activeItems
+        let supersededUploadedItems = scopedActiveItems.filter {
             Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: statusRecords)
         }
         for item in supersededUploadedItems {
             try? localStore.removeSessionSnapshotUploadRetryWorkItem(id: item.id)
         }
-        let activeInitialItems = activeItems.filter { item in
+        let activeInitialItems = scopedActiveItems.filter { item in
             !supersededUploadedItems.contains(where: { $0.id == item.id })
         }
 
@@ -17761,7 +17774,10 @@ final class AppState: ObservableObject {
             persistSessionSnapshotCloudStatus(for: normalized, status: .queued, updatedAt: now)
         }
 
-        let items = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        let fetchedItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        let items = propertyID.map { propertyID in
+            fetchedItems.filter { $0.propertyID == propertyID }
+        } ?? fetchedItems
         var skippedBackoffCount = 0
         var attemptedCount = 0
         var succeededCount = 0
@@ -17777,10 +17793,14 @@ final class AppState: ObservableObject {
         }
 
         for item in replayable {
-            guard shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
+            guard ignoreBackoff || shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
                 if item.status == .failed, let next = item.nextAttemptAt, now < next {
                     skippedBackoffCount += 1
                 }
+                continue
+            }
+            guard item.status != .terminalFailed else {
+                terminalFailedCount += 1
                 continue
             }
 
@@ -18011,6 +18031,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func pruneLocalArchiveSnapshotAfterSuccessfulUpload(
+        archivePath: String,
+        propertyID: UUID,
+        sessionID: UUID,
+        trigger: String
+    ) {
+        guard localStore.removeSessionArchiveSnapshot(atPath: archivePath) else { return }
+        print(
+            "[LocalStoragePrune] result=removed_uploaded_archive " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "trigger=\(trigger)"
+        )
+    }
+
     private func prepareCanonicalShotStateForNoZIPSnapshotUpload(
         item: LocalStore.SessionSnapshotUploadRetryWorkItem
     ) async throws {
@@ -18214,6 +18249,12 @@ final class AppState: ObservableObject {
                 sessionID: inFlight.sessionID,
                 path: inFlight.storagePath,
                 kind: .completed,
+                trigger: inFlight.trigger
+            )
+            pruneLocalArchiveSnapshotAfterSuccessfulUpload(
+                archivePath: inFlight.archivePath,
+                propertyID: inFlight.propertyID,
+                sessionID: inFlight.sessionID,
                 trigger: inFlight.trigger
             )
             recordSessionSnapshotAutoUploadResult(result, triggerSource: inFlight.triggerSource)
@@ -44675,13 +44716,24 @@ final class AppState: ObservableObject {
                 lockReleased = false
             }
 
-            if fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID {
+            let completedDraftSummary = fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID
+                ? fastRuntimeDraftsByPropertyID[context.propertyID]
+                : nil
+            if completedDraftSummary != nil {
                 diagnostics.append("stage=local_draft_index_hide")
                 var nextDrafts = fastRuntimeDraftsByPropertyID
                 nextDrafts.removeValue(forKey: context.propertyID)
                 try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
                 fastRuntimeDraftsByPropertyID = nextDrafts
                 localDraftMarkedUploaded = true
+            }
+            let removedLocalCaptureStores = Self.removeFastRuntimeCompletionStorageRoots(
+                storageRoot: storageRoot,
+                summary: completedDraftSummary,
+                context: context
+            )
+            if removedLocalCaptureStores > 0 {
+                diagnostics.append("local_capture_storage_pruned=\(removedLocalCaptureStores)")
             }
             diagnostics.append("stage=success")
 
@@ -45317,6 +45369,52 @@ final class AppState: ObservableObject {
                 errorMessage: error.localizedDescription
             )
         }
+    }
+
+    @MainActor
+    func retryPropertyUploadAndExport(
+        propertyID: UUID
+    ) async -> PropertyUploadRetryResult {
+        let uploadSummary = await performSessionSnapshotUploadRetry(
+            source: "manual_property_context_retry",
+            propertyID: propertyID,
+            ignoreBackoff: true
+        )
+        let exportRecovery = await recoverFastRuntimePendingExportReportHandoff(propertyID: propertyID)
+        refreshLightweightPropertyRowCloudStatusCache()
+        refreshPropertyRowStatusChipCache()
+        refreshPropertyRowCloudGlyphCache()
+
+        let didUpload = uploadSummary.succeededCount > 0
+        if didUpload || exportRecovery.success {
+            let uploadText = didUpload ? "Upload retry completed." : nil
+            let exportText = exportRecovery.success ? "Export retry completed." : nil
+            return PropertyUploadRetryResult(
+                success: true,
+                message: [uploadText, exportText].compactMap { $0 }.joined(separator: " ")
+            )
+        }
+
+        if uploadSummary.attemptedCount > 0 {
+            let failedCount = uploadSummary.failedCount + uploadSummary.terminalFailedCount
+            let detail = exportRecovery.message.map { Self.diagnosticsPreviewText($0, maxLength: 160) ?? $0 }
+            return PropertyUploadRetryResult(
+                success: false,
+                message: detail ?? "Upload retry attempted, but \(failedCount) item\(failedCount == 1 ? "" : "s") still need attention."
+            )
+        }
+
+        if uploadSummary.skippedBackoffCount > 0 {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: "Upload retry is already scheduled. Try again in a bit if it does not clear."
+            )
+        }
+
+        return PropertyUploadRetryResult(
+            success: false,
+            message: exportRecovery.message ?? "No upload or pending export was ready to retry."
+        )
     }
 
     @MainActor
@@ -47205,6 +47303,110 @@ final class AppState: ObservableObject {
     private static func removeFastRuntimePrototypeStorage(at root: URL) throws {
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         try FileManager.default.removeItem(at: root)
+    }
+
+    private static func removeFastRuntimeCompletionStorageRoots(
+        storageRoot: URL?,
+        summary: FastRuntimeDraftSummary?,
+        context: ActiveCaptureContext
+    ) -> Int {
+        let candidates = [
+            storageRoot,
+            summary.map { URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) }
+        ]
+        var removed = 0
+        var seenPaths: Set<String> = []
+        for candidate in candidates.compactMap({ $0 }) {
+            let standardized = candidate.standardizedFileURL
+            guard seenPaths.insert(standardized.path).inserted,
+                  isOwnedFastRuntimeStorageRoot(
+                    standardized,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID
+                  ),
+                  FileManager.default.fileExists(atPath: standardized.path) else {
+                continue
+            }
+            if (try? FileManager.default.removeItem(at: standardized)) != nil {
+                removed += 1
+            }
+        }
+        return removed
+    }
+
+    private static func isOwnedFastRuntimeStorageRoot(
+        _ url: URL,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        let path = url.standardizedFileURL.path
+        let property = propertyID.uuidString
+        let session = sessionID.uuidString
+
+        if let draftsRoot = try? fastRuntimeDraftsRootURL().standardizedFileURL.path {
+            let expectedDraft = "\(draftsRoot)/Drafts/\(property)/\(session)"
+            if path == expectedDraft {
+                return true
+            }
+        }
+
+        let tempRoot = fastRuntimePrototypeTempRootURL().standardizedFileURL.path
+        let expectedTemp = "\(tempRoot)/\(property)/\(session)"
+        return path == expectedTemp
+    }
+
+    private static func pruneStaleFastRuntimePrototypeTempStorage(
+        now: Date,
+        excludingSessionID: UUID?,
+        olderThan: TimeInterval
+    ) -> Int {
+        let fileManager = FileManager.default
+        let root = fastRuntimePrototypeTempRootURL()
+        guard let propertyFolders = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        var removed = 0
+        for propertyFolder in propertyFolders {
+            guard (try? propertyFolder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  let sessionFolders = try? fileManager.contentsOfDirectory(
+                    at: propertyFolder,
+                    includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey],
+                    options: [.skipsHiddenFiles]
+                  ) else {
+                continue
+            }
+
+            for sessionFolder in sessionFolders {
+                guard (try? sessionFolder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                    continue
+                }
+                if sessionFolder.lastPathComponent.caseInsensitiveCompare(excludingSessionID?.uuidString ?? "") == .orderedSame {
+                    continue
+                }
+                let values = try? sessionFolder.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+                let ageDate = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
+                guard now.timeIntervalSince(ageDate) >= olderThan else {
+                    continue
+                }
+                if (try? fileManager.removeItem(at: sessionFolder)) != nil {
+                    removed += 1
+                }
+            }
+
+            if let remaining = try? fileManager.contentsOfDirectory(
+                at: propertyFolder,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ), remaining.isEmpty {
+                try? fileManager.removeItem(at: propertyFolder)
+            }
+        }
+        return removed
     }
 
     private static func writeFastRuntimeDraftIndexToDisk(_ summaries: [FastRuntimeDraftSummary]) throws {
@@ -58854,6 +59056,11 @@ final class AppState: ObservableObject {
         var offloadedFiles = 0
         var skippedCooldown = 0
         var skippedRecentActivation = 0
+        let prunedFastRuntimeTempFolders = Self.pruneStaleFastRuntimePrototypeTempStorage(
+            now: now,
+            excludingSessionID: excludingSessionID,
+            olderThan: 24 * 60 * 60
+        )
 
         let allProperties = (try? localStore.fetchProperties()) ?? []
         for property in allProperties {
@@ -58885,7 +59092,8 @@ final class AppState: ObservableObject {
             scanned: scanned,
             offloadedFiles: offloadedFiles,
             skippedCooldown: skippedCooldown,
-            skippedRecentActivation: skippedRecentActivation
+            skippedRecentActivation: skippedRecentActivation,
+            prunedFastRuntimeTempFolders: prunedFastRuntimeTempFolders
         )
     }
 
@@ -58954,11 +59162,12 @@ final class AppState: ObservableObject {
         scanned: Int,
         offloadedFiles: Int,
         skippedCooldown: Int,
-        skippedRecentActivation: Int
+        skippedRecentActivation: Int,
+        prunedFastRuntimeTempFolders: Int
     ) {
         let activationRetentionDays = Int(activatedPropertyRetentionWindow / 86_400)
         let cooldownSeconds = Int(sessionMediaOffloadCooldown)
-        let signature = "\(scanned)|\(offloadedFiles)|\(skippedCooldown)|\(skippedRecentActivation)|\(activationRetentionDays)|\(cooldownSeconds)"
+        let signature = "\(scanned)|\(offloadedFiles)|\(skippedCooldown)|\(skippedRecentActivation)|\(prunedFastRuntimeTempFolders)|\(activationRetentionDays)|\(cooldownSeconds)"
         let shouldLog = logThrottleQueue.sync { () -> Bool in
             let now = Date()
             let minInterval: TimeInterval = 30
@@ -58975,6 +59184,7 @@ final class AppState: ObservableObject {
         print(
             "[SessionOffload] scanned=\(scanned) " +
             "offloadedFiles=\(offloadedFiles) " +
+            "prunedFastRuntimeTempFolders=\(prunedFastRuntimeTempFolders) " +
             "skippedCooldown=\(skippedCooldown) " +
             "skippedRecentActivation=\(skippedRecentActivation) " +
             "activationRetentionDays=\(activationRetentionDays) " +

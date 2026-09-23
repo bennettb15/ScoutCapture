@@ -4644,6 +4644,42 @@ final class LocalStore {
         }
     }
 
+    @discardableResult
+    func removeSessionArchiveSnapshot(atPath archivePath: String) -> Bool {
+        (try? performFileIOSync {
+            let snapshotRoot = URL(fileURLWithPath: archivePath, isDirectory: true).standardizedFileURL
+            let archivesRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .standardizedFileURL
+            guard snapshotRoot.path.hasPrefix(archivesRoot.path + "/"),
+                  fileManager.fileExists(atPath: snapshotRoot.path),
+                  fileManager.fileExists(atPath: snapshotRoot.appendingPathComponent("manifest.json").path) else {
+                return false
+            }
+
+            try fileManager.removeItem(at: snapshotRoot)
+
+            let sessionRoot = snapshotRoot.deletingLastPathComponent()
+            pruneEmptyDirectoryIfNeeded(sessionRoot)
+            pruneEmptyDirectoryIfNeeded(sessionRoot.deletingLastPathComponent())
+            return true
+        }) ?? false
+    }
+
+    private func pruneEmptyDirectoryIfNeeded(_ directory: URL) {
+        guard fileManager.fileExists(atPath: directory.path),
+              let children = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+              ),
+              children.isEmpty else {
+            return
+        }
+        try? fileManager.removeItem(at: directory)
+    }
+
     func missingOriginalArchiveProvenance(
         propertyID: UUID,
         sessionID: UUID,
