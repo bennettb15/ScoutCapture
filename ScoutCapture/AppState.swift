@@ -7660,6 +7660,7 @@ final class AppState: ObservableObject {
     }
     @Published private(set) var propertyRowDraftCount: Int = 0
     @Published private(set) var propertyRowDraftBadgeByPropertyID: [UUID: Bool] = [:]
+    @Published private(set) var propertyRowLockBadgeByPropertyID: [UUID: Bool] = [:]
     @Published private(set) var propertyRowCloudGlyphByPropertyID: [UUID: PropertyRowCloudGlyphState] = [:]
     @Published private(set) var propertyRowStatusChipByPropertyID: [UUID: PropertyRowStatusChipState] = [:]
     @Published private(set) var propertyRowSubtitleByPropertyID: [UUID: String] = [:]
@@ -7670,14 +7671,20 @@ final class AppState: ObservableObject {
     @Published private(set) var isAuthenticating: Bool = false
     @Published private(set) var isLoadingPropertiesForOrgSwitch: Bool = false
     @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser? {
-        didSet { refreshPropertyRowDraftBadgeCache() }
+        didSet {
+            refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowLockBadgeCache()
+        }
     }
     @Published var authenticationErrorMessage: String?
-    @Published var locallyLockedPropertyIDs: Set<UUID> = []
+    @Published var locallyLockedPropertyIDs: Set<UUID> = [] {
+        didSet { refreshPropertyRowLockBadgeCache() }
+    }
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
     @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:] {
         didSet {
             refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowLockBadgeCache()
             refreshPropertyRowCloudGlyphCache()
             refreshPropertyRowStatusChipCache()
         }
@@ -9469,6 +9476,7 @@ final class AppState: ObservableObject {
         propertyRowReExportSessionByPropertyID = [:]
         propertyRowPendingDeliverySessionByPropertyID = [:]
         propertyRowSnapshotCloudStatusByPropertyID = [:]
+        propertyRowLockBadgeByPropertyID = [:]
         pendingPropertyRowDetailHydrationIDs = []
         propertyRowDetailHydrationTask?.cancel()
         propertyRowDetailHydrationTask = nil
@@ -10968,6 +10976,7 @@ final class AppState: ObservableObject {
         if !propertyRowSnapshotCloudStatusByPropertyID.isEmpty {
             propertyRowSnapshotCloudStatusByPropertyID = propertyRowSnapshotCloudStatusByPropertyID.filter { scopedPropertyIDs.contains($0.key) }
         }
+        refreshPropertyRowLockBadgeCache()
         refreshPropertyRowCloudGlyphCache()
 
         if let selectedPropertyID,
@@ -42119,6 +42128,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func refreshPropertyRowLockBadgeCache() {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        var next: [UUID: Bool] = [:]
+
+        for (propertyID, propertyStatus) in propertyStatusByPropertyID {
+            let answer = Self.makePropertyStatusCompareAnswer(
+                record: propertyStatus,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            if answer.visibleBadgeState == .locked {
+                next[propertyID] = true
+            }
+        }
+
+        for propertyID in locallyLockedPropertyIDs where propertyStatusByPropertyID[propertyID] == nil {
+            next[propertyID] = true
+        }
+
+        if propertyRowLockBadgeByPropertyID != next {
+            propertyRowLockBadgeByPropertyID = next
+        }
+    }
+
     private func refreshPropertyRowCloudGlyphCache() {
         let next = propertyRowSnapshotCloudStatusByPropertyID.reduce(into: [UUID: PropertyRowCloudGlyphState]()) { partial, entry in
             partial[entry.key] = Self.propertyRowCloudGlyphState(for: entry.value)
@@ -42891,6 +42925,78 @@ final class AppState: ObservableObject {
             )
         }
         return decision
+    }
+
+    @MainActor
+    func evaluateFreshPropertyTapEntryPreflight(
+        propertyID: UUID,
+        context: String
+    ) async -> PropertyStatusEntryPreflightDecision? {
+        do {
+            guard let freshRecord = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
+                if propertyStatusByPropertyID[propertyID] != nil {
+                    var nextCache = propertyStatusByPropertyID
+                    nextCache.removeValue(forKey: propertyID)
+                    propertyStatusByPropertyID = nextCache
+                    lastPropertyStatusRefreshAt = Date()
+                    reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_missing")
+                }
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: nil,
+                    context: "\(context)_fresh_missing"
+                )
+                return nil
+            }
+
+            var nextCache = propertyStatusByPropertyID
+            nextCache[propertyID] = freshRecord
+            propertyStatusByPropertyID = nextCache
+            lastPropertyStatusRefreshAt = Date()
+            reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_fresh")
+
+            let decision = makePropertyStatusEntryPreflightDecision(
+                propertyID: propertyID,
+                record: freshRecord
+            )
+            let resolvedDecision = await resolvedPropertyStatusEntryPreflightDecisionOwner(
+                decision,
+                record: freshRecord
+            )
+            logPropertyStatusEntryPreflight(
+                propertyID: propertyID,
+                decision: resolvedDecision,
+                context: "\(context)_fresh"
+            )
+            return resolvedDecision
+        } catch {
+            if let cachedRecord = propertyStatusByPropertyID[propertyID] {
+                let cachedDecision = makePropertyStatusEntryPreflightDecision(
+                    propertyID: propertyID,
+                    record: cachedRecord
+                )
+                let resolvedCachedDecision = await resolvedPropertyStatusEntryPreflightDecisionOwner(
+                    cachedDecision,
+                    record: cachedRecord
+                )
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: resolvedCachedDecision,
+                    context: "\(context)_fresh_failed_cached"
+                )
+                return resolvedCachedDecision.isBlocked ? resolvedCachedDecision : nil
+            }
+            print(
+                "[PropertyStatusEntry] " +
+                "context=\(context) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "entry_source=property_status_unverified " +
+                "property_status_entry_decision=allow_existing_flow " +
+                "property_status_entry_reason=fresh_tap_read_failed " +
+                "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
+            )
+            return nil
+        }
     }
 
     func preferredPropertyEntrySessionID(for propertyID: UUID) -> UUID {

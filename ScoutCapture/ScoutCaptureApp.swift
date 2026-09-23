@@ -729,6 +729,7 @@ struct SessionHubView: View {
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
     @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
+    @State private var propertyEntryLockPrompt: PropertyEntryLockPrompt? = nil
     @State private var isPreparingPendingExport: Bool = false
     @State private var pendingExportFile: PendingExportFile? = nil
     @State private var pendingExportChecklist = ExportChecklistState()
@@ -1106,6 +1107,15 @@ struct SessionHubView: View {
                     }
                 )
             }
+            .alert(item: $propertyEntryLockPrompt) { prompt in
+                Alert(
+                    title: Text("Session Locked"),
+                    message: Text(lockPromptMessage(for: prompt.block)),
+                    dismissButton: .default(Text("Back")) {
+                        propertyEntryLockPrompt = nil
+                    }
+                )
+            }
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
@@ -1455,6 +1465,7 @@ struct SessionHubView: View {
 
     private func propertyTableSections(showArchivedSection: Bool) -> [PropertyListTableSection] {
         let rowDraftBadges = appState.propertyRowDraftBadgeByPropertyID
+        let rowLockBadges = appState.propertyRowLockBadgeByPropertyID
         let rowSubtitles = appState.propertyRowSubtitleByPropertyID
         let rowCloudGlyphs = appState.propertyRowCloudGlyphByPropertyID
         var sections: [PropertyListTableSection] = []
@@ -1467,6 +1478,7 @@ struct SessionHubView: View {
                     rows: propertyTableRows(
                         for: filteredActiveProperties,
                         rowDraftBadges: rowDraftBadges,
+                        rowLockBadges: rowLockBadges,
                         rowSubtitles: rowSubtitles,
                         rowCloudGlyphs: rowCloudGlyphs
                     )
@@ -1482,6 +1494,7 @@ struct SessionHubView: View {
                     rows: propertyTableRows(
                         for: filteredArchivedProperties,
                         rowDraftBadges: rowDraftBadges,
+                        rowLockBadges: rowLockBadges,
                         rowSubtitles: rowSubtitles,
                         rowCloudGlyphs: rowCloudGlyphs
                     )
@@ -1495,6 +1508,7 @@ struct SessionHubView: View {
     private func propertyTableRows(
         for properties: [Property],
         rowDraftBadges: [UUID: Bool],
+        rowLockBadges: [UUID: Bool],
         rowSubtitles: [UUID: String],
         rowCloudGlyphs: [UUID: AppState.PropertyRowCloudGlyphState]
     ) -> [PropertyListTableRowModel] {
@@ -1505,6 +1519,7 @@ struct SessionHubView: View {
                 subtitle: rowSubtitles[property.id],
                 address: propertyAddressLine(property) ?? property.address,
                 hasDraft: rowDraftBadges[property.id] == true,
+                isLocked: rowLockBadges[property.id] == true,
                 cloudGlyph: rowCloudGlyphs[property.id],
                 canOpenMaps: mapsAddressQuery(for: property) != nil,
                 canMessage: hasValidPhoneNumber(property),
@@ -4018,11 +4033,32 @@ struct SessionHubView: View {
             return
         }
         if !hasDraft {
-            isOpeningProperty = false
-            initialSessionTypePickerProperty = property
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+            Task { @MainActor in
+                let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
+                    propertyID: property.id,
+                    context: "home_property_tap_before_session_type"
+                )
                 guard tapToken == propertyTapToken else { return }
-                if pressedPropertyID == property.id { pressedPropertyID = nil }
+
+                if let block = decision?.block {
+                    isOpeningProperty = false
+                    propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                        propertyID: property.id,
+                        propertyName: property.name,
+                        block: block
+                    )
+                    if pressedPropertyID == property.id {
+                        pressedPropertyID = nil
+                    }
+                    return
+                }
+
+                isOpeningProperty = false
+                initialSessionTypePickerProperty = property
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                    guard tapToken == propertyTapToken else { return }
+                    if pressedPropertyID == property.id { pressedPropertyID = nil }
+                }
             }
             return
         }
@@ -4109,6 +4145,15 @@ struct SessionHubView: View {
     private func openLegacyPathAfterFastLaneIssue(_ property: Property) {
         isOpeningProperty = true
         openProperty(property)
+    }
+
+    private func lockPromptMessage(for block: AppState.SessionEntryCoordinationBlock) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return AppState.sessionEntryBlockMessage(for: block) { lockedAt in
+            formatter.string(from: lockedAt)
+        }
     }
 
     private func handleHiddenDebugTap() {
@@ -5419,6 +5464,7 @@ private struct PropertyListTableRowModel: Identifiable {
     let subtitle: String?
     let address: String?
     let hasDraft: Bool
+    let isLocked: Bool
     let cloudGlyph: AppState.PropertyRowCloudGlyphState?
     let canOpenMaps: Bool
     let canMessage: Bool
@@ -5436,6 +5482,7 @@ extension PropertyListTableRowModel: Equatable {
             lhs.subtitle == rhs.subtitle &&
             lhs.address == rhs.address &&
             lhs.hasDraft == rhs.hasDraft &&
+            lhs.isLocked == rhs.isLocked &&
             lhs.cloudGlyph == rhs.cloudGlyph &&
             lhs.canOpenMaps == rhs.canOpenMaps &&
             lhs.canMessage == rhs.canMessage &&
@@ -5652,6 +5699,7 @@ private final class PropertyListTableCell: UITableViewCell {
     private let subtitleLabel = UILabel()
     private let addressLabel = UILabel()
     private let draftLabel = UILabel()
+    private let lockLabel = UILabel()
     private let textStack = UIStackView()
     private let rootStack = UIStackView()
 
@@ -5671,6 +5719,7 @@ private final class PropertyListTableCell: UITableViewCell {
         subtitleLabel.text = nil
         addressLabel.text = nil
         draftLabel.isHidden = true
+        lockLabel.isHidden = true
     }
 
     func configure(_ row: PropertyListTableRowModel) {
@@ -5679,7 +5728,8 @@ private final class PropertyListTableCell: UITableViewCell {
         subtitleLabel.isHidden = (subtitleLabel.text ?? "").isEmpty
         addressLabel.text = row.address?.trimmingCharacters(in: .whitespacesAndNewlines)
         addressLabel.isHidden = (addressLabel.text ?? "").isEmpty
-        draftLabel.isHidden = !row.hasDraft
+        lockLabel.isHidden = !row.isLocked
+        draftLabel.isHidden = row.isLocked || !row.hasDraft
     }
 
     private func configureViews() {
@@ -5710,6 +5760,17 @@ private final class PropertyListTableCell: UITableViewCell {
         draftLabel.layer.masksToBounds = true
         draftLabel.isHidden = true
 
+        lockLabel.text = "Locked"
+        lockLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        lockLabel.textColor = .systemRed
+        lockLabel.textAlignment = .center
+        lockLabel.backgroundColor = UIColor.systemRed.withAlphaComponent(0.13)
+        lockLabel.layer.cornerRadius = 14
+        lockLabel.layer.borderWidth = 1
+        lockLabel.layer.borderColor = UIColor.systemRed.withAlphaComponent(0.32).cgColor
+        lockLabel.layer.masksToBounds = true
+        lockLabel.isHidden = true
+
         textStack.axis = .vertical
         textStack.alignment = .fill
         textStack.spacing = 4
@@ -5724,10 +5785,13 @@ private final class PropertyListTableCell: UITableViewCell {
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         rootStack.addArrangedSubview(textStack)
         rootStack.addArrangedSubview(draftLabel)
+        rootStack.addArrangedSubview(lockLabel)
 
         contentView.addSubview(rootStack)
         draftLabel.setContentHuggingPriority(.required, for: .horizontal)
         draftLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        lockLabel.setContentHuggingPriority(.required, for: .horizontal)
+        lockLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         NSLayoutConstraint.activate([
@@ -5736,7 +5800,9 @@ private final class PropertyListTableCell: UITableViewCell {
             rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
             rootStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -8),
             draftLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
-            draftLabel.heightAnchor.constraint(equalToConstant: 28)
+            draftLabel.heightAnchor.constraint(equalToConstant: 28),
+            lockLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
+            lockLabel.heightAnchor.constraint(equalToConstant: 28)
         ])
     }
 
@@ -13157,6 +13223,13 @@ private struct FastLaneDraftIssue: Identifiable {
     let id = UUID()
     let property: Property
     let message: String
+}
+
+private struct PropertyEntryLockPrompt: Identifiable {
+    let id = UUID()
+    let propertyID: UUID
+    let propertyName: String
+    let block: AppState.SessionEntryCoordinationBlock
 }
 
 private struct DebugFastRuntimePrototypeView: View {
