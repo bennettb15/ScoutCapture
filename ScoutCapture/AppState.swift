@@ -6385,6 +6385,7 @@ final class AppState: ObservableObject {
         let city: String?
         let state: String?
         let postalCode: String?
+        let isArchived: Bool
         let updatedBy: UUID?
 
         init(
@@ -6399,6 +6400,7 @@ final class AppState: ObservableObject {
             city: String?,
             state: String?,
             postalCode: String?,
+            isArchived: Bool = false,
             updatedBy: UUID? = nil
         ) {
             self.id = id
@@ -6412,6 +6414,7 @@ final class AppState: ObservableObject {
             self.city = city
             self.state = state
             self.postalCode = postalCode
+            self.isArchived = isArchived
             self.updatedBy = updatedBy
         }
 
@@ -6427,6 +6430,7 @@ final class AppState: ObservableObject {
             case city
             case state
             case postalCode = "postal_code"
+            case isArchived = "is_archived"
             case updatedBy = "updated_by"
         }
     }
@@ -8322,6 +8326,7 @@ final class AppState: ObservableObject {
     private let sessionCoordinationStaleLockThreshold: TimeInterval = AppState.propertyStatusOccupiedStaleThreshold
     private let sessionOccupancyHeartbeatInterval: TimeInterval = 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
+    private let propertyArchiveLocalPreservationInterval: TimeInterval = 120
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
     private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
@@ -11016,6 +11021,36 @@ final class AppState: ObservableObject {
         }
         let authorizedIDs = authorizedPropertyIDsByOrganization[activeOrganizationID] ?? []
         return orgScoped.filter { authorizedIDs.contains($0.id) }
+    }
+
+    private func scopedArchivedProperties(from properties: [Property]) -> [Property] {
+        let scopedArchived = scopedProperties(from: properties).filter { $0.isArchived }
+        guard requiresAuthentication else { return scopedArchived }
+
+        let visibleIDs = Set(scopedArchived.map(\.id))
+        let accessibleOrgIDs = Set(accessibleOrganizations.map(\.id))
+            .union(activeOrganizationID.map { [$0] } ?? [])
+        let legacyLocalOrgIDs = Set(
+            allOrganizations
+                .filter {
+                    $0.name
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .caseInsensitiveCompare("Individual") == .orderedSame
+                }
+                .map(\.id)
+        )
+        let recoverableLegacyArchived = Self.uniquePropertiesByID(properties).filter { property in
+            guard property.deletedAt == nil,
+                  property.isArchived,
+                  !visibleIDs.contains(property.id) else {
+                return false
+            }
+            guard let orgID = property.orgId else { return true }
+            return legacyLocalOrgIDs.contains(orgID) || !accessibleOrgIDs.contains(orgID)
+        }
+
+        return (scopedArchived + recoverableLegacyArchived)
+            .sorted(by: Self.propertyIsOrderedBefore)
     }
 
     private func scopedRecentlyDeletedProperties(from properties: [Property]) -> [Property] {
@@ -33736,7 +33771,7 @@ final class AppState: ObservableObject {
             state: payload.state,
             zip: payload.postalCode,
             baselineSessionID: nil,
-            isArchived: false,
+            isArchived: payload.isArchived,
             createdAt: queueItem.createdAt,
             updatedAt: queueItem.updatedAt
         )
@@ -33758,7 +33793,8 @@ final class AppState: ObservableObject {
                 addressLine1: payload.addressLine1,
                 city: payload.city,
                 state: payload.state,
-                postalCode: payload.postalCode
+                postalCode: payload.postalCode,
+                isArchived: payload.isArchived
             )
         )
     }
@@ -35003,6 +35039,7 @@ final class AppState: ObservableObject {
             city: normalizedSupabaseText(property?.city ?? metadata?.propertyCityAtCapture),
             state: normalizedSupabaseText(property?.state ?? metadata?.propertyStateAtCapture),
             postalCode: normalizedSupabaseText(property?.zip ?? metadata?.propertyZipAtCapture),
+            isArchived: property?.isArchived ?? false,
             updatedBy: authenticatedSupabaseUser?.id
         )
     }
@@ -50246,12 +50283,21 @@ final class AppState: ObservableObject {
         ) else {
             return
         }
+        let payloadToApply: PropertyRefreshPayload
+        if let replacingOrganizationID {
+            payloadToApply = mergedBackingRefreshPayload(
+                replacingOrganizationID: replacingOrganizationID,
+                with: payload
+            )
+        } else {
+            payloadToApply = payload
+        }
         applyHubCachePayload(
-            properties: payload.properties,
-            organizations: payload.organizations,
-            caches: payload.caches
+            properties: payloadToApply.properties,
+            organizations: payloadToApply.organizations,
+            caches: payloadToApply.caches
         )
-        lastLiveSyncFingerprint = payload.fingerprint
+        lastLiveSyncFingerprint = payloadToApply.fingerprint
     }
 
     private func wouldApplyRefreshPayloadChangeBackingState(_ payload: PropertyRefreshPayload) -> Bool {
@@ -50345,12 +50391,68 @@ final class AppState: ObservableObject {
         replacingOrganizationID organizationID: UUID,
         with remoteProperties: [Property]
     ) -> [Property] {
-        let remoteIDs = Set(remoteProperties.map(\.id))
+        let localByID = Dictionary(uniqueKeysWithValues: allProperties.map { ($0.id, $0) })
+        let pendingArchiveStateByPropertyID = pendingPropertyArchiveStateByPropertyID(
+            replacingOrganizationID: organizationID
+        )
+        let now = Date()
+        let adjustedRemoteProperties = remoteProperties.map { remote in
+            if let pendingArchiveState = pendingArchiveStateByPropertyID[remote.id] {
+                var preserved = remote
+                preserved.isArchived = pendingArchiveState
+                if let local = localByID[remote.id] {
+                    preserved.updatedAt = max(local.updatedAt, remote.updatedAt)
+                }
+                return preserved
+            }
+
+            guard let local = localByID[remote.id],
+                  local.orgId == organizationID,
+                  local.deletedAt == nil,
+                  remote.deletedAt == nil,
+                  local.isArchived != remote.isArchived,
+                  local.updatedAt > remote.updatedAt,
+                  now.timeIntervalSince(local.updatedAt) <= propertyArchiveLocalPreservationInterval else {
+                return remote
+            }
+
+            var preserved = remote
+            preserved.isArchived = local.isArchived
+            preserved.updatedAt = local.updatedAt
+            return preserved
+        }
+        let remoteIDs = Set(adjustedRemoteProperties.map(\.id))
         let preserved = allProperties.filter { property in
             property.orgId != organizationID ||
-            (property.deletedAt != nil && !remoteIDs.contains(property.id))
+            ((property.deletedAt != nil || property.isArchived) && !remoteIDs.contains(property.id))
         }
-        return (preserved + remoteProperties).sorted(by: Self.propertyIsOrderedBefore)
+        return (preserved + adjustedRemoteProperties).sorted(by: Self.propertyIsOrderedBefore)
+    }
+
+    private func pendingPropertyArchiveStateByPropertyID(
+        replacingOrganizationID organizationID: UUID
+    ) -> [UUID: Bool] {
+        let queued = (try? localStore.fetchQueuedMutations()) ?? []
+        var result: [UUID: (state: Bool, updatedAt: Date)] = [:]
+        for item in queued {
+            guard item.organizationID == organizationID,
+                  item.operation == "upsert_property",
+                  item.acknowledgedAt == nil,
+                  item.status == .pending || item.status == .failed || item.status == .inFlight,
+                  let payload = try? JSONDecoder().decode(
+                    QueuedPropertyMutationPayload.self,
+                    from: item.payloadData
+                  ) else {
+                continue
+            }
+            let propertyID = item.entityID
+            let pendingUpdatedAt = item.updatedAt
+            if let current = result[propertyID], current.updatedAt > pendingUpdatedAt {
+                continue
+            }
+            result[propertyID] = (payload.property.isArchived, pendingUpdatedAt)
+        }
+        return result.mapValues(\.state)
     }
 
     private func mergedBackingOrganizations(
@@ -53634,10 +53736,25 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func setPropertyArchived(id: UUID, archived: Bool) -> Bool {
-        guard canAccessProperty(id) else { return false }
-        guard let property = properties.first(where: { $0.id == id }) else { return false }
+        guard let property = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id }) else { return false }
+        let canArchiveOrRestore = canAccessProperty(id) ||
+            (!archived && property.isArchived && scopedArchivedProperties(from: allProperties).contains { $0.id == id })
+        guard canArchiveOrRestore else { return false }
         var updated = property
         updated.isArchived = archived
+        if !archived,
+           requiresAuthentication,
+           let activeOrganizationID,
+           !canAccessOrganization(updated.orgId) {
+            do {
+                try ensureLocalOrganizationExists(for: activeOrganizationID)
+                updated.orgId = activeOrganizationID
+            } catch {
+                hubTransientStatusMessage = "Unable to restore property."
+                return false
+            }
+        }
         do {
             let persisted = try localStore.updateProperty(updated)
             if let idx = allProperties.firstIndex(where: { $0.id == id }) {
@@ -53649,10 +53766,70 @@ final class AppState: ObservableObject {
             }
             let caches = makeHubCaches(for: allProperties)
             applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
-            schedulePhaseBPropertyShadowWrite(for: persisted)
+            schedulePropertyArchiveRemoteWrite(for: persisted)
+            hubTransientStatusMessage = archived ? "Property archived." : "Property restored."
             return true
         } catch {
+            hubTransientStatusMessage = archived ? "Unable to archive property." : "Unable to restore property."
             return false
+        }
+    }
+
+    private func schedulePropertyArchiveRemoteWrite(for property: Property) {
+        guard let orgID = property.orgId else {
+            schedulePhaseBPropertyShadowWrite(for: property)
+            return
+        }
+        Task(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            let mutation: LocalStore.QueuedMutation
+            do {
+                guard let builtMutation = try self.makeQueuedPropertyMutation(for: property) else {
+                    print("[PropertyArchive] remote_write_skipped propertyID=\(property.id.uuidString) reason=payload_build_failed")
+                    return
+                }
+                mutation = builtMutation
+                self.enqueueOfflineMutation(mutation, reason: "property_archive_changed")
+                let payload = try JSONDecoder().decode(
+                    QueuedPropertyMutationPayload.self,
+                    from: mutation.payloadData
+                )
+                let canAttemptRemoteWrite =
+                    self.propertyShadowWriteOverride != nil ||
+                    self.remoteMutationPathAvailable(for: orgID)
+                guard canAttemptRemoteWrite else {
+                    print(
+                        "[PropertyArchive] remote_write_deferred " +
+                        "propertyID=\(property.id.uuidString) " +
+                        "orgID=\(orgID.uuidString) " +
+                        "isArchived=\(property.isArchived) " +
+                        "reason=remote_unavailable"
+                    )
+                    return
+                }
+                try await self.performQueuedPropertyRemoteWrite(
+                    property: property,
+                    payload: payload.property
+                )
+                self.removeQueuedMutationIfPresent(
+                    idempotencyKey: mutation.idempotencyKey,
+                    reason: "archive_property_success"
+                )
+                print(
+                    "[PropertyArchive] remote_write_success " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "isArchived=\(property.isArchived)"
+                )
+            } catch {
+                print(
+                    "[PropertyArchive] remote_write_failed " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "isArchived=\(property.isArchived) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -54330,11 +54507,11 @@ final class AppState: ObservableObject {
     }
 
     func activeProperties() -> [Property] {
-        properties.filter { $0.deletedAt == nil && !$0.isArchived }
+        scopedProperties(from: allProperties).filter { !$0.isArchived }
     }
 
     func archivedProperties() -> [Property] {
-        properties.filter { $0.deletedAt == nil && $0.isArchived }
+        scopedArchivedProperties(from: allProperties)
     }
 
     @discardableResult

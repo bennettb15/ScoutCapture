@@ -2328,6 +2328,7 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: created)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            try writeHubIndex(properties: state.properties, organizations: state.organizations)
             try removePropertyDeletionTombstone(propertyID: created.id)
             try appendPropertySyncEvent(
                 propertyID: created.id,
@@ -2364,6 +2365,7 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: updated)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            try writeHubIndex(properties: state.properties, organizations: state.organizations)
             try removePropertyDeletionTombstone(propertyID: updated.id)
             try appendPropertySyncEvent(
                 propertyID: updated.id,
@@ -2378,7 +2380,9 @@ final class LocalStore {
 
     func deleteProperty(id: UUID) throws {
         try performFileIOSync {
-            let originalProperties = try readProperties()
+            let originalState = try migratedPropertyAndOrganizationState()
+            let originalProperties = originalState.properties
+            let originalOrganizations = originalState.organizations
             guard originalProperties.contains(where: { $0.id == id }) else {
                 throw StoreError.propertyNotFound(id)
             }
@@ -2413,6 +2417,7 @@ final class LocalStore {
 
                 let updatedProperties = originalProperties.filter { $0.id != id }
                 try writeProperties(updatedProperties)
+                try writeHubIndex(properties: updatedProperties, organizations: originalOrganizations)
                 if updatedProperties.isEmpty, fileManager.fileExists(atPath: propertiesURL.path) {
                     try fileManager.removeItem(at: propertiesURL)
                 }
@@ -2432,6 +2437,7 @@ final class LocalStore {
             } catch {
                 if didWriteUpdatedProperties {
                     try? writeProperties(originalProperties)
+                    try? writeHubIndex(properties: originalProperties, organizations: originalOrganizations)
                 }
                 if didWriteTombstones {
                     try? writePropertyDeletionTombstones(originalTombstones)

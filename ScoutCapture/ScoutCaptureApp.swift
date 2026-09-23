@@ -676,7 +676,7 @@ struct SessionHubView: View {
     private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
-    @State private var showArchivedProperties: Bool = false
+    @AppStorage("scoutcapture.showArchivedProperties") private var showArchivedProperties: Bool = false
     @State private var showSettingsSheet: Bool = false
     @State private var propertyToArchive: Property? = nil
     @State private var propertyToDelete: Property? = nil
@@ -788,11 +788,11 @@ struct SessionHubView: View {
     }
 
     private var activeProperties: [Property] {
-        appState.properties.filter { $0.deletedAt == nil && !$0.isArchived }
+        appState.activeProperties()
     }
 
     private var archivedProperties: [Property] {
-        appState.properties.filter { $0.deletedAt == nil && $0.isArchived }
+        appState.archivedProperties()
     }
 
     private var normalizedSearchQuery: String {
@@ -808,7 +808,6 @@ struct SessionHubView: View {
     private var filteredArchivedProperties: [Property] {
         archivedProperties
             .filter(matchesSearch(_:))
-            .filter(matchesPropertyFilter(_:))
     }
 
     private var shouldShowStartupPlaceholders: Bool {
@@ -917,7 +916,11 @@ struct SessionHubView: View {
                         PropertyListTableView(
                             sections: propertyTableSections(showArchivedSection: showArchivedSection),
                             onTap: { property in
-                                handlePropertyTap(property)
+                                if property.isArchived {
+                                    return
+                                } else {
+                                    handlePropertyTap(property)
+                                }
                             },
                             onManageSessions: { property in
                                 manageSessionsProperty = property
@@ -1496,6 +1499,7 @@ struct SessionHubView: View {
                 address: propertyAddressLine(property) ?? property.address,
                 hasDraft: rowDraftBadges[property.id] == true,
                 isLocked: rowLockBadges[property.id] == true,
+                isArchived: property.isArchived,
                 cloudGlyph: cloudGlyph,
                 canRetryUpload: rowStatusChips[property.id] != nil || cloudGlyph == .warning,
                 canOpenMaps: mapsAddressQuery(for: property) != nil,
@@ -5449,6 +5453,7 @@ private struct PropertyListTableRowModel: Identifiable {
     let address: String?
     let hasDraft: Bool
     let isLocked: Bool
+    let isArchived: Bool
     let cloudGlyph: AppState.PropertyRowCloudGlyphState?
     let canRetryUpload: Bool
     let canOpenMaps: Bool
@@ -5468,6 +5473,7 @@ extension PropertyListTableRowModel: Equatable {
             lhs.address == rhs.address &&
             lhs.hasDraft == rhs.hasDraft &&
             lhs.isLocked == rhs.isLocked &&
+            lhs.isArchived == rhs.isArchived &&
             lhs.cloudGlyph == rhs.cloudGlyph &&
             lhs.canRetryUpload == rhs.canRetryUpload &&
             lhs.canOpenMaps == rhs.canOpenMaps &&
@@ -5531,8 +5537,38 @@ private struct PropertyListTableView: UIViewRepresentable {
         context.coordinator.onCall = onCall
 
         guard context.coordinator.sections != sections else { return }
-        context.coordinator.sections = sections
-        tableView.reloadData()
+        let oldSections = context.coordinator.sections
+        let oldSectionIDs = oldSections.map(\.id)
+        let newSectionIDs = sections.map(\.id)
+        UIView.performWithoutAnimation {
+            context.coordinator.sections = sections
+            let deletedSections = oldSectionIDs.enumerated().compactMap { index, id in
+                newSectionIDs.contains(id) ? nil : index
+            }
+            let insertedSections = newSectionIDs.enumerated().compactMap { index, id in
+                oldSectionIDs.contains(id) ? nil : index
+            }
+            let reloadedSections = newSectionIDs.enumerated().compactMap { index, id -> Int? in
+                guard let oldIndex = oldSectionIDs.firstIndex(of: id),
+                      !deletedSections.contains(oldIndex),
+                      !insertedSections.contains(index),
+                      oldSections[oldIndex] != sections[index] else {
+                    return nil
+                }
+                return index
+            }
+
+            if oldSectionIDs == newSectionIDs {
+                tableView.reloadSections(IndexSet(reloadedSections), with: .none)
+            } else {
+                tableView.performBatchUpdates {
+                    tableView.deleteSections(IndexSet(deletedSections), with: .none)
+                    tableView.insertSections(IndexSet(insertedSections), with: .none)
+                    tableView.reloadSections(IndexSet(reloadedSections), with: .none)
+                }
+            }
+            tableView.layoutIfNeeded()
+        }
     }
 
     final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
@@ -5591,8 +5627,27 @@ private struct PropertyListTableView: UIViewRepresentable {
             return cell
         }
 
-        func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-            sections[section].title
+        func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+            guard let title = sections[section].title, !title.isEmpty else {
+                return nil
+            }
+            let container = UIView()
+            container.backgroundColor = .systemBackground
+
+            let label = UILabel()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.text = title
+            label.font = .systemFont(ofSize: 14, weight: .semibold)
+            label.textColor = .secondaryLabel
+            container.addSubview(label)
+
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+                label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6)
+            ])
+
+            return container
         }
 
         func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
@@ -5669,7 +5724,7 @@ private struct PropertyListTableView: UIViewRepresentable {
                 let retryUpload = UIAction(title: "Retry Upload", image: UIImage(systemName: "arrow.clockwise.icloud")) { _ in
                     self.onRetryUpload(property)
                 }
-                let archiveTitle = property.isArchived ? "Unarchive Property" : "Archive Property"
+                let archiveTitle = property.isArchived ? "Restore Property" : "Archive Property"
                 let archiveImage = property.isArchived ? "archivebox" : "archivebox.fill"
                 let archive = UIAction(title: archiveTitle, image: UIImage(systemName: archiveImage)) { _ in
                     self.onArchiveToggle(property)
@@ -5700,6 +5755,7 @@ private final class PropertyListTableCell: UITableViewCell {
     private let addressLabel = UILabel()
     private let draftLabel = UILabel()
     private let lockLabel = UILabel()
+    private let archivedLabel = UILabel()
     private let textStack = UIStackView()
     private let rootStack = UIStackView()
 
@@ -5720,6 +5776,7 @@ private final class PropertyListTableCell: UITableViewCell {
         addressLabel.text = nil
         draftLabel.isHidden = true
         lockLabel.isHidden = true
+        archivedLabel.isHidden = true
     }
 
     func configure(_ row: PropertyListTableRowModel) {
@@ -5729,7 +5786,8 @@ private final class PropertyListTableCell: UITableViewCell {
         addressLabel.text = row.address?.trimmingCharacters(in: .whitespacesAndNewlines)
         addressLabel.isHidden = (addressLabel.text ?? "").isEmpty
         lockLabel.isHidden = !row.isLocked
-        draftLabel.isHidden = row.isLocked || !row.hasDraft
+        archivedLabel.isHidden = !row.isArchived
+        draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft
     }
 
     private func configureViews() {
@@ -5771,6 +5829,17 @@ private final class PropertyListTableCell: UITableViewCell {
         lockLabel.layer.masksToBounds = true
         lockLabel.isHidden = true
 
+        archivedLabel.text = "Archived"
+        archivedLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        archivedLabel.textColor = .secondaryLabel
+        archivedLabel.textAlignment = .center
+        archivedLabel.backgroundColor = UIColor.secondaryLabel.withAlphaComponent(0.12)
+        archivedLabel.layer.cornerRadius = 14
+        archivedLabel.layer.borderWidth = 1
+        archivedLabel.layer.borderColor = UIColor.secondaryLabel.withAlphaComponent(0.26).cgColor
+        archivedLabel.layer.masksToBounds = true
+        archivedLabel.isHidden = true
+
         textStack.axis = .vertical
         textStack.alignment = .fill
         textStack.spacing = 4
@@ -5786,12 +5855,15 @@ private final class PropertyListTableCell: UITableViewCell {
         rootStack.addArrangedSubview(textStack)
         rootStack.addArrangedSubview(draftLabel)
         rootStack.addArrangedSubview(lockLabel)
+        rootStack.addArrangedSubview(archivedLabel)
 
         contentView.addSubview(rootStack)
         draftLabel.setContentHuggingPriority(.required, for: .horizontal)
         draftLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         lockLabel.setContentHuggingPriority(.required, for: .horizontal)
         lockLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        archivedLabel.setContentHuggingPriority(.required, for: .horizontal)
+        archivedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         NSLayoutConstraint.activate([
@@ -5802,7 +5874,9 @@ private final class PropertyListTableCell: UITableViewCell {
             draftLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
             draftLabel.heightAnchor.constraint(equalToConstant: 28),
             lockLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
-            lockLabel.heightAnchor.constraint(equalToConstant: 28)
+            lockLabel.heightAnchor.constraint(equalToConstant: 28),
+            archivedLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 88),
+            archivedLabel.heightAnchor.constraint(equalToConstant: 28)
         ])
     }
 
