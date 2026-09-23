@@ -5563,6 +5563,17 @@ final class AppState: ObservableObject {
         let displaySubtitle: String
     }
 
+    private struct LocalActivityFeedRecord: Codable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID?
+        let propertyID: UUID?
+        let actorUserID: UUID?
+        let eventType: String
+        let payload: [String: AnyJSON]
+        let createdAt: Date
+    }
+
 #if DEBUG
     struct DebugRemotePropertyDeltaInput {
         let id: UUID
@@ -8319,6 +8330,7 @@ final class AppState: ObservableObject {
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
+    private let localActivityFeedDefaultsKey = "scoutcapture.localActivityFeed.v1"
     private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
@@ -10041,18 +10053,66 @@ final class AppState: ObservableObject {
                 .value as [SupabaseSessionEventRecord]
         }
 
-        let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID)))
+        let localRecords = cachedLocalActivityFeedRecords().filter { record in
+            guard record.orgID == orgID else { return false }
+            guard let propertyID else { return true }
+            if record.propertyID == propertyID { return true }
+            if let sessionID = record.sessionID {
+                return sessionIDFilterValues.contains(sessionID.uuidString.lowercased())
+            }
+            return false
+        }
+
+        let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID) + localRecords.compactMap(\.sessionID)))
         let sessionLookupByID = try await fetchActivitySessionLookupByID(
             sessionIDs: eventSessionIDs,
             client: client
         )
 
-        return eventRecords.map { record in
+        let remoteItems = eventRecords.map { record in
             makeActivityFeedItem(
-                record: record,
+                id: record.id,
+                orgID: record.orgID,
+                sessionID: record.sessionID,
+                propertyID: record.propertyID,
+                actorUserID: record.actorUserID,
+                eventType: record.eventType,
+                payload: record.payload,
+                createdAt: parseSupabaseDateString(record.createdAt) ?? Date(),
                 sessionLookup: record.sessionID.flatMap { sessionLookupByID[$0] }
             )
         }
+        let remoteClientEventIDs = Set(
+            eventRecords.compactMap { activityPayloadString($0.payload, keys: ["client_event_id", "clientEventID"]) }
+        )
+        let localItems = localRecords
+            .filter { record in
+                guard let clientEventID = activityPayloadString(record.payload, keys: ["client_event_id", "clientEventID"]) else {
+                    return true
+                }
+                return !remoteClientEventIDs.contains(clientEventID)
+            }
+            .map { record in
+                makeActivityFeedItem(
+                    id: record.id,
+                    orgID: record.orgID,
+                    sessionID: record.sessionID,
+                    propertyID: record.propertyID,
+                    actorUserID: record.actorUserID,
+                    eventType: record.eventType,
+                    payload: record.payload,
+                    createdAt: record.createdAt,
+                    sessionLookup: record.sessionID.flatMap { sessionLookupByID[$0] }
+                )
+            }
+
+        return (remoteItems + localItems)
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.id.uuidString > $1.id.uuidString
+            }
+            .prefix(normalizedLimit)
+            .map { $0 }
     }
 
     private func clampedActivityFeedLimit(_ limit: Int) -> Int {
@@ -10089,21 +10149,28 @@ final class AppState: ObservableObject {
         propertyID: UUID? = nil,
         payload: [String: Any]
     ) async {
-        var payloadWithActor = payload
-        if let actorID = authenticatedSupabaseUser?.id,
-           payloadWithActor["actor_user_id"] == nil,
-           payloadWithActor["actorUserID"] == nil {
-            payloadWithActor["actor_user_id"] = actorID.uuidString.lowercased()
+        let shouldCacheLocal = activityPayloadString(
+            normalizedAuditEventPayload(payload),
+            keys: ["client_event_id", "clientEventID"]
+        ) == nil
+        let clientEventID = shouldCacheLocal ? UUID() : nil
+        var payloadWithClientID = payload
+        if let clientEventID {
+            payloadWithClientID["client_event_id"] = clientEventID.uuidString.lowercased()
         }
-        if let actorEmail = normalizedSupabaseText(authenticatedSupabaseUser?.email),
-           payloadWithActor["actor_email"] == nil,
-           payloadWithActor["actorEmail"] == nil,
-           payloadWithActor["actor_name"] == nil,
-           payloadWithActor["actorName"] == nil,
-           payloadWithActor["actor"] == nil {
-            payloadWithActor["actor_email"] = actorEmail
-        }
+        let payloadWithActor = auditPayloadAddingActor(payloadWithClientID)
         let normalizedPayload = normalizedAuditEventPayload(payloadWithActor)
+        if let clientEventID {
+            cacheLocalActivityFeedRecord(
+                id: clientEventID,
+                orgID: orgID,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                actorUserID: authenticatedSupabaseUser?.id,
+                eventType: eventType,
+                payload: normalizedPayload
+            )
+        }
 #if DEBUG
         if let auditEventEmitOverride {
             do {
@@ -10134,6 +10201,100 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func auditPayloadAddingActor(_ payload: [String: Any]) -> [String: Any] {
+        var payloadWithActor = payload
+        if let actorID = authenticatedSupabaseUser?.id,
+           payloadWithActor["actor_user_id"] == nil,
+           payloadWithActor["actorUserID"] == nil {
+            payloadWithActor["actor_user_id"] = actorID.uuidString.lowercased()
+        }
+        if let actorEmail = normalizedSupabaseText(authenticatedSupabaseUser?.email),
+           payloadWithActor["actor_email"] == nil,
+           payloadWithActor["actorEmail"] == nil,
+           payloadWithActor["actor_name"] == nil,
+           payloadWithActor["actorName"] == nil,
+           payloadWithActor["actor"] == nil {
+            payloadWithActor["actor_email"] = actorEmail
+        }
+        return payloadWithActor
+    }
+
+    private func emitCachedAuditEvent(
+        orgID: UUID,
+        eventType: String,
+        sessionID: UUID? = nil,
+        propertyID: UUID? = nil,
+        payload: [String: Any]
+    ) {
+        let clientEventID = UUID()
+        var payloadWithClientID = payload
+        payloadWithClientID["client_event_id"] = clientEventID.uuidString.lowercased()
+        let payloadWithActor = auditPayloadAddingActor(payloadWithClientID)
+        let normalizedPayload = normalizedAuditEventPayload(payloadWithActor)
+        cacheLocalActivityFeedRecord(
+            id: clientEventID,
+            orgID: orgID,
+            sessionID: sessionID,
+            propertyID: propertyID,
+            actorUserID: authenticatedSupabaseUser?.id,
+            eventType: eventType,
+            payload: normalizedPayload
+        )
+        Task {
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: eventType,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                payload: payloadWithClientID
+            )
+        }
+    }
+
+    private func cachedLocalActivityFeedRecords() -> [LocalActivityFeedRecord] {
+        guard let data = userDefaults.data(forKey: localActivityFeedDefaultsKey),
+              let decoded = try? JSONDecoder().decode([LocalActivityFeedRecord].self, from: data) else {
+            return []
+        }
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        return decoded
+            .filter { $0.createdAt >= cutoff }
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.id.uuidString > $1.id.uuidString
+            }
+            .prefix(100)
+            .map { $0 }
+    }
+
+    private func cacheLocalActivityFeedRecord(
+        id: UUID,
+        orgID: UUID,
+        sessionID: UUID?,
+        propertyID: UUID?,
+        actorUserID: UUID?,
+        eventType: String,
+        payload: [String: AnyJSON]
+    ) {
+        let record = LocalActivityFeedRecord(
+            id: id,
+            orgID: orgID,
+            sessionID: sessionID,
+            propertyID: propertyID,
+            actorUserID: actorUserID,
+            eventType: eventType,
+            payload: payload,
+            createdAt: Date()
+        )
+        var records = cachedLocalActivityFeedRecords()
+        records.removeAll { $0.id == id }
+        records.insert(record, at: 0)
+        records = Array(records.prefix(100))
+        if let data = try? JSONEncoder().encode(records) {
+            userDefaults.set(data, forKey: localActivityFeedDefaultsKey)
+        }
+    }
+
     private func fetchActivitySessionLookupByID(
         sessionIDs: [UUID],
         client: SupabaseClient
@@ -10151,35 +10312,41 @@ final class AppState: ObservableObject {
     }
 
     private func makeActivityFeedItem(
-        record: SupabaseSessionEventRecord,
+        id: UUID,
+        orgID: UUID,
+        sessionID: UUID?,
+        propertyID: UUID?,
+        actorUserID: UUID?,
+        eventType: String,
+        payload: [String: AnyJSON],
+        createdAt: Date,
         sessionLookup: SupabaseActivitySessionLookupRecord?
     ) -> ActivityFeedItem {
-        let createdAt = parseSupabaseDateString(record.createdAt) ?? Date()
         let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
-            ?? record.propertyID.flatMap { activityPropertyName(for: $0) }
+            ?? propertyID.flatMap { activityPropertyName(for: $0) }
         let sessionTitle = normalizedSupabaseText(sessionLookup?.title)
         let title = normalizedActivityDisplayText(
-            activityFeedTitle(for: record.eventType, payload: record.payload),
+            activityFeedTitle(for: eventType, payload: payload),
             fallback: "Activity event"
         )
         let subtitle = normalizedActivityDisplayText(
             activityFeedSubtitle(
-                eventType: record.eventType,
-                actorUserID: record.actorUserID,
-                payload: record.payload,
+                eventType: eventType,
+                actorUserID: actorUserID,
+                payload: payload,
                 propertyName: propertyName,
                 sessionTitle: sessionTitle,
-                sessionID: record.sessionID
+                sessionID: sessionID
             ),
             fallback: "Organization activity"
         )
 
         return ActivityFeedItem(
-            id: record.id,
-            orgID: record.orgID,
-            sessionID: record.sessionID,
-            eventType: record.eventType,
-            payload: record.payload,
+            id: id,
+            orgID: orgID,
+            sessionID: sessionID,
+            eventType: eventType,
+            payload: payload,
             createdAt: createdAt,
             displayTitle: title,
             displaySubtitle: subtitle
@@ -10198,6 +10365,12 @@ final class AppState: ObservableObject {
             return "Session completed"
         case "session.exported":
             return "Session exported"
+        case "session.draft_saved":
+            return "Draft saved"
+        case "session.deleted":
+            return "Session deleted"
+        case "session.restored":
+            return "Session restored"
         case "member.invited":
             return "Member invited"
         case "member.accepted":
@@ -10208,6 +10381,12 @@ final class AppState: ObservableObject {
             return "Property access granted"
         case "property.access.revoked":
             return "Property access revoked"
+        case "property.archived":
+            return "Property archived"
+        case "property.restored":
+            return "Property restored"
+        case "property.deleted":
+            return "Property deleted"
         case "observation.created":
             if activityPayloadBool(payload, keys: ["is_flagged"]) == true {
                 return "Flagged observation created"
@@ -10287,6 +10466,30 @@ final class AppState: ObservableObject {
                 return actor
             }
             return resolvedPropertyName ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
+        case "session.draft_saved":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) saved a draft for \(resolvedPropertyName)"
+            }
+            if let resolvedPropertyName {
+                return "Draft saved for \(resolvedPropertyName)"
+            }
+            return resolvedSessionName ?? fallbackSession ?? fallbackScope
+        case "session.deleted":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) deleted a session for \(resolvedPropertyName)"
+            }
+            if let resolvedPropertyName {
+                return "Session deleted for \(resolvedPropertyName)"
+            }
+            return resolvedSessionName ?? fallbackSession ?? fallbackScope
+        case "session.restored":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) restored a session for \(resolvedPropertyName)"
+            }
+            if let resolvedPropertyName {
+                return "Session restored for \(resolvedPropertyName)"
+            }
+            return resolvedSessionName ?? fallbackSession ?? fallbackScope
         case "member.invited":
             if let subject, let resolvedRole {
                 return "\(actor) invited \(subject) as \(resolvedRole)"
@@ -10330,6 +10533,21 @@ final class AppState: ObservableObject {
                 return "\(actor) revoked property access from \(subject)"
             }
             return "\(actor) revoked property access"
+        case "property.archived":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) archived \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? fallbackScope
+        case "property.restored":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) restored \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? fallbackScope
+        case "property.deleted":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) deleted \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? fallbackScope
         case "observation.created":
             let context = [actor, resolvedPropertyName, resolvedPriority, resolvedTrade, resolvedReason]
                 .compactMap { value -> String? in
@@ -44291,6 +44509,21 @@ final class AppState: ObservableObject {
             nextDrafts[context.propertyID] = summary
             try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
             fastRuntimeDraftsByPropertyID = nextDrafts
+            if let property, let orgID = property.orgId {
+                var payload = propertyAuditPayload(property: property)
+                payload["session_id"] = context.sessionID.uuidString.lowercased()
+                payload["session_title"] = "Session \(context.sessionID.uuidString.prefix(8))"
+                payload["session_status"] = Session.Status.draft.rawValue
+                payload["photo_count"] = photoCount
+                payload["session_source"] = "fast_lane"
+                emitCachedAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.draft_saved",
+                    sessionID: context.sessionID,
+                    propertyID: context.propertyID,
+                    payload: payload
+                )
+            }
 
             let persistMilliseconds = Date().timeIntervalSince(persistStartedAt) * 1_000
             return FastRuntimePrototypeCloseResult(
@@ -44772,6 +45005,18 @@ final class AppState: ObservableObject {
             if removedLocalCaptureStores > 0 {
                 diagnostics.append("local_capture_storage_pruned=\(removedLocalCaptureStores)")
             }
+            emitCachedAuditEvent(
+                orgID: orgID,
+                eventType: "session.completed",
+                sessionID: context.sessionID,
+                propertyID: context.propertyID,
+                payload: fastRuntimeSessionLifecycleAuditPayload(
+                    context: context,
+                    property: property,
+                    photoCount: shotResults.count,
+                    status: .completed
+                )
+            )
             diagnostics.append("stage=success")
 
             return FastRuntimeCompleteUploadResult(
@@ -45018,6 +45263,29 @@ final class AppState: ObservableObject {
             reason: "fast_lane_report_handoff_accepted"
         ) {
             persistFastRuntimeCompletionCloudStatus(status, storagePath: snapshotPath)
+        }
+        if let orgID = context.orgID ??
+            propertyStatusByPropertyID[context.propertyID]?.orgID ??
+            properties.first(where: { $0.id == context.propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == context.propertyID })?.orgId ??
+            activeOrganizationID {
+            let property = properties.first(where: { $0.id == context.propertyID }) ??
+                allProperties.first(where: { $0.id == context.propertyID })
+            var payload = fastRuntimeSessionLifecycleAuditPayload(
+                context: context,
+                property: property,
+                photoCount: 0,
+                status: .completed
+            )
+            payload["snapshot_id"] = snapshotID?.uuidString.lowercased() ?? ""
+            payload["snapshot_path"] = normalizedSupabaseText(snapshotPath) ?? ""
+            emitCachedAuditEvent(
+                orgID: orgID,
+                eventType: "session.exported",
+                sessionID: context.sessionID,
+                propertyID: context.propertyID,
+                payload: payload
+            )
         }
         return true
     }
@@ -53767,6 +54035,10 @@ final class AppState: ObservableObject {
             let caches = makeHubCaches(for: allProperties)
             applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
             schedulePropertyArchiveRemoteWrite(for: persisted)
+            emitPropertyAuditEvent(
+                property: persisted,
+                eventType: archived ? "property.archived" : "property.restored"
+            )
             hubTransientStatusMessage = archived ? "Property archived." : "Property restored."
             return true
         } catch {
@@ -54560,6 +54832,7 @@ final class AppState: ObservableObject {
 
         try await callSoftDeletePropertyRPC(propertyID: id)
         applyRemoteSoftDeletedPropertyLocally(existing, deletedAt: Date())
+        emitPropertyAuditEvent(property: existing, eventType: "property.deleted")
 
 #if DEBUG
         if let propertySoftDeleteRefreshOverride {
@@ -54768,6 +55041,14 @@ final class AppState: ObservableObject {
 
         try await callSoftDeleteSessionRPC(sessionID: sessionID)
         applyRemoteSoftDeletedSessionLocally(existing, deletedAt: preflight.deletedAt ?? Date())
+        let propertyForAudit = allProperties.first(where: { $0.id == propertyID }) ??
+            properties.first(where: { $0.id == propertyID })
+        emitSessionDeletedAuditEvent(
+            property: propertyForAudit,
+            session: existing,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
 
 #if DEBUG
         if let sessionSoftDeleteRefreshOverride {
@@ -55062,6 +55343,7 @@ final class AppState: ObservableObject {
 #endif
 
         applyRemoteRestoredSessionLocally(deletedSession)
+        emitSessionRestoredAuditEvent(deletedSession)
 
 #if DEBUG
         if let sessionRestoreRefreshOverride {
@@ -55127,8 +55409,17 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func remoteRestoreProperty(id: UUID) async -> Bool {
+        let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id })
+        let recentlyDeletedPropertyForAudit = (try? await fetchRecentlyDeletedPropertiesRemote())?
+            .first(where: { $0.id == id })
         do {
             try await performRemoteRestoreProperty(id: id)
+            emitPropertyRestoredAuditEvent(
+                property: propertyForAudit,
+                recentlyDeletedProperty: recentlyDeletedPropertyForAudit,
+                propertyID: id
+            )
             return true
         } catch {
             let message = "The property could not be restored. \(error.localizedDescription)"
@@ -55174,6 +55465,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func deletePropertyIfEmpty(id: UUID) -> Bool {
         guard canAccessProperty(id) else { return false }
+        let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id })
         let counts = propertyDataCounts(for: id)
         guard counts.isEmpty else { return false }
         do {
@@ -55186,9 +55479,15 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+            if let propertyForAudit {
+                emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+            }
             return true
         } catch {
             if handleDeletePropertyNotFound(id: id, error: error) {
+                if let propertyForAudit {
+                    emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+                }
                 return true
             }
             return false
@@ -55198,6 +55497,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func deleteProperty(id: UUID) -> Bool {
         guard canAccessProperty(id) else { return false }
+        let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id })
         refreshProperties()
         do {
             try localStore.deleteProperty(id: id)
@@ -55209,13 +55510,120 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+            if let propertyForAudit {
+                emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+            }
             return true
         } catch {
             if handleDeletePropertyNotFound(id: id, error: error) {
+                if let propertyForAudit {
+                    emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+                }
                 return true
             }
             return false
         }
+    }
+
+    private func emitPropertyAuditEvent(property: Property, eventType: String) {
+        guard let orgID = property.orgId else { return }
+        let payload = propertyAuditPayload(property: property)
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: eventType,
+            propertyID: property.id,
+            payload: payload
+        )
+    }
+
+    private func emitPropertyRestoredAuditEvent(
+        property: Property?,
+        recentlyDeletedProperty: RecentlyDeletedProperty?,
+        propertyID: UUID
+    ) {
+        guard let orgID = property?.orgId ?? recentlyDeletedProperty?.orgID ?? activeOrganizationID else { return }
+        let payload: [String: Any]
+        if let property {
+            payload = propertyAuditPayload(property: property)
+        } else if let recentlyDeletedProperty {
+            payload = recentlyDeletedPropertyAuditPayload(property: recentlyDeletedProperty)
+        } else {
+            payload = [
+                "property_id": propertyID.uuidString.lowercased(),
+                "property_name": "Property \(propertyID.uuidString.prefix(8))"
+            ]
+        }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "property.restored",
+            propertyID: propertyID,
+            payload: payload
+        )
+    }
+
+    private func propertyAuditPayload(property: Property) -> [String: Any] {
+        [
+            "property_id": property.id.uuidString.lowercased(),
+            "property_name": property.name,
+            "address": property.address ?? ""
+        ]
+    }
+
+    private func sessionLifecycleAuditPayload(property: Property, session: Session) -> [String: Any] {
+        var payload = propertyAuditPayload(property: property)
+        payload["session_id"] = session.id.uuidString.lowercased()
+        payload["session_title"] = "Session \(session.id.uuidString.prefix(8))"
+        payload["session_status"] = session.status.rawValue
+        payload["photo_count"] = sessionMaterialContentCount(session)
+        return payload
+    }
+
+    private func fastRuntimeSessionLifecycleAuditPayload(
+        context: ActiveCaptureContext,
+        property: Property?,
+        photoCount: Int,
+        status: Session.Status
+    ) -> [String: Any] {
+        var payload: [String: Any]
+        if let property {
+            payload = propertyAuditPayload(property: property)
+        } else {
+            payload = [
+                "property_id": context.propertyID.uuidString.lowercased(),
+                "property_name": "Property \(context.propertyID.uuidString.prefix(8))"
+            ]
+        }
+        payload["session_id"] = context.sessionID.uuidString.lowercased()
+        payload["session_title"] = "Session \(context.sessionID.uuidString.prefix(8))"
+        payload["session_status"] = status.rawValue
+        payload["session_type"] = context.sessionType.rawValue
+        payload["photo_count"] = photoCount
+        payload["session_source"] = "fast_lane"
+        return payload
+    }
+
+    private func recentlyDeletedPropertyAuditPayload(property: RecentlyDeletedProperty) -> [String: Any] {
+        [
+            "property_id": property.id.uuidString.lowercased(),
+            "property_name": property.name,
+            "address": formattedRecentlyDeletedPropertyAddress(property)
+        ]
+    }
+
+    private func formattedRecentlyDeletedPropertyAddress(_ property: RecentlyDeletedProperty) -> String {
+        [
+            property.addressLine1,
+            property.addressLine2,
+            property.city,
+            property.state,
+            property.postalCode
+        ]
+            .compactMap { value -> String? in
+                guard let value else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .joined(separator: ", ")
     }
 
     private func handleDeletePropertyNotFound(id: UUID, error: Error) -> Bool {
@@ -55790,6 +56198,7 @@ final class AppState: ObservableObject {
                 sessionID: persisted.id,
                 reason: "save_draft_with_captures"
             )
+            emitSessionDraftSavedAuditEvent(for: persisted)
         }
         return persisted
     }
@@ -56293,15 +56702,13 @@ final class AppState: ObservableObject {
         triggerBackupForLifecycleEvent()
         if let property = properties.first(where: { $0.id == persisted.propertyID }) ?? allProperties.first(where: { $0.id == persisted.propertyID }),
            let orgID = property.orgId {
-            Task {
-                await emitAuditEvent(
-                    orgID: orgID,
-                    eventType: "session.exported",
-                    sessionID: persisted.id,
-                    propertyID: persisted.propertyID,
-                    payload: [:]
-                )
-            }
+            emitCachedAuditEvent(
+                orgID: orgID,
+                eventType: "session.exported",
+                sessionID: persisted.id,
+                propertyID: persisted.propertyID,
+                payload: sessionLifecycleAuditPayload(property: property, session: persisted)
+            )
         }
     }
 
@@ -56475,15 +56882,27 @@ final class AppState: ObservableObject {
               let orgID = property.orgId else {
             return
         }
-        Task {
-            await emitAuditEvent(
-                orgID: orgID,
-                eventType: "session.completed",
-                sessionID: session.id,
-                propertyID: session.propertyID,
-                payload: [:]
-            )
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.completed",
+            sessionID: session.id,
+            propertyID: session.propertyID,
+            payload: sessionLifecycleAuditPayload(property: property, session: session)
+        )
+    }
+
+    private func emitSessionDraftSavedAuditEvent(for session: Session) {
+        guard let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
+              let orgID = property.orgId else {
+            return
         }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.draft_saved",
+            sessionID: session.id,
+            propertyID: session.propertyID,
+            payload: sessionLifecycleAuditPayload(property: property, session: session)
+        )
     }
 
     @discardableResult
@@ -56529,15 +56948,13 @@ final class AppState: ObservableObject {
             triggerBackupForLifecycleEvent()
             if let property = properties.first(where: { $0.id == persisted.propertyID }) ?? allProperties.first(where: { $0.id == persisted.propertyID }),
                let orgID = property.orgId {
-                Task {
-                    await emitAuditEvent(
-                        orgID: orgID,
-                        eventType: "session.exported",
-                        sessionID: persisted.id,
-                        propertyID: persisted.propertyID,
-                        payload: [:]
-                    )
-                }
+                emitCachedAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.exported",
+                    sessionID: persisted.id,
+                    propertyID: persisted.propertyID,
+                    payload: sessionLifecycleAuditPayload(property: property, session: persisted)
+                )
             }
             return true
         } catch {
@@ -56552,6 +56969,9 @@ final class AppState: ObservableObject {
         triggerSafetyPause: Bool = true
     ) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
+        let propertyForAudit = allProperties.first(where: { $0.id == propertyID }) ??
+            properties.first(where: { $0.id == propertyID })
+        let sessionForAudit = sessions(for: propertyID).first(where: { $0.id == sessionID })
         do {
             try localStore.deleteSessionCascade(id: sessionID, propertyID: propertyID)
             if currentSession?.id == sessionID {
@@ -56559,6 +56979,12 @@ final class AppState: ObservableObject {
             }
             reloadSessionCache(for: propertyID)
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+            emitSessionDeletedAuditEvent(
+                property: propertyForAudit,
+                session: sessionForAudit,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
             return true
         } catch {
             if case LocalStore.StoreError.sessionNotFound = error {
@@ -56572,10 +56998,65 @@ final class AppState: ObservableObject {
                 }
                 reloadSessionCache(for: propertyID)
                 cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+                emitSessionDeletedAuditEvent(
+                    property: propertyForAudit,
+                    session: sessionForAudit,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
                 return true
             }
             return false
         }
+    }
+
+    private func emitSessionDeletedAuditEvent(
+        property: Property?,
+        session: Session?,
+        propertyID: UUID,
+        sessionID: UUID
+    ) {
+        guard let orgID = property?.orgId else { return }
+        var payload: [String: Any] = [
+            "property_id": propertyID.uuidString.lowercased(),
+            "property_name": property?.name ?? "Property \(propertyID.uuidString.prefix(8))"
+        ]
+        if let session {
+            payload["session_type"] = session.sessionType.rawValue
+            payload["session_status"] = session.status.rawValue
+            payload["started_at"] = session.startedAt.ISO8601Format()
+        }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.deleted",
+            sessionID: sessionID,
+            propertyID: propertyID,
+            payload: payload
+        )
+    }
+
+    private func emitSessionRestoredAuditEvent(_ deletedSession: RecentlyDeletedSession) {
+        guard let orgID = activeOrganizationID ?? allProperties.first(where: { $0.id == deletedSession.propertyID })?.orgId else {
+            return
+        }
+        let property = allProperties.first(where: { $0.id == deletedSession.propertyID }) ??
+            properties.first(where: { $0.id == deletedSession.propertyID })
+        var payload: [String: Any] = [
+            "property_id": deletedSession.propertyID.uuidString.lowercased(),
+            "property_name": property?.name ?? "Property \(deletedSession.propertyID.uuidString.prefix(8))",
+            "session_status": deletedSession.status,
+            "started_at": deletedSession.startedAt.ISO8601Format()
+        ]
+        if let captureProfile = normalizedSupabaseText(deletedSession.captureProfile) {
+            payload["session_type"] = captureProfile
+        }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.restored",
+            sessionID: deletedSession.id,
+            propertyID: deletedSession.propertyID,
+            payload: payload
+        )
     }
 
     func resetLocalSessionUIIndex() {
