@@ -776,14 +776,7 @@ final class LocalStore {
 
         try? createStorageDirectories(baseDirectoryURL: scoutRoot)
 
-        // Pre-fire the iCloud download request as early as possible so the daemon
-        // starts fetching hub-index.json before any polling loop begins.
-        let hubURL = hubIndexURL
-        DispatchQueue.global(qos: .userInitiated).async {
-            if !fileManager.fileExists(atPath: hubURL.path) {
-                try? fileManager.startDownloadingUbiquitousItem(at: hubURL)
-            }
-        }
+        // Operational storage is local App Support. Legacy iCloud recovery paths are explicit.
     }
 
     init(testStorageRootURL: URL, fileManager: FileManager = .default) {
@@ -5351,9 +5344,6 @@ final class LocalStore {
             return syncProjected
         }
 
-        if !fileManager.fileExists(atPath: propertiesURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout)
-        }
         guard fileManager.fileExists(atPath: propertiesURL.path) else {
             return []
         }
@@ -5362,11 +5352,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: propertiesURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout) {
-                data = try Data(contentsOf: propertiesURL)
-            } else {
-                throw error
-            }
+            throw error
         }
         return try decoder.decode([Property].self, from: data)
     }
@@ -5499,9 +5485,6 @@ final class LocalStore {
     }
 
     private func readOrganizationsRaw(downloadTimeout: TimeInterval) throws -> [Organization] {
-        if !fileManager.fileExists(atPath: organizationsURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout)
-        }
         guard fileManager.fileExists(atPath: organizationsURL.path) else {
             return []
         }
@@ -5510,11 +5493,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: organizationsURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout) {
-                data = try Data(contentsOf: organizationsURL)
-            } else {
-                throw error
-            }
+            throw error
         }
         return try decoder.decode([Organization].self, from: data)
     }
@@ -5704,9 +5683,6 @@ final class LocalStore {
     }
 
     private func readHubIndexRaw(downloadTimeout: TimeInterval) throws -> HubIndex? {
-        if !fileManager.fileExists(atPath: hubIndexURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout)
-        }
         guard fileManager.fileExists(atPath: hubIndexURL.path) else { return nil }
         if shouldAvoidBlockingUbiquitousRead(at: hubIndexURL, timeout: downloadTimeout) {
             return nil
@@ -5716,14 +5692,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: hubIndexURL)
         } catch {
-            if downloadTimeout <= 0.08 {
-                return nil
-            }
-            if ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout) {
-                data = try Data(contentsOf: hubIndexURL)
-            } else {
-                throw error
-            }
+            throw error
         }
         try? data.write(to: localHubIndexCacheURL, options: .atomic)
         return try decoder.decode(HubIndex.self, from: data)

@@ -8340,6 +8340,7 @@ final class AppState: ObservableObject {
     private var lastLiveSyncFingerprint: String?
     private var lastBackgroundRemoteFingerprint: String?
     private var lastBackgroundRemoteAttemptCompletedAt: Date?
+    private var lastForegroundRemotePropertyRefreshCompletedAt: Date?
     private var liveSyncBurstUntil: Date?
     private var lastLiveSyncRefreshAt: Date?
     private var isBackgroundRefreshInFlight: Bool = false
@@ -9483,6 +9484,7 @@ final class AppState: ObservableObject {
         lastLiveSyncFingerprint = nil
         lastBackgroundRemoteFingerprint = nil
         lastBackgroundRemoteAttemptCompletedAt = nil
+        lastForegroundRemotePropertyRefreshCompletedAt = nil
         lastLiveSyncRefreshAt = nil
         lastBackgroundRefreshStartedAt = nil
         nextPropertyRefreshToken = 0
@@ -41557,6 +41559,9 @@ final class AppState: ObservableObject {
             if !propertyIDs.isEmpty {
                 return propertyIDs
             }
+            if lastForegroundRemotePropertyRefreshCompletedAt != nil {
+                return []
+            }
             if Date().timeIntervalSince(start) >= timeout {
                 return []
             }
@@ -49703,6 +49708,8 @@ final class AppState: ObservableObject {
     private func performForegroundRemotePropertyRefresh(
         activeSessionCheckpointTrigger: String? = nil
     ) async -> Bool {
+        defer { lastForegroundRemotePropertyRefreshCompletedAt = Date() }
+
         guard let requestedOrganizationID = activeOrganizationID else {
             performLocalPropertyRefreshFallback(
                 orgID: nil,
