@@ -4232,6 +4232,69 @@ final class LocalStore {
     }
 
     @discardableResult
+    func pruneUploadedSessionMediaAssets(propertyID: UUID, sessionID: UUID) -> (removedFiles: Int, removedBytes: Int64) {
+        (try? performFileIOSync {
+            guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+                return (0, 0)
+            }
+            let sessionRoot = sessionFolderURL(propertyID: propertyID, sessionID: sessionID).standardizedFileURL
+            var candidateURLs: Set<URL> = []
+
+            for shot in metadata.shots {
+                guard trimmedNonEmpty(shot.storageBucket) != nil,
+                      trimmedNonEmpty(shot.storagePath) != nil,
+                      shot.uploadState.lowercased() == "uploaded" else {
+                    continue
+                }
+                appendPrunableSessionRelativeURL(
+                    shot.originalRelativePath,
+                    sessionRoot: sessionRoot,
+                    into: &candidateURLs
+                )
+                appendPrunableSessionRelativeURL(
+                    shot.stampedRelativePath,
+                    sessionRoot: sessionRoot,
+                    into: &candidateURLs
+                )
+            }
+
+            var removedFiles = 0
+            var removedBytes: Int64 = 0
+            for url in candidateURLs {
+                guard fileManager.fileExists(atPath: url.path),
+                      (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+                    continue
+                }
+                let size = ((try? fileManager.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
+                do {
+                    try fileManager.removeItem(at: url)
+                    removedFiles += 1
+                    removedBytes += size
+                } catch {
+                    continue
+                }
+            }
+
+            pruneEmptyDirectoryIfNeeded(originalsFolderURL(propertyID: propertyID, sessionID: sessionID))
+            pruneEmptyDirectoryIfNeeded(stampedFolderURL(propertyID: propertyID, sessionID: sessionID))
+            return (removedFiles, removedBytes)
+        }) ?? (0, 0)
+    }
+
+    private func appendPrunableSessionRelativeURL(
+        _ relativePath: String?,
+        sessionRoot: URL,
+        into urls: inout Set<URL>
+    ) {
+        guard let relativePath = trimmedNonEmpty(relativePath) else { return }
+        let candidate = sessionRoot
+            .appendingPathComponent(relativePath, isDirectory: false)
+            .standardizedFileURL
+        guard candidate.path.hasPrefix(sessionRoot.path + "/") else { return }
+        urls.insert(candidate)
+    }
+
+    @discardableResult
     func createSessionArchiveSnapshot(session: Session, trigger: String, deviceID: String? = nil) throws -> URL? {
         try performFileIOSync {
             guard session.status == .completed, session.isSealed else { return nil }

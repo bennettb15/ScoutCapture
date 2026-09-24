@@ -60065,6 +60065,8 @@ final class AppState: ObservableObject {
         let now = Date()
         var scanned = 0
         var offloadedFiles = 0
+        var prunedUploadedFiles = 0
+        var prunedUploadedBytes: Int64 = 0
         var skippedCooldown = 0
         var skippedRecentActivation = 0
         let prunedFastRuntimeTempFolders = Self.pruneStaleFastRuntimePrototypeTempStorage(
@@ -60075,9 +60077,9 @@ final class AppState: ObservableObject {
 
         let allProperties = (try? localStore.fetchProperties()) ?? []
         for property in allProperties {
-            if isPropertyWithinActivationRetentionWindow(property.id, now: now) {
+            let recentlyActivated = isPropertyWithinActivationRetentionWindow(property.id, now: now)
+            if recentlyActivated {
                 skippedRecentActivation += 1
-                continue
             }
             let propertySessions = (try? localStore.fetchSessions(propertyID: property.id)) ?? []
             for session in propertySessions {
@@ -60092,16 +60094,26 @@ final class AppState: ObservableObject {
                     skippedCooldown += 1
                     continue
                 }
-                offloadedFiles += localStore.offloadSessionMediaAssets(
+                if !recentlyActivated {
+                    offloadedFiles += localStore.offloadSessionMediaAssets(
+                        propertyID: session.propertyID,
+                        sessionID: session.id
+                    )
+                }
+                let pruneResult = localStore.pruneUploadedSessionMediaAssets(
                     propertyID: session.propertyID,
                     sessionID: session.id
                 )
+                prunedUploadedFiles += pruneResult.removedFiles
+                prunedUploadedBytes += pruneResult.removedBytes
             }
         }
 
         logSessionOffload(
             scanned: scanned,
             offloadedFiles: offloadedFiles,
+            prunedUploadedFiles: prunedUploadedFiles,
+            prunedUploadedBytes: prunedUploadedBytes,
             skippedCooldown: skippedCooldown,
             skippedRecentActivation: skippedRecentActivation,
             prunedFastRuntimeTempFolders: prunedFastRuntimeTempFolders
@@ -60172,13 +60184,15 @@ final class AppState: ObservableObject {
     private func logSessionOffload(
         scanned: Int,
         offloadedFiles: Int,
+        prunedUploadedFiles: Int,
+        prunedUploadedBytes: Int64,
         skippedCooldown: Int,
         skippedRecentActivation: Int,
         prunedFastRuntimeTempFolders: Int
     ) {
         let activationRetentionDays = Int(activatedPropertyRetentionWindow / 86_400)
         let cooldownSeconds = Int(sessionMediaOffloadCooldown)
-        let signature = "\(scanned)|\(offloadedFiles)|\(skippedCooldown)|\(skippedRecentActivation)|\(prunedFastRuntimeTempFolders)|\(activationRetentionDays)|\(cooldownSeconds)"
+        let signature = "\(scanned)|\(offloadedFiles)|\(prunedUploadedFiles)|\(prunedUploadedBytes)|\(skippedCooldown)|\(skippedRecentActivation)|\(prunedFastRuntimeTempFolders)|\(activationRetentionDays)|\(cooldownSeconds)"
         let shouldLog = logThrottleQueue.sync { () -> Bool in
             let now = Date()
             let minInterval: TimeInterval = 30
@@ -60195,6 +60209,8 @@ final class AppState: ObservableObject {
         print(
             "[SessionOffload] scanned=\(scanned) " +
             "offloadedFiles=\(offloadedFiles) " +
+            "prunedUploadedFiles=\(prunedUploadedFiles) " +
+            "prunedUploadedBytes=\(prunedUploadedBytes) " +
             "prunedFastRuntimeTempFolders=\(prunedFastRuntimeTempFolders) " +
             "skippedCooldown=\(skippedCooldown) " +
             "skippedRecentActivation=\(skippedRecentActivation) " +
