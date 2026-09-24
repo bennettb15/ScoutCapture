@@ -1843,9 +1843,6 @@ struct SessionHubView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Manage Sessions") {
-                manageSessionsProperty = property
-            }
             Button("Edit Contact") {
                 editContactProperty = property
             }
@@ -2551,10 +2548,6 @@ struct SessionHubView: View {
                                 Section("Recovery") {
                                     NavigationLink("Recently Deleted Properties") {
                                         RecentlyDeletedPropertiesRecoveryView()
-                                            .environmentObject(appState)
-                                    }
-                                    NavigationLink("Recently Deleted Sessions") {
-                                        RecentlyDeletedSessionsRecoveryView()
                                             .environmentObject(appState)
                                     }
                                 }
@@ -5717,9 +5710,6 @@ private struct PropertyListTableView: UIViewRepresentable {
             let property = row.property
             return UIContextMenuConfiguration(identifier: property.id.uuidString as NSString, previewProvider: nil) { [weak self] _ in
                 guard let self else { return nil }
-                let manage = UIAction(title: "Manage Sessions", image: UIImage(systemName: "folder")) { _ in
-                    self.onManageSessions(property)
-                }
                 let edit = UIAction(title: "Edit Contact", image: UIImage(systemName: "person.crop.circle")) { _ in
                     self.onEditContact(property)
                 }
@@ -5738,7 +5728,7 @@ private struct PropertyListTableView: UIViewRepresentable {
                 ) { _ in
                     self.onDelete(property)
                 }
-                var menuItems: [UIMenuElement] = [manage, edit]
+                var menuItems: [UIMenuElement] = [edit]
                 if row.canRetryUpload {
                     menuItems.append(retryUpload)
                 }
