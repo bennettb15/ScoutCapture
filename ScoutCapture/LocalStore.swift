@@ -723,6 +723,7 @@ final class LocalStore {
 
     private let activeRootURL: URL
     private let scoutRootURL: URL
+    private let scoutRootStatusReadCandidates: [URL]
     private let propertiesURL: URL
     private let organizationsURL: URL
     private let hubIndexURL: URL
@@ -753,6 +754,7 @@ final class LocalStore {
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
         self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
+        self.scoutRootStatusReadCandidates = StorageRoot.scoutRootCandidates()
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
@@ -774,14 +776,7 @@ final class LocalStore {
 
         try? createStorageDirectories(baseDirectoryURL: scoutRoot)
 
-        // Pre-fire the iCloud download request as early as possible so the daemon
-        // starts fetching hub-index.json before any polling loop begins.
-        let hubURL = hubIndexURL
-        DispatchQueue.global(qos: .userInitiated).async {
-            if !fileManager.fileExists(atPath: hubURL.path) {
-                try? fileManager.startDownloadingUbiquitousItem(at: hubURL)
-            }
-        }
+        // Operational storage is local App Support. Legacy iCloud recovery paths are explicit.
     }
 
     init(testStorageRootURL: URL, fileManager: FileManager = .default) {
@@ -800,6 +795,7 @@ final class LocalStore {
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
         self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
+        self.scoutRootStatusReadCandidates = [scoutRoot]
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
@@ -1954,16 +1950,95 @@ final class LocalStore {
         downloadTimeout: TimeInterval = 0,
         requireCurrentIfUbiquitous: Bool = false
     ) throws -> [SessionSnapshotUploadStatusRecord] {
-        guard prepareUbiquitousStatusFileRead(
+        let primaryRecords = try readSessionSnapshotUploadStatusRecords(
             at: sessionSnapshotUploadStatusURL,
+            downloadTimeout: downloadTimeout,
+            requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
+        )
+        let legacyRecords = sessionSnapshotUploadStatusCandidateURLs()
+            .filter { $0 != sessionSnapshotUploadStatusURL }
+            .compactMap { url -> [SessionSnapshotUploadStatusRecord]? in
+                try? readSessionSnapshotUploadStatusRecords(
+                    at: url,
+                    downloadTimeout: downloadTimeout,
+                    requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
+                )
+            }
+            .flatMap { $0 }
+        guard !legacyRecords.isEmpty else {
+            return primaryRecords
+        }
+
+        let mergedRecords = Self.mergedSessionSnapshotUploadStatusRecords(primaryRecords + legacyRecords)
+        if mergedRecords != primaryRecords {
+            try? writeSessionSnapshotUploadStatusRecords(mergedRecords)
+        }
+        return mergedRecords
+    }
+
+    private func readSessionSnapshotUploadStatusRecords(
+        at url: URL,
+        downloadTimeout: TimeInterval,
+        requireCurrentIfUbiquitous: Bool
+    ) throws -> [SessionSnapshotUploadStatusRecord] {
+        guard prepareUbiquitousStatusFileRead(
+            at: url,
             timeout: downloadTimeout,
             requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
         ) else {
             return []
         }
-        guard fileManager.fileExists(atPath: sessionSnapshotUploadStatusURL.path) else { return [] }
-        let data = try Data(contentsOf: sessionSnapshotUploadStatusURL)
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)
         return try decoder.decode([SessionSnapshotUploadStatusRecord].self, from: data)
+    }
+
+    private func sessionSnapshotUploadStatusCandidateURLs() -> [URL] {
+        scoutRootStatusReadCandidates
+            .map { $0.appendingPathComponent("session_snapshot_upload_status.json") }
+            .reduce(into: [URL]()) { urls, url in
+                if !urls.contains(url) {
+                    urls.append(url)
+                }
+            }
+    }
+
+    private static func mergedSessionSnapshotUploadStatusRecords(
+        _ records: [SessionSnapshotUploadStatusRecord]
+    ) -> [SessionSnapshotUploadStatusRecord] {
+        var mergedByKey: [String: SessionSnapshotUploadStatusRecord] = [:]
+        for record in records {
+            if let existing = mergedByKey[record.idempotencyKey] {
+                mergedByKey[record.idempotencyKey] = preferredSessionSnapshotUploadStatusRecord(
+                    existing,
+                    over: record
+                )
+            } else {
+                mergedByKey[record.idempotencyKey] = record
+            }
+        }
+        return mergedByKey.values.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt < rhs.updatedAt
+            }
+            return lhs.idempotencyKey < rhs.idempotencyKey
+        }
+    }
+
+    private static func preferredSessionSnapshotUploadStatusRecord(
+        _ lhs: SessionSnapshotUploadStatusRecord,
+        over rhs: SessionSnapshotUploadStatusRecord
+    ) -> SessionSnapshotUploadStatusRecord {
+        if lhs.status == .uploaded && rhs.status != .uploaded {
+            return lhs
+        }
+        if rhs.status == .uploaded && lhs.status != .uploaded {
+            return rhs
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt > rhs.updatedAt ? lhs : rhs
+        }
+        return lhs
     }
 
     private func prepareUbiquitousStatusFileRead(
@@ -2253,6 +2328,7 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: created)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            try writeHubIndex(properties: state.properties, organizations: state.organizations)
             try removePropertyDeletionTombstone(propertyID: created.id)
             try appendPropertySyncEvent(
                 propertyID: created.id,
@@ -2289,6 +2365,7 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: updated)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            try writeHubIndex(properties: state.properties, organizations: state.organizations)
             try removePropertyDeletionTombstone(propertyID: updated.id)
             try appendPropertySyncEvent(
                 propertyID: updated.id,
@@ -2303,7 +2380,9 @@ final class LocalStore {
 
     func deleteProperty(id: UUID) throws {
         try performFileIOSync {
-            let originalProperties = try readProperties()
+            let originalState = try migratedPropertyAndOrganizationState()
+            let originalProperties = originalState.properties
+            let originalOrganizations = originalState.organizations
             guard originalProperties.contains(where: { $0.id == id }) else {
                 throw StoreError.propertyNotFound(id)
             }
@@ -2338,6 +2417,7 @@ final class LocalStore {
 
                 let updatedProperties = originalProperties.filter { $0.id != id }
                 try writeProperties(updatedProperties)
+                try writeHubIndex(properties: updatedProperties, organizations: originalOrganizations)
                 if updatedProperties.isEmpty, fileManager.fileExists(atPath: propertiesURL.path) {
                     try fileManager.removeItem(at: propertiesURL)
                 }
@@ -2357,6 +2437,7 @@ final class LocalStore {
             } catch {
                 if didWriteUpdatedProperties {
                     try? writeProperties(originalProperties)
+                    try? writeHubIndex(properties: originalProperties, organizations: originalOrganizations)
                 }
                 if didWriteTombstones {
                     try? writePropertyDeletionTombstones(originalTombstones)
@@ -2507,6 +2588,45 @@ final class LocalStore {
             }
 
             guard let index = matchIndex else {
+                if let issueID = overlay.issueID,
+                   let status = overlay.status {
+                    let timestamp = overlay.updatedAt ?? Date()
+                    let statement = trimmedNonEmpty(overlay.detailType) ??
+                        trimmedNonEmpty(overlay.shotKey) ??
+                        "Flagged issue"
+                    var observation = Observation(
+                        id: issueID,
+                        propertyID: propertyID,
+                        sessionID: nil,
+                        createdAt: timestamp,
+                        updatedAt: timestamp,
+                        statement: statement,
+                        status: status,
+                        linkedShotID: overlay.shotID,
+                        building: overlay.building,
+                        targetElevation: overlay.targetElevation,
+                        detailType: overlay.detailType,
+                        priority: overlay.priority,
+                        trade: overlay.trade,
+                        currentReason: statement,
+                        note: statement
+                    )
+                    if status == .pendingReview || status == .resolved {
+                        observation.resolvedInSessionID = nil
+                    }
+                    observations.append(observation)
+                    let insertedIndex = observations.count - 1
+                    observationIndexByID[issueID] = insertedIndex
+                    appliedCount += 1
+#if DEBUG
+                    print(
+                        "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                        "result=created match=issue_id issueID=\(issueID.uuidString) " +
+                        "key=\(locationKey ?? "none") status=\(status.issueStatusValue) persisted=true"
+                    )
+#endif
+                    continue
+                }
                 skippedNoMatchCount += 1
 #if DEBUG
                 print(
@@ -2532,39 +2652,52 @@ final class LocalStore {
 
             let before = observations[index]
             if let status = overlay.status,
-               observations[index].status != .resolutionRequired,
-               shouldApplyPortalPunchlistStatusOverlay(
-                status,
-                updatedAt: overlay.updatedAt,
-                to: observations[index]
-               ) {
-                observations[index].status = status
-                switch status {
-                case .active:
-                    if before.status == .pendingReview {
-                        observations[index].resolutionPhotoRef = nil
-                        observations[index].resolutionStatement = nil
-                        observations[index].historyEvents.append(
-                            ObservationHistoryEvent(
-                                timestamp: overlay.updatedAt ?? Date(),
-                                sessionID: nil,
-                                kind: .reopened,
-                                beforeValue: Observation.Status.pendingReview.issueStatusValue,
-                                afterValue: Observation.Status.active.issueStatusValue,
-                                field: "status",
-                                shotID: overlay.shotID ?? before.linkedShotID
+               observations[index].status != .resolutionRequired {
+                let remoteActiveIsNewer = overlay.updatedAt.map { $0 > observations[index].updatedAt } ?? false
+                let exactIssueReopenedFromReview = matchMethod == "issue_id" &&
+                    observations[index].status == .pendingReview &&
+                    status == .active &&
+                    remoteActiveIsNewer
+                let exactIssueSubmittedForReview = matchMethod == "issue_id" &&
+                    observations[index].status == .active &&
+                    status == .pendingReview
+                let shouldPreservePendingReview = observations[index].status == .pendingReview &&
+                    status == .active &&
+                    !overlay.reopensResolved &&
+                    !remoteActiveIsNewer
+                if !shouldPreservePendingReview &&
+                    (overlay.reopensResolved || exactIssueReopenedFromReview || exactIssueSubmittedForReview || shouldApplyPortalPunchlistStatusOverlay(
+                        status,
+                        updatedAt: overlay.updatedAt,
+                        to: observations[index]
+                    )) {
+                    observations[index].status = status
+                    switch status {
+                    case .active:
+                        if before.status == .pendingReview || overlay.reopensResolved {
+                            observations[index].resolutionStatement = nil
+                            observations[index].historyEvents.append(
+                                ObservationHistoryEvent(
+                                    timestamp: overlay.updatedAt ?? Date(),
+                                    sessionID: nil,
+                                    kind: .reopened,
+                                    beforeValue: Observation.Status.pendingReview.issueStatusValue,
+                                    afterValue: Observation.Status.active.issueStatusValue,
+                                    field: "status",
+                                    shotID: overlay.shotID ?? before.linkedShotID
+                                )
                             )
-                        )
+                        }
+                        observations[index].resolvedInSessionID = nil
+                    case .resolutionRequired:
+                        observations[index].resolvedInSessionID = nil
+                    case .pendingReview:
+                        break
+                    case .resolved:
+                        observations[index].resolvedInSessionID =
+                            observations[index].resolvedInSessionID ??
+                            observations[index].updatedInSessionID
                     }
-                    observations[index].resolvedInSessionID = nil
-                case .resolutionRequired:
-                    observations[index].resolvedInSessionID = nil
-                case .pendingReview:
-                    break
-                case .resolved:
-                    observations[index].resolvedInSessionID =
-                        observations[index].resolvedInSessionID ??
-                        observations[index].updatedInSessionID
                 }
             }
             if let priority = overlay.priority {
@@ -2628,6 +2761,7 @@ final class LocalStore {
     private func preservedLocalWorkflowStatus(
         existing: Observation?,
         incoming: Observation.Status,
+        incomingUpdatedAt: Date?,
         representsResolvedDocumentation: Bool
     ) -> Observation.Status {
         if isTerminalResolvedSupportingDocumentation(existing),
@@ -2638,7 +2772,11 @@ final class LocalStore {
            incoming == .active {
             return .pendingReview
         }
-        if shouldPreservePortalRejectedActive(existing: existing, incoming: incoming) {
+        if shouldPreservePortalRejectedActive(
+            existing: existing,
+            incoming: incoming,
+            incomingUpdatedAt: incomingUpdatedAt
+        ) {
             return .active
         }
         guard existing?.status == .resolutionRequired else { return incoming }
@@ -2647,20 +2785,32 @@ final class LocalStore {
 
     private func shouldPreservePortalRejectedActive(
         existing: Observation?,
-        incoming: Observation.Status
+        incoming: Observation.Status,
+        incomingUpdatedAt: Date? = nil
     ) -> Bool {
-        existing?.status == .active &&
-            incoming == .pendingReview &&
-            observationHasPortalRejectedPendingReviewReopen(existing)
+        guard let existing,
+              existing.status == .active,
+              incoming == .pendingReview,
+              let latestReopenAt = latestPortalRejectedPendingReviewReopenAt(existing) else {
+            return false
+        }
+        if let incomingUpdatedAt,
+           incomingUpdatedAt > latestReopenAt {
+            return false
+        }
+        return true
     }
 
-    private func observationHasPortalRejectedPendingReviewReopen(_ observation: Observation?) -> Bool {
-        guard let observation else { return false }
-        return observation.historyEvents.contains { event in
-            event.kind == .reopened &&
+    private func latestPortalRejectedPendingReviewReopenAt(_ observation: Observation?) -> Date? {
+        guard let observation else { return nil }
+        return observation.historyEvents.compactMap { event -> Date? in
+            guard event.kind == .reopened &&
                 event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
-                event.afterValue == Observation.Status.active.issueStatusValue
-        }
+                event.afterValue == Observation.Status.active.issueStatusValue else {
+                return nil
+            }
+            return event.timestamp
+        }.max()
     }
 
     private func mergedObservationShots(
@@ -2807,6 +2957,24 @@ final class LocalStore {
 
     func loadSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
         try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    func fetchSessionMetadataIDs(propertyID: UUID) throws -> [UUID] {
+        let sessionsURL = sessionsFolderURL(propertyID: propertyID)
+        guard fileManager.fileExists(atPath: sessionsURL.path) else { return [] }
+        let sessionFolderURLs = try fileManager.contentsOfDirectory(
+            at: sessionsURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        return sessionFolderURLs.compactMap { sessionFolderURL in
+            guard (try? sessionFolderURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                return nil
+            }
+            let metadataURL = sessionFolderURL.appendingPathComponent("session.json", isDirectory: false)
+            guard fileManager.fileExists(atPath: metadataURL.path) else { return nil }
+            return UUID(uuidString: sessionFolderURL.lastPathComponent)
+        }
     }
 
     func saveSessionMetadataAtomically(propertyID: UUID, sessionID: UUID, metadata: SessionMetadata) throws {
@@ -3378,13 +3546,13 @@ final class LocalStore {
         let normalizedPriority = normalizedSessionPriority(observation.priority)
         let normalizedTrade = trimmedNonEmpty(trade)
         let isResolved = observation.status == .resolved
-        let isActiveFieldWork = observation.status.isActiveFieldWork
+        let shouldRemainInIssueLane = observation.status != .resolutionRequired
         let issueStatus = observation.status.issueStatusValue
         let captureKindForActiveUpdate = trimmedNonEmpty(activeCaptureKind) ?? "follow_up_capture"
 
         var syncedShot: ShotMetadata?
         if let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            metadata.shots[shotIndex].isFlagged = isActiveFieldWork
+            metadata.shots[shotIndex].isFlagged = shouldRemainInIssueLane
             metadata.shots[shotIndex].issueID = observation.id
             metadata.shots[shotIndex].issueStatus = issueStatus
             if let reason {
@@ -4064,6 +4232,69 @@ final class LocalStore {
     }
 
     @discardableResult
+    func pruneUploadedSessionMediaAssets(propertyID: UUID, sessionID: UUID) -> (removedFiles: Int, removedBytes: Int64) {
+        (try? performFileIOSync {
+            guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+                return (0, 0)
+            }
+            let sessionRoot = sessionFolderURL(propertyID: propertyID, sessionID: sessionID).standardizedFileURL
+            var candidateURLs: Set<URL> = []
+
+            for shot in metadata.shots {
+                guard trimmedNonEmpty(shot.storageBucket) != nil,
+                      trimmedNonEmpty(shot.storagePath) != nil,
+                      shot.uploadState.lowercased() == "uploaded" else {
+                    continue
+                }
+                appendPrunableSessionRelativeURL(
+                    shot.originalRelativePath,
+                    sessionRoot: sessionRoot,
+                    into: &candidateURLs
+                )
+                appendPrunableSessionRelativeURL(
+                    shot.stampedRelativePath,
+                    sessionRoot: sessionRoot,
+                    into: &candidateURLs
+                )
+            }
+
+            var removedFiles = 0
+            var removedBytes: Int64 = 0
+            for url in candidateURLs {
+                guard fileManager.fileExists(atPath: url.path),
+                      (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+                    continue
+                }
+                let size = ((try? fileManager.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
+                do {
+                    try fileManager.removeItem(at: url)
+                    removedFiles += 1
+                    removedBytes += size
+                } catch {
+                    continue
+                }
+            }
+
+            pruneEmptyDirectoryIfNeeded(originalsFolderURL(propertyID: propertyID, sessionID: sessionID))
+            pruneEmptyDirectoryIfNeeded(stampedFolderURL(propertyID: propertyID, sessionID: sessionID))
+            return (removedFiles, removedBytes)
+        }) ?? (0, 0)
+    }
+
+    private func appendPrunableSessionRelativeURL(
+        _ relativePath: String?,
+        sessionRoot: URL,
+        into urls: inout Set<URL>
+    ) {
+        guard let relativePath = trimmedNonEmpty(relativePath) else { return }
+        let candidate = sessionRoot
+            .appendingPathComponent(relativePath, isDirectory: false)
+            .standardizedFileURL
+        guard candidate.path.hasPrefix(sessionRoot.path + "/") else { return }
+        urls.insert(candidate)
+    }
+
+    @discardableResult
     func createSessionArchiveSnapshot(session: Session, trigger: String, deviceID: String? = nil) throws -> URL? {
         try performFileIOSync {
             guard session.status == .completed, session.isSealed else { return nil }
@@ -4482,6 +4713,42 @@ final class LocalStore {
         }
     }
 
+    @discardableResult
+    func removeSessionArchiveSnapshot(atPath archivePath: String) -> Bool {
+        (try? performFileIOSync {
+            let snapshotRoot = URL(fileURLWithPath: archivePath, isDirectory: true).standardizedFileURL
+            let archivesRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .standardizedFileURL
+            guard snapshotRoot.path.hasPrefix(archivesRoot.path + "/"),
+                  fileManager.fileExists(atPath: snapshotRoot.path),
+                  fileManager.fileExists(atPath: snapshotRoot.appendingPathComponent("manifest.json").path) else {
+                return false
+            }
+
+            try fileManager.removeItem(at: snapshotRoot)
+
+            let sessionRoot = snapshotRoot.deletingLastPathComponent()
+            pruneEmptyDirectoryIfNeeded(sessionRoot)
+            pruneEmptyDirectoryIfNeeded(sessionRoot.deletingLastPathComponent())
+            return true
+        }) ?? false
+    }
+
+    private func pruneEmptyDirectoryIfNeeded(_ directory: URL) {
+        guard fileManager.fileExists(atPath: directory.path),
+              let children = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+              ),
+              children.isEmpty else {
+            return
+        }
+        try? fileManager.removeItem(at: directory)
+    }
+
     func missingOriginalArchiveProvenance(
         propertyID: UUID,
         sessionID: UUID,
@@ -4742,6 +5009,18 @@ final class LocalStore {
             let currentMetaShot = issueShots.sorted {
                 LocalConflictRules.currentIssueShotSortPrecedes($0, $1, linkedShotID: nil)
             }.first
+            let resolvedMetaShot = issueShots.filter { shot in
+                let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+                let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+                return issueStatus == "pending_review" ||
+                    issueStatus == "resolved" ||
+                    captureKind == "resolved_capture"
+            }
+            .sorted {
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                return $0.createdAt > $1.createdAt
+            }
+            .first
             let shots = issueShots
                 .sorted { $0.createdAt < $1.createdAt }
                 .map { shot in
@@ -4751,20 +5030,21 @@ final class LocalStore {
                         imageLocalIdentifier: shotPath(for: shot),
                         note: shot.noteText
                     )
-                }
+            }
 
             let snapshotStatus = Observation.Status.status(from: issue.issueStatus)
             let existing = existingObservationsByID[issue.issueID]
+            let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
+            let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
             let preservePortalRejectedActive = shouldPreservePortalRejectedActive(
                 existing: existing,
-                incoming: snapshotStatus
+                incoming: snapshotStatus,
+                incomingUpdatedAt: updatedAt
             )
             let linkedShot = preservePortalRejectedActive
                 ? existing?.linkedShotID
                 : currentMetaShot?.shotID ?? shots.last?.id
             let latestMetaShot = currentMetaShot
-            let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
-            let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
             let observationUpdatedAt = preservePortalRejectedActive
                 ? max(existing?.updatedAt ?? updatedAt, updatedAt)
                 : updatedAt
@@ -4776,6 +5056,7 @@ final class LocalStore {
             let status = preservedLocalWorkflowStatus(
                 existing: existing,
                 incoming: snapshotStatus,
+                incomingUpdatedAt: updatedAt,
                 representsResolvedDocumentation: snapshotStatus == .resolved &&
                     (issue.lastCaptureSessionId == sessionID || issue.resolvedAt != nil)
             )
@@ -4789,7 +5070,7 @@ final class LocalStore {
                 statement: trimmedNonEmpty(issue.detailNote) ?? "",
                 status: status,
                 linkedShotID: linkedShot,
-                resolutionPhotoRef: nil,
+                resolutionPhotoRef: resolvedMetaShot.map(shotPath(for:)) ?? existing?.resolutionPhotoRef,
                 resolutionStatement: nil,
                 updatedInSessionID: effectiveSessionID,
                 resolvedInSessionID: status == .resolved || status == .pendingReview ? effectiveSessionID : nil,
@@ -4897,6 +5178,18 @@ final class LocalStore {
                 let latestShot = orderedShots.sorted {
                     LocalConflictRules.currentIssueShotSortPrecedes($0, $1, linkedShotID: nil)
                 }.first
+                let resolvedShot = orderedShots.filter { shot in
+                    let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+                    let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+                    return issueStatus == "pending_review" ||
+                        issueStatus == "resolved" ||
+                        captureKind == "resolved_capture"
+                }
+                .sorted {
+                    if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                    return $0.createdAt > $1.createdAt
+                }
+                .first
                 let issue = metadata.issues.first(where: { $0.issueID == issueID })
                 let createdAt = issue?.firstSeenAt ?? orderedShots.first?.createdAt ?? metadata.startedAt
                 let updatedAt = issue?.lastSeenAt ?? issue?.resolvedAt ?? latestShot?.updatedAt ?? metadata.startedAt
@@ -4912,7 +5205,8 @@ final class LocalStore {
                 let existing = observationsByID[issueID]
                 let preservePortalRejectedActive = shouldPreservePortalRejectedActive(
                     existing: existing,
-                    incoming: metadataStatus
+                    incoming: metadataStatus,
+                    incomingUpdatedAt: updatedAt
                 )
                 if isTerminalResolvedSupportingDocumentation(existing),
                    metadataStatus != .resolved {
@@ -4932,6 +5226,7 @@ final class LocalStore {
                 let status = preservedLocalWorkflowStatus(
                     existing: observationsByID[issueID],
                     incoming: metadataStatus,
+                    incomingUpdatedAt: updatedAt,
                     representsResolvedDocumentation: resolvedByThisSnapshot
                 )
                 if next.updatedAt > updatedAt,
@@ -4949,6 +5244,9 @@ final class LocalStore {
                 next.resolvedInSessionID = status == .resolved || status == .pendingReview
                     ? (issue?.lastCaptureSessionId ?? sessionID)
                     : nil
+                if let resolvedShot {
+                    next.resolutionPhotoRef = shotPath(for: resolvedShot)
+                }
                 next.building = latestShot?.building ?? next.building
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
                 next.detailType = latestShot?.detailType ?? next.detailType
@@ -5151,9 +5449,6 @@ final class LocalStore {
             return syncProjected
         }
 
-        if !fileManager.fileExists(atPath: propertiesURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout)
-        }
         guard fileManager.fileExists(atPath: propertiesURL.path) else {
             return []
         }
@@ -5162,11 +5457,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: propertiesURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout) {
-                data = try Data(contentsOf: propertiesURL)
-            } else {
-                throw error
-            }
+            throw error
         }
         return try decoder.decode([Property].self, from: data)
     }
@@ -5299,9 +5590,6 @@ final class LocalStore {
     }
 
     private func readOrganizationsRaw(downloadTimeout: TimeInterval) throws -> [Organization] {
-        if !fileManager.fileExists(atPath: organizationsURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout)
-        }
         guard fileManager.fileExists(atPath: organizationsURL.path) else {
             return []
         }
@@ -5310,11 +5598,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: organizationsURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout) {
-                data = try Data(contentsOf: organizationsURL)
-            } else {
-                throw error
-            }
+            throw error
         }
         return try decoder.decode([Organization].self, from: data)
     }
@@ -5504,9 +5788,6 @@ final class LocalStore {
     }
 
     private func readHubIndexRaw(downloadTimeout: TimeInterval) throws -> HubIndex? {
-        if !fileManager.fileExists(atPath: hubIndexURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout)
-        }
         guard fileManager.fileExists(atPath: hubIndexURL.path) else { return nil }
         if shouldAvoidBlockingUbiquitousRead(at: hubIndexURL, timeout: downloadTimeout) {
             return nil
@@ -5516,14 +5797,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: hubIndexURL)
         } catch {
-            if downloadTimeout <= 0.08 {
-                return nil
-            }
-            if ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout) {
-                data = try Data(contentsOf: hubIndexURL)
-            } else {
-                throw error
-            }
+            throw error
         }
         try? data.write(to: localHubIndexCacheURL, options: .atomic)
         return try decoder.decode(HubIndex.self, from: data)

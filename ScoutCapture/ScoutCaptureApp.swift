@@ -11,6 +11,7 @@ import MapKit
 import Combine
 import ImageIO
 import UniformTypeIdentifiers
+import CoreMotion
 
 private let isVerboseConsoleLoggingEnabled = false
 
@@ -210,14 +211,16 @@ struct ScoutCaptureApp: App {
 }
 
 private struct CloudBackupSheet: View {
-    let onOpenSessionRestore: (() -> Void)?
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @State private var showRestoreConfirmation: Bool = false
-    @State private var restoreErrorMessage: String? = nil
-    @State private var isRestoring: Bool = false
-    @State private var showRestoreSuccess: Bool = false
+    @State private var showLegacyCloudCleanupConfirmation: Bool = false
+    @State private var isClearingLegacyCloudStorage: Bool = false
+    @State private var legacyCloudCleanupResult: StorageRoot.LegacyCloudStorageCleanupResult?
+    @State private var legacyCloudCleanupErrorMessage: String? = nil
+    @State private var isScanningLocalStorage: Bool = false
+    @State private var localStorageBreakdown: StorageRoot.LocalStorageBreakdownResult?
+    @State private var localStorageBreakdownErrorMessage: String? = nil
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -233,14 +236,15 @@ private struct CloudBackupSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 18) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     Color.clear
                         .frame(width: 76, height: 36)
 
                     Spacer(minLength: 0)
 
-                    Text("iCloud Backup")
+                    Text("Storage")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -262,212 +266,169 @@ private struct CloudBackupSheet: View {
                     .buttonStyle(.plain)
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(statusTitle)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Local Storage")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.primary)
-                    Text(appState.backupStatusSubtitle())
+                    Text("Supabase is the source of truth for completed uploads. This screen manages local app storage and legacy iCloud cleanup only.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    iCloudAvailabilityRow
+                    legacyICloudAvailabilityRow
                     backupRow(
-                        title: "Status",
-                        value: statusLine
+                        title: "Current Store",
+                        value: "Local App Support"
                     )
-                    if let snapshotSummary {
-                        backupRow(
-                            title: "Snapshot",
-                            value: snapshotSummary
-                        )
-                    }
-                    if let lastRunSummary {
-                        backupRow(
-                            title: "Last Delta",
-                            value: lastRunSummary
-                        )
-                    }
-                    if let lastFailureMessage = appState.cloudBackupStatus.lastFailureMessage,
-                       !lastFailureMessage.isEmpty {
-                        backupRow(title: "Last Error", value: lastFailureMessage)
-                    }
-                    if appState.cloudBackupStatus.isRunning,
-                       let progressCompleted = appState.cloudBackupStatus.progressCompleted,
-                       let progressTotal = appState.cloudBackupStatus.progressTotal,
-                       progressTotal > 0 {
-                        backupRow(
-                            title: appState.cloudBackupStatus.progressPhase ?? "Progress",
-                            value: "\(Int((Double(progressCompleted) / Double(progressTotal)) * 100))% (\(progressCompleted)/\(progressTotal))"
-                        )
-                        backupRow(
-                            title: "Remaining",
-                            value: "\(max(progressTotal - progressCompleted, 0)) entries"
-                        )
-                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
                 .background(Color(uiColor: .secondarySystemBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                Button(action: {
-                    appState.backupNow()
-                }) {
-                    Text(appState.cloudBackupStatus.isRunning ? "Backing Up..." : "Back Up Now")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .foregroundColor(.white)
-                        .background(Color.blue.opacity(appState.cloudBackupStatus.iCloudAvailable ? 1.0 : 0.45))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(!appState.cloudBackupStatus.iCloudAvailable || appState.cloudBackupStatus.isRunning || isRestoring)
-
                 VStack(alignment: .leading, spacing: 6) {
                     Button(action: {
-                        showRestoreConfirmation = true
+                        showLegacyCloudCleanupConfirmation = true
                     }) {
-                        Text(isRestoring ? "Restoring..." : "Restore Full App Backup")
+                        Text(isClearingLegacyCloudStorage ? "Clearing..." : "Clear Legacy iCloud Storage")
                             .font(.system(size: 16, weight: .semibold))
                             .frame(maxWidth: .infinity, minHeight: 50)
                             .foregroundColor(.white)
-                            .background(canRestore ? Color.green : Color.gray)
+                            .background(appState.cloudBackupStatus.iCloudAvailable ? Color.red : Color.gray)
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!canRestore || isRestoring || appState.cloudBackupStatus.isRunning)
+                    .disabled(!appState.cloudBackupStatus.iCloudAvailable || isClearingLegacyCloudStorage)
 
-                    Text("Restores missing app-level data from the latest iCloud backup.")
+                    Text("Deletes old ScoutCapture iCloud storage created before Supabase became canonical. Current local App Support data is not deleted.")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
                 }
 
-                if let onOpenSessionRestore {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Button(action: {
-                            dismiss()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                onOpenSessionRestore()
-                            }
-                        }) {
-                            Text("Restore Session Snapshot")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                                .foregroundColor(.white)
-                                .background(Color.orange)
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isRestoring || appState.cloudBackupStatus.isRunning)
+                VStack(alignment: .leading, spacing: 10) {
+                    Button(action: {
+                        scanLocalStorage()
+                    }) {
+                        Text(isScanningLocalStorage ? "Scanning..." : "Scan Local Storage")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .foregroundColor(.white)
+                            .background(isScanningLocalStorage ? Color.gray : Color.blue)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isScanningLocalStorage)
 
-                        Text("Opens per-session recovery for a specific property/session snapshot.")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
+                    Text("Read-only size breakdown for local App Support storage, archives, fast-lane drafts, and originals.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+
+                    if let localStorageBreakdown {
+                        VStack(spacing: 8) {
+                            ForEach(localStorageBreakdown.items) { item in
+                                localStorageBreakdownRow(item)
+                            }
+                        }
                     }
                 }
 
-                Spacer()
+                }
             }
             .padding(16)
         }
-        .alert("Restore Full App Backup?", isPresented: $showRestoreConfirmation) {
-            Button("Restore", role: .destructive) {
-                isRestoring = true
-                appState.restoreLatestBackup { errorMessage in
-                    isRestoring = false
-                    restoreErrorMessage = errorMessage
-                    if errorMessage == nil {
-                        showRestoreSuccess = true
+        .alert("Clear Legacy iCloud Storage?", isPresented: $showLegacyCloudCleanupConfirmation) {
+            Button("Clear iCloud Storage", role: .destructive) {
+                isClearingLegacyCloudStorage = true
+                appState.clearLegacyCloudStorage { result in
+                    isClearingLegacyCloudStorage = false
+                    switch result {
+                    case .success(let cleanupResult):
+                        legacyCloudCleanupResult = cleanupResult
+                    case .failure(let error):
+                        legacyCloudCleanupErrorMessage = error.localizedDescription
                     }
                 }
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This restores missing app-level data from the latest iCloud backup. For one property/session only, use Restore Session Snapshot.")
+            Text("This removes legacy ScoutCapture files from iCloud Drive for this app, including old SCOUT data and iCloud backup blobs. It does not delete the current local App Support store or Supabase records.")
         }
-        .alert("Restore Complete", isPresented: $showRestoreSuccess) {
-            Button("OK", role: .cancel) {
-                dismiss()
-            }
-        } message: {
-            Text("App backup restore finished successfully.")
-        }
-        .alert("Restore Failed", isPresented: Binding(
-            get: { restoreErrorMessage != nil },
-            set: { if !$0 { restoreErrorMessage = nil } }
+        .alert("Legacy iCloud Storage Cleared", isPresented: Binding(
+            get: { legacyCloudCleanupResult != nil },
+            set: { if !$0 { legacyCloudCleanupResult = nil } }
         )) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text(restoreErrorMessage ?? "Unable to restore the backup.")
+            Text(legacyCloudCleanupSummary)
+        }
+        .alert("Legacy iCloud Cleanup Failed", isPresented: Binding(
+            get: { legacyCloudCleanupErrorMessage != nil },
+            set: { if !$0 { legacyCloudCleanupErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(legacyCloudCleanupErrorMessage ?? "Unable to clear legacy iCloud storage.")
+        }
+        .alert("Local Storage Scan Failed", isPresented: Binding(
+            get: { localStorageBreakdownErrorMessage != nil },
+            set: { if !$0 { localStorageBreakdownErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(localStorageBreakdownErrorMessage ?? "Unable to scan local storage.")
         }
         .onAppear {
             appState.refreshBackupStatus()
         }
     }
 
-    private var canRestore: Bool {
-        appState.cloudBackupStatus.iCloudAvailable &&
-        appState.cloudBackupStatus.hasBackup &&
-        !appState.cloudBackupStatus.isRunning
-    }
-
-    private var statusTitle: String {
-        switch appState.cloudBackupStatus.state {
-        case .backedUp:
-            return "Backed Up"
-        case .pending:
-            return appState.cloudBackupStatus.isRunning ? "Backup Running" : "Backup Pending"
-        case .unavailable:
-            return "iCloud Unavailable"
+    private func scanLocalStorage() {
+        isScanningLocalStorage = true
+        appState.loadLocalStorageBreakdown { result in
+            isScanningLocalStorage = false
+            switch result {
+            case .success(let breakdown):
+                localStorageBreakdown = breakdown
+            case .failure(let error):
+                localStorageBreakdownErrorMessage = error.localizedDescription
+            }
         }
     }
 
-    private var statusLine: String {
-        if let pauseUntil = appState.cloudBackupStatus.safetyPauseUntil, pauseUntil > Date() {
-            let minutesRemaining = max(1, Int(ceil(pauseUntil.timeIntervalSinceNow / 60)))
-            let reason = appState.cloudBackupStatus.safetyPauseReason ?? "after a destructive action"
-            return "Automatic backup paused \(reason) (\(minutesRemaining)m left)."
-        }
-        switch appState.cloudBackupStatus.state {
-        case .backedUp:
-            return "Latest local data is backed up."
-        case .pending:
-            return appState.cloudBackupStatus.isRunning
-                ? "Backup is running now."
-                : "Changes are queued for backup."
-        case .unavailable:
-            return "Sign in to iCloud or re-enable iCloud Drive."
-        }
-    }
-
-    private var snapshotSummary: String? {
-        guard let fileCount = appState.cloudBackupStatus.snapshotFileCount,
-              let byteCount = appState.cloudBackupStatus.snapshotByteCount else {
-            return nil
+    private var legacyCloudCleanupSummary: String {
+        guard let legacyCloudCleanupResult else {
+            return "Legacy iCloud storage was cleared."
         }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
-        let sizeString = formatter.string(fromByteCount: Int64(byteCount))
-        return "\(fileCount) files • \(sizeString)"
+        let sizeString = formatter.string(fromByteCount: Int64(legacyCloudCleanupResult.removedByteCount))
+        return "Removed \(legacyCloudCleanupResult.removedItemCount) items (\(sizeString)) from legacy iCloud storage."
     }
 
-    private var lastRunSummary: String? {
-        guard let added = appState.cloudBackupStatus.lastRunAddedCount,
-              let updated = appState.cloudBackupStatus.lastRunUpdatedCount,
-              let pruned = appState.cloudBackupStatus.lastRunPrunedCount else {
-            return nil
+    @ViewBuilder
+    private func localStorageBreakdownRow(_ item: StorageRoot.StorageBreakdownItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("\(item.itemCount) items")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            Text(localStorageSizeString(item.byteCount))
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.primary)
+                .monospacedDigit()
         }
-        let sizeString: String
-        if let changedBytes = appState.cloudBackupStatus.lastRunChangedByteCount {
-            let formatter = ByteCountFormatter()
-            formatter.countStyle = .file
-            sizeString = formatter.string(fromByteCount: Int64(changedBytes))
-        } else {
-            sizeString = "n/a"
-        }
-        return "+\(added) • ~\(updated) • -\(pruned) • \(sizeString)"
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func localStorageSizeString(_ byteCount: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(byteCount))
     }
 
     @ViewBuilder
@@ -483,9 +444,9 @@ private struct CloudBackupSheet: View {
     }
 
     @ViewBuilder
-    private var iCloudAvailabilityRow: some View {
+    private var legacyICloudAvailabilityRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("iCloud")
+            Text("Legacy iCloud")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.secondary)
             HStack(spacing: 8) {
@@ -509,10 +470,15 @@ private struct AppRootView: View {
     @State private var didStartWarmup: Bool = false
     @State private var launchProgress: Double = 0
     @State private var showsProgressBar: Bool = false
+    @State private var startupLoadingDetail: String? = nil
     @State private var propertyListReadinessTimedOut: Bool = false
     @State private var homePropertyListReady: Bool = false
     @State private var didStartHomePropertyListReadiness: Bool = false
     @State private var homePropertyListReadinessTimedOut: Bool = false
+    @State private var startupNetworkGateActive: Bool = false
+    @State private var startupNetworkRetryToken: Int = 0
+    @State private var startupAuthGraceActive: Bool = false
+    @State private var startupAuthGraceToken: Int = 0
     // Keep first property-row badge/cloud hydration behind splash when possible.
     private let warmLaunchTimeoutSeconds: TimeInterval = 15.0
 
@@ -532,6 +498,51 @@ private struct AppRootView: View {
         propertyListReadinessTimedOut || homePropertyListReadinessTimedOut
     }
 
+    private var shouldShowInitialPropertyListUpdatingBanner: Bool {
+        initialPropertyListTimedOut && appState.isInitialPropertyListUpdateStillActive
+    }
+
+    private var isStartupWaitingForNetwork: Bool {
+        appState.properties.isEmpty && (!appState.isNetworkAvailable || startupNetworkGateActive)
+    }
+
+    private var startupLoadingMessage: String {
+        if isStartupWaitingForNetwork && !appState.isNetworkAvailable {
+            return "No network connection"
+        }
+        return "Loading properties..."
+    }
+
+    private var startupLoadingDetailMessage: String? {
+        if isStartupWaitingForNetwork {
+            if appState.isNetworkAvailable {
+                return "Connection restored. Loading properties."
+            }
+            return "Connect to Wi-Fi or cellular to load properties."
+        }
+        return startupLoadingDetail
+    }
+
+    private var startupShowsSpinner: Bool {
+        appState.isNetworkAvailable
+    }
+
+    private var startupOfflineMessage: String {
+        "No network connection"
+    }
+
+    private var startupOfflineDetail: String {
+        "Connect to Wi-Fi or cellular to load properties."
+    }
+
+    private var shouldHoldStartupForAuthResolution: Bool {
+        startupAuthGraceActive &&
+            appState.requiresAuthentication &&
+            appState.isAuthenticationReady &&
+            !appState.isAuthenticated &&
+            appState.isNetworkAvailable
+    }
+
     var body: some View {
         Group {
             if !isAppReady {
@@ -539,14 +550,36 @@ private struct AppRootView: View {
                     progress: launchProgress,
                     showsProgressBar: showsProgressBar,
                     showsLogo: true,
-                    message: "Loading properties...",
-                    showsSpinner: false
+                    message: startupLoadingMessage,
+                    detailMessage: startupLoadingDetailMessage,
+                    showsSpinner: startupShowsSpinner
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
                 LoadingView(
                     progress: 0,
                     showsProgressBar: false,
-                    showsLogo: true
+                    showsLogo: true,
+                    message: appState.isNetworkAvailable ? "Checking sign-in..." : startupOfflineMessage,
+                    detailMessage: appState.isNetworkAvailable ? "Restoring your saved session." : startupOfflineDetail,
+                    showsSpinner: appState.isNetworkAvailable
+                )
+            } else if appState.requiresAuthentication && !appState.isAuthenticated && !appState.isNetworkAvailable {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: startupOfflineMessage,
+                    detailMessage: startupOfflineDetail,
+                    showsSpinner: false
+                )
+            } else if shouldHoldStartupForAuthResolution {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: "Checking sign-in...",
+                    detailMessage: "Restoring your saved session.",
+                    showsSpinner: true
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticated {
                 AuthView()
@@ -554,24 +587,35 @@ private struct AppRootView: View {
                 LoadingView(
                     progress: 0,
                     showsProgressBar: false,
-                    showsLogo: true
+                    showsLogo: true,
+                    message: appState.isNetworkAvailable ? "Loading organization..." : startupOfflineMessage,
+                    detailMessage: appState.isNetworkAvailable ? "Preparing your workspace." : startupOfflineDetail,
+                    showsSpinner: appState.isNetworkAvailable
                 )
             } else if !homePropertyListReady {
                 LoadingView(
                     progress: launchProgress,
                     showsProgressBar: true,
                     showsLogo: true,
-                    message: "Loading properties...",
-                    showsSpinner: false
+                    message: isStartupWaitingForNetwork && !appState.isNetworkAvailable ? "No network connection" : "Preparing property list...",
+                    detailMessage: startupLoadingDetailMessage,
+                    showsSpinner: startupShowsSpinner
                 )
             } else {
-                SessionHubView(initialPropertyListTimedOut: initialPropertyListTimedOut)
+                SessionHubView(initialPropertyListTimedOut: shouldShowInitialPropertyListUpdatingBanner)
             }
         }
         .onChange(of: appState.isAuthenticationReady) { _, _ in
+            startStartupAuthGraceIfNeeded()
             startHomePropertyListReadinessIfNeeded()
         }
         .onChange(of: appState.isAuthenticated) { _, _ in
+            if appState.isAuthenticated {
+                startupAuthGraceActive = false
+                startupAuthGraceToken += 1
+            } else {
+                startStartupAuthGraceIfNeeded()
+            }
             startHomePropertyListReadinessIfNeeded()
         }
         .onChange(of: appState.isOrganizationContextReady) { _, _ in
@@ -583,9 +627,24 @@ private struct AppRootView: View {
         .onChange(of: minimumLaunchDelayMet) { _, _ in
             startHomePropertyListReadinessIfNeeded()
         }
+        .onChange(of: appState.isNetworkAvailable) { _, isAvailable in
+            handleNetworkAvailabilityChange(isAvailable)
+            if isAvailable {
+                startStartupAuthGraceIfNeeded()
+            }
+        }
+        .onChange(of: appState.properties.count) { _, newCount in
+            if newCount > 0 {
+                startupNetworkGateActive = false
+                startupNetworkRetryToken += 1
+            }
+        }
         .task {
             guard !didStartWarmup else { return }
             didStartWarmup = true
+            if !appState.isNetworkAvailable && appState.properties.isEmpty {
+                startupNetworkGateActive = true
+            }
 
             if skipStartupLoading {
                 sessionHubReady = true
@@ -605,6 +664,7 @@ private struct AppRootView: View {
             withAnimation(.easeOut(duration: 0.16)) {
                 showsProgressBar = true
             }
+            scheduleStartupLoadingFeedback()
 
             advanceLaunchProgress(to: 0.22)
             async let minDelay: Void = {
@@ -643,12 +703,25 @@ private struct AppRootView: View {
 
             _ = await minDelay
             advanceLaunchProgress(to: 0.96)
+            startupLoadingDetail = "Finalizing local row status before showing home."
             AddPropertyWarmup.prewarm()
             OptionalDetailNoteWarmup.prewarm()
             try? await Task.sleep(nanoseconds: 60_000_000)
             minimumLaunchDelayMet = true
             startHomePropertyListReadinessIfNeeded()
             onInitialLaunchCompleted()
+        }
+    }
+
+    private func scheduleStartupLoadingFeedback() {
+        startupLoadingDetail = "Preparing local property data."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            guard !homePropertyListReady else { return }
+            startupLoadingDetail = "First launch can take longer while Scout prepares local data."
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+            guard !homePropertyListReady else { return }
+            startupLoadingDetail = "Still working. This keeps the home list smooth once it opens."
         }
     }
 
@@ -667,6 +740,15 @@ private struct AppRootView: View {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
             guard !homePropertyListReady else { return }
+            if startupNetworkGateActive && appState.properties.isEmpty {
+                homePropertyListReadinessTimedOut = true
+                didStartHomePropertyListReadiness = false
+                startupLoadingDetail = appState.isNetworkAvailable
+                    ? "Connection restored. Loading properties."
+                    : "Connect to Wi-Fi or cellular to load properties."
+                scheduleStartupNetworkRetryIfNeeded()
+                return
+            }
             homePropertyListReadinessTimedOut = true
             advanceLaunchProgress(to: 1.0)
             homePropertyListReady = true
@@ -685,6 +767,99 @@ private struct AppRootView: View {
             homePropertyListReady = true
         }
     }
+
+    private func handleNetworkAvailabilityChange(_ isAvailable: Bool) {
+        guard !homePropertyListReady else { return }
+        if isAvailable {
+            startStartupAuthGraceIfNeeded()
+            if appState.properties.isEmpty {
+                startupNetworkGateActive = true
+            }
+            startupLoadingDetail = "Connection restored. Loading properties."
+            attemptStartupNetworkRecovery()
+        } else {
+            startupNetworkGateActive = appState.properties.isEmpty
+            startupNetworkRetryToken += 1
+            startupLoadingDetail = "Connect to Wi-Fi or cellular to load properties."
+        }
+    }
+
+    private func startStartupAuthGraceIfNeeded() {
+        guard !homePropertyListReady,
+              appState.requiresAuthentication,
+              appState.isNetworkAvailable,
+              appState.isAuthenticationReady,
+              !appState.isAuthenticated,
+              appState.properties.isEmpty else { return }
+        startupAuthGraceActive = true
+        startupAuthGraceToken += 1
+        let token = startupAuthGraceToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+            guard token == startupAuthGraceToken else { return }
+            startupAuthGraceActive = false
+        }
+    }
+
+    private func attemptStartupNetworkRecovery() {
+        guard startupNetworkGateActive,
+              appState.isNetworkAvailable,
+              appState.properties.isEmpty,
+              !homePropertyListReady else { return }
+        Task { @MainActor in
+            let restored = await appState.restoreAuthenticatedStartupAfterNetworkReconnect()
+            guard startupNetworkGateActive,
+                  appState.isNetworkAvailable,
+                  appState.properties.isEmpty,
+                  !homePropertyListReady else {
+                if !appState.properties.isEmpty {
+                    startupNetworkGateActive = false
+                    startupNetworkRetryToken += 1
+                    didStartHomePropertyListReadiness = false
+                    startHomePropertyListReadinessIfNeeded()
+                }
+                return
+            }
+
+            guard restored || canPrepareHomePropertyList else {
+                startupLoadingDetail = "Connection restored. Checking your saved sign-in."
+                scheduleStartupNetworkRetryIfNeeded()
+                return
+            }
+
+            await appState.refreshPropertiesAwaitingForegroundRefresh()
+            guard startupNetworkGateActive,
+                  appState.isNetworkAvailable,
+                  !homePropertyListReady else { return }
+
+            if appState.properties.isEmpty {
+                scheduleStartupNetworkRetryIfNeeded()
+                return
+            }
+            startupNetworkGateActive = false
+            startupNetworkRetryToken += 1
+            homePropertyListReadinessTimedOut = false
+            didStartHomePropertyListReadiness = false
+            startHomePropertyListReadinessIfNeeded()
+        }
+    }
+
+    private func scheduleStartupNetworkRetryIfNeeded() {
+        guard startupNetworkGateActive,
+              appState.isNetworkAvailable,
+              appState.properties.isEmpty,
+              !homePropertyListReady else { return }
+        startupNetworkRetryToken += 1
+        let token = startupNetworkRetryToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            guard token == startupNetworkRetryToken,
+                  startupNetworkGateActive,
+                  appState.isNetworkAvailable,
+                  appState.properties.isEmpty,
+                  !homePropertyListReady else { return }
+            startupLoadingDetail = "Still waiting for property data. Checking connection again."
+            attemptStartupNetworkRecovery()
+        }
+    }
 }
 
 struct SessionHubView: View {
@@ -694,7 +869,7 @@ struct SessionHubView: View {
     private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
-    @State private var showArchivedProperties: Bool = false
+    @AppStorage("scoutcapture.showArchivedProperties") private var showArchivedProperties: Bool = false
     @State private var showSettingsSheet: Bool = false
     @State private var propertyToArchive: Property? = nil
     @State private var propertyToDelete: Property? = nil
@@ -702,11 +877,20 @@ struct SessionHubView: View {
     @State private var manageSessionsProperty: Property? = nil
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
+    @State private var initialSessionTypePickerProperty: Property? = nil
+    @State private var fastLaneOpeningProperty: Property? = nil
+    @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
+    @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
+    @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
+    @State private var propertyEntryLockPrompt: PropertyEntryLockPrompt? = nil
+    @State private var showOfflinePropertyEntryAlert: Bool = false
     @State private var isPreparingPendingExport: Bool = false
     @State private var pendingExportFile: PendingExportFile? = nil
     @State private var pendingExportChecklist = ExportChecklistState()
     @State private var pendingExportErrorMessage: String? = nil
     @State private var showPendingExportError: Bool = false
+    @State private var propertyUploadRetryAlert: PropertyUploadRetryAlert? = nil
+    @State private var retryingPropertyUploadIDs: Set<UUID> = []
     @State private var mapLookupPropertyID: UUID? = nil
     @State private var showMapsErrorToast: Bool = false
     @State private var mapsErrorToastToken: Int = 0
@@ -715,13 +899,13 @@ struct SessionHubView: View {
     @State private var hubTransientStatusToastToken: Int = 0
     @State private var isSearchExpanded: Bool = false
     @State private var searchQuery: String = ""
+    @State private var manualRefreshRotation: Double = 0
     @FocusState private var isSearchFieldFocused: Bool
     @State private var propertyListFilter: PropertyListFilter = .all
     @State private var showCalendarComingSoonPopup: Bool = false
     @State private var showTemporaryMigrationExport: Bool = false
     @State private var showTemporaryMigrationImport: Bool = false
     @State private var showCloudBackupSheet: Bool = false
-    @State private var showSessionRestoreSheet: Bool = false
     @State private var showDebugTools: Bool = false
     @State private var hiddenDebugTapCount: Int = 0
     @State private var lastHiddenDebugTapAt: Date? = nil
@@ -732,14 +916,14 @@ struct SessionHubView: View {
     @State private var dismissedPendingInvitationIDs: Set<UUID> = []
     @State private var isPendingInviteActionInFlight: Bool = false
     @State private var pendingInvitePromptErrorMessage: String? = nil
-    @State private var isManualPropertyRefreshInFlight: Bool = false
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
     private let startupPlaceholderHoldSeconds: TimeInterval = 8.0
+    private let diagnosticMinimalHomeRows: Bool = true
 
     private enum HubRoute: Hashable {
-        case propertySession(propertyID: UUID, resumeDraft: Bool)
+        case propertySession(propertyID: UUID, resumeDraft: Bool, initialSessionType: SessionType?)
     }
 
     private enum PropertyListFilter {
@@ -753,6 +937,12 @@ struct SessionHubView: View {
         let propertyID: UUID
         let sessionID: UUID
         let url: URL
+    }
+
+    private struct PropertyUploadRetryAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
     }
 
     private struct ExportChecklistState {
@@ -792,11 +982,11 @@ struct SessionHubView: View {
     }
 
     private var activeProperties: [Property] {
-        appState.properties.filter { $0.deletedAt == nil && !$0.isArchived }
+        appState.activeProperties()
     }
 
     private var archivedProperties: [Property] {
-        appState.properties.filter { $0.deletedAt == nil && $0.isArchived }
+        appState.archivedProperties()
     }
 
     private var normalizedSearchQuery: String {
@@ -812,7 +1002,6 @@ struct SessionHubView: View {
     private var filteredArchivedProperties: [Property] {
         archivedProperties
             .filter(matchesSearch(_:))
-            .filter(matchesPropertyFilter(_:))
     }
 
     private var shouldShowStartupPlaceholders: Bool {
@@ -867,7 +1056,7 @@ struct SessionHubView: View {
                     pendingInvitationPrompt(invitation)
                 }
 
-                if initialPropertyListTimedOut {
+                if initialPropertyListTimedOut && !diagnosticMinimalHomeRows {
                     initialPropertyListUpdatingBanner
                 }
 
@@ -906,36 +1095,57 @@ struct SessionHubView: View {
                                 }
                             }
                         }
-                    } else {
+                    } else if hasNoMatches {
                         List {
-                            if !filteredActiveProperties.isEmpty {
-                                Section {
-                                    ForEach(filteredActiveProperties) { property in
-                                        propertyRow(property)
-                                    }
-                                }
-                            }
-
-                            if showArchivedSection && !filteredArchivedProperties.isEmpty {
-                                Section("Archived") {
-                                    ForEach(filteredArchivedProperties) { property in
-                                        propertyRow(property)
-                                    }
-                                }
-                            }
-
-                            if hasNoMatches {
-                                Section {
-                                    Text("No matching properties")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                        .padding(.vertical, 10)
-                                }
+                            Section {
+                                Text("No matching properties")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding(.vertical, 10)
                             }
                         }
-                        .id(appState.hubRowRefreshToken)
                         .listStyle(.plain)
+                    } else {
+                        PropertyListTableView(
+                            sections: propertyTableSections(showArchivedSection: showArchivedSection),
+                            onTap: { property in
+                                if property.isArchived {
+                                    return
+                                } else {
+                                    handlePropertyTap(property)
+                                }
+                            },
+                            onManageSessions: { property in
+                                manageSessionsProperty = property
+                            },
+                            onEditContact: { property in
+                                editContactProperty = property
+                            },
+                            onArchiveToggle: { property in
+                                if property.isArchived {
+                                    _ = appState.setPropertyArchived(id: property.id, archived: false)
+                                } else {
+                                    propertyToArchive = property
+                                }
+                            },
+                            onDelete: { property in
+                                requestDeleteProperty(property)
+                            },
+                            onRetryUpload: { property in
+                                retryUploadOrExport(for: property)
+                            },
+                            onMaps: { property in
+                                openMaps(for: property)
+                            },
+                            onMessage: { property in
+                                triggerPhoneAction(.message, for: property)
+                            },
+                            onCall: { property in
+                                triggerPhoneAction(.call, for: property)
+                            }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
             }
@@ -946,10 +1156,11 @@ struct SessionHubView: View {
             }
             .navigationDestination(for: HubRoute.self) { route in
                 switch route {
-                case let .propertySession(propertyID, resumeDraft):
+                case let .propertySession(propertyID, resumeDraft, initialSessionType):
                     PropertySessionView(
                         propertyID: propertyID,
                         resumeDraft: resumeDraft,
+                        initialSessionType: initialSessionType,
                         onPendingExportRecovered: { property, session in
                             pendingExportPromptProperty = property
                             pendingExportPromptSession = session
@@ -1001,13 +1212,7 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showCloudBackupSheet) {
-                CloudBackupSheet(
-                    onOpenSessionRestore: { showSessionRestoreSheet = true }
-                )
-                    .environmentObject(appState)
-            }
-            .sheet(isPresented: $showSessionRestoreSheet) {
-                SessionArchiveRestoreSheet()
+                CloudBackupSheet()
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showSettingsSheet) {
@@ -1024,6 +1229,50 @@ struct SessionHubView: View {
                 )
                     .environmentObject(appState)
             }
+            .fullScreenCover(item: $fastLanePreviewRequest) { request in
+                DebugFastRuntimePrototypeCameraPreviewView(
+                    context: request.context,
+                    propertyName: request.propertyName,
+                    prototypeResult: request.result,
+                    buttonTappedAt: request.buttonTappedAt,
+                    contextReadyAt: request.contextReadyAt,
+                    previewRequestedAt: request.previewRequestedAt,
+                    initialCapturedCount: request.initialCapturedCount,
+                    storageRoot: request.storageRoot,
+                    isDraftResume: request.isDraftResume,
+                    initialLocationMode: request.initialLocationMode,
+                    initialMetadataContext: request.initialMetadataContext,
+                    initialProfileLocked: request.initialProfileLocked,
+                    isDebugMode: false,
+                    onDismiss: { closeResult in
+                        if closeResult.errorMessage != nil {
+                            fastLaneCloseResult = closeResult
+                        }
+                        fastLanePreviewRequest = nil
+                        fastLaneOpeningProperty = nil
+                        isOpeningProperty = false
+                    }
+                )
+                .environmentObject(appState)
+                .interactiveDismissDisabled(true)
+            }
+            .alert(item: $fastLaneDraftIssue) { issue in
+                Alert(
+                    title: Text("Fast-Lane Draft Needs Cleanup"),
+                    message: Text(issue.message),
+                    primaryButton: .destructive(Text("Clear Fast-Lane Drafts")) {
+                        clearFastLaneDraftsFromIssue()
+                    },
+                    secondaryButton: .default(Text("Use Legacy Path")) {
+                        openLegacyPathAfterFastLaneIssue(issue.property)
+                    }
+                )
+            }
+            .alert("No Network Connection", isPresented: $showOfflinePropertyEntryAlert) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Connect to Wi-Fi or cellular before opening a property. If a session is already open, capture can continue if the network drops.")
+            }
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
@@ -1033,7 +1282,7 @@ struct SessionHubView: View {
                 } else {
                     placeholderHoldUntil = nil
                 }
-                appState.triggerBackupForLifecycleEvent()
+                appState.triggerBackupForLifecycleEvent(after: 8.0)
                 selectionHaptic.prepare()
             }
             .onChange(of: appState.hubTransientStatusMessage) { _, newValue in
@@ -1059,7 +1308,7 @@ struct SessionHubView: View {
                 }
             }
             .onChange(of: path) { oldPath, newPath in
-                if case let .propertySession(propertyID, _) = oldPath.last,
+                if case let .propertySession(propertyID, _, _) = oldPath.last,
                    newPath.isEmpty {
                     appState.refreshPropertySessionState(propertyID: propertyID)
                 }
@@ -1109,9 +1358,38 @@ struct SessionHubView: View {
             } message: {
                 Text(pendingExportErrorMessage ?? "Unable to prepare export.")
             }
+            .alert(item: $propertyUploadRetryAlert) { alert in
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
             .overlay {
                 if pendingExportPromptSession != nil, pendingExportPromptProperty != nil {
                     pendingExportPromptOverlay
+                }
+            }
+            .overlay {
+                if let property = initialSessionTypePickerProperty {
+                    initialSessionTypePickerOverlay(for: property)
+                }
+            }
+            .overlay {
+                if let property = fastLaneOpeningProperty {
+                    fastLaneOpeningOverlay(for: property)
+                }
+            }
+            .overlay {
+                if let prompt = propertyEntryLockPrompt {
+                    propertyEntryLockPromptOverlay(prompt)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if let closeResult = fastLaneCloseResult {
+                    fastLaneCloseResultOverlay(closeResult)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 22)
                 }
             }
             .overlay {
@@ -1164,15 +1442,17 @@ struct SessionHubView: View {
                 }
             }
             .overlay(alignment: .top) {
-                VStack(spacing: 8) {
-                    if let hubTransientStatusMessage = appState.hubTransientStatusMessage {
-                        toastCapsule(hubTransientStatusMessage)
-                    }
-                    if showMapsErrorToast {
-                        toastCapsule("Unable to open Maps for this address.")
-                    }
-                    if showPhoneNumberErrorToast {
-                        toastCapsule("No phone number on file")
+                if !diagnosticMinimalHomeRows {
+                    VStack(spacing: 8) {
+                        if let hubTransientStatusMessage = appState.hubTransientStatusMessage {
+                            toastCapsule(hubTransientStatusMessage)
+                        }
+                        if showMapsErrorToast {
+                            toastCapsule("Unable to open Maps for this address.")
+                        }
+                        if showPhoneNumberErrorToast {
+                            toastCapsule("No phone number on file")
+                        }
                     }
                 }
             }
@@ -1180,11 +1460,15 @@ struct SessionHubView: View {
     }
 
     private func runManualPropertyRefresh() {
-        guard !isManualPropertyRefreshInFlight else { return }
-        isManualPropertyRefreshInFlight = true
+        withAnimation(.linear(duration: 0.9)) {
+            manualRefreshRotation += 360
+        }
         Task {
             await appState.refreshPropertiesAwaitingForegroundRefresh()
-            isManualPropertyRefreshInFlight = false
+            await appState.refreshLightweightPropertyEntryLocks(
+                propertyIDs: filteredActiveProperties.map(\.id),
+                reason: "manual_home_refresh"
+            )
         }
     }
 
@@ -1280,13 +1564,202 @@ struct SessionHubView: View {
     }
 
     @ViewBuilder
+    private func diagnosticPropertyRow(
+        _ property: Property,
+        hasDraft: Bool,
+        subtitleLine: String?,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> some View {
+        if diagnosticMinimalHomeRows {
+            minimalPropertyRow(
+                property,
+                hasDraft: hasDraft,
+                subtitleLine: subtitleLine,
+                cloudGlyph: cloudGlyph
+            )
+        } else {
+            propertyRow(property)
+        }
+    }
+
+    private func minimalPropertyRow(
+        _ property: Property,
+        hasDraft: Bool,
+        subtitleLine: String?,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> some View {
+        let addressLine = propertyAddressLine(property) ?? property.address
+
+        return Button {
+            handlePropertyTap(property)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    propertyRowTitleText(
+                        property.name,
+                        cloudGlyph: cloudGlyph
+                    )
+                        .font(.system(size: 18, weight: .semibold))
+                        .lineLimit(1)
+
+                    if let subtitleLine,
+                       !subtitleLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(subtitleLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    if let addressLine,
+                       !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(addressLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if hasDraft {
+                    chipLabel("Draft", tint: .orange)
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(pressedPropertyID == property.id ? 0.70 : 1.0)
+        .animation(.easeOut(duration: 0.10), value: pressedPropertyID)
+    }
+
+    private func propertyTableSections(showArchivedSection: Bool) -> [PropertyListTableSection] {
+        let rowDraftBadges = appState.propertyRowDraftBadgeByPropertyID
+        let rowLockBadges = appState.propertyRowLockBadgeByPropertyID
+        let rowSubtitles = appState.propertyRowSubtitleByPropertyID
+        let rowCloudGlyphs = appState.propertyRowCloudGlyphByPropertyID
+        let rowStatusChips = appState.propertyRowStatusChipByPropertyID
+        var sections: [PropertyListTableSection] = []
+
+        if !filteredActiveProperties.isEmpty {
+            sections.append(
+                PropertyListTableSection(
+                    id: "active",
+                    title: nil,
+                    rows: propertyTableRows(
+                        for: filteredActiveProperties,
+                        rowDraftBadges: rowDraftBadges,
+                        rowLockBadges: rowLockBadges,
+                        rowSubtitles: rowSubtitles,
+                        rowCloudGlyphs: rowCloudGlyphs,
+                        rowStatusChips: rowStatusChips
+                    )
+                )
+            )
+        }
+
+        if showArchivedSection && !filteredArchivedProperties.isEmpty {
+            sections.append(
+                PropertyListTableSection(
+                    id: "archived",
+                    title: "Archived",
+                    rows: propertyTableRows(
+                        for: filteredArchivedProperties,
+                        rowDraftBadges: rowDraftBadges,
+                        rowLockBadges: rowLockBadges,
+                        rowSubtitles: rowSubtitles,
+                        rowCloudGlyphs: rowCloudGlyphs,
+                        rowStatusChips: rowStatusChips
+                    )
+                )
+            )
+        }
+
+        return sections
+    }
+
+    private func propertyTableRows(
+        for properties: [Property],
+        rowDraftBadges: [UUID: Bool],
+        rowLockBadges: [UUID: Bool],
+        rowSubtitles: [UUID: String],
+        rowCloudGlyphs: [UUID: AppState.PropertyRowCloudGlyphState],
+        rowStatusChips: [UUID: AppState.PropertyRowStatusChipState]
+    ) -> [PropertyListTableRowModel] {
+        properties.map { property in
+            let cloudGlyph = rowCloudGlyphs[property.id]
+            return PropertyListTableRowModel(
+                property: property,
+                title: property.name,
+                subtitle: rowSubtitles[property.id],
+                address: propertyAddressLine(property) ?? property.address,
+                hasDraft: rowDraftBadges[property.id] == true,
+                isLocked: rowLockBadges[property.id] == true,
+                isArchived: property.isArchived,
+                cloudGlyph: cloudGlyph,
+                canRetryUpload: rowStatusChips[property.id] != nil || cloudGlyph == .warning,
+                canOpenMaps: mapsAddressQuery(for: property) != nil,
+                canMessage: hasValidPhoneNumber(property),
+                canCall: hasValidPhoneNumber(property)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func propertyRowStatusChip(_ state: AppState.PropertyRowStatusChipState) -> some View {
+        Text(state == .uploading ? "Uploading" : "Pending Export")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.blue)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func propertyRowTitleText(
+        _ title: String,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> Text {
+        guard let cloudGlyph else {
+            return Text(title).foregroundColor(.primary)
+        }
+        return Text(title).foregroundColor(.primary)
+            + Text(" \(propertyRowCloudGlyphText(cloudGlyph))")
+                .foregroundColor(propertyRowCloudGlyphColor(cloudGlyph))
+    }
+
+    private func propertyRowCloudGlyphText(_ state: AppState.PropertyRowCloudGlyphState) -> String {
+        switch state {
+        case .current:
+            return "✓"
+        case .uploading:
+            return "↑"
+        case .warning:
+            return "!"
+        }
+    }
+
+    private func propertyRowCloudGlyphColor(_ state: AppState.PropertyRowCloudGlyphState) -> Color {
+        switch state {
+        case .current, .uploading:
+            return .blue
+        case .warning:
+            return .orange
+        }
+    }
+
+    @ViewBuilder
     private func propertyRow(_ property: Property) -> some View {
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
+        let rawHasDraft = badgeModel.showDraft
         let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
-        let hasDraft = badgeModel.showDraft
-        let hasPendingExport = badgeModel.showPendingExport
+        let isActivelyUploading = sessionUploadStatus?.state == .uploading &&
+            sessionUploadStatus?.isConfigurationBlocked == false
+        let hasDraft = rawHasDraft && !isActivelyUploading
+        let hasPendingExport = badgeModel.showPendingExport && !isActivelyUploading
         let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let manualExportSession = latestReExportSession ?? pendingSession
@@ -1369,17 +1842,7 @@ struct SessionHubView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onAppear {
-            appState.schedulePropertyRowDetailsHydration(
-                reason: "property_row_appeared",
-                propertyIDs: [property.id],
-                refreshCloudStatus: true
-            )
-        }
         .contextMenu {
-            Button("Manage Sessions") {
-                manageSessionsProperty = property
-            }
             Button("Edit Contact") {
                 editContactProperty = property
             }
@@ -1648,27 +2111,19 @@ struct SessionHubView: View {
                         Button {
                             runManualPropertyRefresh()
                         } label: {
-                            Group {
-                                if isManualPropertyRefreshInFlight {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
-                                        .scaleEffect(0.82)
-                                } else {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 18, weight: .medium))
-                                }
-                            }
-                            .foregroundColor(buttonLabel)
-                            .frame(width: 42, height: 42)
-                            .background(buttonFill)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(buttonStroke, lineWidth: 1)
-                            )
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 20, weight: .medium))
+                                .rotationEffect(.degrees(manualRefreshRotation))
+                                .foregroundColor(buttonLabel)
+                                .frame(width: 42, height: 42)
+                                .background(buttonFill)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(buttonStroke, lineWidth: 1)
+                                )
                         }
                         .buttonStyle(.plain)
-                        .disabled(isManualPropertyRefreshInFlight)
                         .accessibilityLabel("Refresh properties")
 
                         Spacer(minLength: 0)
@@ -1743,6 +2198,10 @@ struct SessionHubView: View {
             if !isSearchExpanded {
                 propertiesSearchRow
             }
+
+            if !appState.isNetworkAvailable {
+                networkUnavailableBanner
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, isCompactSearchMode ? 4 : 6)
@@ -1750,6 +2209,28 @@ struct SessionHubView: View {
         .background(Color(uiColor: .systemBackground))
         .animation(.easeInOut(duration: 0.18), value: isSearchExpanded)
         .animation(.easeInOut(duration: 0.18), value: isCompactSearchMode)
+    }
+
+    private var networkUnavailableBanner: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 13, weight: .semibold))
+            Text("No network connection. Connect to open a property. Already-open sessions can keep capturing offline.")
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .foregroundColor(.orange)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.14))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityLabel("No network connection. Connect to open a property. Already-open sessions can keep capturing offline.")
     }
 
     private var propertiesSearchRow: some View {
@@ -1997,15 +2478,7 @@ struct SessionHubView: View {
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
         @Environment(\.colorScheme) private var colorScheme
-        @State private var inviteEmail: String = ""
-        @State private var inviteRole: String = "viewer"
-        @State private var collaborationStatusMessage: String?
-        @State private var collaborationErrorMessage: String?
-        @State private var isCollaborationActionInFlight: Bool = false
-        @State private var memberForPropertyAccessManagement: PropertyAccessManagementPresentation?
-        @State private var pendingMembershipRevoke: PendingMembershipRevoke?
         private let showDeveloperSection: Bool = false
-        private let inviteRoleOptions = ["viewer", "field", "manager", "owner"]
 
         private var buttonFill: Color {
             colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -2017,10 +2490,6 @@ struct SessionHubView: View {
 
         private var buttonLabel: Color {
             colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
-
-        private var shouldShowCollaborationSection: Bool {
-            appState.requiresAuthentication && appState.isOwnerOfActiveOrganization
         }
 
         var body: some View {
@@ -2058,8 +2527,8 @@ struct SessionHubView: View {
                                 .tint(.blue)
                         }
 
-                        Section("Backup") {
-                            Button("iCloud Backup") {
+                        Section("Storage") {
+                            Button("Manage Local Storage") {
                                 dismiss()
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                                     onOpenCloudBackup?()
@@ -2079,10 +2548,6 @@ struct SessionHubView: View {
                                 Section("Recovery") {
                                     NavigationLink("Recently Deleted Properties") {
                                         RecentlyDeletedPropertiesRecoveryView()
-                                            .environmentObject(appState)
-                                    }
-                                    NavigationLink("Recently Deleted Sessions") {
-                                        RecentlyDeletedSessionsRecoveryView()
                                             .environmentObject(appState)
                                     }
                                 }
@@ -2127,124 +2592,6 @@ struct SessionHubView: View {
                                 }
                             }
 
-                            if appState.requiresAuthentication && !appState.pendingOrganizationInvitations.isEmpty {
-                                Section("Pending Invites") {
-                                    ForEach(appState.pendingOrganizationInvitations) { invitation in
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(invitation.orgName)
-                                                    .font(.system(size: 15, weight: .semibold))
-                                                Text("\(invitation.role.capitalized) access")
-                                                    .font(.system(size: 13, weight: .medium))
-                                                    .foregroundStyle(.secondary)
-                                            }
-
-                                            Button(isCollaborationActionInFlight ? "Accepting..." : "Accept") {
-                                                accept(invitation: invitation)
-                                            }
-                                            .disabled(isCollaborationActionInFlight)
-                                        }
-                                        .padding(.vertical, 4)
-                                    }
-                                }
-                            }
-
-                            if shouldShowCollaborationSection,
-                               let activeOrganization = appState.activeOrganization {
-                                Section("Collaboration") {
-                                    Text("Manage access for \(activeOrganization.name)")
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(.secondary)
-
-                                    TextField("Invite by email", text: $inviteEmail)
-                                        .textInputAutocapitalization(.never)
-                                        .autocorrectionDisabled()
-                                        .keyboardType(.emailAddress)
-
-                                    Picker("Invite Role", selection: $inviteRole) {
-                                        ForEach(inviteRoleOptions, id: \.self) { role in
-                                            Text(role.capitalized).tag(role)
-                                        }
-                                    }
-
-                                    Button(isCollaborationActionInFlight ? "Inviting..." : "Send Invite") {
-                                        sendInvite()
-                                    }
-                                    .disabled(
-                                        isCollaborationActionInFlight ||
-                                        inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                                        appState.activeOrganizationID == nil
-                                    )
-
-                                    if let collaborationStatusMessage, !collaborationStatusMessage.isEmpty {
-                                        Text(collaborationStatusMessage)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(.secondary)
-                                    }
-
-                                    if let collaborationErrorMessage, !collaborationErrorMessage.isEmpty {
-                                        Text(collaborationErrorMessage)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(.red)
-                                    }
-
-                                    if appState.activeOrganizationMembers.isEmpty {
-                                        Text("No members found.")
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        ForEach(appState.activeOrganizationMembers) { member in
-                                            HStack(alignment: .center, spacing: 12) {
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text(member.displayName)
-                                                        .font(.system(size: 15, weight: .semibold))
-                                                    if let email = member.email, !email.isEmpty, email != member.displayName {
-                                                        Text(email)
-                                                            .font(.system(size: 13, weight: .medium))
-                                                            .foregroundStyle(.secondary)
-                                                    }
-                                                    Text(member.role.capitalized)
-                                                        .font(.system(size: 12, weight: .medium))
-                                                        .foregroundStyle(.secondary)
-                                                }
-
-                                                Spacer(minLength: 0)
-
-                                                if member.role != "owner" {
-                                                    HStack(spacing: 10) {
-                                                        Button("Manage") {
-                                                            memberForPropertyAccessManagement = PropertyAccessManagementPresentation(member: member)
-                                                        }
-                                                        .disabled(isCollaborationActionInFlight)
-                                                        .buttonStyle(.borderless)
-                                                        .font(.system(size: 13, weight: .semibold))
-                                                        .foregroundStyle(.white)
-                                                        .padding(.horizontal, 14)
-                                                        .frame(height: 32)
-                                                        .background(Color.blue)
-                                                        .clipShape(Capsule())
-
-                                                        Button {
-                                                            pendingMembershipRevoke = PendingMembershipRevoke(member: member)
-                                                        } label: {
-                                                            ZStack {
-                                                                Circle()
-                                                                    .fill(Color.red)
-                                                                    .frame(width: 32, height: 32)
-                                                                Text("X")
-                                                                    .font(.system(size: 13, weight: .bold))
-                                                                    .foregroundStyle(.white)
-                                                            }
-                                                        }
-                                                        .disabled(isCollaborationActionInFlight)
-                                                        .buttonStyle(.borderless)
-                                                    }
-                                                }
-                                            }
-                                            .padding(.vertical, 4)
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         if showDeveloperSection, let onOpenDebugTools {
@@ -2263,110 +2610,6 @@ struct SessionHubView: View {
                     .listSectionSpacing(18)
                 }
             }
-            .task {
-                await refreshCollaborationState()
-            }
-            .sheet(
-                item: $memberForPropertyAccessManagement,
-                onDismiss: {
-                    memberForPropertyAccessManagement = nil
-                }
-            ) { presentation in
-                if let activeOrganizationID = appState.activeOrganizationID,
-                   let activeOrganization = appState.activeOrganization {
-                    PropertyAccessManagementSheet(
-                        member: presentation.member,
-                        organizationID: activeOrganizationID,
-                        organizationName: activeOrganization.name,
-                        onClose: {
-                            memberForPropertyAccessManagement = nil
-                        }
-                    )
-                    .environmentObject(appState)
-                }
-            }
-            .alert(item: $pendingMembershipRevoke) { pendingRevoke in
-                Alert(
-                    title: Text("Revoke Access?"),
-                    message: Text(revokeConfirmationMessage(for: pendingRevoke.member)),
-                    primaryButton: .destructive(Text("Revoke Access")) {
-                        revoke(member: pendingRevoke.member)
-                    },
-                    secondaryButton: .cancel(Text("Cancel"))
-                )
-            }
-        }
-
-        private func refreshCollaborationState() async {
-            await appState.refreshPendingOrganizationInvitations()
-            await appState.refreshActiveOrganizationMembers()
-        }
-
-        private func sendInvite() {
-            guard let activeOrganizationID = appState.activeOrganizationID else { return }
-            let trimmedEmail = inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedEmail.isEmpty else { return }
-
-            collaborationErrorMessage = nil
-            collaborationStatusMessage = nil
-            isCollaborationActionInFlight = true
-
-            Task {
-                defer { isCollaborationActionInFlight = false }
-                do {
-                    try await appState.inviteUserToOrganization(
-                        email: trimmedEmail,
-                        role: inviteRole,
-                        orgID: activeOrganizationID
-                    )
-                    inviteEmail = ""
-                    collaborationStatusMessage = "Invite sent."
-                } catch {
-                    collaborationErrorMessage = error.localizedDescription
-                }
-            }
-        }
-
-        private func accept(invitation: PendingOrganizationInvitation) {
-            collaborationErrorMessage = nil
-            collaborationStatusMessage = nil
-            isCollaborationActionInFlight = true
-
-            Task {
-                defer { isCollaborationActionInFlight = false }
-                do {
-                    try await appState.acceptOrganizationInvitation(invitationID: invitation.id)
-                    collaborationStatusMessage = "Access accepted."
-                } catch {
-                    collaborationErrorMessage = error.localizedDescription
-                }
-            }
-        }
-
-        private func revoke(member: OrganizationAccessMember) {
-            guard let activeOrganizationID = appState.activeOrganizationID else { return }
-
-            collaborationErrorMessage = nil
-            collaborationStatusMessage = nil
-            isCollaborationActionInFlight = true
-
-            Task {
-                defer { isCollaborationActionInFlight = false }
-                do {
-                    try await appState.revokeOrganizationMembership(
-                        userID: member.id,
-                        orgID: activeOrganizationID
-                    )
-                    collaborationStatusMessage = "Access revoked."
-                } catch {
-                    collaborationErrorMessage = error.localizedDescription
-                }
-            }
-        }
-
-        private func revokeConfirmationMessage(for member: OrganizationAccessMember) -> String {
-            let memberIdentifier = member.email ?? member.displayName
-            return "\(memberIdentifier) will lose access to this organization and its associated data."
         }
     }
 
@@ -3354,6 +3597,133 @@ struct SessionHubView: View {
         .animation(.easeInOut(duration: 0.18), value: isSearchExpanded)
     }
 
+    @ViewBuilder
+    private func initialSessionTypePickerOverlay(for property: Property) -> some View {
+        ZStack {
+            Color.black.opacity(colorScheme == .light ? 0.52 : 0.68)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                VStack(spacing: 5) {
+                    Text("Session Type")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(headerPrimaryLabel)
+
+                    Text(property.name)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(headerPrimaryLabel)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+
+                    if let addressLine = propertyAddressLine(property) ?? property.address,
+                       !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(addressLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    initialSessionChoiceButton(
+                        title: "Full Documentation",
+                        subtitle: "Guided photos + flags + resolution required",
+                        systemImage: "camera.metering.matrix",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialFullDocumentationEntry(for: property)
+                    }
+                    initialSessionChoiceButton(
+                        title: "Punchlist Visit",
+                        subtitle: "Active/RR items only, no guided requirements",
+                        systemImage: "checklist",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialPunchlistEntry(for: property)
+                    }
+                }
+
+                Button {
+                    dismissInitialSessionTypePicker(for: property)
+                } label: {
+                    Text("Back")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.blue)
+                        .padding(.horizontal, 18)
+                        .frame(height: 38)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 430)
+            .background(colorScheme == .light ? Color(.systemBackground) : Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(colorScheme == .light ? Color.black.opacity(0.12) : Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
+            .padding(.horizontal, 20)
+        }
+        .allowsHitTesting(true)
+    }
+
+    private func initialSessionChoiceButton(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        isEnabled: Bool,
+        disabledCaption: String?,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 17, weight: .semibold))
+                    Text(subtitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                    if let disabledCaption {
+                        Text(disabledCaption)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.82))
+                    }
+                }
+                Spacer(minLength: 0)
+                if isEnabled {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.blue)
+                } else {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.secondary.opacity(0.70))
+                }
+            }
+            .foregroundColor(isEnabled ? headerPrimaryLabel : .secondary)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 82)
+            .background(isEnabled ? Color.blue.opacity(colorScheme == .light ? 0.10 : 0.18) : Color(.tertiarySystemFill))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isEnabled ? Color.blue.opacity(0.30) : Color.secondary.opacity(0.18), lineWidth: 1)
+            )
+            .opacity(isEnabled ? 1 : 0.78)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+
     private func matchesSearch(_ property: Property) -> Bool {
         let query = normalizedSearchQuery
         guard !query.isEmpty else { return true }
@@ -3396,6 +3766,82 @@ struct SessionHubView: View {
     }
 
     @ViewBuilder
+    private func fastLaneOpeningOverlay(for property: Property) -> some View {
+        ZStack {
+            Color.black.opacity(0.46)
+                .ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                Text("Opening Camera")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text(property.name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.78))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+
+                ProgressView()
+                    .tint(.white)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(minWidth: 280, maxWidth: 430)
+            .background(Color.black.opacity(0.82))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+        }
+        .allowsHitTesting(true)
+    }
+
+    private func fastLaneCloseResultOverlay(
+        _ result: AppState.FastRuntimePrototypeCloseResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast-Lane Close Needs Attention")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.white)
+            if let error = result.errorMessage {
+                Text(error)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.88))
+                    .lineLimit(3)
+            } else {
+                Text("Your draft state may need cleanup from Debug Tools.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.88))
+                    .lineLimit(3)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: 430, alignment: .leading)
+        .background(Color.black.opacity(0.84))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .onTapGesture {
+            fastLaneCloseResult = nil
+        }
+    }
+
+    private func millisecondsText(_ value: Double) -> String {
+        String(format: "%.1f ms", value)
+    }
+
+    private func optionalMillisecondsText(_ value: Double?) -> String {
+        guard let value else { return "not run" }
+        return millisecondsText(value)
+    }
+
+    @ViewBuilder
     private func checklistRow(title: String, isComplete: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: isComplete ? "checkmark.circle.fill" : "circle")
@@ -3411,7 +3857,11 @@ struct SessionHubView: View {
     private func openProperty(_ property: Property) {
         // PropertySessionView sets selected property on appear.
         // Avoid duplicating that state write during the navigation push.
-        path.append(.propertySession(propertyID: property.id, resumeDraft: false))
+        path.append(.propertySession(propertyID: property.id, resumeDraft: false, initialSessionType: nil))
+    }
+
+    private func openProperty(_ property: Property, initialSessionType: SessionType) {
+        path.append(.propertySession(propertyID: property.id, resumeDraft: false, initialSessionType: initialSessionType))
     }
 
     private func beginPropertyPressFeedback(propertyID: UUID) {
@@ -3447,6 +3897,13 @@ struct SessionHubView: View {
 
     private func handlePropertyTap(_ property: Property) {
         guard !isOpeningProperty else { return }
+        guard appState.isNetworkAvailable else {
+            showOfflinePropertyEntryAlert = true
+            if pressedPropertyID == property.id {
+                pressedPropertyID = nil
+            }
+            return
+        }
         isOpeningProperty = true
         propertyTapToken += 1
         let tapToken = propertyTapToken
@@ -3458,18 +3915,79 @@ struct SessionHubView: View {
         }
     }
 
-    private func continueAcceptedPropertyTap(_ property: Property, tapToken: Int) {
-        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
-        let latestSession = sessionsForProperty.first
-        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
+    private func continueAcceptedPropertyTap(
+        _ property: Property,
+        tapToken: Int,
+        didFreshEntryPreflight: Bool = false
+    ) {
+        if !didFreshEntryPreflight {
+            Task { @MainActor in
+                let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
+                    propertyID: property.id,
+                    context: "home_property_tap_initial"
+                )
+                guard tapToken == propertyTapToken else { return }
 
-        let pending = pendingSession != nil
-        let latestID = latestSession?.id.uuidString ?? "NONE"
-        let isBaseline = latestSession.map { property.baselineSessionID == $0.id } ?? false
-        let sealed = latestSession?.isSealed ?? false
-        let firstDelivered = latestSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
-        let action = pending ? "promptDeliver" : "openCamera"
-        verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pending) action=\(action)")
+                if let block = decision?.block {
+                    isOpeningProperty = false
+                    propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                        propertyID: property.id,
+                        propertyName: property.name,
+                        block: block
+                    )
+                    if pressedPropertyID == property.id {
+                        pressedPropertyID = nil
+                    }
+                    return
+                }
+
+                continueAcceptedPropertyTap(
+                    property,
+                    tapToken: tapToken,
+                    didFreshEntryPreflight: true
+                )
+            }
+            return
+        }
+
+        let badgeModel = appState.propertyCardBadgeModel(for: property.id)
+        let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
+        let fastDraftResumeState = appState.fastRuntimeDraftResumeState(for: property.id)
+        let hasPendingExport = badgeModel.showPendingExport
+        let hasDraft = badgeModel.showDraft
+        let isFastLaneUploading = appState.isFastRuntimeCompletionUploading(propertyID: property.id)
+
+        let latestID = pendingSession?.id.uuidString ??
+            badgeModel.activeOccupancySessionID?.uuidString ??
+            badgeModel.materialDraftSessionID?.uuidString ??
+            "NONE"
+        let isBaseline = pendingSession.map { property.baselineSessionID == $0.id } ?? false
+        let sealed = pendingSession?.isSealed ?? false
+        let firstDelivered = pendingSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
+        let action: String
+        if isFastLaneUploading {
+            action = "blockFastLaneUploading"
+        } else if pendingSession != nil {
+            action = "promptDeliver"
+        } else if hasPendingExport {
+            action = "openPendingExportGate"
+        } else if fastDraftResumeState != nil {
+            action = "resumeFastLaneDraft"
+        } else if !hasDraft {
+            action = "showSessionTypePicker"
+        } else {
+            action = "openCamera"
+        }
+        verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pendingSession != nil) cachedPendingExport=\(hasPendingExport) draft=\(hasDraft) action=\(action) badgeSource=\(badgeModel.badgeSource)")
+        if isFastLaneUploading {
+            isOpeningProperty = false
+            appState.showHubTransientStatusMessage("Uploading. Finishing this session now.")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
         if let pendingSession {
             isOpeningProperty = false
             pendingExportPromptProperty = property
@@ -3480,10 +3998,186 @@ struct SessionHubView: View {
             }
             return
         }
+        if hasPendingExport {
+            openProperty(property)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
+        if let fastDraftResumeState {
+            if fastDraftResumeState.canResume,
+               let context = fastDraftResumeState.context,
+               let storageRoot = fastDraftResumeState.storageRoot,
+               let summary = fastDraftResumeState.summary {
+                beginFastLaneDraftResume(
+                    property: property,
+                    context: context,
+                    summary: summary,
+                    storageRoot: storageRoot
+                )
+            } else {
+                isOpeningProperty = false
+                fastLaneDraftIssue = FastLaneDraftIssue(
+                    property: property,
+                    message: fastDraftResumeState.errorMessage ?? "Fast-lane draft resume state is unavailable."
+                )
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
+        if !hasDraft {
+            isOpeningProperty = false
+            initialSessionTypePickerProperty = property
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
         openProperty(property)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard tapToken == propertyTapToken else { return }
             if pressedPropertyID == property.id { pressedPropertyID = nil }
+        }
+    }
+
+    private func beginFastLaneDraftResume(
+        property: Property,
+        context: ActiveCaptureContext,
+        summary: AppState.FastRuntimeDraftSummary,
+        storageRoot: URL
+    ) {
+        let buttonTappedAt = Date()
+        fastLaneCloseResult = nil
+        fastLaneOpeningProperty = nil
+        fastLanePreviewRequest = FastRuntimeCameraPreviewRequest(
+            context: context,
+            propertyName: property.name,
+            result: AppState.FastRuntimePrototypeResult(
+                propertyID: property.id,
+                propertyName: property.name,
+                sessionType: summary.sessionType,
+                entryState: .lockedByCurrentUser,
+                lockSessionID: summary.sessionID,
+                entryBlock: nil,
+                isCurrentDeviceOccupiedClaim: true,
+                requiresFallback: false,
+                reason: "fast_runtime_draft_index",
+                contextSource: "fast_runtime_draft_index",
+                context: context,
+                tempStorageRoot: storageRoot,
+                didReleasePrototypeClaim: false,
+                releaseErrorMessage: nil,
+                timings: AppState.FastRuntimePrototypeTimings(
+                    targetSessionID: summary.sessionID,
+                    rpcMilliseconds: 0,
+                    contextMilliseconds: 0,
+                    tempStorageMilliseconds: nil,
+                    releaseMilliseconds: nil,
+                    totalMilliseconds: 0
+                )
+            ),
+            buttonTappedAt: buttonTappedAt,
+            contextReadyAt: buttonTappedAt,
+            previewRequestedAt: Date(),
+            initialCapturedCount: summary.photoCount,
+            storageRoot: storageRoot,
+            isDraftResume: true,
+            initialLocationMode: CameraChromeLocationMode(fastRuntimeRawValue: summary.lastMetadataContext?.locationMode ?? summary.lastLocationMode),
+            initialMetadataContext: summary.lastMetadataContext,
+            initialProfileLocked: summary.photoCount > 0 || appState.fastRuntimeCaptureProfileShouldLock(propertyID: property.id)
+        )
+    }
+
+    private func clearFastLaneDraftsFromIssue() {
+        fastLaneCloseResult = nil
+        Task {
+            let result = await appState.clearFastRuntimePrototypeState()
+            await MainActor.run {
+                fastLaneCloseResult = AppState.FastRuntimePrototypeCloseResult(
+                    propertyID: UUID(),
+                    propertyName: "Fast-Lane Cleanup",
+                    sessionID: UUID(),
+                    draftPersisted: false,
+                    photoCount: 0,
+                    lockAction: "cleanup \(result.claimReleaseSuccessCount)/\(result.claimReleaseAttemptCount)",
+                    tempDiscarded: result.draftFolderDeleted || result.tempFoldersDeletedCount > 0,
+                    draftRootPath: nil,
+                    errorMessage: result.summary,
+                    timings: AppState.FastRuntimePrototypeCloseTimings(
+                        persistMilliseconds: nil,
+                        releaseMilliseconds: nil,
+                        cleanupMilliseconds: nil,
+                        totalMilliseconds: 0
+                    )
+                )
+            }
+        }
+    }
+
+    private func openLegacyPathAfterFastLaneIssue(_ property: Property) {
+        isOpeningProperty = true
+        openProperty(property)
+    }
+
+    @ViewBuilder
+    private func propertyEntryLockPromptOverlay(_ prompt: PropertyEntryLockPrompt) -> some View {
+        ZStack {
+            Color.black.opacity(0.48)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+
+            VStack(spacing: 14) {
+                Text("Session Locked")
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text(prompt.propertyName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                Text(lockPromptMessage(for: prompt.block))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white.opacity(0.86))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+
+                customCapsuleToolbarButton(
+                    title: "Back",
+                    isEnabled: true,
+                    fill: Color.white.opacity(0.10),
+                    stroke: Color.white.opacity(0.25),
+                    label: .white
+                ) {
+                    propertyEntryLockPrompt = nil
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 430)
+            .background(Color.black.opacity(0.84))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+        }
+        .animation(.easeInOut(duration: 0.18), value: propertyEntryLockPrompt?.id)
+    }
+
+    private func lockPromptMessage(for block: AppState.SessionEntryCoordinationBlock) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return AppState.sessionEntryBlockMessage(for: block) { lockedAt in
+            formatter.string(from: lockedAt)
         }
     }
 
@@ -3508,6 +4202,244 @@ struct SessionHubView: View {
     private func dismissPendingExportPrompt() {
         pendingExportPromptProperty = nil
         pendingExportPromptSession = nil
+    }
+
+    private func dismissInitialSessionTypePicker(for property: Property) {
+        guard initialSessionTypePickerProperty?.id == property.id else { return }
+        initialSessionTypePickerProperty = nil
+        isOpeningProperty = false
+        if pressedPropertyID == property.id {
+            pressedPropertyID = nil
+        }
+        selectionHaptic.prepare()
+    }
+
+    private func beginInitialFullDocumentationEntry(for property: Property) {
+        beginInitialSessionEntry(for: property, sessionType: .fullDocumentation)
+    }
+
+    private func beginInitialPunchlistEntry(for property: Property) {
+        beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+    }
+
+    private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
+        guard initialSessionTypePickerProperty?.id == property.id else { return }
+        guard appState.isNetworkAvailable else {
+            showOfflinePropertyEntryAlert = true
+            return
+        }
+        Task { @MainActor in
+            let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
+                propertyID: property.id,
+                context: "home_session_type_picker_entry"
+            )
+            guard initialSessionTypePickerProperty?.id == property.id else { return }
+            if let block = decision?.block {
+                initialSessionTypePickerProperty = nil
+                isOpeningProperty = false
+                propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                    propertyID: property.id,
+                    propertyName: property.name,
+                    block: block
+                )
+                if pressedPropertyID == property.id {
+                    pressedPropertyID = nil
+                }
+                return
+            }
+
+            initialSessionTypePickerProperty = nil
+            isOpeningProperty = true
+            propertyTapToken += 1
+            if pressedPropertyID == property.id {
+                pressedPropertyID = nil
+            }
+            selectionHaptic.impactOccurred()
+            selectionHaptic.prepare()
+            beginFastLaneInitialSessionEntry(for: property, sessionType: sessionType, buttonTappedAt: Date())
+        }
+    }
+
+    private func beginFastLaneInitialSessionEntry(
+        for property: Property,
+        sessionType: SessionType,
+        buttonTappedAt: Date
+    ) {
+        fastLaneCloseResult = nil
+        fastLaneOpeningProperty = property
+        Task {
+            var result = await appState.runFastRuntimePrototype(
+                propertyID: property.id,
+                sessionType: sessionType,
+                prepareTempStorage: true,
+                releaseClaim: false,
+                allowCurrentUserOccupiedContext: false
+            )
+            var contextReadyAt = Date()
+            var blockedMessage: String?
+
+            if !fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType),
+               result.entryState == .lockedByCurrentUser,
+               result.isCurrentDeviceOccupiedClaim {
+                if let resumeState = appState.fastRuntimeDraftResumeState(for: property.id),
+                   resumeState.canResume,
+                   let context = resumeState.context,
+                   let storageRoot = resumeState.storageRoot,
+                   let summary = resumeState.summary,
+                   result.lockSessionID == nil || result.lockSessionID == summary.sessionID {
+                    await MainActor.run {
+                        guard fastLaneOpeningProperty?.id == property.id else { return }
+                        fastLaneOpeningProperty = nil
+                        isOpeningProperty = false
+                        if pressedPropertyID == property.id {
+                            pressedPropertyID = nil
+                        }
+                        beginFastLaneDraftResume(
+                            property: property,
+                            context: context,
+                            summary: summary,
+                            storageRoot: storageRoot
+                        )
+                    }
+                    return
+                }
+
+                let release = await appState.releaseFastRuntimePrototypeCurrentUserClaim(
+                    propertyID: property.id,
+                    requireCurrentDeviceMatch: true
+                )
+                if release.didRelease {
+                    result = await appState.runFastRuntimePrototype(
+                        propertyID: property.id,
+                        sessionType: sessionType,
+                        prepareTempStorage: true,
+                        releaseClaim: false,
+                        allowCurrentUserOccupiedContext: false
+                    )
+                    contextReadyAt = Date()
+                    if !fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType) {
+                        blockedMessage = "Cleared the stale fast-camera claim, but this property is still not ready to open. Please try again."
+                    }
+                } else {
+                    blockedMessage = "This property is already open on this device, and the stale fast-camera claim could not be cleared. Use Debug Tools to clear fast-lane state, then try again."
+                }
+            }
+
+            await MainActor.run {
+                guard fastLaneOpeningProperty?.id == property.id else { return }
+                guard fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType),
+                      let context = result.context else {
+                    fastLaneOpeningProperty = nil
+                    isOpeningProperty = false
+                    if pressedPropertyID == property.id {
+                        pressedPropertyID = nil
+                    }
+                    if let block = fastLaneInitialEntryLockBlock(for: result) {
+                        propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                            propertyID: property.id,
+                            propertyName: property.name,
+                            block: block
+                        )
+                    } else {
+                        appState.showHubTransientStatusMessage(blockedMessage ?? fastLaneInitialEntryBlockedMessage(for: result))
+                    }
+                    return
+                }
+
+                fastLaneOpeningProperty = nil
+                fastLanePreviewRequest = FastRuntimeCameraPreviewRequest(
+                    context: context,
+                    propertyName: result.propertyName,
+                    result: result,
+                    buttonTappedAt: buttonTappedAt,
+                    contextReadyAt: contextReadyAt,
+                    previewRequestedAt: Date(),
+                    initialCapturedCount: 0,
+                    storageRoot: result.tempStorageRoot,
+                    isDraftResume: false,
+                    initialLocationMode: .exterior,
+                    initialMetadataContext: nil,
+                    initialProfileLocked: appState.fastRuntimeCaptureProfileShouldLock(propertyID: property.id)
+                )
+            }
+        }
+    }
+
+    private func fastLaneInitialEntryIsOpenable(
+        _ result: AppState.FastRuntimePrototypeResult,
+        property: Property,
+        sessionType: SessionType
+    ) -> Bool {
+        guard result.entryState == .unlockedAndClaimed,
+              result.requiresFallback == false,
+              result.contextSource == "unlocked_and_claimed",
+              let context = result.context,
+              context.propertyID == property.id,
+              context.sessionID == result.timings.targetSessionID,
+              context.sessionType == sessionType,
+              context.canCapture else {
+            return false
+        }
+        return true
+    }
+
+    private func fastLaneInitialEntryBlockedMessage(for result: AppState.FastRuntimePrototypeResult) -> String {
+        let reason = result.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReason = reason?.lowercased()
+
+        switch result.entryState {
+        case .lockedByCurrentUser?:
+            if normalizedReason == "current_user_occupied" {
+                if result.isCurrentDeviceOccupiedClaim {
+                    return "This property is already open on this device. Use the Draft badge or clear fast-lane state from Debug Tools."
+                }
+                return "This property is already open on your account. Close it on the other device, then try again."
+            }
+            return "This property is already open on this account. Use the draft or clear the fast-lane test state."
+        case .lockedByOtherUser?:
+            return "This property is locked by another user."
+        case .pendingExport?:
+            return "This property is waiting for export to finish."
+        case .staleClaimable?:
+            return "This property needs a quick refresh before opening."
+        case .unlockedAndClaimed?:
+            return "Fast camera could not open cleanly. Please try again."
+        case .unknownRequiresFallback?, nil:
+            if let reason, !reason.isEmpty {
+                return "Unable to confirm property availability: \(reason)"
+            }
+            return "Unable to confirm property availability."
+        }
+    }
+
+    private func fastLaneInitialEntryLockBlock(
+        for result: AppState.FastRuntimePrototypeResult
+    ) -> AppState.SessionEntryCoordinationBlock? {
+        if let entryBlock = result.entryBlock {
+            return entryBlock
+        }
+        switch result.entryState {
+        case .lockedByOtherUser?:
+            return AppState.SessionEntryCoordinationBlock(
+                ownerDescription: "another signed-in user",
+                lockedAt: nil,
+                blockContext: "occupied"
+            )
+        case .lockedByCurrentUser?:
+            return AppState.SessionEntryCoordinationBlock(
+                ownerDescription: result.isCurrentDeviceOccupiedClaim ? "this device" : "your account on another device",
+                lockedAt: nil,
+                blockContext: "occupied"
+            )
+        case .pendingExport?:
+            return AppState.SessionEntryCoordinationBlock(
+                ownerDescription: "another signed-in user",
+                lockedAt: nil,
+                blockContext: "pending_export"
+            )
+        case .staleClaimable?, .unlockedAndClaimed?, .unknownRequiresFallback?, nil:
+            return nil
+        }
     }
 
     private func beginPendingExport(for property: Property, session: Session) {
@@ -3552,6 +4484,21 @@ struct SessionHubView: View {
                     pendingExportPromptProperty = property
                     pendingExportPromptSession = session
                 }
+            }
+        }
+    }
+
+    private func retryUploadOrExport(for property: Property) {
+        guard !retryingPropertyUploadIDs.contains(property.id) else { return }
+        retryingPropertyUploadIDs.insert(property.id)
+        Task {
+            let result = await appState.retryPropertyUploadAndExport(propertyID: property.id)
+            await MainActor.run {
+                retryingPropertyUploadIDs.remove(property.id)
+                propertyUploadRetryAlert = PropertyUploadRetryAlert(
+                    title: result.success ? "Retry Started" : "Retry Not Ready",
+                    message: result.message
+                )
             }
         }
     }
@@ -4605,6 +5552,482 @@ struct SessionHubView: View {
         .buttonStyle(.plain)
         .tint(.clear)
         .disabled(!isEnabled)
+    }
+}
+
+private struct PropertyListTableSection: Equatable, Identifiable {
+    let id: String
+    let title: String?
+    let rows: [PropertyListTableRowModel]
+}
+
+private struct PropertyListTableRowModel: Identifiable {
+    let property: Property
+    let title: String
+    let subtitle: String?
+    let address: String?
+    let hasDraft: Bool
+    let isLocked: Bool
+    let isArchived: Bool
+    let cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    let canRetryUpload: Bool
+    let canOpenMaps: Bool
+    let canMessage: Bool
+    let canCall: Bool
+
+    var id: UUID { property.id }
+}
+
+extension PropertyListTableRowModel: Equatable {
+    static func == (lhs: PropertyListTableRowModel, rhs: PropertyListTableRowModel) -> Bool {
+        lhs.property.id == rhs.property.id &&
+            lhs.property.orgId == rhs.property.orgId &&
+            lhs.property.clientPhone == rhs.property.clientPhone &&
+            lhs.title == rhs.title &&
+            lhs.subtitle == rhs.subtitle &&
+            lhs.address == rhs.address &&
+            lhs.hasDraft == rhs.hasDraft &&
+            lhs.isLocked == rhs.isLocked &&
+            lhs.isArchived == rhs.isArchived &&
+            lhs.cloudGlyph == rhs.cloudGlyph &&
+            lhs.canRetryUpload == rhs.canRetryUpload &&
+            lhs.canOpenMaps == rhs.canOpenMaps &&
+            lhs.canMessage == rhs.canMessage &&
+            lhs.canCall == rhs.canCall
+    }
+}
+
+private struct PropertyListTableView: UIViewRepresentable {
+    let sections: [PropertyListTableSection]
+    let onTap: (Property) -> Void
+    let onManageSessions: (Property) -> Void
+    let onEditContact: (Property) -> Void
+    let onArchiveToggle: (Property) -> Void
+    let onDelete: (Property) -> Void
+    let onRetryUpload: (Property) -> Void
+    let onMaps: (Property) -> Void
+    let onMessage: (Property) -> Void
+    let onCall: (Property) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            sections: sections,
+            onTap: onTap,
+            onManageSessions: onManageSessions,
+            onEditContact: onEditContact,
+            onArchiveToggle: onArchiveToggle,
+            onDelete: onDelete,
+            onRetryUpload: onRetryUpload,
+            onMaps: onMaps,
+            onMessage: onMessage,
+            onCall: onCall
+        )
+    }
+
+    func makeUIView(context: Context) -> UITableView {
+        let tableView = UITableView(frame: .zero, style: .plain)
+        tableView.register(PropertyListTableCell.self, forCellReuseIdentifier: PropertyListTableCell.reuseIdentifier)
+        tableView.dataSource = context.coordinator
+        tableView.delegate = context.coordinator
+        tableView.backgroundColor = .systemBackground
+        tableView.separatorColor = .separator
+        tableView.separatorInset = UIEdgeInsets(top: 0, left: 26, bottom: 0, right: 10)
+        tableView.rowHeight = 82
+        tableView.estimatedRowHeight = 82
+        tableView.sectionHeaderTopPadding = 0
+        tableView.keyboardDismissMode = .onDrag
+        tableView.delaysContentTouches = false
+        return tableView
+    }
+
+    func updateUIView(_ tableView: UITableView, context: Context) {
+        context.coordinator.onTap = onTap
+        context.coordinator.onManageSessions = onManageSessions
+        context.coordinator.onEditContact = onEditContact
+        context.coordinator.onArchiveToggle = onArchiveToggle
+        context.coordinator.onDelete = onDelete
+        context.coordinator.onRetryUpload = onRetryUpload
+        context.coordinator.onMaps = onMaps
+        context.coordinator.onMessage = onMessage
+        context.coordinator.onCall = onCall
+
+        guard context.coordinator.sections != sections else { return }
+        let oldSections = context.coordinator.sections
+        let oldSectionIDs = oldSections.map(\.id)
+        let newSectionIDs = sections.map(\.id)
+        UIView.performWithoutAnimation {
+            context.coordinator.sections = sections
+            let deletedSections = oldSectionIDs.enumerated().compactMap { index, id in
+                newSectionIDs.contains(id) ? nil : index
+            }
+            let insertedSections = newSectionIDs.enumerated().compactMap { index, id in
+                oldSectionIDs.contains(id) ? nil : index
+            }
+            let reloadedSections = newSectionIDs.enumerated().compactMap { index, id -> Int? in
+                guard let oldIndex = oldSectionIDs.firstIndex(of: id),
+                      !deletedSections.contains(oldIndex),
+                      !insertedSections.contains(index),
+                      oldSections[oldIndex] != sections[index] else {
+                    return nil
+                }
+                return index
+            }
+
+            if oldSectionIDs == newSectionIDs {
+                tableView.reloadSections(IndexSet(reloadedSections), with: .none)
+            } else {
+                tableView.performBatchUpdates {
+                    tableView.deleteSections(IndexSet(deletedSections), with: .none)
+                    tableView.insertSections(IndexSet(insertedSections), with: .none)
+                    tableView.reloadSections(IndexSet(reloadedSections), with: .none)
+                }
+            }
+            tableView.layoutIfNeeded()
+        }
+    }
+
+    final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
+        var sections: [PropertyListTableSection]
+        var onTap: (Property) -> Void
+        var onManageSessions: (Property) -> Void
+        var onEditContact: (Property) -> Void
+        var onArchiveToggle: (Property) -> Void
+        var onDelete: (Property) -> Void
+        var onRetryUpload: (Property) -> Void
+        var onMaps: (Property) -> Void
+        var onMessage: (Property) -> Void
+        var onCall: (Property) -> Void
+
+        init(
+            sections: [PropertyListTableSection],
+            onTap: @escaping (Property) -> Void,
+            onManageSessions: @escaping (Property) -> Void,
+            onEditContact: @escaping (Property) -> Void,
+            onArchiveToggle: @escaping (Property) -> Void,
+            onDelete: @escaping (Property) -> Void,
+            onRetryUpload: @escaping (Property) -> Void,
+            onMaps: @escaping (Property) -> Void,
+            onMessage: @escaping (Property) -> Void,
+            onCall: @escaping (Property) -> Void
+        ) {
+            self.sections = sections
+            self.onTap = onTap
+            self.onManageSessions = onManageSessions
+            self.onEditContact = onEditContact
+            self.onArchiveToggle = onArchiveToggle
+            self.onDelete = onDelete
+            self.onRetryUpload = onRetryUpload
+            self.onMaps = onMaps
+            self.onMessage = onMessage
+            self.onCall = onCall
+        }
+
+        func numberOfSections(in tableView: UITableView) -> Int {
+            sections.count
+        }
+
+        func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+            sections[section].rows.count
+        }
+
+        func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+            guard let cell = tableView.dequeueReusableCell(
+                withIdentifier: PropertyListTableCell.reuseIdentifier,
+                for: indexPath
+            ) as? PropertyListTableCell else {
+                return UITableViewCell(style: .default, reuseIdentifier: nil)
+            }
+            let row = sections[indexPath.section].rows[indexPath.row]
+            cell.configure(row)
+            return cell
+        }
+
+        func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+            guard let title = sections[section].title, !title.isEmpty else {
+                return nil
+            }
+            let container = UIView()
+            container.backgroundColor = .systemBackground
+
+            let label = UILabel()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.text = title
+            label.font = .systemFont(ofSize: 14, weight: .semibold)
+            label.textColor = .secondaryLabel
+            container.addSubview(label)
+
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+                label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6)
+            ])
+
+            return container
+        }
+
+        func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+            guard let title = sections[section].title, !title.isEmpty else {
+                return .leastNormalMagnitude
+            }
+            return 30
+        }
+
+        func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+            tableView.deselectRow(at: indexPath, animated: true)
+            let row = sections[indexPath.section].rows[indexPath.row]
+            onTap(row.property)
+        }
+
+        func tableView(
+            _ tableView: UITableView,
+            trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
+        ) -> UISwipeActionsConfiguration? {
+            let row = sections[indexPath.section].rows[indexPath.row]
+            var actions: [UIContextualAction] = []
+
+            if row.canCall {
+                let action = UIContextualAction(style: .normal, title: "Call") { [weak self] _, _, completion in
+                    self?.onCall(row.property)
+                    completion(true)
+                }
+                action.image = UIImage(systemName: "phone.fill")
+                action.backgroundColor = .systemGreen
+                actions.append(action)
+            }
+
+            if row.canMessage {
+                let action = UIContextualAction(style: .normal, title: "Message") { [weak self] _, _, completion in
+                    self?.onMessage(row.property)
+                    completion(true)
+                }
+                action.image = UIImage(systemName: "message.fill")
+                action.backgroundColor = .systemGreen
+                actions.append(action)
+            }
+
+            if row.canOpenMaps {
+                let action = UIContextualAction(style: .normal, title: "Maps") { [weak self] _, _, completion in
+                    self?.onMaps(row.property)
+                    completion(true)
+                }
+                action.image = UIImage(systemName: "map.fill")
+                action.backgroundColor = .systemBlue
+                actions.append(action)
+            }
+
+            guard !actions.isEmpty else { return nil }
+            let configuration = UISwipeActionsConfiguration(actions: actions)
+            configuration.performsFirstActionWithFullSwipe = false
+            return configuration
+        }
+
+        func tableView(
+            _ tableView: UITableView,
+            contextMenuConfigurationForRowAt indexPath: IndexPath,
+            point: CGPoint
+        ) -> UIContextMenuConfiguration? {
+            let row = sections[indexPath.section].rows[indexPath.row]
+            let property = row.property
+            return UIContextMenuConfiguration(identifier: property.id.uuidString as NSString, previewProvider: nil) { [weak self] _ in
+                guard let self else { return nil }
+                let edit = UIAction(title: "Edit Contact", image: UIImage(systemName: "person.crop.circle")) { _ in
+                    self.onEditContact(property)
+                }
+                let retryUpload = UIAction(title: "Retry Upload", image: UIImage(systemName: "arrow.clockwise.icloud")) { _ in
+                    self.onRetryUpload(property)
+                }
+                let archiveTitle = property.isArchived ? "Restore Property" : "Archive Property"
+                let archiveImage = property.isArchived ? "archivebox" : "archivebox.fill"
+                let archive = UIAction(title: archiveTitle, image: UIImage(systemName: archiveImage)) { _ in
+                    self.onArchiveToggle(property)
+                }
+                let delete = UIAction(
+                    title: "Delete Property",
+                    image: UIImage(systemName: "trash"),
+                    attributes: .destructive
+                ) { _ in
+                    self.onDelete(property)
+                }
+                var menuItems: [UIMenuElement] = [edit]
+                if row.canRetryUpload {
+                    menuItems.append(retryUpload)
+                }
+                menuItems.append(contentsOf: [archive, delete])
+                return UIMenu(children: menuItems)
+            }
+        }
+    }
+}
+
+private final class PropertyListTableCell: UITableViewCell {
+    static let reuseIdentifier = "PropertyListTableCell"
+
+    private let titleLabel = UILabel()
+    private let subtitleLabel = UILabel()
+    private let addressLabel = UILabel()
+    private let draftLabel = UILabel()
+    private let lockLabel = UILabel()
+    private let archivedLabel = UILabel()
+    private let textStack = UIStackView()
+    private let rootStack = UIStackView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        configureViews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureViews()
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        titleLabel.attributedText = nil
+        subtitleLabel.text = nil
+        addressLabel.text = nil
+        draftLabel.isHidden = true
+        lockLabel.isHidden = true
+        archivedLabel.isHidden = true
+    }
+
+    func configure(_ row: PropertyListTableRowModel) {
+        titleLabel.attributedText = attributedTitle(row.title, cloudGlyph: row.cloudGlyph)
+        subtitleLabel.text = row.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        subtitleLabel.isHidden = (subtitleLabel.text ?? "").isEmpty
+        addressLabel.text = row.address?.trimmingCharacters(in: .whitespacesAndNewlines)
+        addressLabel.isHidden = (addressLabel.text ?? "").isEmpty
+        lockLabel.isHidden = !row.isLocked
+        archivedLabel.isHidden = !row.isArchived
+        draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft
+    }
+
+    private func configureViews() {
+        backgroundColor = .systemBackground
+        contentView.backgroundColor = .systemBackground
+        selectionStyle = .default
+
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textColor = .label
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.numberOfLines = 1
+
+        [subtitleLabel, addressLabel].forEach { label in
+            label.font = .systemFont(ofSize: 13, weight: .medium)
+            label.textColor = .secondaryLabel
+            label.lineBreakMode = .byTruncatingTail
+            label.numberOfLines = 1
+        }
+
+        draftLabel.text = "Draft"
+        draftLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        draftLabel.textColor = .systemOrange
+        draftLabel.textAlignment = .center
+        draftLabel.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.15)
+        draftLabel.layer.cornerRadius = 14
+        draftLabel.layer.borderWidth = 1
+        draftLabel.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.35).cgColor
+        draftLabel.layer.masksToBounds = true
+        draftLabel.isHidden = true
+
+        lockLabel.text = "Locked"
+        lockLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        lockLabel.textColor = .systemRed
+        lockLabel.textAlignment = .center
+        lockLabel.backgroundColor = UIColor.systemRed.withAlphaComponent(0.13)
+        lockLabel.layer.cornerRadius = 14
+        lockLabel.layer.borderWidth = 1
+        lockLabel.layer.borderColor = UIColor.systemRed.withAlphaComponent(0.32).cgColor
+        lockLabel.layer.masksToBounds = true
+        lockLabel.isHidden = true
+
+        archivedLabel.text = "Archived"
+        archivedLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        archivedLabel.textColor = .secondaryLabel
+        archivedLabel.textAlignment = .center
+        archivedLabel.backgroundColor = UIColor.secondaryLabel.withAlphaComponent(0.12)
+        archivedLabel.layer.cornerRadius = 14
+        archivedLabel.layer.borderWidth = 1
+        archivedLabel.layer.borderColor = UIColor.secondaryLabel.withAlphaComponent(0.26).cgColor
+        archivedLabel.layer.masksToBounds = true
+        archivedLabel.isHidden = true
+
+        textStack.axis = .vertical
+        textStack.alignment = .fill
+        textStack.spacing = 4
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(subtitleLabel)
+        textStack.addArrangedSubview(addressLabel)
+
+        rootStack.axis = .horizontal
+        rootStack.alignment = .top
+        rootStack.spacing = 10
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        rootStack.addArrangedSubview(textStack)
+        rootStack.addArrangedSubview(draftLabel)
+        rootStack.addArrangedSubview(lockLabel)
+        rootStack.addArrangedSubview(archivedLabel)
+
+        contentView.addSubview(rootStack)
+        draftLabel.setContentHuggingPriority(.required, for: .horizontal)
+        draftLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        lockLabel.setContentHuggingPriority(.required, for: .horizontal)
+        lockLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        archivedLabel.setContentHuggingPriority(.required, for: .horizontal)
+        archivedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        NSLayoutConstraint.activate([
+            rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 26),
+            rootStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -26),
+            rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            rootStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -8),
+            draftLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
+            draftLabel.heightAnchor.constraint(equalToConstant: 28),
+            lockLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
+            lockLabel.heightAnchor.constraint(equalToConstant: 28),
+            archivedLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 88),
+            archivedLabel.heightAnchor.constraint(equalToConstant: 28)
+        ])
+    }
+
+    private func attributedTitle(
+        _ title: String,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> NSAttributedString {
+        let result = NSMutableAttributedString(
+            string: title,
+            attributes: [
+                .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                .foregroundColor: UIColor.label
+            ]
+        )
+
+        guard let cloudGlyph else { return result }
+        let glyphColor: UIColor
+        let glyph: String
+        switch cloudGlyph {
+        case .current:
+            glyph = " ✓"
+            glyphColor = .systemBlue
+        case .uploading:
+            glyph = " ↑"
+            glyphColor = .systemBlue
+        case .warning:
+            glyph = " !"
+            glyphColor = .systemOrange
+        }
+        result.append(
+            NSAttributedString(
+                string: glyph,
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                    .foregroundColor: glyphColor
+                ]
+            )
+        )
+        return result
     }
 }
 
@@ -11953,6 +13376,9476 @@ nonisolated private func formattedAge(_ seconds: TimeInterval?) -> String {
     return "\(remainingSeconds)s"
 }
 
+private struct FastRuntimeCameraPreviewRequest: Identifiable {
+    let id = UUID()
+    let context: ActiveCaptureContext
+    let propertyName: String
+    let result: AppState.FastRuntimePrototypeResult
+    let buttonTappedAt: Date
+    let contextReadyAt: Date
+    let previewRequestedAt: Date
+    let initialCapturedCount: Int
+    let storageRoot: URL?
+    let isDraftResume: Bool
+    let initialLocationMode: CameraChromeLocationMode?
+    let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
+    let initialProfileLocked: Bool
+}
+
+private extension CameraChromeLocationMode {
+    init(fastRuntimeRawValue value: String?) {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "interior":
+            self = .interior
+        case "exterior":
+            self = .exterior
+        default:
+            self = .exterior
+        }
+    }
+}
+
+private struct FastLaneDraftIssue: Identifiable {
+    let id = UUID()
+    let property: Property
+    let message: String
+}
+
+private struct PropertyEntryLockPrompt: Identifiable {
+    let id = UUID()
+    let propertyID: UUID
+    let propertyName: String
+    let block: AppState.SessionEntryCoordinationBlock
+}
+
+private struct DebugFastRuntimePrototypeView: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedPropertyID: UUID?
+    @State private var selectedSessionType: SessionType = .fullDocumentation
+    @State private var prepareTempStorage: Bool = true
+    @State private var releaseClaim: Bool = true
+    @State private var allowCurrentUserOccupiedContext: Bool = false
+    @State private var isRunning: Bool = false
+    @State private var isOpeningPrototypePreview: Bool = false
+    @State private var isReleasingCurrentUserClaim: Bool = false
+    @State private var result: AppState.FastRuntimePrototypeResult?
+    @State private var releaseResult: AppState.FastRuntimePrototypeReleaseResult?
+    @State private var previewCloseResult: AppState.FastRuntimePrototypeCloseResult?
+    @State private var prototypeCameraRequest: FastRuntimeCameraPreviewRequest?
+
+    private var availableProperties: [Property] {
+        appState.properties
+            .filter { $0.deletedAt == nil && !$0.isArchived }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Target") {
+                    if availableProperties.isEmpty {
+                        Text("No active properties loaded.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Property", selection: $selectedPropertyID) {
+                            ForEach(availableProperties) { property in
+                                Text(property.name)
+                                    .tag(Optional(property.id))
+                            }
+                        }
+                    }
+
+                    Picker("Session Type", selection: $selectedSessionType) {
+                        Text("Full").tag(SessionType.fullDocumentation)
+                        Text("Punch").tag(SessionType.punchlistVisit)
+                    }
+                    .pickerStyle(.segmented)
+
+                    Toggle("Create Temp Storage", isOn: $prepareTempStorage)
+                    Toggle("Auto-release Claim", isOn: $releaseClaim)
+                    Toggle("Allow Current-user Context", isOn: $allowCurrentUserOccupiedContext)
+                }
+
+                Section("Run") {
+                    Button(isRunning ? "Running Prototype..." : "Run Fast Runtime Prototype") {
+                        runPrototype()
+                    }
+                    .disabled(isRunning || isOpeningPrototypePreview || isReleasingCurrentUserClaim || selectedPropertyID == nil)
+
+                    Button(isReleasingCurrentUserClaim ? "Releasing Claim..." : "Release My Current-user Claim") {
+                        releaseCurrentUserClaim()
+                    }
+                    .disabled(isRunning || isOpeningPrototypePreview || isReleasingCurrentUserClaim || selectedPropertyID == nil)
+                }
+
+                if let releaseResult {
+                    Section("Release Current-user Claim") {
+                        diagnosticRow("Property", releaseResult.propertyName)
+                        diagnosticRow("Probe Session", releaseResult.probeSessionID.uuidString)
+                        diagnosticRow("Lock Session", releaseResult.lockSessionID?.uuidString ?? "none")
+                        diagnosticRow("Entry State", releaseResult.entryState?.rawValue ?? "none")
+                        diagnosticRow("Released", releaseResult.didRelease ? "true" : "false")
+                        diagnosticBlock("Message", releaseResult.message)
+                        if let reason = releaseResult.reason {
+                            diagnosticBlock("Reason", reason)
+                        }
+                        diagnosticRow("RPC", millisecondsText(releaseResult.rpcMilliseconds))
+                        diagnosticRow("Release", optionalMillisecondsText(releaseResult.releaseMilliseconds))
+                        diagnosticRow("Total", millisecondsText(releaseResult.totalMilliseconds))
+                    }
+                }
+
+                if let previewCloseResult {
+                    Section("Prototype Preview Close") {
+                        diagnosticRow("Property", previewCloseResult.propertyName)
+                        diagnosticRow("Session", previewCloseResult.sessionID.uuidString)
+                        diagnosticRow("Draft Persisted", previewCloseResult.draftPersisted ? "true" : "false")
+                        diagnosticRow("Photo Count", "\(previewCloseResult.photoCount)")
+                        diagnosticRow("Lock Action", previewCloseResult.lockAction)
+                        diagnosticRow("Temp Discarded", previewCloseResult.tempDiscarded ? "true" : "false")
+                        diagnosticRow("Draft Root", previewCloseResult.draftRootPath ?? "none")
+                        diagnosticRow("Persist", optionalMillisecondsText(previewCloseResult.timings.persistMilliseconds))
+                        diagnosticRow("Release", optionalMillisecondsText(previewCloseResult.timings.releaseMilliseconds))
+                        diagnosticRow("Cleanup", optionalMillisecondsText(previewCloseResult.timings.cleanupMilliseconds))
+                        diagnosticRow("Total", millisecondsText(previewCloseResult.timings.totalMilliseconds))
+                        if let error = previewCloseResult.errorMessage {
+                            diagnosticBlock("Error", error)
+                        }
+                    }
+                }
+
+                if let result {
+                    if result.context != nil {
+                        Section("Camera Preview") {
+                            Button(isOpeningPrototypePreview ? "Opening Prototype Preview..." : "Open Prototype Camera Preview") {
+                                openPrototypeCameraPreview()
+                            }
+                            .disabled(
+                                isRunning ||
+                                isOpeningPrototypePreview ||
+                                selectedPropertyID == nil ||
+                                result.contextSource != "unlocked_and_claimed"
+                            )
+
+                            if result.contextSource != "unlocked_and_claimed" {
+                                diagnosticBlock(
+                                    "Preview",
+                                    "Prototype camera preview requires a clean unlocked_and_claimed context. Release your current-user claim or choose an idle property, then rerun."
+                                )
+                            }
+                        }
+                    }
+
+                    Section("Result") {
+                        diagnosticRow("Property", result.propertyName)
+                        diagnosticRow("Property ID", result.propertyID.uuidString)
+                        diagnosticRow("Target Session", result.timings.targetSessionID.uuidString)
+                        diagnosticRow("Session Type", result.sessionType.rawValue)
+                        diagnosticRow("Entry State", result.entryState?.rawValue ?? "none")
+                        diagnosticRow("Requires Fallback", result.requiresFallback ? "true" : "false")
+                        diagnosticRow("Context Created", result.context == nil ? "false" : "true")
+                        diagnosticRow("Context Source", result.contextSource)
+                        diagnosticRow("Temp Storage", result.tempStorageRoot?.path ?? "none")
+                        diagnosticRow("Released Claim", result.didReleasePrototypeClaim ? "true" : "false")
+                        if let releaseError = result.releaseErrorMessage {
+                            diagnosticBlock("Release", releaseError)
+                        }
+                        if let reason = result.reason {
+                            diagnosticBlock("Reason", reason)
+                        }
+                    }
+
+                    Section("Timing") {
+                        diagnosticRow("RPC", millisecondsText(result.timings.rpcMilliseconds))
+                        diagnosticRow("Context", millisecondsText(result.timings.contextMilliseconds))
+                        diagnosticRow("Temp Storage", optionalMillisecondsText(result.timings.tempStorageMilliseconds))
+                        diagnosticRow("Release", optionalMillisecondsText(result.timings.releaseMilliseconds))
+                        diagnosticRow("Total", millisecondsText(result.timings.totalMilliseconds))
+                    }
+
+                    if let context = result.context {
+                        Section("ActiveCaptureContext") {
+                            diagnosticRow("Session ID", context.sessionID.uuidString)
+                            diagnosticRow("Property ID", context.propertyID.uuidString)
+                            diagnosticRow("Org ID", context.orgID?.uuidString ?? "none")
+                            diagnosticRow("Owner User", context.ownerUserID?.uuidString ?? "none")
+                            diagnosticRow("Owner Email", context.ownerEmail ?? "none")
+                            diagnosticRow("Owner Device", context.ownerDeviceID ?? "none")
+                            diagnosticRow("Created", formattedDate(context.createdAt))
+                            diagnosticRow("Status", context.status.rawValue)
+                            diagnosticRow("Can Capture", context.canCapture ? "true" : "false")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Fast Runtime Prototype")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                if selectedPropertyID == nil {
+                    selectedPropertyID = availableProperties.first?.id
+                }
+            }
+            .fullScreenCover(item: $prototypeCameraRequest) { request in
+                DebugFastRuntimePrototypeCameraPreviewView(
+                    context: request.context,
+                    propertyName: request.propertyName,
+                    prototypeResult: request.result,
+                    buttonTappedAt: request.buttonTappedAt,
+                    contextReadyAt: request.contextReadyAt,
+                    previewRequestedAt: request.previewRequestedAt,
+                    initialCapturedCount: request.initialCapturedCount,
+                    storageRoot: request.storageRoot,
+                    isDraftResume: request.isDraftResume,
+                    initialLocationMode: request.initialLocationMode,
+                    initialMetadataContext: request.initialMetadataContext,
+                    initialProfileLocked: request.initialProfileLocked,
+                    isDebugMode: true,
+                    onDismiss: { closeResult in
+                        previewCloseResult = closeResult
+                        prototypeCameraRequest = nil
+                    }
+                )
+                .environmentObject(appState)
+                .interactiveDismissDisabled(true)
+            }
+        }
+    }
+
+    private func runPrototype() {
+        guard let selectedPropertyID, !isRunning else { return }
+        isRunning = true
+        result = nil
+        releaseResult = nil
+        previewCloseResult = nil
+        Task {
+            let prototypeResult = await appState.runFastRuntimePrototype(
+                propertyID: selectedPropertyID,
+                sessionType: selectedSessionType,
+                prepareTempStorage: prepareTempStorage,
+                releaseClaim: releaseClaim,
+                allowCurrentUserOccupiedContext: allowCurrentUserOccupiedContext
+            )
+            await MainActor.run {
+                result = prototypeResult
+                isRunning = false
+            }
+        }
+    }
+
+    private func openPrototypeCameraPreview() {
+        guard let selectedPropertyID, !isOpeningPrototypePreview else { return }
+        isOpeningPrototypePreview = true
+        result = nil
+        releaseResult = nil
+        previewCloseResult = nil
+        let buttonTappedAt = Date()
+        Task {
+            let prototypeResult = await appState.runFastRuntimePrototype(
+                propertyID: selectedPropertyID,
+                sessionType: selectedSessionType,
+                prepareTempStorage: prepareTempStorage,
+                releaseClaim: false,
+                allowCurrentUserOccupiedContext: false
+            )
+            let contextReadyAt = Date()
+            await MainActor.run {
+                result = prototypeResult
+                guard let context = prototypeResult.context,
+                      prototypeResult.contextSource == "unlocked_and_claimed" else {
+                    isOpeningPrototypePreview = false
+                    return
+                }
+                prototypeCameraRequest = FastRuntimeCameraPreviewRequest(
+                    context: context,
+                    propertyName: prototypeResult.propertyName,
+                    result: prototypeResult,
+                    buttonTappedAt: buttonTappedAt,
+                    contextReadyAt: contextReadyAt,
+                    previewRequestedAt: Date(),
+                    initialCapturedCount: 0,
+                    storageRoot: prototypeResult.tempStorageRoot,
+                    isDraftResume: false,
+                    initialLocationMode: .exterior,
+                    initialMetadataContext: nil,
+                    initialProfileLocked: appState.fastRuntimeCaptureProfileShouldLock(propertyID: selectedPropertyID)
+                )
+                isOpeningPrototypePreview = false
+            }
+        }
+    }
+
+    private func releaseCurrentUserClaim() {
+        guard let selectedPropertyID, !isReleasingCurrentUserClaim else { return }
+        isReleasingCurrentUserClaim = true
+        result = nil
+        releaseResult = nil
+        previewCloseResult = nil
+        Task {
+            let release = await appState.releaseFastRuntimePrototypeCurrentUserClaim(
+                propertyID: selectedPropertyID
+            )
+            await MainActor.run {
+                releaseResult = release
+                isReleasingCurrentUserClaim = false
+            }
+        }
+    }
+
+    private func millisecondsText(_ value: Double) -> String {
+        String(format: "%.1f ms", value)
+    }
+
+    private func optionalMillisecondsText(_ value: Double?) -> String {
+        guard let value else { return "not run" }
+        return millisecondsText(value)
+    }
+}
+
+private enum FastRuntimeProductionCompleteState: Equatable {
+    case idle
+    case validating
+    case uploading
+    case preparingReport
+    case complete
+    case failed(String)
+
+    var isRunning: Bool {
+        switch self {
+        case .validating, .uploading, .preparingReport:
+            return true
+        case .idle, .complete, .failed:
+            return false
+        }
+    }
+
+    var isComplete: Bool {
+        if case .complete = self { return true }
+        return false
+    }
+}
+
+private enum FastLaneSideControlSheetMode: Identifiable {
+    case activeIssues
+    case guided
+
+    var id: String {
+        switch self {
+        case .activeIssues: return "active_issues"
+        case .guided: return "guided"
+        }
+    }
+}
+
+private struct FastLaneReferenceViewerState: Identifiable {
+    let id = UUID()
+    let title: String
+    let assets: [ReportAsset]
+    let startIndex: Int
+}
+
+private struct FastLaneSharedActionMenuItem: Identifiable {
+    let id = UUID()
+    let title: String
+    var isEnabled: Bool = true
+    let action: () -> Void
+}
+
+private struct FastLaneSharedActionMenuOverlay: View {
+    let rotation: Angle
+    let items: [FastLaneSharedActionMenuItem]
+    let onDismiss: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.55)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onDismiss()
+                }
+
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Actions")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.92))
+                    Spacer(minLength: 0)
+                    Button("Done") {
+                        onDismiss()
+                    }
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white.opacity(0.92))
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(Color.black.opacity(0.20))
+
+                VStack(spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        Button(action: item.action) {
+                            HStack(spacing: 10) {
+                                Text(item.title)
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.95))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.78)
+                                Spacer(minLength: 0)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!item.isEnabled)
+                        .opacity(item.isEnabled ? 1.0 : 0.45)
+
+                        if index != items.count - 1 {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.12))
+                                .frame(height: 1)
+                                .padding(.horizontal, 12)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: 360)
+            .rotationEffect(rotation)
+        }
+    }
+}
+
+private enum FastLaneCaptureIntent: Equatable {
+    case free
+    case guided(UUID)
+    case flagged(UUID)
+    case resolution(UUID)
+    case retake(UUID)
+
+    var source: String {
+        switch self {
+        case .free:
+            return "free"
+        case .guided:
+            return "guided"
+        case .flagged:
+            return "flagged"
+        case .resolution:
+            return "resolution"
+        case .retake:
+            return "retake"
+        }
+    }
+
+    var issueID: UUID? {
+        switch self {
+        case .flagged(let id), .resolution(let id):
+            return id
+        default:
+            return nil
+        }
+    }
+
+    var guidedID: UUID? {
+        switch self {
+        case .guided(let id):
+            return id
+        default:
+            return nil
+        }
+    }
+}
+
+private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
+    let id = UUID()
+    let issueID: UUID
+    let shotID: UUID
+    let reason: String
+    let priority: String
+}
+
+private enum FastLaneFlaggedDecisionStage: Equatable {
+    case primary
+    case reviseObservation
+}
+
+private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
+    let cornerRadius: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isPressed = configuration.isPressed
+
+        configuration.label
+            .scaleEffect(isPressed ? 0.97 : 1.0)
+            .brightness(isPressed ? -0.08 : 0)
+            .overlay {
+                if isPressed {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(0.16))
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay {
+                if isPressed {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+private enum FastLaneCoreChecklistCategory: String, CaseIterable, Identifiable {
+    case overview
+    case elevation
+    case roofline
+    case cladding
+    case foundation
+    case entry
+    case openings
+    case drainage
+    case hardscape
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview:
+            return "Overview"
+        case .elevation:
+            return "Elevation (Center / Left / Right)"
+        case .roofline:
+            return "Roofline / Top"
+        case .cladding:
+            return "Cladding / Facade"
+        case .foundation:
+            return "Foundation / Ground Line"
+        case .entry:
+            return "Entry / Access"
+        case .openings:
+            return "Openings"
+        case .drainage:
+            return "Drainage"
+        case .hardscape:
+            return "Hardscape Interface"
+        }
+    }
+
+    var note: String? {
+        switch self {
+        case .overview, .elevation:
+            return nil
+        case .roofline:
+            return "soffit, fascia, gutter edge"
+        case .cladding:
+            return "siding, facade, wall material"
+        case .foundation:
+            return "foundation, grade, wall interface"
+        case .entry:
+            return "doors, stairs, overhangs"
+        case .openings:
+            return "windows, trim, sealant"
+        case .drainage:
+            return "outlets + termination"
+        case .hardscape:
+            return "paving + slope"
+        }
+    }
+
+    var requiredCount: Int {
+        switch self {
+        case .overview:
+            return 1
+        case .elevation:
+            return 3
+        default:
+            return 0
+        }
+    }
+
+    var showsCompletionIndicator: Bool {
+        self == .overview || self == .elevation
+    }
+
+    static func category(for detailType: String) -> FastLaneCoreChecklistCategory? {
+        switch detailType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "overview":
+            return .overview
+        case "elevation":
+            return .elevation
+        case "roofline", "chimney", "canopy / awning":
+            return .roofline
+        case "cladding / siding", "cladding / facade":
+            return .cladding
+        case "foundation":
+            return .foundation
+        case "entry / porch", "porch", "entry", "storefront", "loading dock":
+            return .entry
+        case "window", "window / glazing":
+            return .openings
+        case "downspout", "downspouts", "utility / hvac", "mechanical equipment", "trash / service area":
+            return .drainage
+        case "driveway / garage", "backyard / patio", "landscaping", "fence / gate", "pool / outdoor amenities", "sidewalk", "exterior stairs / ramp", "exterior stairs", "parking area", "site circulation", "landscape / hardscape", "signage":
+            return .hardscape
+        default:
+            return nil
+        }
+    }
+}
+
+private struct FastLaneCoreChecklistRowState: Identifiable, Equatable {
+    let category: FastLaneCoreChecklistCategory
+    let count: Int
+
+    var id: FastLaneCoreChecklistCategory { category }
+
+    var isComplete: Bool {
+        guard category.requiredCount > 0 else { return false }
+        return count >= category.requiredCount
+    }
+
+    var countLabel: String {
+        guard category.requiredCount > 0 else { return "\(count)" }
+        return "\(min(count, category.requiredCount))/\(category.requiredCount)"
+    }
+}
+
+private struct DebugFastRuntimePrototypeCameraPreviewView: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject private var camera = CameraManager.shared
+    private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
+
+    let context: ActiveCaptureContext
+    let propertyName: String
+    let prototypeResult: AppState.FastRuntimePrototypeResult
+    let buttonTappedAt: Date
+    let contextReadyAt: Date
+    let previewRequestedAt: Date
+    let initialCapturedCount: Int
+    let storageRoot: URL?
+    let isDraftResume: Bool
+    let initialLocationMode: CameraChromeLocationMode?
+    let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
+    let initialProfileLocked: Bool
+    let isDebugMode: Bool
+    let onDismiss: (AppState.FastRuntimePrototypeCloseResult) -> Void
+
+    @State private var previewRunningAt: Date?
+    @State private var releaseStartedAt: Date?
+    @State private var releaseFinishedAt: Date?
+    @State private var isClosing: Bool = false
+    @State private var fastLaneExitIntentActive: Bool = false
+    @State private var isSavingFastCapture: Bool = false
+    @State private var captureFlashVisible: Bool = false
+    @State private var capturedCount: Int = 0
+    @State private var fastLaneCaptureProfileHistoryLocked: Bool = false
+    @State private var captureErrorMessage: String?
+    @State private var lastCapture: FastRuntimePreviewCaptureTiming?
+    @State private var fastStorageRoot: URL?
+    @State private var isTimingExpanded: Bool = false
+    @State private var isRunningCompleteDryRun: Bool = false
+    @State private var isRunningCompleteUpload: Bool = false
+    @State private var isRunningReportPackageDryRun: Bool = false
+    @State private var isRunningReportHandoff: Bool = false
+    @State private var didCompleteUpload: Bool = false
+    @State private var productionCompleteState: FastRuntimeProductionCompleteState = .idle
+    @State private var completeDryRunResult: AppState.FastRuntimeCompleteDryRunResult?
+    @State private var completeUploadResult: AppState.FastRuntimeCompleteUploadResult?
+    @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
+    @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
+    @State private var chromeLocationMode: CameraChromeLocationMode = .exterior
+    @StateObject private var fastDetailTypesModel = FastLaneDetailTypesModel()
+    @StateObject private var fastPanelDetailTypesModel = DetailTypesModel()
+    @StateObject private var locationManager = LocationManager()
+    @State private var fastLaneCaptureProfileState: CaptureProfile = .residential
+    @State private var fastMetadataContext: AppState.FastRuntimeCaptureMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+        captureProfile: CaptureProfile.residential.rawValue,
+        locationMode: "Exterior",
+        building: "B1",
+        elevation: "North",
+        detailType: "Overview",
+        angleIndex: 4
+    )
+    @State private var isShowingFastMetadataPicker: Bool = false
+    @State private var didApplyInitialLocationMode: Bool = false
+    @State private var didLoadFastMetadataOptions: Bool = false
+    @State private var fastBuildingOptions: [String] = FastLaneMetadataOptions.defaultBuildingOptions
+    @State private var fastTradeOptions: [String] = FastLaneMetadataOptions.defaultTradeOptions
+    @State private var lastValidDeviceOrientation: UIDeviceOrientation = .portrait
+    @State private var glyphAngleDegrees: Double = 0
+    @State private var didWarmFastMetadataLists: Bool = false
+    @State private var showFastLaneControlsMenu: Bool = false
+    @State private var showFastLaneGrid: Bool = false
+    @State private var showFastLaneLevel: Bool = false
+    @State private var isFastLaneFrontCamera: Bool = false
+    @State private var showFastLaneManageBuildingsSheet: Bool = false
+    @State private var showFastLaneManageTradesSheet: Bool = false
+    @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
+    @State private var showFastLaneDetailNoteOverlay: Bool = false
+    @State private var showFastLaneSessionActionsSheet: Bool = false
+    @State private var fastLaneSideControlCounts: AppState.FastRuntimePreviewSideControlCounts = .empty
+    @State private var fastLaneSideControlPayload: AppState.FastRuntimePreviewSideControlPayload = .empty
+    @State private var isLoadingFastLaneSideControlSheet: Bool = false
+    @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
+    @State private var fastLaneCaptureIntent: FastLaneCaptureIntent = .free
+    @State private var fastLaneGuidedThumbnailPathByID: [UUID: String] = [:]
+    @State private var fastLaneGuidedReferencePathByID: [UUID: String] = [:]
+    @State private var fastLaneGuidedReferencePathByKey: [String: String] = [:]
+    @State private var fastLaneIssueThumbnailPathByID: [UUID: String] = [:]
+    @State private var fastLaneIssueReferencePathByID: [UUID: String] = [:]
+    @State private var fastLaneMediaHydrationAttemptedKeys: Set<String> = []
+    @State private var fastLaneReferenceViewerState: FastLaneReferenceViewerState?
+    @State private var fastLaneArmedReferenceThumbnail: UIImage?
+    @State private var fastLaneArmedReferencePath: String?
+    @State private var showFastLaneArmedReferenceOverlay: Bool = false
+    @State private var fastLaneReferenceOverlayOpacity: Double = 0.45
+    @State private var showFastLaneArmedReferenceMenu: Bool = false
+    @State private var showFastLaneCoreChecklist: Bool = false
+    @State private var fastLaneCoreChecklistRows: [FastLaneCoreChecklistRowState] =
+        FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
+    @State private var didRefreshFastLaneSideControlCounts: Bool = false
+    @State private var didRefreshFastLaneIssuePayload: Bool = false
+    @State private var isRefreshingFastLaneSideControlCounts: Bool = false
+    @State private var isSyncingFastLanePortalIssueState: Bool = false
+    @State private var didSyncFastLanePortalIssueStateAfterPreview: Bool = false
+    @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
+    @State private var fastLaneSideControlToastText: String?
+    @State private var fastLaneSideControlToastToken: Int = 0
+    @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
+    @State private var fastLaneFlaggedDecisionStage: FastLaneFlaggedDecisionStage = .primary
+    @State private var fastLaneFlaggedRevisionText: String = ""
+    @State private var fastLaneFlaggedRevisionPriority: String = "Medium"
+    @State private var fastLaneRetakeIssueID: UUID?
+    @State private var fastLaneRetakeGuidedID: UUID?
+    @State private var fastLaneGalleryDisplayCount: Int = 0
+    @StateObject private var fastLaneGalleryImageCache = AssetImageCache()
+    @State private var showFastLaneGallery: Bool = false
+    @State private var fastLaneGalleryAssets: [ReportAsset] = []
+    @State private var fastLaneGalleryMetadataByAssetID: [String: FastLaneGalleryMetadata] = [:]
+    @State private var fastLanePreviousGallerySessionID: UUID?
+    @State private var fastLanePreviousGalleryAssets: [ReportAsset] = []
+    @State private var fastLanePreviousGalleryMetadataByAssetID: [String: FastLaneGalleryMetadata] = [:]
+    @State private var fastLaneGalleryThumbnail: UIImage?
+    @State private var fastLaneGalleryThumbnailAssetID: String = ""
+    @State private var fastLaneGalleryRefreshToken = UUID()
+    @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
+    private let glyphRotationAnimation = Animation.interactiveSpring(
+        response: 0.48,
+        dampingFraction: 0.90,
+        blendDuration: 0.18
+    )
+    private static let priorityOptions: [String] = ["Low", "Medium", "High", "Critical"]
+
+    var body: some View {
+        ZStack {
+            CameraChromeView(
+                display: cameraChromeDisplay,
+                zoomSteps: camera.zoomSteps,
+                selectedZoomID: camera.selectedZoomId,
+                actions: cameraChromeActions,
+                previewContent: {
+                    CameraPreviewView(session: camera.session)
+                },
+                overlayContent: {
+                    fastLanePreviewOverlays
+                }
+            )
+
+            if showFastLaneControlsMenu {
+                fastLaneControlsOverlay
+                    .zIndex(80)
+            }
+
+            if showFastLaneArmedReferenceMenu {
+                fastLaneArmedReferenceActionOverlay
+                    .zIndex(82)
+            }
+
+            if showFastLaneDetailNoteOverlay {
+                fastLaneDetailNoteOverlay
+                    .zIndex(90)
+            }
+
+            if showFastLaneSessionActionsSheet {
+                FastLaneSessionActionsSheet(
+                    summary: fastLaneSessionActionsSummary,
+                    isEndingSession: isFastLaneExiting,
+                    endingTitle: fastLaneEndingProgressTitle,
+                    onResume: {
+                        showFastLaneSessionActionsSheet = false
+                    },
+                    onSaveDraftAndExit: {
+                        fastLaneExitIntentActive = true
+                        showFastLaneSessionActionsSheet = false
+                        closePreview()
+                    },
+                    onComplete: {
+                        showFastLaneSessionActionsSheet = false
+                        runProductionComplete()
+                    }
+                )
+                .zIndex(500)
+            }
+
+            if showFastLaneCoreChecklist {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        showFastLaneCoreChecklist = false
+                    }
+                    .zIndex(520)
+
+                FastLaneCoreChecklistSheet(
+                    elevationTitle: CanonicalElevation.normalize(fastMetadataContext.elevation) ?? fastMetadataContext.elevation,
+                    rows: fastLaneCoreChecklistRows,
+                    onClose: {
+                        showFastLaneCoreChecklist = false
+                    }
+                )
+                .padding(.horizontal, 18)
+                .zIndex(525)
+            }
+
+            if let pending = fastLanePendingFlaggedDecision {
+                fastLaneFlaggedDecisionOverlay(pending)
+                    .zIndex(540)
+            }
+        }
+        .onAppear {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            refreshCameraChromeGlyphRotation()
+            loadFastLaneMetadataOptionsIfNeeded()
+            warmFastLaneMetadataListsIfNeeded()
+            if !didApplyInitialLocationMode {
+                let initialContext = fastLaneFreeMetadataContextIfNeeded(
+                    AppState.normalizedFastRuntimeMetadataContext(
+                        initialMetadataContext,
+                        fallbackLocationMode: initialLocationMode?.rawValue,
+                        fallbackPosition: 1
+                    )
+                )
+                fastLaneCaptureProfileState =
+                    CaptureProfile(storedValue: initialContext.captureProfile) ??
+                    inheritedFastLaneCaptureProfile
+                applyFastLaneMetadataContext(initialContext)
+                didApplyInitialLocationMode = true
+            }
+            fastStorageRoot = storageRoot ?? prototypeResult.tempStorageRoot
+            if capturedCount < initialCapturedCount {
+                capturedCount = initialCapturedCount
+            }
+            fastLaneCaptureProfileHistoryLocked = initialProfileLocked || initialCapturedCount > 0
+            primeFastLaneSideControlSnapshot()
+            reloadFastLaneGalleryAssets()
+            shutterHaptic.prepare()
+            locationManager.start()
+            camera.prepareForPreviewAsync()
+            camera.ensurePreviewRunningAsync()
+            if camera.isPreviewRunning, previewRunningAt == nil {
+                previewRunningAt = Date()
+                refreshFastLaneSideControlCountsIfNeeded()
+                scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            refreshCameraChromeGlyphRotation()
+        }
+        .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
+            guard isRunning, previewRunningAt == nil else { return }
+            previewRunningAt = Date()
+            refreshFastLaneSideControlCountsIfNeeded()
+            scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
+        }
+        .onDisappear {
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            locationManager.stop()
+            fastLaneLevelModel.stop()
+        }
+        .onChange(of: showFastLaneLevel) { _, isShowing in
+            if isShowing {
+                fastLaneLevelModel.start()
+            } else {
+                fastLaneLevelModel.stop()
+            }
+        }
+        .sheet(item: $completeDryRunResult) { result in
+            FastRuntimeCompleteDryRunResultView(result: result)
+        }
+        .sheet(item: $completeUploadResult) { result in
+            FastRuntimeCompleteUploadResultView(result: result)
+        }
+        .sheet(item: $reportPackageDryRunResult) { result in
+            FastRuntimeReportPackageDryRunResultView(result: result)
+        }
+        .sheet(item: $reportHandoffResult) { result in
+            FastRuntimeReportHandoffResultView(result: result)
+        }
+        .sheet(isPresented: $isShowingFastMetadataPicker) {
+            FastLaneMetadataFilterSheet(
+                profile: fastLaneCaptureProfile,
+                context: fastMetadataContext,
+                buildingOptions: $fastBuildingOptions,
+                tradeOptions: $fastTradeOptions,
+                detailTypesModel: fastDetailTypesModel,
+                onCancel: {
+                    isShowingFastMetadataPicker = false
+                },
+                onConfirm: { updatedContext in
+                    applyFastLaneMetadataContext(updatedContext)
+                    isShowingFastMetadataPicker = false
+                }
+            )
+        }
+        .sheet(isPresented: $showFastLaneManageBuildingsSheet) {
+            FastLaneManageBuildingsSheet(
+                options: $fastBuildingOptions,
+                selectedBuilding: Binding(
+                    get: { fastMetadataContext.building },
+                    set: { newValue in
+                        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                            locationMode: fastMetadataContext.locationMode,
+                            building: newValue,
+                            elevation: fastMetadataContext.elevation,
+                            detailType: fastMetadataContext.detailType,
+                            trade: fastMetadataContext.trade,
+                            detailNote: fastMetadataContext.detailNote,
+                            priority: fastMetadataContext.priority,
+                            angleIndex: fastMetadataContext.angleIndex
+                        ))
+                    }
+                ),
+                onClose: { showFastLaneManageBuildingsSheet = false }
+            )
+        }
+        .sheet(item: $fastLaneManageDetailMode) { mode in
+            FastLaneManageDetailTypesView(mode: mode, profile: fastLaneCaptureProfile, model: fastDetailTypesModel)
+        }
+        .sheet(isPresented: $showFastLaneManageTradesSheet) {
+            FastLaneManageTradesSheet(
+                options: $fastTradeOptions,
+                selectedTrade: Binding(
+                    get: { fastMetadataContext.trade ?? "" },
+                    set: { newValue in
+                        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                            locationMode: fastMetadataContext.locationMode,
+                            building: fastMetadataContext.building,
+                            elevation: fastMetadataContext.elevation,
+                            detailType: fastMetadataContext.detailType,
+                            trade: newValue,
+                            detailNote: fastMetadataContext.detailNote,
+                            priority: fastMetadataContext.priority,
+                            angleIndex: fastMetadataContext.angleIndex
+                        ))
+                    }
+                ),
+                onClose: { showFastLaneManageTradesSheet = false }
+            )
+        }
+        .fullScreenCover(isPresented: $showFastLaneGallery) {
+            FastLanePhotoLibraryFullscreen(
+                title: propertyName,
+                assets: fastLaneGalleryAssets,
+                metadataByAssetID: fastLaneGalleryMetadataByAssetID,
+                previousSessionID: fastLanePreviousGallerySessionID,
+                previousAssets: fastLanePreviousGalleryAssets,
+                previousMetadataByAssetID: fastLanePreviousGalleryMetadataByAssetID,
+                cache: fastLaneGalleryImageCache,
+                thumbnailRefreshToken: fastLaneGalleryRefreshToken
+            )
+        }
+        .fullScreenCover(item: $fastLaneReferenceViewerState) { state in
+            FastLanePhotoViewer(
+                title: state.title,
+                assets: state.assets,
+                startIndex: state.startIndex,
+                cache: fastLaneGalleryImageCache,
+                viewerToken: state.id.hashValue
+            )
+        }
+        .fullScreenCover(item: $fastLaneSideControlSheetMode) { mode in
+            fastLaneSideControlSheet(for: mode)
+        }
+    }
+
+    @ViewBuilder
+    private func fastLaneSideControlSheet(for mode: FastLaneSideControlSheetMode) -> some View {
+        switch mode {
+        case .activeIssues:
+            ActiveIssuesSheet(
+                mode: .activeIssues,
+                observations: fastLaneSideControlPayload.activeObservations,
+                isHydrating: isLoadingFastLaneSideControlSheet,
+                currentSessionID: context.sessionID,
+                sessionShotIDs: fastLaneCurrentSessionShotIDs(),
+                resolvedThumbnailPathByID: fastLaneIssueThumbnailPathByID,
+                referencePathByID: fastLaneIssueReferencePathByID,
+                angleIndexByIssueID: fastLaneIssueAngleIndexByID(
+                    for: fastLaneSideControlPayload.activeObservations
+                ),
+                allowReferenceFallback: true,
+                captureProfile: fastLaneCaptureProfile,
+                tradeOptions: FastLaneMetadataOptions.canonicalTradeOptions(
+                    fastTradeOptions,
+                    selectedTrade: fastMetadataContext.trade
+                ),
+                buildingOptions: $fastBuildingOptions,
+                detailTypesModel: fastPanelDetailTypesModel,
+                buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                cache: fastLaneGalleryImageCache,
+                compactContextAngle: true,
+                selectionDisabledIssueIDs: fastLaneHandledIssueIDsInCurrentSession(),
+                onClose: {
+                    fastLaneSideControlSheetMode = nil
+                },
+                onSelectIssue: { observation in
+                    armFastLaneIssueCapture(observation, mode: .activeIssues)
+                },
+                onRetakeIssue: { observation in
+                    retakeFastLaneIssueCapture(observation, mode: .activeIssues)
+                },
+                onReclassifyIssue: { observation, building, elevation, detailType in
+                    updateFastLaneObservationClassification(
+                        observation,
+                        building: building,
+                        elevation: elevation,
+                        detailType: detailType
+                    )
+                },
+                loadPortalNotes: { observations, angleIndexByIssueID in
+                    await fastLaneLoadPortalNotes(
+                        observations: observations,
+                        angleIndexByIssueID: angleIndexByIssueID
+                    )
+                }
+            )
+        case .guided:
+            GuidedChecklistOverlay(
+                guidedShots: fastLaneSideControlPayload.guidedShots,
+                retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
+                resolvedThumbnailPathByID: fastLaneGuidedThumbnailPathByID,
+                referencePathByID: fastLaneGuidedReferencePathByID,
+                currentSessionID: context.sessionID,
+                currentSessionStartedAt: context.createdAt,
+                currentSessionEndedAt: nil,
+                currentSessionShotIDs: fastLaneCurrentSessionShotIDs(),
+                canChangeShotLifecycle: context.canCapture,
+                isBaselineSession: false,
+                allowReferenceFallback: true,
+                captureProfile: fastLaneCaptureProfile,
+                buildingOptions: $fastBuildingOptions,
+                detailTypesModel: fastPanelDetailTypesModel,
+                buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                refreshToken: fastLaneGalleryRefreshToken,
+                cache: fastLaneGalleryImageCache,
+                compactContextAngle: true,
+                onClose: {
+                    fastLaneSideControlSheetMode = nil
+                },
+                onSelectGuided: { guidedShot in
+                    armFastLaneGuidedShot(guidedShot)
+                },
+                onSkip: { guidedShot, reason, otherNote in
+                    updateFastLaneGuidedSkip(guidedShot, reason: reason, otherNote: otherNote)
+                },
+                onUndoSkip: { guidedShot in
+                    undoFastLaneGuidedSkip(guidedShot)
+                },
+                onRetake: { guidedShot in
+                    retakeFastLaneGuidedShot(guidedShot)
+                },
+                onRetire: { guidedShot, reason in
+                    retireFastLaneGuidedShot(guidedShot, reason: reason)
+                },
+                onRestoreRetired: { guidedShot in
+                    restoreFastLaneGuidedShot(guidedShot)
+                },
+                onReclassify: { guidedShot, building, elevation, detailType in
+                    updateFastLaneGuidedClassification(
+                        guidedShot,
+                        building: building,
+                        elevation: elevation,
+                        detailType: detailType
+                    )
+                }
+            )
+        }
+    }
+
+    private func fastLaneCurrentSessionShotIDs() -> Set<UUID> {
+        Set(fastLaneLocalShotRecords().map(\.id))
+    }
+
+    private func fastLaneIssueAngleIndexByID(for observations: [Observation]) -> [UUID: Int] {
+        observations.reduce(into: [UUID: Int]()) { partial, observation in
+            if let angle = fastLaneObservationDisplayAngleIndex(observation) {
+                partial[observation.id] = angle
+            }
+        }
+    }
+
+    private func reloadFastLaneSideControlPayloadFromLocalStore() {
+        let payload = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType
+        )
+        let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+        fastLaneSideControlPayload = scopedPayload
+        fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+        refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+    }
+
+    private func fastLaneLoadPortalNotes(
+        observations: [Observation],
+        angleIndexByIssueID: [UUID: Int]
+    ) async -> [UUID: [PortalPunchlistNote]] {
+        guard let activeOrganizationID = appState.activeOrganizationID else {
+            return [:]
+        }
+        return await appState.fetchPortalPunchlistNotes(
+            propertyID: context.propertyID,
+            activeOrganizationID: activeOrganizationID,
+            observations: observations,
+            angleIndexByIssueID: angleIndexByIssueID
+        )
+    }
+
+    private func updateFastLaneGuidedSkip(
+        _ guidedShot: GuidedShot,
+        reason: SkipReason,
+        otherNote: String?
+    ) {
+        if appState.fastRuntimeSetGuidedSkip(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id,
+            reason: reason,
+            otherNote: otherNote
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to skip guided photo")
+        }
+    }
+
+    private func undoFastLaneGuidedSkip(_ guidedShot: GuidedShot) {
+        if appState.fastRuntimeUndoGuidedSkip(
+            propertyID: context.propertyID,
+            guidedShotID: guidedShot.id
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to undo skip")
+        }
+    }
+
+    private func retireFastLaneGuidedShot(_ guidedShot: GuidedShot, reason: String) {
+        if appState.fastRuntimeRetireGuidedShot(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id,
+            reason: reason
+        ) {
+            if fastLaneCaptureIntent.guidedID == guidedShot.id {
+                clearFastLaneArmedCapture()
+            }
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to retire guided photo")
+        }
+    }
+
+    private func restoreFastLaneGuidedShot(_ guidedShot: GuidedShot) {
+        if appState.fastRuntimeRestoreGuidedShot(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to restore guided photo")
+        }
+    }
+
+    private func updateFastLaneGuidedClassification(
+        _ guidedShot: GuidedShot,
+        building: String,
+        elevation: String,
+        detailType: String
+    ) {
+        if appState.fastRuntimeReclassifyGuidedShot(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: fastLaneAngleIndexForContext(
+                building: building,
+                elevation: elevation,
+                detailType: detailType,
+                excludingGuidedShotID: guidedShot.id
+            )
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to reclassify guided photo")
+        }
+    }
+
+    private func updateFastLaneObservationClassification(
+        _ observation: Observation,
+        building: String,
+        elevation: String,
+        detailType: String
+    ) {
+        if appState.fastRuntimeReclassifyObservation(
+            propertyID: context.propertyID,
+            observationID: observation.id,
+            building: building,
+            elevation: elevation,
+            detailType: detailType
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to reclassify issue")
+        }
+    }
+
+    private func reopenFastLaneResolutionObservation(_ observation: Observation) {
+        if appState.fastRuntimeReopenObservation(
+            propertyID: context.propertyID,
+            observationID: observation.id
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to reopen issue")
+        }
+    }
+
+    private var cameraChromeDisplay: CameraChromeDisplayModel {
+        let profile = fastLaneCaptureProfile
+        let accent = fastLaneCaptureProfileAccentColor
+        return CameraChromeDisplayModel(
+            profileTitle: profile.title,
+            profileSystemImage: profile == .residential ? "house.fill" : "building.2.fill",
+            profileAccentColor: accent,
+            isProfileLocked: isFastLaneCaptureProfileLocked,
+            propertyName: propertyName,
+            cloudStatus: fastLaneChromeCloudStatus,
+            showsPunchlistBadge: context.sessionType == .punchlistVisit,
+            metadata: CameraChromeMetadataModel(
+                building: fastMetadataContext.building,
+                orientation: fastMetadataOrientationLabel(for: fastMetadataContext.elevation),
+                showsOrientationDot: chromeLocationMode == .exterior,
+                orientationDotColor: isFastLaneElevationHeadingAligned ? .green : .white,
+                detailType: fastLaneShortShotTypeLabel(fastMetadataContext.detailType),
+                angle: "A\(max(1, fastMetadataContext.angleIndex))",
+                trade: fastMetadataContext.trade,
+                isFilterAvailable: !isFastLaneCaptureIntentArmed
+            ),
+            previewStatusTitle: previewStatusTitle,
+            previewStatusColor: previewStatusColor,
+            isPreviewRunning: camera.isPreviewRunning,
+            isShutterEnabled: canUseFastShutter,
+            isHDVisible: camera.hdSupported,
+            isHDEnabled: camera.effectiveHDEnabled,
+            locationMode: chromeLocationMode,
+            isLocationModeEnabled: !isFastLaneCaptureIntentArmed,
+            sideControls: fastLaneChromeSideControls,
+            savedCount: fastLaneGalleryDisplayCount,
+            thumbnail: fastLaneGalleryThumbnail,
+            ellipsisEnabled: true,
+            hasDetailNote: fastMetadataContext.detailNote != nil,
+            detailNotePriority: fastMetadataContext.priority,
+            armedReference: fastLaneArmedReferenceModel,
+            deviceOrientation: lastValidDeviceOrientation,
+            glyphRotationAngle: .degrees(glyphAngleDegrees)
+        )
+    }
+
+    private func refreshCameraChromeGlyphRotation() {
+        let orientation = UIDevice.current.orientation
+        let newValue: UIDeviceOrientation? = {
+            switch orientation {
+            case .portrait, .portraitUpsideDown:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return orientation
+            default:
+                return nil
+            }
+        }()
+
+        guard let newValue else { return }
+        let target: Double
+        switch newValue {
+        case .landscapeLeft:
+            target = 90
+        case .landscapeRight:
+            target = -90
+        default:
+            target = 0
+        }
+        guard newValue != lastValidDeviceOrientation || abs(glyphAngleDegrees - target) > 0.5 else {
+            return
+        }
+
+        lastValidDeviceOrientation = newValue
+
+        withAnimation(glyphRotationAnimation) {
+            glyphAngleDegrees = target
+        }
+    }
+
+    private var cameraChromeActions: CameraChromeActions {
+        CameraChromeActions(
+            onProfileTapped: {
+                toggleFastLaneCaptureProfileIfAllowed()
+            },
+            onEndTapped: {
+                presentFastLaneSessionActionsSheet()
+            },
+            onMetadataTapped: {
+                guard !isFastLaneCaptureIntentArmed else { return }
+                isShowingFastMetadataPicker = true
+            },
+            onSideControlTapped: { controlID in
+                handleFastLaneSideControlTap(controlID)
+            },
+            onZoomTapped: { step in
+                camera.setZoomStep(step)
+            },
+            onHDTapped: {
+                guard camera.hdSupported, !camera.isCapturing, !isSavingFastCapture else { return }
+                shutterHaptic.impactOccurred(intensity: 0.55)
+                shutterHaptic.prepare()
+                camera.manualHDEnabled.toggle()
+            },
+            onShutterTapped: {
+                shutterHaptic.impactOccurred()
+                shutterHaptic.prepare()
+                beginFastLaneShutter()
+            },
+            onThumbnailTapped: {
+                shutterHaptic.impactOccurred(intensity: 0.45)
+                shutterHaptic.prepare()
+                reloadFastLaneGalleryAssets()
+                showFastLaneGallery = true
+            },
+            onDetailNoteTapped: {
+                shutterHaptic.impactOccurred(intensity: 0.55)
+                shutterHaptic.prepare()
+                showFastLaneDetailNoteOverlay = true
+            },
+            onLocationModeChanged: { mode in
+                guard !isFastLaneCaptureIntentArmed else { return }
+                applyFastLaneLocationMode(mode)
+            },
+            onEllipsisTapped: {
+                showFastLaneControlsMenu = true
+            },
+            onCancelArmedCapture: {
+                shutterHaptic.impactOccurred(intensity: 0.55)
+                shutterHaptic.prepare()
+                clearFastLaneArmedCapture()
+            },
+            onArmedReferenceTapped: {
+                shutterHaptic.impactOccurred(intensity: 0.45)
+                shutterHaptic.prepare()
+                showFastLaneArmedReferenceOverlay.toggle()
+            },
+            onArmedReferenceMenuTapped: {
+                shutterHaptic.impactOccurred(intensity: 0.45)
+                shutterHaptic.prepare()
+                showFastLaneArmedReferenceMenu = true
+            }
+        )
+    }
+
+    private var fastLaneChromeCloudStatus: CameraChromeStatusModel? {
+        return CameraChromeStatusModel(
+            title: previewStatusTitle,
+            systemImage: fastLaneHeaderStatusSystemImage,
+            color: previewStatusColor
+        )
+    }
+
+    private var fastLaneHeaderStatusSystemImage: String {
+        if isFastLaneExiting { return "arrow.down.circle.fill" }
+        if didCompleteUpload { return "checkmark.icloud.fill" }
+        if camera.isPreviewRunning { return "checkmark.circle.fill" }
+        return "camera.fill"
+    }
+
+    private var isFastLaneExiting: Bool {
+        isClosing || fastLaneExitIntentActive
+    }
+
+    private var isFastLaneCaptureIntentArmed: Bool {
+        fastLaneCaptureIntent != .free
+    }
+
+    private var fastLaneArmedReferenceModel: CameraChromeArmedReferenceModel? {
+        guard isFastLaneCaptureIntentArmed else { return nil }
+        return CameraChromeArmedReferenceModel(
+            thumbnail: fastLaneArmedReferenceThumbnail,
+            hasReferenceImage: fastLaneArmedReferencePath != nil
+        )
+    }
+
+    private var fastLaneSessionActionsSummary: FastLaneSessionActionsSummary {
+        FastLaneSessionActionsSummary(
+            guidedRemainingCount: fastLaneSideControlCounts.guidedRemainingCount,
+            flaggedRemainingCount: fastLaneSideControlCounts.activeIssueCount,
+            currentSessionCaptureCount: max(capturedCount, fastLaneGalleryDisplayCount),
+            sessionType: context.sessionType,
+            canComplete: canRunProductionComplete,
+            isComplete: productionCompleteState.isComplete || didCompleteUpload,
+            disabledReason: fastLaneSessionActionsCompleteDisabledReason
+        )
+    }
+
+    private var fastLaneEndingProgressTitle: String {
+        fastLaneCompletionCapturedPhotoCount() > 0 ? "Closing Draft..." : "Closing..."
+    }
+
+    private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
+        let guided = context.sessionType == .punchlistVisit ? 0 : fastLaneSideControlCounts.guidedRemainingCount
+        return (
+            flagged: fastLaneSideControlCounts.activeIssueCount,
+            guided: guided
+        )
+    }
+
+    private var hasFastLaneCompletionRemainingDebt: Bool {
+        let counts = fastLaneCompletionRemainingCounts
+        return counts.flagged > 0 || counts.guided > 0
+    }
+
+    private var fastLaneSessionActionsCompleteDisabledReason: String? {
+        if productionCompleteState.isComplete || didCompleteUpload {
+            return "Session already completed."
+        }
+        if productionCompleteState.isRunning {
+            return productionCompleteStatusText ?? "Completion is already running."
+        }
+        if isFastLaneExiting {
+            return "Session is closing."
+        }
+        if isSavingFastCapture || camera.isCapturing {
+            return "Complete is disabled while the current photo is saving."
+        }
+        if fastLaneCompletionCapturedPhotoCount() == 0 {
+            return "\(AppState.sessionCompletionActionTitle(sessionType: context.sessionType)) is disabled until at least one photo is captured."
+        }
+        if hasFastLaneCompletionRemainingDebt {
+            let counts = fastLaneCompletionRemainingCounts
+            var parts: [String] = []
+            if counts.flagged > 0 {
+                parts.append("\(counts.flagged) flagged")
+            }
+            if counts.guided > 0 {
+                parts.append("\(counts.guided) guided")
+            }
+            return "Complete is disabled until remaining \(parts.joined(separator: ", ")) items are handled."
+        }
+        return nil
+    }
+
+    private var fastLaneCaptureProfile: CaptureProfile {
+        fastLaneCaptureProfileState
+    }
+
+    private var inheritedFastLaneCaptureProfile: CaptureProfile {
+        CaptureProfile(storedValue: initialMetadataContext?.captureProfile) ??
+            appState.properties.first(where: { $0.id == context.propertyID })?.captureProfile ??
+            (appState.selectedProperty?.id == context.propertyID ? appState.selectedProperty?.captureProfile : nil) ??
+            .residential
+    }
+
+    private var isFastLaneCaptureProfileLocked: Bool {
+        fastLaneCaptureProfileHistoryLocked || capturedCount > 0
+    }
+
+    private var fastLaneCaptureProfileAccentColor: Color {
+        switch fastLaneCaptureProfile {
+        case .residential:
+            return Color(red: 0.95, green: 0.56, blue: 0.15)
+        case .commercial:
+            return Color(red: 0.12, green: 0.66, blue: 1.0)
+        }
+    }
+
+    private func toggleFastLaneCaptureProfileIfAllowed() {
+        guard !isFastLaneCaptureProfileLocked else { return }
+        let targetProfile: CaptureProfile = fastLaneCaptureProfile == .residential ? .commercial : .residential
+        fastLaneCaptureProfileState = targetProfile
+        fastDetailTypesModel.resetSelectionsToOverview(for: targetProfile)
+        let currentMode = chromeLocationMode
+        let nextElevation = currentMode == .interior
+            ? "Interior"
+            : (Self.exteriorElevationOptions.contains(fastMetadataContext.elevation) ? fastMetadataContext.elevation : "North")
+        let detailOptions = fastDetailTypesModel.names(for: currentMode, profile: targetProfile)
+        let overview = detailOptions.first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
+            detailOptions.first ??
+            "Overview"
+        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: targetProfile.rawValue,
+            locationMode: currentMode.rawValue,
+            building: fastMetadataContext.building,
+            elevation: nextElevation,
+            detailType: overview,
+            trade: fastMetadataContext.trade,
+            detailNote: fastMetadataContext.detailNote,
+            priority: fastMetadataContext.priority,
+            angleIndex: fastMetadataContext.angleIndex
+        ))
+    }
+
+    private var fastLaneChromeSideControls: [CameraChromeSideControl] {
+        let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
+        let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
+        return [
+            CameraChromeSideControl(
+                id: "active_issues",
+                systemImage: "flag.fill",
+                color: activeIssueCount > 0 ? .red : .white,
+                badgeText: activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
+                accessibilityLabel: "Active issues",
+                isEnabled: true
+            ),
+            CameraChromeSideControl(
+                id: "guided",
+                systemImage: "safari",
+                color: guidedCount > 0 ? .blue : .white,
+                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
+                accessibilityLabel: "Guided",
+                isVisible: context.sessionType != .punchlistVisit,
+                isEnabled: true
+            ),
+            CameraChromeSideControl(
+                id: "checklist",
+                systemImage: "checkmark",
+                accessibilityLabel: "Checklist",
+                isVisible: context.sessionType != .punchlistVisit,
+                isEnabled: true
+            )
+        ]
+    }
+
+    @ViewBuilder
+    private var fastLanePreviewOverlays: some View {
+        if showFastLaneGrid {
+            FastLaneGridOverlay()
+                .stroke(Color.white.opacity(0.44), lineWidth: 1)
+                .allowsHitTesting(false)
+                .zIndex(7)
+        }
+
+        if showFastLaneLevel {
+            FastLaneLevelOverlay(
+                rollDegrees: fastLaneLevelModel.rollDegrees,
+                isLevel: fastLaneLevelModel.isLevel
+            )
+            .rotationEffect(.degrees(glyphAngleDegrees))
+            .allowsHitTesting(false)
+            .zIndex(8)
+        }
+
+        if showFastLaneArmedReferenceOverlay && isFastLaneCaptureIntentArmed {
+            GeometryReader { geo in
+                if let reference = fastLaneArmedReferenceThumbnail {
+                    Image(uiImage: reference)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .opacity(fastLaneReferenceOverlayOpacity)
+                        .allowsHitTesting(false)
+                        .zIndex(10)
+                } else {
+                    Text("No reference available")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.black.opacity(0.62))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .rotationEffect(.degrees(glyphAngleDegrees))
+                        .allowsHitTesting(false)
+                        .zIndex(11)
+                }
+            }
+        }
+
+        if captureFlashVisible {
+            Color.white
+                .opacity(0.32)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+                .zIndex(24)
+        }
+
+        if let stagedNote = fastMetadataContext.detailNote,
+           !stagedNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let isLandscape = lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
+            if isLandscape {
+                fastLaneStagedFlagPill(
+                    text: stagedNote,
+                    priority: fastMetadataContext.priority
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 96)
+                .padding(.horizontal, 18)
+                .rotationEffect(.degrees(glyphAngleDegrees))
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+                .allowsHitTesting(false)
+                .zIndex(55)
+            } else {
+                fastLaneStagedFlagPill(
+                    text: stagedNote,
+                    priority: fastMetadataContext.priority
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 10)
+                .padding(.horizontal, 18)
+                .allowsHitTesting(false)
+                .zIndex(55)
+            }
+        }
+
+        if let captureErrorMessage {
+            Text(captureErrorMessage)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.horizontal, 18)
+                .allowsHitTesting(false)
+                .zIndex(25)
+        }
+
+        if let fastLaneSideControlToastText {
+            Text(fastLaneSideControlToastText)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.horizontal, 18)
+                .rotationEffect(.degrees(glyphAngleDegrees))
+                .allowsHitTesting(false)
+                .zIndex(25)
+        }
+
+        if showFastLaneArmedReferenceOverlay &&
+            isFastLaneCaptureIntentArmed &&
+            fastLaneArmedReferenceThumbnail != nil {
+            VStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    Image(systemName: "circle.lefthalf.filled")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.88))
+                    Slider(value: $fastLaneReferenceOverlayOpacity, in: 0.1...0.9)
+                        .tint(.blue)
+                    Image(systemName: "circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.88))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.horizontal, 26)
+            .padding(.bottom, (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) ? 94 : 74)
+            .rotationEffect(.degrees(glyphAngleDegrees))
+            .zIndex(21)
+        }
+
+        if isDebugMode && isTimingExpanded {
+            timingPanel
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .zIndex(18)
+        }
+
+    }
+
+    private func fastLaneStagedFlagPill(text: String, priority: String?) -> some View {
+        let normalizedPriority = normalizedFastLaneDetailPriority(priority)
+        return HStack(spacing: 8) {
+            if !normalizedPriority.isEmpty {
+                Circle()
+                    .fill(fastLaneDetailPriorityColor(normalizedPriority))
+                    .frame(width: 9, height: 9)
+            }
+            Text(text)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var fastLaneArmedReferenceActionOverlay: some View {
+        let referencePath = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: false)
+        let capturedPath = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: true)
+        return FastLaneSharedActionMenuOverlay(
+            rotation: .degrees(glyphAngleDegrees),
+            items: [
+                FastLaneSharedActionMenuItem(
+                    title: "View Reference Image",
+                    isEnabled: referencePath != nil,
+                    action: {
+                        showFastLaneArmedReferenceMenu = false
+                        showFastLaneArmedReferenceImage(isCaptured: false)
+                    }
+                ),
+                FastLaneSharedActionMenuItem(
+                    title: "View Captured Image",
+                    isEnabled: capturedPath != nil,
+                    action: {
+                        showFastLaneArmedReferenceMenu = false
+                        showFastLaneArmedReferenceImage(isCaptured: true)
+                    }
+                )
+            ],
+            onDismiss: {
+                showFastLaneArmedReferenceMenu = false
+            }
+        )
+    }
+
+    private var fastLaneControlsOverlay: some View {
+        GeometryReader { geo in
+            let panelWidth = min(max(320, geo.size.width - 24), 560)
+            let panelHeight: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 430 : 360
+
+            ZStack {
+                Color.black.opacity(0.46)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showFastLaneControlsMenu = false
+                    }
+
+                VStack {
+                    Spacer(minLength: 0)
+
+                    FastLaneCameraControlsSheet(
+                        glyphRotationAngle: .degrees(glyphAngleDegrees),
+                        flashSetting: camera.flashSetting,
+                        isFrontCamera: isFastLaneFrontCamera,
+                        isGridOn: $showFastLaneGrid,
+                        isLevelOn: $showFastLaneLevel,
+                        onBuildingList: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                showFastLaneManageBuildingsSheet = true
+                            }
+                        },
+                        onInteriorList: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                fastLaneManageDetailMode = .interior
+                            }
+                        },
+                        onExteriorList: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                fastLaneManageDetailMode = .exterior
+                            }
+                        },
+                        onTrades: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                showFastLaneManageTradesSheet = true
+                            }
+                        },
+                        onFlash: {
+                            camera.cycleFlash()
+                        },
+                        onCameraSwap: {
+                            isFastLaneFrontCamera.toggle()
+                            camera.toggleCamera()
+                        }
+                    )
+                    .frame(width: panelWidth, height: panelHeight)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.45), radius: 18, x: 0, y: 10)
+                    .padding(.bottom, max(16, geo.safeAreaInsets.bottom + 12))
+                }
+                .padding(.horizontal, 12)
+            }
+        }
+    }
+
+    private var fastLaneDetailNoteOverlay: some View {
+        FastLaneDetailNoteModal(
+            elevation: fastMetadataContext.elevation,
+            detailType: fastMetadataContext.detailType,
+            existingNote: fastMetadataContext.detailNote ?? "",
+            isNoteEditable: true,
+            tradeOptions: FastLaneMetadataOptions.canonicalTradeOptions(
+                fastTradeOptions,
+                selectedTrade: fastMetadataContext.trade
+            ),
+            priorityOptions: Self.priorityOptions,
+            selectedTrade: Binding(
+                get: { fastMetadataContext.trade ?? "" },
+                set: { newValue in
+                    applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                        locationMode: fastMetadataContext.locationMode,
+                        building: fastMetadataContext.building,
+                        elevation: fastMetadataContext.elevation,
+                        detailType: fastMetadataContext.detailType,
+                        trade: newValue,
+                        detailNote: fastMetadataContext.detailNote,
+                        priority: fastMetadataContext.priority,
+                        angleIndex: fastMetadataContext.angleIndex
+                    ))
+                }
+            ),
+            selectedPriority: Binding(
+                get: {
+                    fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
+                },
+                set: { newValue in
+                    applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                        locationMode: fastMetadataContext.locationMode,
+                        building: fastMetadataContext.building,
+                        elevation: fastMetadataContext.elevation,
+                        detailType: fastMetadataContext.detailType,
+                        trade: fastMetadataContext.trade,
+                        detailNote: fastMetadataContext.detailNote,
+                        priority: newValue,
+                        angleIndex: fastMetadataContext.angleIndex
+                    ))
+                }
+            ),
+            onCancel: {
+                showFastLaneDetailNoteOverlay = false
+            },
+            onSave: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let stagedPriority = fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
+                applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                    locationMode: fastMetadataContext.locationMode,
+                    building: fastMetadataContext.building,
+                    elevation: fastMetadataContext.elevation,
+                    detailType: fastMetadataContext.detailType,
+                    trade: fastMetadataContext.trade,
+                    detailNote: trimmed.isEmpty ? nil : trimmed,
+                    priority: trimmed.isEmpty ? nil : stagedPriority,
+                    angleIndex: fastMetadataContext.angleIndex
+                ))
+                showFastLaneDetailNoteOverlay = false
+            }
+        )
+    }
+
+    private var headerPanel: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Button(isClosing ? "Closing..." : "Close") {
+                    closePreview()
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(Color.black.opacity(0.58))
+                .clipShape(Capsule())
+                .disabled(isClosing || isSavingFastCapture || camera.isCapturing)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(propertyName)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    Text(isDraftResume ? "\(sessionTypeLabel) Draft" : sessionTypeLabel)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.78))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                if isDebugMode {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isTimingExpanded.toggle()
+                        }
+                    } label: {
+                        Text(isTimingExpanded ? "Hide" : "Timing")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.92))
+                            .padding(.horizontal, 10)
+                            .frame(height: 28)
+                            .background(Color.black.opacity(0.58))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 8) {
+                statusBadge(previewStatusTitle, color: previewStatusColor)
+                statusBadge("Saved \(fastLaneGalleryDisplayCount)", color: .white.opacity(0.82))
+                if didCompleteUpload {
+                    statusBadge("Uploaded", color: .green)
+                }
+                if isDebugMode, let total = lastCapture?.totalMilliseconds {
+                    statusBadge("Last \(String(format: "%.0f", total)) ms", color: .white.opacity(0.82))
+                }
+                Spacer(minLength: 0)
+            }
+
+            if isDebugMode && isTimingExpanded {
+                timingPanel
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+    }
+
+    private var previewStatusTitle: String {
+        if isFastLaneExiting { return "Closing" }
+        if didCompleteUpload { return "Current" }
+        return camera.isPreviewRunning ? "Ready" : "Starting"
+    }
+
+    private var previewStatusColor: Color {
+        if isFastLaneExiting { return .white.opacity(0.82) }
+        if didCompleteUpload { return .green }
+        return camera.isPreviewRunning ? .green : .yellow
+    }
+
+    private var shutterPanel: some View {
+        VStack(spacing: 10) {
+            if let captureErrorMessage {
+                Text(captureErrorMessage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 18)
+            }
+
+            if capturedCount > 0 {
+                if isDebugMode {
+                    HStack(spacing: 10) {
+                        Button(isRunningCompleteDryRun ? "Checking..." : "Complete Dry Run") {
+                            runCompleteDryRun()
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.94))
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                        .background(Color.black.opacity(0.58))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                        )
+                        .disabled(isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
+
+                        Button(didCompleteUpload ? "Uploaded" : (isRunningCompleteUpload ? "Uploading..." : "Fast Complete Upload (Experimental)")) {
+                            runCompleteUpload()
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.96))
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                        .background(Color.orange.opacity(0.72))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                        )
+                        .disabled(didCompleteUpload || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
+                    }
+                } else {
+                    productionCompletePanel
+                }
+            }
+
+            if isDebugMode && didCompleteUpload {
+                HStack(spacing: 10) {
+                    Button(isRunningReportPackageDryRun ? "Checking Report..." : "Fast Report Package Dry Run") {
+                        runReportPackageDryRun()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.96))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(Color.green.opacity(0.68))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                    )
+                    .disabled(isRunningReportPackageDryRun || isRunningReportHandoff || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
+
+                    Button(isRunningReportHandoff ? "Handing Off..." : "Fast Report Handoff (Experimental)") {
+                        runReportHandoff()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.96))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(Color.teal.opacity(0.72))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                    )
+                    .disabled(isRunningReportHandoff || isRunningReportPackageDryRun || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
+                }
+            }
+
+            HStack(spacing: 18) {
+                Text("Saved \(fastLaneGalleryDisplayCount)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.88))
+                    .frame(width: 92, alignment: .leading)
+
+                Button {
+                    beginFastLaneShutter()
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color.white.opacity(isSavingFastCapture || camera.isCapturing ? 0.62 : 0.96))
+                            .frame(width: 72, height: 72)
+                        Circle()
+                            .stroke(Color.black.opacity(0.78), lineWidth: 3)
+                            .frame(width: 58, height: 58)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!canUseFastShutter)
+                .accessibilityLabel("Capture photo")
+
+                Text(didCompleteUpload ? "Uploaded" : (isSavingFastCapture || camera.isCapturing ? "Saving" : (isDraftResume ? "Draft" : "Ready")))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(canUseFastShutter ? 0.88 : 0.55))
+                    .frame(width: 92, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 28)
+    }
+
+    private var sessionTypeLabel: String {
+        switch context.sessionType {
+        case .fullDocumentation:
+            return "Full Documentation"
+        case .punchlistVisit:
+            return "Punchlist"
+        }
+    }
+
+    private func statusBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, 9)
+            .frame(height: 24)
+            .background(Color.black.opacity(0.52))
+            .clipShape(Capsule())
+    }
+
+    private var timingPanel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            timingText("Tap -> RPC/context", contextReadyAt.timeIntervalSince(buttonTappedAt) * 1_000)
+            timingText("Context -> preview request", previewRequestedAt.timeIntervalSince(contextReadyAt) * 1_000)
+            timingText("Request -> preview running", previewRunningAt.map { $0.timeIntervalSince(previewRequestedAt) * 1_000 })
+            timingText("Total tap -> preview running", previewRunningAt.map { $0.timeIntervalSince(buttonTappedAt) * 1_000 })
+            Divider()
+                .overlay(Color.white.opacity(0.22))
+            timingText("Shutter -> haptic/visual", lastCapture?.hapticMilliseconds)
+            timingText("Shutter -> image captured", lastCapture?.imageCapturedMilliseconds)
+            timingText("Capture -> temp file", lastCapture?.fileWriteMilliseconds)
+            timingText("Temp file -> metadata", lastCapture?.metadataMilliseconds)
+            timingText("Total shutter -> saved", lastCapture?.totalMilliseconds)
+            timingText("Close handling", releaseFinishedAt.flatMap { finished in
+                releaseStartedAt.map { finished.timeIntervalSince($0) * 1_000 }
+            })
+        }
+        .font(.system(size: 11, weight: .medium, design: .monospaced))
+        .foregroundColor(.white.opacity(0.86))
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.58))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func timingText(_ label: String, _ milliseconds: Double?) -> some View {
+        HStack {
+            Text(label)
+            Spacer(minLength: 8)
+            Text(milliseconds.map { String(format: "%.1f ms", $0) } ?? "pending")
+        }
+    }
+
+    private var canUseFastShutter: Bool {
+        context.canCapture &&
+            camera.isPreviewRunning &&
+            !camera.isCapturing &&
+            !isSavingFastCapture &&
+            !isFastLaneExiting &&
+            !didCompleteUpload &&
+            !productionCompleteState.isRunning
+    }
+
+    private var productionCompletePanel: some View {
+        VStack(spacing: 8) {
+            if case let .failed(message) = productionCompleteState {
+                Text(message)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            HStack(spacing: 10) {
+                Button(productionCompleteButtonTitle) {
+                    runProductionComplete()
+                }
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 20)
+                .frame(height: 42)
+                .background(productionCompleteState.isComplete ? Color.green.opacity(0.74) : Color.blue.opacity(0.84))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(Color.white.opacity(0.26), lineWidth: 1)
+                )
+                .disabled(!canRunProductionComplete)
+
+                if productionCompleteState.isRunning {
+                    ProgressView()
+                        .tint(.white)
+                }
+            }
+
+            if let status = productionCompleteStatusText {
+                Text(status)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.82))
+            }
+        }
+    }
+
+    private var productionCompleteButtonTitle: String {
+        switch productionCompleteState {
+        case .idle, .failed:
+            return "Complete"
+        case .validating:
+            return "Checking..."
+        case .uploading:
+            return "Uploading..."
+        case .preparingReport:
+            return "Preparing Report..."
+        case .complete:
+            return "Complete"
+        }
+    }
+
+    private var productionCompleteStatusText: String? {
+        switch productionCompleteState {
+        case .idle:
+            return nil
+        case .validating:
+            return "Checking saved photos"
+        case .uploading:
+            return "Uploading"
+        case .preparingReport:
+            return "Preparing report"
+        case .complete:
+            return "Complete"
+        case .failed:
+            return "Failed. Your draft is still saved."
+        }
+    }
+
+    private var canRunProductionComplete: Bool {
+        fastLaneCompletionCapturedPhotoCount() > 0 &&
+            !hasFastLaneCompletionRemainingDebt &&
+            !productionCompleteState.isRunning &&
+            !productionCompleteState.isComplete &&
+            !isFastLaneExiting &&
+            !isSavingFastCapture &&
+            !camera.isCapturing
+    }
+
+    private func captureFastLanePhoto() {
+        guard canUseFastShutter else { return }
+        let shutterTappedAt = Date()
+        captureErrorMessage = nil
+        isSavingFastCapture = true
+        captureFlashVisible = true
+        shutterHaptic.impactOccurred()
+        shutterHaptic.prepare()
+        let hapticAt = Date()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            captureFlashVisible = false
+        }
+
+        DispatchQueue.main.async {
+            camera.capturePhoto { data in
+                let imageCapturedAt = Date()
+                guard let data else {
+                    DispatchQueue.main.async {
+                        lastCapture = FastRuntimePreviewCaptureTiming(
+                            shutterTappedAt: shutterTappedAt,
+                            hapticAt: hapticAt,
+                            imageCapturedAt: imageCapturedAt,
+                            savedAt: nil,
+                            saveResult: nil
+                        )
+                        captureErrorMessage = "Capture failed: no image data."
+                        isSavingFastCapture = false
+                    }
+                    return
+                }
+
+                Task {
+                    let capturePreparation = await MainActor.run {
+                        (
+                            metadata: fastLaneMetadataContextForNextCapture(),
+                            intent: fastLaneCaptureIntent,
+                            retakeGuidedID: fastLaneRetakeGuidedID,
+                            retakeIssueID: fastLaneRetakeIssueID
+                        )
+                    }
+                    let saveResult = await appState.saveFastRuntimePrototypeCapture(
+                        data: data,
+                        context: context,
+                        capturedAt: imageCapturedAt,
+                        storageRootOverride: fastStorageRoot,
+                        metadataContext: capturePreparation.metadata
+                    )
+                    if saveResult.success, let savedShot = saveResult.shot {
+                        appState.projectFastRuntimeCaptureToLocalCameraState(
+                            context: context,
+                            shot: savedShot,
+                            guidedID: capturePreparation.intent.guidedID
+                        )
+                        if let retakeIssueID = capturePreparation.retakeIssueID {
+                            await pruneFastLaneRetakenIssueRecords(
+                                issueID: retakeIssueID,
+                                keepingShotID: savedShot.id,
+                                storageRoot: saveResult.storageRoot
+                            )
+                        }
+                        if let retakeGuidedID = capturePreparation.retakeGuidedID {
+                            await pruneFastLaneRetakenGuidedRecords(
+                                guidedID: retakeGuidedID,
+                                keepingShot: savedShot,
+                                storageRoot: saveResult.storageRoot
+                            )
+                        }
+                    }
+                    await MainActor.run {
+                        lastCapture = FastRuntimePreviewCaptureTiming(
+                            shutterTappedAt: shutterTappedAt,
+                            hapticAt: hapticAt,
+                            imageCapturedAt: imageCapturedAt,
+                            savedAt: Date(),
+                            saveResult: saveResult
+                        )
+                        if saveResult.success {
+                            let completedIntent = capturePreparation.intent
+                            fastLaneRetakeGuidedID = nil
+                            fastLaneRetakeIssueID = nil
+                            if !fastLaneCaptureProfileHistoryLocked {
+                                let lockedProfile = fastLaneCaptureProfile
+                                _ = appState.setPropertyCaptureProfileDefault(
+                                    propertyID: context.propertyID,
+                                    profile: lockedProfile
+                                )
+                                _ = appState.setSessionCaptureProfileSnapshot(
+                                    propertyID: context.propertyID,
+                                    sessionID: context.sessionID,
+                                    profile: lockedProfile
+                                )
+                                fastLaneCaptureProfileHistoryLocked = true
+                            }
+                            capturedCount += 1
+                            fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
+                            let nextBaseContext: AppState.FastRuntimeCaptureMetadataContext
+                            if let savedContext = saveResult.shot?.metadataContext {
+                                nextBaseContext = AppState.FastRuntimeCaptureMetadataContext(
+                                    captureProfile: savedContext.captureProfile ?? fastLaneCaptureProfile.rawValue,
+                                    locationMode: savedContext.locationMode,
+                                    building: savedContext.building,
+                                    elevation: savedContext.elevation,
+                                    detailType: savedContext.detailType,
+                                    trade: savedContext.trade,
+                                    detailNote: nil,
+                                    priority: nil,
+                                    angleIndex: max(1, savedContext.angleIndex)
+                                )
+                                chromeLocationMode = CameraChromeLocationMode(fastRuntimeRawValue: savedContext.locationMode)
+                            } else {
+                                nextBaseContext = AppState.FastRuntimeCaptureMetadataContext(
+                                    captureProfile: fastLaneCaptureProfile.rawValue,
+                                    locationMode: fastMetadataContext.locationMode,
+                                    building: fastMetadataContext.building,
+                                    elevation: fastMetadataContext.elevation,
+                                    detailType: fastMetadataContext.detailType,
+                                    trade: fastMetadataContext.trade,
+                                    detailNote: nil,
+                                    priority: nil,
+                                    angleIndex: max(1, fastMetadataContext.angleIndex)
+                                )
+                            }
+                            captureErrorMessage = nil
+                            fastLaneCaptureIntent = .free
+                            clearFastLaneArmedReferenceState()
+                            fastMetadataContext = nextBaseContext.withAngleIndex(
+                                fastLaneAngleIndexForNextCapture(nextBaseContext)
+                            )
+                            reloadFastLaneGalleryAssets()
+                            refreshFastLaneSideControlCounts(force: true)
+                            if case .flagged(let issueID) = completedIntent,
+                               let savedShotID = saveResult.shot?.id {
+                                presentFastLaneFlaggedDecision(issueID: issueID, shotID: savedShotID)
+                            } else if let feedback = fastLanePostCaptureFeedback(for: completedIntent) {
+                                showFastLaneSideControlToast(feedback)
+                            }
+                        } else {
+                            captureErrorMessage = saveResult.errorMessage ?? "Capture save failed."
+                        }
+                        isSavingFastCapture = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func beginFastLaneShutter() {
+        captureFastLanePhoto()
+    }
+
+    private func presentFastLaneSessionActionsSheet() {
+        guard !isFastLaneExiting else { return }
+        showFastLaneControlsMenu = false
+        showFastLaneDetailNoteOverlay = false
+        primeFastLaneSideControlSnapshot()
+        showFastLaneSessionActionsSheet = true
+    }
+
+    private func refreshFastLaneSideControlCountsIfNeeded() {
+        guard !isRefreshingFastLaneSideControlCounts else { return }
+        guard !didRefreshFastLaneSideControlCounts || !didSyncFastLanePortalIssueStateAfterPreview else { return }
+        refreshFastLaneSideControlCounts(force: false)
+    }
+
+    private func scheduleFastLanePortalIssueFollowUpRefreshIfNeeded() {
+        guard !didScheduleFastLanePortalIssueFollowUpRefresh else { return }
+        didScheduleFastLanePortalIssueFollowUpRefresh = true
+        Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            await MainActor.run {
+                guard !isFastLaneExiting else { return }
+                refreshFastLaneSideControlCounts(force: true)
+            }
+        }
+    }
+
+    private func primeFastLaneSideControlSnapshot() {
+        let payload = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType
+        )
+        let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+        fastLaneSideControlPayload = scopedPayload
+        fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+        refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+        didRefreshFastLaneSideControlCounts = true
+        didRefreshFastLaneIssuePayload = true
+    }
+
+    private func refreshFastLaneSideControlCounts(force: Bool) {
+        if !force {
+            guard !isRefreshingFastLaneSideControlCounts else { return }
+        }
+        isRefreshingFastLaneSideControlCounts = true
+        Task {
+            await syncFastLanePortalIssueStateIfAvailable(force: force)
+            let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+            await MainActor.run {
+                let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
+                    resolutionRequiredObservations: [],
+                    activeObservations: issuePayload.activeObservations,
+                    guidedShots: fastLaneSideControlPayload.guidedShots,
+                    retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
+                )
+                let scopedPayload = fastLanePayloadScopedToCurrentFastSession(rawPayload)
+                fastLaneSideControlPayload = scopedPayload
+                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+                didRefreshFastLaneSideControlCounts = true
+                didRefreshFastLaneIssuePayload = true
+            }
+
+            guard context.sessionType != .punchlistVisit else {
+                await MainActor.run {
+                    isRefreshingFastLaneSideControlCounts = false
+                }
+                return
+            }
+
+            let payload = appState.fastRuntimePreviewSideControlPayload(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            let scopedPayload = await MainActor.run {
+                fastLanePayloadScopedToCurrentFastSession(payload)
+            }
+            let counts = await MainActor.run {
+                fastLaneSideControlCounts(from: scopedPayload)
+            }
+            await MainActor.run {
+                fastLaneSideControlPayload = scopedPayload
+                fastLaneSideControlCounts = counts
+                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                isRefreshingFastLaneSideControlCounts = false
+            }
+        }
+    }
+
+    private func syncFastLanePortalIssueStateIfAvailable(force: Bool) async {
+        let activeOrganizationID: UUID? = await MainActor.run {
+            guard force || !didSyncFastLanePortalIssueStateAfterPreview else { return nil }
+            guard !isSyncingFastLanePortalIssueState else { return nil }
+            guard let activeOrganizationID = appState.activeOrganizationID else { return nil }
+            isSyncingFastLanePortalIssueState = true
+            return activeOrganizationID
+        }
+
+        guard let activeOrganizationID else { return }
+        _ = await appState.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+            propertyID: context.propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        await MainActor.run {
+            didSyncFastLanePortalIssueStateAfterPreview = true
+            isSyncingFastLanePortalIssueState = false
+        }
+    }
+
+    private func fastLaneSideControlCounts(
+        from payload: AppState.FastRuntimePreviewSideControlPayload
+    ) -> AppState.FastRuntimePreviewSideControlCounts {
+        let localShots = fastLaneLocalShotRecords()
+        let handledIssueIDs = Set(
+            localShots.compactMap { shot -> UUID? in
+                guard shot.metadataContext?.isFlagged == true else { return nil }
+                return shot.metadataContext?.issueID
+            }
+        )
+        return AppState.FastRuntimePreviewSideControlCounts(
+            resolutionRequiredCount: 0,
+            activeIssueCount: payload.activeObservations.filter {
+                ($0.status == .active || $0.status == .resolutionRequired) &&
+                    !handledIssueIDs.contains($0.id) &&
+                    !fastLaneObservationHandledByCurrentDraft($0, localShots: localShots)
+            }.count,
+            guidedRemainingCount: payload.guidedShots.filter {
+                !$0.isRetired &&
+                    $0.status != .retired &&
+                    !$0.isCompleted &&
+                    $0.skipReason == nil
+            }.count,
+            checklistCount: 0
+        )
+    }
+
+    private func fastLaneObservationHandledByCurrentDraft(
+        _ observation: Observation,
+        localShots: [AppState.FastRuntimePrototypeShotRecord]
+    ) -> Bool {
+        for shot in localShots {
+            if shot.id == observation.linkedShotID { return true }
+            if observation.shots.contains(where: { $0.id == shot.id }) { return true }
+            guard let metadata = shot.metadataContext else { continue }
+            if metadata.issueID == observation.id { return true }
+            guard fastLaneShotCanRepresentIssueHandling(metadata) else { continue }
+            if fastLaneShot(metadata, matchesObservation: observation) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func fastLaneShotCanRepresentIssueHandling(
+        _ metadata: AppState.FastRuntimeCaptureMetadataContext
+    ) -> Bool {
+        if metadata.isFlagged == true { return true }
+        if let source = metadata.captureIntentSource?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           ["flagged", "resolution", "retake"].contains(source) {
+            return true
+        }
+        return fastLaneTrimmedNonEmpty(metadata.detailNote) != nil ||
+            fastLaneTrimmedNonEmpty(metadata.priority) != nil
+    }
+
+    private func fastLaneShot(
+        _ metadata: AppState.FastRuntimeCaptureMetadataContext,
+        matchesObservation observation: Observation
+    ) -> Bool {
+        if !fastLaneMaterialContextMatches(
+            shotBuilding: metadata.building,
+            shotElevation: metadata.elevation,
+            shotDetailType: metadata.detailType,
+            rowBuilding: observation.building,
+            rowElevation: observation.targetElevation,
+            rowDetailType: observation.detailType
+        ) {
+            return false
+        }
+
+        let matchingGuidedAngles = observation.guidedShots
+            .filter {
+                fastLaneMaterialContextMatches(
+                    shotBuilding: metadata.building,
+                    shotElevation: metadata.elevation,
+                    shotDetailType: metadata.detailType,
+                    rowBuilding: $0.building ?? observation.building,
+                    rowElevation: $0.targetElevation ?? observation.targetElevation,
+                    rowDetailType: $0.detailType ?? observation.detailType
+                )
+            }
+            .compactMap(\.angleIndex)
+            .map { max(1, $0) }
+        if !matchingGuidedAngles.isEmpty {
+            return matchingGuidedAngles.contains(max(1, metadata.angleIndex))
+        }
+
+        let shotNote = fastLaneNormalizedComparableText(metadata.detailNote)
+        let observationNotes = [
+            observation.currentReason,
+            observation.note,
+            observation.resolutionStatement,
+            observation.statement
+        ]
+            .map(fastLaneNormalizedComparableText)
+            .filter { !$0.isEmpty }
+        return observationNotes.isEmpty || observationNotes.contains(shotNote)
+    }
+
+    private func fastLaneMaterialContextMatches(
+        shotBuilding: String?,
+        shotElevation: String?,
+        shotDetailType: String?,
+        rowBuilding: String?,
+        rowElevation: String?,
+        rowDetailType: String?
+    ) -> Bool {
+        let shotBuildingKey = normalizedFastLaneComparable(shotBuilding)
+        let shotElevationKey = normalizedFastLaneComparable(CanonicalElevation.normalize(shotElevation ?? "") ?? shotElevation)
+        let shotDetailKey = normalizedFastLaneComparable(shotDetailType)
+        guard !shotBuildingKey.isEmpty, !shotElevationKey.isEmpty, !shotDetailKey.isEmpty else {
+            return false
+        }
+        return shotBuildingKey == normalizedFastLaneComparable(rowBuilding) &&
+            shotElevationKey == normalizedFastLaneComparable(CanonicalElevation.normalize(rowElevation ?? "") ?? rowElevation) &&
+            shotDetailKey == normalizedFastLaneComparable(rowDetailType)
+    }
+
+    private func fastLaneNormalizedComparableText(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private func fastLaneAngleIndexForContext(
+        building rawBuilding: String,
+        elevation rawElevation: String,
+        detailType rawDetailType: String,
+        excludingGuidedShotID: UUID? = nil
+    ) -> Int {
+        let building = normalizedFastLaneComparable(rawBuilding)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(rawElevation) ?? rawElevation)
+        let detail = normalizedFastLaneComparable(rawDetailType)
+        guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { return 1 }
+
+        var usedAngles = Set<Int>()
+        func reserve(
+            building reserveBuilding: String?,
+            elevation reserveElevation: String?,
+            detailType reserveDetailType: String?,
+            angleIndex reserveAngle: Int?
+        ) {
+            guard normalizedFastLaneComparable(reserveBuilding) == building,
+                  normalizedFastLaneComparable(CanonicalElevation.normalize(reserveElevation ?? "") ?? reserveElevation) == elevation,
+                  normalizedFastLaneComparable(reserveDetailType) == detail else {
+                return
+            }
+            usedAngles.insert(max(1, reserveAngle ?? 1))
+        }
+
+        for shot in fastLaneLocalShotRecords() {
+            guard let metadata = shot.metadataContext else { continue }
+            reserve(
+                building: metadata.building,
+                elevation: metadata.elevation,
+                detailType: metadata.detailType,
+                angleIndex: metadata.angleIndex
+            )
+        }
+
+        let payload = fastLaneSideControlPayload
+        for guided in payload.guidedShots + payload.retiredGuidedShots where guided.id != excludingGuidedShotID {
+            reserve(
+                building: guided.building,
+                elevation: guided.targetElevation,
+                detailType: guided.detailType,
+                angleIndex: guided.angleIndex
+            )
+        }
+        for observation in payload.activeObservations {
+            for guided in observation.guidedShots {
+                reserve(
+                    building: guided.building ?? observation.building,
+                    elevation: guided.targetElevation ?? observation.targetElevation,
+                    detailType: guided.detailType ?? observation.detailType,
+                    angleIndex: guided.angleIndex
+                )
+            }
+        }
+        for reservation in appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID) {
+            reserve(
+                building: reservation.building,
+                elevation: reservation.elevation,
+                detailType: reservation.detailType,
+                angleIndex: reservation.angleIndex
+            )
+        }
+
+        var nextAngle = 1
+        while usedAngles.contains(nextAngle) {
+            nextAngle += 1
+        }
+        return nextAngle
+    }
+
+    private func fastLaneAngleIndexForNextCapture(
+        _ metadata: AppState.FastRuntimeCaptureMetadataContext
+    ) -> Int {
+        switch fastLaneCaptureIntent {
+        case .guided, .flagged, .resolution, .retake:
+            return max(1, metadata.angleIndex)
+        case .free:
+            break
+        }
+
+        let building = normalizedFastLaneComparable(metadata.building)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
+        let detail = normalizedFastLaneComparable(metadata.detailType)
+        guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else {
+            return 1
+        }
+
+        var usedAngles = Set<Int>()
+        for shot in fastLaneLocalShotRecords() {
+            guard let shotMetadata = shot.metadataContext else { continue }
+            guard normalizedFastLaneComparable(shotMetadata.building) == building,
+                  normalizedFastLaneComparable(CanonicalElevation.normalize(shotMetadata.elevation) ?? shotMetadata.elevation) == elevation,
+                  normalizedFastLaneComparable(shotMetadata.detailType) == detail else {
+                continue
+            }
+            usedAngles.insert(max(1, shotMetadata.angleIndex))
+        }
+        func reserveGuidedAngles(from guidedShots: [GuidedShot]) {
+            for guidedShot in guidedShots {
+                guard normalizedFastLaneComparable(guidedShot.building) == building,
+                      normalizedFastLaneComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation) == elevation,
+                      normalizedFastLaneComparable(guidedShot.detailType) == detail else {
+                    continue
+                }
+                usedAngles.insert(max(1, guidedShot.angleIndex ?? 1))
+            }
+        }
+        func reserveIssueAngles(from observations: [Observation]) {
+            for observation in observations {
+                for guidedShot in observation.guidedShots {
+                    guard normalizedFastLaneComparable(guidedShot.building ?? observation.building) == building,
+                          normalizedFastLaneComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? observation.targetElevation ?? "") ?? (guidedShot.targetElevation ?? observation.targetElevation)) == elevation,
+                          normalizedFastLaneComparable(guidedShot.detailType ?? observation.detailType) == detail else {
+                        continue
+                    }
+                    usedAngles.insert(max(1, guidedShot.angleIndex ?? 1))
+                }
+            }
+        }
+        func reserveAppStateAngles(_ reservations: [AppState.FastRuntimeAngleReservation]) {
+            for reservation in reservations {
+                guard normalizedFastLaneComparable(reservation.building) == building,
+                      normalizedFastLaneComparable(CanonicalElevation.normalize(reservation.elevation) ?? reservation.elevation) == elevation,
+                      normalizedFastLaneComparable(reservation.detailType) == detail else {
+                    continue
+                }
+                usedAngles.insert(max(1, reservation.angleIndex))
+            }
+        }
+
+        reserveGuidedAngles(from: fastLaneSideControlPayload.guidedShots)
+        reserveIssueAngles(from: fastLaneSideControlPayload.activeObservations)
+        reserveAppStateAngles(appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID))
+        let latestPayload = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType
+        )
+        let latestScopedPayload = fastLanePayloadScopedToCurrentFastSession(latestPayload)
+        reserveGuidedAngles(from: latestScopedPayload.guidedShots)
+        reserveIssueAngles(from: latestScopedPayload.activeObservations)
+
+        var nextAngle = 1
+        while usedAngles.contains(nextAngle) {
+            nextAngle += 1
+        }
+        return nextAngle
+    }
+
+    private func fastLanePayloadScopedToCurrentFastSession(
+        _ payload: AppState.FastRuntimePreviewSideControlPayload
+    ) -> AppState.FastRuntimePreviewSideControlPayload {
+        guard context.sessionType != .punchlistVisit else {
+            return AppState.FastRuntimePreviewSideControlPayload(
+                resolutionRequiredObservations: [],
+                activeObservations: payload.activeObservations,
+                guidedShots: [],
+                retiredGuidedShots: []
+            )
+        }
+
+        let localShots = fastLaneLocalShotRecords()
+        let guided = payload.guidedShots.map { guidedShot in
+            fastLaneGuidedShotScopedToCurrentSession(guidedShot, localShots: localShots)
+        }
+        let guidedKeys = Set(guided.map(fastLaneGuidedComparisonKey))
+        let currentSessionGuidedRows = localShots.compactMap { shot -> GuidedShot? in
+            guard shot.metadataContext?.isGuided == true else { return nil }
+            guard shot.metadataContext?.issueID == nil else { return nil }
+            guard let row = fastLaneGuidedShotRow(from: shot) else { return nil }
+            guard !guidedKeys.contains(fastLaneGuidedComparisonKey(row)) else { return nil }
+            return row
+        }
+        let retired = payload.retiredGuidedShots.map { guidedShot in
+            fastLaneGuidedShotScopedToCurrentSession(guidedShot, localShots: localShots)
+        }
+        let existingActiveIDs = Set(payload.activeObservations.map(\.id))
+        let localIssues = fastLaneMergedObservationRows(from: localShots.compactMap(fastLaneObservationRow))
+        let localIssuesByID = localIssues.reduce(into: [UUID: Observation]()) { partial, observation in
+            partial[observation.id] = observation
+        }
+        let scopedActive = payload.activeObservations.map { observation in
+            fastLaneObservationScopedToCurrentSession(
+                observation,
+                localObservation: localIssuesByID[observation.id]
+            )
+        }
+        let localActive = localIssues.filter {
+            !existingActiveIDs.contains($0.id)
+        }
+        return AppState.FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: [],
+            activeObservations: scopedActive + localActive,
+            guidedShots: guided + currentSessionGuidedRows,
+            retiredGuidedShots: retired
+        )
+    }
+
+    private func fastLaneGuidedComparisonKey(_ guidedShot: GuidedShot) -> String {
+        let building = normalizedFastLaneComparable(guidedShot.building)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation)
+        let detail = normalizedFastLaneComparable(guidedShot.detailType)
+        return "\(building)|\(elevation)|\(detail)|\(max(1, guidedShot.angleIndex ?? 1))"
+    }
+
+    private func fastLaneGuidedShotRow(from shot: AppState.FastRuntimePrototypeShotRecord) -> GuidedShot? {
+        guard let metadata = shot.metadataContext else { return nil }
+        let title = fastLaneConciseContextLabel(
+            building: metadata.building,
+            elevation: metadata.elevation,
+            detailType: metadata.detailType
+        )
+        return GuidedShot(
+            id: shot.id,
+            title: title.isEmpty ? "Guided Shot" : title,
+            building: metadata.building,
+            targetElevation: metadata.elevation,
+            detailType: metadata.detailType,
+            angleIndex: metadata.angleIndex,
+            referenceImageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+            referenceImagePath: fastLaneResolvedLocalPath(for: shot),
+            shot: Shot(
+                id: shot.id,
+                capturedAt: shot.capturedAt,
+                imageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+                note: metadata.detailNote
+            ),
+            isCompleted: true
+        )
+    }
+
+    private func fastLaneObservationRow(from shot: AppState.FastRuntimePrototypeShotRecord) -> Observation? {
+        guard let metadata = shot.metadataContext,
+              metadata.isFlagged == true,
+              let issueID = metadata.issueID else {
+            return nil
+        }
+        let status = Observation.Status.status(from: metadata.issueStatus)
+        return Observation(
+            id: issueID,
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            createdAt: shot.capturedAt,
+            updatedAt: shot.capturedAt,
+            statement: metadata.detailNote ?? metadata.detailType,
+            status: status,
+            linkedShotID: shot.id,
+            resolutionPhotoRef: status == .resolutionRequired ? fastLaneResolvedLocalPath(for: shot) : nil,
+            resolutionStatement: status == .resolutionRequired ? metadata.detailNote : nil,
+            building: metadata.building,
+            targetElevation: metadata.elevation,
+            detailType: metadata.detailType,
+            priority: metadata.priority,
+            trade: metadata.trade,
+            currentReason: metadata.detailNote,
+            note: metadata.detailNote,
+            shots: [
+                Shot(
+                    id: shot.id,
+                    capturedAt: shot.capturedAt,
+                    imageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+                    note: metadata.detailNote
+                )
+            ],
+            guidedShots: [
+                GuidedShot(
+                    id: shot.id,
+                    title: fastLaneConciseContextLabel(
+                        building: metadata.building,
+                        elevation: metadata.elevation,
+                        detailType: metadata.detailType
+                    ),
+                    building: metadata.building,
+                    targetElevation: metadata.elevation,
+                    detailType: metadata.detailType,
+                    angleIndex: metadata.angleIndex,
+                    referenceImageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+                    referenceImagePath: fastLaneResolvedLocalPath(for: shot),
+                    shot: Shot(
+                        id: shot.id,
+                        capturedAt: shot.capturedAt,
+                        imageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+                        note: metadata.detailNote
+                    ),
+                    isCompleted: true
+                )
+            ]
+        )
+    }
+
+    private func fastLaneMergedObservationRows(from observations: [Observation]) -> [Observation] {
+        var mergedByID: [UUID: Observation] = [:]
+        for observation in observations {
+            guard var existing = mergedByID[observation.id] else {
+                mergedByID[observation.id] = observation
+                continue
+            }
+            if observation.updatedAt > existing.updatedAt {
+                let oldShots = existing.shots
+                let oldGuided = existing.guidedShots
+                let oldStatus = existing.status
+                existing = observation
+                existing.status = fastLanePreferredObservationWorkflowStatus(oldStatus, observation.status)
+                for shot in oldShots where !existing.shots.contains(where: { $0.id == shot.id }) {
+                    existing.shots.append(shot)
+                }
+                for guided in oldGuided where !existing.guidedShots.contains(where: { $0.id == guided.id }) {
+                    existing.guidedShots.append(guided)
+                }
+            } else {
+                for shot in observation.shots where !existing.shots.contains(where: { $0.id == shot.id }) {
+                    existing.shots.append(shot)
+                }
+                for guided in observation.guidedShots where !existing.guidedShots.contains(where: { $0.id == guided.id }) {
+                    existing.guidedShots.append(guided)
+                }
+                existing.updatedAt = max(existing.updatedAt, observation.updatedAt)
+                existing.status = fastLanePreferredObservationWorkflowStatus(existing.status, observation.status)
+            }
+            existing.shots.sort { $0.capturedAt < $1.capturedAt }
+            existing.guidedShots.sort { lhs, rhs in
+                if (lhs.shot?.capturedAt ?? .distantPast) != (rhs.shot?.capturedAt ?? .distantPast) {
+                    return (lhs.shot?.capturedAt ?? .distantPast) < (rhs.shot?.capturedAt ?? .distantPast)
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            mergedByID[observation.id] = existing
+        }
+        return Array(mergedByID.values).sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    private func fastLanePreferredObservationWorkflowStatus(
+        _ lhs: Observation.Status,
+        _ rhs: Observation.Status
+    ) -> Observation.Status {
+        if lhs == rhs { return lhs }
+        if lhs == .pendingReview || rhs == .pendingReview { return .pendingReview }
+        if lhs == .resolved || rhs == .resolved { return .resolved }
+        if lhs == .resolutionRequired || rhs == .resolutionRequired { return .resolutionRequired }
+        return .active
+    }
+
+    private func fastLaneObservationScopedToCurrentSession(
+        _ observation: Observation,
+        localObservation: Observation?
+    ) -> Observation {
+        guard let localObservation else { return observation }
+        var scoped = observation
+        if localObservation.status != .active || scoped.status == .active {
+            scoped.status = localObservation.status
+        }
+        scoped.linkedShotID = localObservation.linkedShotID ?? scoped.linkedShotID
+        scoped.updatedInSessionID = localObservation.updatedInSessionID ?? scoped.updatedInSessionID
+        scoped.resolvedInSessionID = localObservation.resolvedInSessionID ?? scoped.resolvedInSessionID
+        if fastLaneTrimmedNonEmpty(scoped.resolutionPhotoRef) == nil {
+            scoped.resolutionPhotoRef = localObservation.resolutionPhotoRef
+        }
+        if fastLaneTrimmedNonEmpty(scoped.resolutionStatement) == nil {
+            scoped.resolutionStatement = localObservation.resolutionStatement
+        }
+        if fastLaneTrimmedNonEmpty(scoped.currentReason) == nil {
+            scoped.currentReason = localObservation.currentReason
+        }
+        if fastLaneTrimmedNonEmpty(scoped.note) == nil {
+            scoped.note = localObservation.note
+        }
+        if fastLaneTrimmedNonEmpty(scoped.priority) == nil {
+            scoped.priority = localObservation.priority
+        }
+        if fastLaneTrimmedNonEmpty(scoped.trade) == nil {
+            scoped.trade = localObservation.trade
+        }
+        scoped.updatedAt = max(scoped.updatedAt, localObservation.updatedAt)
+
+        let existingShotIDs = Set(scoped.shots.map(\.id))
+        for shot in localObservation.shots where !existingShotIDs.contains(shot.id) {
+            scoped.shots.append(shot)
+        }
+        let existingGuidedIDs = Set(scoped.guidedShots.map(\.id))
+        for guided in localObservation.guidedShots where !existingGuidedIDs.contains(guided.id) {
+            scoped.guidedShots.append(guided)
+        }
+        return scoped
+    }
+
+    private func fastLaneHandledIssueIDsInCurrentSession() -> Set<UUID> {
+        Set(
+            fastLaneLocalShotRecords().compactMap { shot -> UUID? in
+                guard shot.metadataContext?.isFlagged == true else { return nil }
+                return shot.metadataContext?.issueID
+            }
+        )
+    }
+
+    private func fastLaneGuidedShotScopedToCurrentSession(
+        _ guidedShot: GuidedShot,
+        localShots: [AppState.FastRuntimePrototypeShotRecord]
+    ) -> GuidedShot {
+        var scoped = guidedShot
+        let historicalReferencePath = fastLaneGuidedReferencePath(for: guidedShot)
+        if fastLaneTrimmedNonEmpty(scoped.referenceImageLocalIdentifier) == nil {
+            scoped.referenceImageLocalIdentifier = historicalReferencePath
+        }
+        if fastLaneTrimmedNonEmpty(scoped.referenceImagePath) == nil {
+            scoped.referenceImagePath = historicalReferencePath
+        }
+        scoped.shot = nil
+        scoped.isCompleted = false
+        if scoped.skipSessionID != context.sessionID {
+            scoped.skipReason = nil
+            scoped.skipReasonNote = nil
+            scoped.skipSessionID = nil
+        }
+
+        guard let localShot = localShots.first(where: { fastLaneShot($0, matches: guidedShot) }) else {
+            return scoped
+        }
+
+        scoped.shot = Shot(
+            id: localShot.id,
+            capturedAt: localShot.capturedAt,
+            imageLocalIdentifier: fastLaneResolvedLocalPath(for: localShot),
+            note: localShot.metadataContext?.detailNote
+        )
+        scoped.isCompleted = true
+        scoped.skipReason = nil
+        scoped.skipReasonNote = nil
+        scoped.skipSessionID = nil
+        return scoped
+    }
+
+    private func fastLaneGuidedReferencePath(for guidedShot: GuidedShot) -> String? {
+        [
+            guidedShot.referenceImagePath,
+            guidedShot.referenceImageLocalIdentifier,
+            guidedShot.shot?.imageLocalIdentifier
+        ]
+        .compactMap(fastLaneTrimmedNonEmpty)
+        .first(where: { FileManager.default.fileExists(atPath: $0) })
+    }
+
+    private func fastLaneLocalShotRecords() -> [AppState.FastRuntimePrototypeShotRecord] {
+        guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
+            return []
+        }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        guard let data = try? Data(contentsOf: metadataURL) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return ((try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data)) ?? [])
+            .filter { $0.propertyID == context.propertyID && $0.sessionID == context.sessionID }
+            .sorted {
+                if $0.capturedAt != $1.capturedAt { return $0.capturedAt < $1.capturedAt }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+    }
+
+    private func fastLaneCompletionCapturedPhotoCount() -> Int {
+        let savedShotCount = fastLaneLocalShotRecords().count
+        return savedShotCount > 0 ? savedShotCount : capturedCount
+    }
+
+    private func fastLaneResolvedLocalPath(for shot: AppState.FastRuntimePrototypeShotRecord) -> String? {
+        let direct = shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.isEmpty, FileManager.default.fileExists(atPath: direct) {
+            return direct
+        }
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            relativePath: relativePath
+        ) {
+            return resolved.path
+        }
+        guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
+            return direct.isEmpty ? nil : direct
+        }
+        let relativeURL = root.appendingPathComponent(relativePath, isDirectory: false)
+        if FileManager.default.fileExists(atPath: relativeURL.path) {
+            return relativeURL.path
+        }
+        let filename = URL(fileURLWithPath: relativePath.isEmpty ? direct : relativePath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filename.isEmpty {
+            let originalsFallback = appState.sharedLocalStore
+                .originalsFolderURL(propertyID: shot.propertyID, sessionID: shot.sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: originalsFallback.path) {
+                return originalsFallback.path
+            }
+        }
+        return direct.isEmpty ? nil : direct
+    }
+
+    private func fastLaneShot(
+        _ shot: AppState.FastRuntimePrototypeShotRecord,
+        matches guidedShot: GuidedShot
+    ) -> Bool {
+        guard let metadata = shot.metadataContext else { return false }
+        let guidedBuilding = normalizedFastLaneComparable(guidedShot.building)
+        let guidedElevation = normalizedFastLaneComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation)
+        let guidedDetail = normalizedFastLaneComparable(guidedShot.detailType)
+        let shotBuilding = normalizedFastLaneComparable(metadata.building)
+        let shotElevation = normalizedFastLaneComparable(CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
+        let shotDetail = normalizedFastLaneComparable(metadata.detailType)
+        guard !guidedBuilding.isEmpty,
+              !guidedElevation.isEmpty,
+              !guidedDetail.isEmpty,
+              guidedBuilding == shotBuilding,
+              guidedElevation == shotElevation,
+              guidedDetail == shotDetail else {
+            return false
+        }
+        return max(1, guidedShot.angleIndex ?? 1) == max(1, metadata.angleIndex)
+    }
+
+    private func handleFastLaneSideControlTap(_ controlID: CameraChromeSideControl.ID) {
+        shutterHaptic.impactOccurred(intensity: 0.42)
+        shutterHaptic.prepare()
+        refreshFastLaneSideControlCountsIfNeeded()
+
+        switch controlID {
+        case "active_issues":
+            presentFastLaneIssueList(.activeIssues)
+        case "guided":
+            guard context.sessionType != .punchlistVisit else {
+                showFastLaneSideControlToast("No guided requirements")
+                return
+            }
+            presentFastLaneGuidedChecklist()
+        case "checklist":
+            guard context.sessionType != .punchlistVisit else {
+                showFastLaneSideControlToast("Checklist is not available for Punchlist Visit")
+                return
+            }
+            presentFastLaneCoreChecklist()
+        default:
+            break
+        }
+    }
+
+    private func presentFastLaneIssueList(_ mode: FastLaneSideControlSheetMode) {
+        let expectedEmptyText = "No active flagged issues"
+        let knownCount = fastLaneSideControlCounts.activeIssueCount
+        let cachedRows = fastLaneSideControlPayload.activeObservations
+
+        if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneIssuePayload {
+            fastLaneSideControlSheetMode = mode
+            isLoadingFastLaneSideControlSheet = true
+            scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: mode)
+        } else {
+            showFastLaneSideControlToast(expectedEmptyText)
+        }
+
+        refreshFastLaneIssueSideControlPayload { payload in
+            let rows = payload.activeObservations
+            if rows.isEmpty {
+                if fastLaneSideControlSheetMode == mode {
+                    fastLaneSideControlSheetMode = nil
+                    showFastLaneSideControlToast(expectedEmptyText)
+                }
+            } else {
+                fastLaneSideControlSheetMode = mode
+                scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: mode)
+            }
+            isLoadingFastLaneSideControlSheet = false
+        }
+    }
+
+    private func presentFastLaneGuidedChecklist() {
+        if !fastLaneSideControlPayload.guidedShots.isEmpty ||
+            fastLaneSideControlCounts.guidedRemainingCount > 0 ||
+            !didRefreshFastLaneSideControlCounts {
+            fastLaneSideControlSheetMode = .guided
+            isLoadingFastLaneSideControlSheet = true
+            scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+        } else {
+            showFastLaneSideControlToast("No guided photos")
+        }
+
+        refreshFastLaneSideControlPayload { payload in
+            if payload.guidedShots.isEmpty {
+                if fastLaneSideControlSheetMode == .guided {
+                    fastLaneSideControlSheetMode = nil
+                    showFastLaneSideControlToast("No guided photos")
+                }
+            } else {
+                fastLaneSideControlSheetMode = .guided
+                scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+            }
+            isLoadingFastLaneSideControlSheet = false
+        }
+    }
+
+    private func presentFastLaneCoreChecklist() {
+        refreshFastLaneCoreChecklistRows()
+        showFastLaneCoreChecklist = true
+    }
+
+    private func armFastLaneGuidedShot(_ guidedShot: GuidedShot) {
+        guard !guidedShot.isCompleted else {
+            showFastLaneSideControlToast("Guided photo already captured")
+            return
+        }
+        fastLaneRetakeGuidedID = nil
+        armFastLaneGuidedShotUnchecked(guidedShot)
+    }
+
+    private func retakeFastLaneGuidedShot(_ guidedShot: GuidedShot) {
+        fastLaneRetakeGuidedID = guidedShot.id
+        armFastLaneGuidedShotUnchecked(guidedShot)
+    }
+
+    private func armFastLaneGuidedShotUnchecked(_ guidedShot: GuidedShot) {
+        clearFastLaneArmedReferenceState()
+        fastLaneCaptureIntent = .guided(guidedShot.id)
+        let building = fastLaneTrimmedNonEmpty(guidedShot.building) ?? fastMetadataContext.building
+        let elevation = fastLaneTrimmedNonEmpty(guidedShot.targetElevation) ?? fastMetadataContext.elevation
+        let detailType = fastLaneTrimmedNonEmpty(guidedShot.detailType) ?? fastMetadataContext.detailType
+        let nextMode: CameraChromeLocationMode = elevation.caseInsensitiveCompare("Interior") == .orderedSame ? .interior : .exterior
+        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: fastLaneCaptureProfile.rawValue,
+            locationMode: nextMode.rawValue,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            trade: fastMetadataContext.trade,
+            detailNote: fastMetadataContext.detailNote,
+            priority: fastMetadataContext.priority,
+            angleIndex: max(1, guidedShot.angleIndex ?? 1),
+            isGuided: true,
+            captureIntentSource: fastLaneRetakeGuidedID == guidedShot.id
+                ? FastLaneCaptureIntent.retake(guidedShot.shot?.id ?? guidedShot.id).source
+                : FastLaneCaptureIntent.guided(guidedShot.id).source
+        ))
+        loadFastLaneArmedReference(
+            from: fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot)
+        )
+        fastLaneSideControlSheetMode = nil
+    }
+
+    private func armFastLaneIssueCapture(
+        _ observation: Observation,
+        mode: ActiveIssuesSheet.Mode
+    ) {
+        fastLaneRetakeIssueID = nil
+        armFastLaneIssueCapture(
+            observation,
+            mode: mode,
+            intentSourceOverride: nil
+        )
+    }
+
+    private func retakeFastLaneIssueCapture(
+        _ observation: Observation,
+        mode: ActiveIssuesSheet.Mode
+    ) {
+        fastLaneRetakeIssueID = observation.id
+        armFastLaneIssueCapture(
+            observation,
+            mode: mode,
+            intentSourceOverride: FastLaneCaptureIntent.retake(observation.linkedShotID ?? observation.id).source
+        )
+    }
+
+    private func armFastLaneIssueCapture(
+        _ observation: Observation,
+        mode: ActiveIssuesSheet.Mode,
+        intentSourceOverride: String?
+    ) {
+        let intent: FastLaneCaptureIntent = .flagged(observation.id)
+        clearFastLaneArmedReferenceState()
+        fastLaneCaptureIntent = intent
+
+        let building = fastLaneTrimmedNonEmpty(observation.building) ?? fastMetadataContext.building
+        let elevation = fastLaneTrimmedNonEmpty(observation.targetElevation) ?? fastMetadataContext.elevation
+        let detailType = fastLaneTrimmedNonEmpty(observation.detailType) ?? fastMetadataContext.detailType
+        let nextMode: CameraChromeLocationMode = elevation.caseInsensitiveCompare("Interior") == .orderedSame ? .interior : .exterior
+        let note = fastMetadataContext.detailNote ??
+            Observation.inferredCurrentReason(
+                note: observation.currentReason ?? observation.note,
+                statement: observation.statement
+            ) ??
+            fastLaneTrimmedNonEmpty(observation.resolutionStatement) ??
+            fastLaneTrimmedNonEmpty(observation.previousReason)
+
+        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: fastLaneCaptureProfile.rawValue,
+            locationMode: nextMode.rawValue,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            trade: fastMetadataContext.trade ?? observation.trade,
+            detailNote: note,
+            priority: fastMetadataContext.priority ?? observation.priority,
+            angleIndex: fastLaneObservationTargetAngleIndex(observation) ?? max(1, fastMetadataContext.angleIndex),
+            isGuided: false,
+            isFlagged: true,
+            issueID: observation.id,
+            issueStatus: observation.status.issueStatusValue,
+            captureIntentSource: intentSourceOverride ?? intent.source
+        ))
+        loadFastLaneArmedReference(
+            from: fastLaneIssueThumbnailPathByID[observation.id] ?? fastLaneIssueDisplayImagePath(for: observation)
+        )
+        fastLaneSideControlSheetMode = nil
+    }
+
+    private func fastLaneObservationTargetAngleIndex(_ observation: Observation) -> Int? {
+        let building = normalizedFastLaneComparable(observation.building)
+        let elevation = normalizedFastLaneComparable(
+            CanonicalElevation.normalize(observation.targetElevation ?? "") ?? observation.targetElevation
+        )
+        let detail = normalizedFastLaneComparable(observation.detailType)
+        return observation.guidedShots
+            .filter { guided in
+                normalizedFastLaneComparable(guided.building ?? observation.building) == building &&
+                    normalizedFastLaneComparable(CanonicalElevation.normalize(guided.targetElevation ?? observation.targetElevation ?? "") ?? (guided.targetElevation ?? observation.targetElevation)) == elevation &&
+                    normalizedFastLaneComparable(guided.detailType ?? observation.detailType) == detail
+            }
+            .map { max(1, $0.angleIndex ?? 1) }
+            .sorted()
+            .first
+    }
+
+    private func fastLaneMetadataContextForNextCapture() -> AppState.FastRuntimeCaptureMetadataContext {
+        let current = AppState.normalizedFastRuntimeMetadataContext(
+            fastMetadataContext,
+            fallbackPosition: max(1, fastMetadataContext.angleIndex)
+        )
+        let angleIndex = fastLaneAngleIndexForNextCapture(current)
+        let shouldCreateGuidedMaterial = context.sessionType != .punchlistVisit &&
+            current.detailNote == nil &&
+            fastLaneCaptureIntent == .free
+        let isGuided: Bool = {
+            switch fastLaneCaptureIntent {
+            case .guided:
+                return true
+            case .free:
+                return shouldCreateGuidedMaterial
+            default:
+                return false
+            }
+        }()
+        let isFlagged: Bool = {
+            switch fastLaneCaptureIntent {
+            case .flagged, .resolution:
+                return true
+            default:
+                return current.detailNote != nil
+            }
+        }()
+        let issueStatus: String? = {
+            switch fastLaneCaptureIntent {
+            case .flagged:
+                return Observation.Status.active.issueStatusValue
+            default:
+                return current.detailNote == nil ? nil : Observation.Status.active.issueStatusValue
+            }
+        }()
+        let captureIssueID = fastLaneCaptureIntent.issueID ?? (isFlagged ? UUID() : nil)
+
+        return AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: current.captureProfile ?? fastLaneCaptureProfile.rawValue,
+            locationMode: current.locationMode,
+            building: current.building,
+            elevation: current.elevation,
+            detailType: current.detailType,
+            trade: current.trade,
+            detailNote: current.detailNote,
+            priority: current.priority,
+            angleIndex: angleIndex,
+            shotKey: current.shotKey,
+            isGuided: isGuided,
+            isFlagged: isFlagged,
+            issueID: captureIssueID,
+            issueStatus: issueStatus,
+            captureIntentSource: current.captureIntentSource ?? fastLaneCaptureIntent.source
+        )
+    }
+
+    private func refreshFastLaneSideControlPayload(completion: @escaping (AppState.FastRuntimePreviewSideControlPayload) -> Void) {
+        isLoadingFastLaneSideControlSheet = true
+        Task {
+            let payload = appState.fastRuntimePreviewSideControlPayload(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            let scopedPayload = await MainActor.run {
+                fastLanePayloadScopedToCurrentFastSession(payload)
+            }
+            let counts = await MainActor.run {
+                fastLaneSideControlCounts(from: scopedPayload)
+            }
+            await MainActor.run {
+                fastLaneSideControlPayload = scopedPayload
+                fastLaneSideControlCounts = counts
+                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                didRefreshFastLaneIssuePayload = true
+                completion(scopedPayload)
+            }
+        }
+    }
+
+    private func refreshFastLaneIssueSideControlPayload(completion: @escaping (AppState.FastRuntimePreviewSideControlPayload) -> Void) {
+        isLoadingFastLaneSideControlSheet = true
+        Task {
+            await syncFastLanePortalIssueStateIfAvailable(force: true)
+            let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+            await MainActor.run {
+                let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
+                    resolutionRequiredObservations: [],
+                    activeObservations: issuePayload.activeObservations,
+                    guidedShots: fastLaneSideControlPayload.guidedShots,
+                    retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
+                )
+                let updatedPayload = fastLanePayloadScopedToCurrentFastSession(rawPayload)
+                fastLaneSideControlPayload = updatedPayload
+                fastLaneSideControlCounts = fastLaneSideControlCounts(from: updatedPayload)
+                refreshFastLaneSideControlMediaMaps(for: updatedPayload)
+                didRefreshFastLaneIssuePayload = true
+                completion(updatedPayload)
+            }
+        }
+    }
+
+    private func refreshFastLaneSideControlMediaMaps(for payload: AppState.FastRuntimePreviewSideControlPayload) {
+        let guidedRows = payload.guidedShots + payload.retiredGuidedShots
+        let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
+        let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
+        fastLaneGuidedThumbnailPathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
+            if let path = fastLaneGuidedDisplayImagePath(for: guidedShot) {
+                partial[guidedShot.id] = path
+            }
+        }
+        var nextGuidedReferencePathByKey: [String: String] = [:]
+        fastLaneGuidedReferencePathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
+            let key = fastLaneGuidedComparisonKey(guidedShot)
+            let candidate = fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
+                ?? previousGuidedReferencePathByID[guidedShot.id]
+                ?? previousGuidedReferencePathByKey[key]
+            if let path = candidate,
+               fastLaneExistingLocalPath(path) != nil,
+               !fastLanePathBelongsToCurrentSession(path) {
+                partial[guidedShot.id] = path
+                nextGuidedReferencePathByKey[key] = path
+            }
+        }
+        fastLaneGuidedReferencePathByKey = nextGuidedReferencePathByKey
+
+        let issueRows = payload.activeObservations
+        fastLaneIssueThumbnailPathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
+            if let path = fastLaneIssueDisplayImagePath(for: observation) {
+                partial[observation.id] = path
+            }
+        }
+        fastLaneIssueReferencePathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
+            if let path = fastLaneObservationReferenceDisplayImagePath(for: observation) {
+                partial[observation.id] = path
+            }
+        }
+    }
+
+    private func fastLaneGuidedDisplayImagePath(for guidedShot: GuidedShot) -> String? {
+        [
+            guidedShot.shot?.imageLocalIdentifier,
+            guidedShot.referenceImagePath,
+            guidedShot.referenceImageLocalIdentifier
+        ]
+        .compactMap(fastLaneExistingLocalPath)
+        .first
+    }
+
+    private func fastLaneIssueDisplayImagePath(for observation: Observation) -> String? {
+        if let latestShotPath = observation.shots
+            .sorted(by: { lhs, rhs in
+                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            })
+            .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
+            .first {
+            return latestShotPath
+        }
+
+        if let resolutionPath = fastLaneExistingLocalPath(observation.resolutionPhotoRef) {
+            return resolutionPath
+        }
+
+        if let guidedReference = observation.guidedShots
+            .compactMap(fastLaneGuidedDisplayImagePath(for:))
+            .first {
+            return guidedReference
+        }
+
+        if let linkedShotID = observation.linkedShotID,
+           let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
+           let path = fastLaneExistingLocalPath(linkedShot.imageLocalIdentifier) {
+            return path
+        }
+        return nil
+    }
+
+    private func scheduleFastLaneGuidedPanelMediaHydrationIfNeeded() {
+        let guidedRows = fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots
+        let requests = appState.fastRuntimeGuidedPanelMediaHydrationRequests(
+            propertyID: context.propertyID,
+            guidedShots: guidedRows
+        )
+        scheduleFastLanePanelMediaHydration(requests, kind: .guided)
+    }
+
+    private func scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: FastLaneSideControlSheetMode) {
+        let observations: [Observation]
+        switch mode {
+        case .activeIssues:
+            observations = fastLaneSideControlPayload.activeObservations
+        case .guided:
+            return
+        }
+        let requests = appState.fastRuntimeIssuePanelMediaHydrationRequests(
+            propertyID: context.propertyID,
+            observations: observations
+        )
+        scheduleFastLanePanelMediaHydration(requests, kind: .flagged)
+    }
+
+    private enum FastLanePanelMediaHydrationKind {
+        case guided
+        case flagged
+    }
+
+    private func scheduleFastLanePanelMediaHydration(
+        _ requests: [AppState.OperationalMediaHydrationRequest],
+        kind: FastLanePanelMediaHydrationKind
+    ) {
+        let pending = requests.filter { request in
+            !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
+        }
+        guard !pending.isEmpty else { return }
+        for request in pending {
+            fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
+        }
+
+        Task {
+            let didStart: Bool
+            switch kind {
+            case .guided:
+                didStart = await appState.ensureGuidedHistoricalMediaAvailableForRequests(pending)
+            case .flagged:
+                didStart = await appState.ensureFlaggedHistoricalMediaAvailableForRequests(pending)
+            }
+            guard didStart else { return }
+            let payload = appState.fastRuntimePreviewSideControlPayload(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            await MainActor.run {
+                let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+                fastLaneSideControlPayload = scopedPayload
+                fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+            }
+        }
+    }
+
+    private func fastLaneHydrationKey(for request: AppState.OperationalMediaHydrationRequest) -> String {
+        "\(request.sessionID.uuidString.lowercased())|\(request.shotID.uuidString.lowercased())"
+    }
+
+    private func fastLaneExistingLocalPath(_ candidate: String?) -> String? {
+        guard let trimmed = fastLaneTrimmedNonEmpty(candidate),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        if FileManager.default.fileExists(atPath: trimmed) {
+            return trimmed
+        }
+        if !trimmed.hasPrefix("/"),
+           let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            relativePath: trimmed
+           ) {
+            return resolved.path
+        }
+        return fastLaneRepairedPanelImagePath(fromStoredPath: trimmed)
+    }
+
+    private func fastLaneRepairedPanelImagePath(fromStoredPath storedPath: String) -> String? {
+        let filename = URL(fileURLWithPath: storedPath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !filename.isEmpty else {
+            return nil
+        }
+
+        let sessionIDs: [UUID] = {
+            let components = URL(fileURLWithPath: storedPath).pathComponents
+            for (index, component) in components.enumerated() where component == "Sessions" {
+                let nextIndex = components.index(after: index)
+                guard components.indices.contains(nextIndex),
+                      let sessionID = UUID(uuidString: components[nextIndex]) else {
+                    continue
+                }
+                return [sessionID]
+            }
+            return ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+                .sorted { $0.startedAt > $1.startedAt }
+                .map(\.id)
+        }()
+
+        for sessionID in sessionIDs {
+            let candidate = appState.sharedLocalStore
+                .originalsFolderURL(propertyID: context.propertyID, sessionID: sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate.path
+            }
+
+            let fastRuntimeCandidate = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
+                .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+                .appendingPathComponent("Originals", isDirectory: true)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: fastRuntimeCandidate.path) {
+                return fastRuntimeCandidate.path
+            }
+        }
+        return nil
+    }
+
+    private func fastLaneReportAsset(forLocalPath path: String, creationDate: Date?) -> ReportAsset? {
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let url = URL(fileURLWithPath: path, isDirectory: false)
+        return ReportAsset(
+            localIdentifier: path,
+            fileURL: url,
+            creationDate: creationDate,
+            pixelWidth: 0,
+            pixelHeight: 0,
+            originalFilename: url.lastPathComponent
+        )
+    }
+
+    private func openFastLaneGuidedImage(_ guidedShot: GuidedShot) {
+        guard let path = fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot),
+              let asset = fastLaneReportAsset(forLocalPath: path, creationDate: guidedShot.shot?.capturedAt) else {
+            showFastLaneSideControlToast("Image not available yet")
+            return
+        }
+
+        fastLaneReferenceViewerState = FastLaneReferenceViewerState(
+            title: guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Guided Photo" : guidedShot.title,
+            assets: [asset],
+            startIndex: 0
+        )
+    }
+
+    private func openFastLaneIssueImage(_ observation: Observation) {
+        guard let path = fastLaneIssueThumbnailPathByID[observation.id] ?? fastLaneIssueDisplayImagePath(for: observation),
+              let asset = fastLaneReportAsset(
+                forLocalPath: path,
+                creationDate: observation.shots.first(where: { $0.imageLocalIdentifier == path })?.capturedAt
+              ) else {
+            showFastLaneSideControlToast("Image not available yet")
+            return
+        }
+
+        fastLaneReferenceViewerState = FastLaneReferenceViewerState(
+            title: observation.statement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Issue Photo" : observation.statement,
+            assets: [asset],
+            startIndex: 0
+        )
+    }
+
+    private func fastLaneArmedGuidedShot() -> GuidedShot? {
+        guard case .guided(let id) = fastLaneCaptureIntent else { return nil }
+        return fastLaneSideControlPayload.guidedShots.first(where: { $0.id == id }) ??
+            appState.fastRuntimePreviewSideControlPayload(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            ).guidedShots.first(where: { $0.id == id })
+    }
+
+    private func fastLaneArmedObservation() -> Observation? {
+        guard let issueID = fastLaneCaptureIntent.issueID else { return nil }
+        switch fastLaneCaptureIntent {
+        case .resolution:
+            return fastLaneSideControlPayload.resolutionRequiredObservations.first(where: { $0.id == issueID }) ??
+                appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+                    .resolutionRequiredObservations.first(where: { $0.id == issueID })
+        case .flagged:
+            return fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
+                appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+                    .activeObservations.first(where: { $0.id == issueID })
+        default:
+            return nil
+        }
+    }
+
+    private func fastLaneArmedReferenceImageLocalIdentifier(isCaptured: Bool) -> String? {
+        if let guidedShot = fastLaneArmedGuidedShot() {
+            let raw = isCaptured
+                ? guidedShot.shot?.imageLocalIdentifier
+                : (fastLaneGuidedReferencePathByID[guidedShot.id] ?? fastLaneGuidedReferenceDisplayImagePath(for: guidedShot))
+            return fastLaneExistingLocalPath(raw)
+        }
+
+        guard let observation = fastLaneArmedObservation() else { return nil }
+        let raw: String? = {
+            if isCaptured {
+                guard observation.updatedInSessionID == context.sessionID ||
+                        observation.resolvedInSessionID == context.sessionID else {
+                    return nil
+                }
+                return observation.shots
+                    .sorted { $0.capturedAt > $1.capturedAt }
+                    .compactMap { fastLaneExistingLocalPath($0.imageLocalIdentifier) }
+                    .first
+            }
+            return fastLaneIssueReferencePathByID[observation.id] ??
+                fastLaneObservationReferenceDisplayImagePath(for: observation)
+        }()
+        return fastLaneExistingLocalPath(raw)
+    }
+
+    private func fastLaneArmedReferenceDetailLabel() -> String {
+        if let guidedShot = fastLaneArmedGuidedShot() {
+            return fastLaneConciseContextLabel(
+                building: guidedShot.building,
+                elevation: guidedShot.targetElevation,
+                detailType: guidedShot.detailType
+            )
+        }
+        if let observation = fastLaneArmedObservation() {
+            return fastLaneConciseContextLabel(
+                building: observation.building,
+                elevation: observation.targetElevation,
+                detailType: observation.detailType
+            )
+        }
+        return ""
+    }
+
+    private func showFastLaneArmedReferenceImage(isCaptured: Bool) {
+        guard let path = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: isCaptured),
+              let asset = fastLaneReportAsset(forLocalPath: path, creationDate: nil) else {
+            showFastLaneSideControlToast("Image not available yet")
+            return
+        }
+        fastLaneReferenceViewerState = FastLaneReferenceViewerState(
+            title: isCaptured ? "Captured Image" : "Reference Image",
+            assets: [asset],
+            startIndex: 0
+        )
+    }
+
+    private func loadFastLaneArmedReference(from path: String?) {
+        let resolvedPath = fastLaneExistingLocalPath(path)
+        fastLaneArmedReferencePath = resolvedPath
+        fastLaneArmedReferenceThumbnail = nil
+        fastLaneReferenceOverlayOpacity = 0.45
+        showFastLaneArmedReferenceOverlay = false
+        showFastLaneArmedReferenceMenu = false
+        guard let resolvedPath,
+              let asset = fastLaneReportAsset(forLocalPath: resolvedPath, creationDate: nil) else {
+            return
+        }
+
+        let tokenPath = resolvedPath
+        let px = max(220, 88 * UIScreen.currentScale * 2.0)
+        fastLaneGalleryImageCache.requestThumbnail(for: asset, pixelSize: px) { image in
+            DispatchQueue.main.async {
+                guard fastLaneArmedReferencePath == tokenPath else { return }
+                fastLaneArmedReferenceThumbnail = image
+            }
+        }
+    }
+
+    private func clearFastLaneArmedReferenceState() {
+        fastLaneArmedReferenceThumbnail = nil
+        fastLaneArmedReferencePath = nil
+        showFastLaneArmedReferenceOverlay = false
+        showFastLaneArmedReferenceMenu = false
+        fastLaneReferenceOverlayOpacity = 0.45
+    }
+
+    private func clearFastLaneArmedCapture() {
+        fastLaneCaptureIntent = .free
+        fastLaneRetakeGuidedID = nil
+        fastLaneRetakeIssueID = nil
+        clearFastLaneArmedReferenceState()
+        let clearedContext = fastLaneFreeMetadataContext(from: fastMetadataContext)
+        fastMetadataContext = clearedContext.withAngleIndex(
+            fastLaneAngleIndexForNextCapture(clearedContext)
+        )
+    }
+
+    private func fastLaneFreeMetadataContextIfNeeded(
+        _ context: AppState.FastRuntimeCaptureMetadataContext
+    ) -> AppState.FastRuntimeCaptureMetadataContext {
+        guard context.captureIntentSource != nil ||
+            context.issueID != nil ||
+            context.issueStatus != nil ||
+            context.isFlagged == true else {
+            return context
+        }
+        let freeContext = fastLaneFreeMetadataContext(from: context)
+        return freeContext.withAngleIndex(fastLaneAngleIndexForNextCapture(freeContext))
+    }
+
+    private func fastLaneFreeMetadataContext(
+        from context: AppState.FastRuntimeCaptureMetadataContext
+    ) -> AppState.FastRuntimeCaptureMetadataContext {
+        AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: context.captureProfile ?? fastLaneCaptureProfile.rawValue,
+            locationMode: context.locationMode,
+            building: context.building,
+            elevation: context.elevation,
+            detailType: context.detailType,
+            trade: context.trade,
+            detailNote: nil,
+            priority: nil,
+            angleIndex: max(1, context.angleIndex)
+        )
+    }
+
+    @ViewBuilder
+    private func fastLaneFlaggedDecisionOverlay(_ pending: FastLanePendingFlaggedDecision) -> some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                Text(fastLaneFlaggedDecisionTitle)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white)
+
+                Text(fastLaneFlaggedDecisionMessage)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                if fastLaneFlaggedDecisionStage != .reviseObservation, !pending.reason.isEmpty {
+                    Text(pending.reason)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.95))
+                        .lineLimit(3)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                if fastLaneFlaggedDecisionStage == .reviseObservation {
+                    TextEditor(text: $fastLaneFlaggedRevisionText)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.white)
+                        .scrollContentBackground(.hidden)
+                        .padding(10)
+                        .frame(minHeight: 112, maxHeight: 132)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+
+                    HStack(spacing: 10) {
+                        Text("Priority")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.90))
+                            .frame(width: 62, alignment: .leading)
+
+                        Menu {
+                            ForEach(Self.priorityOptions, id: \.self) { option in
+                                Button(option) {
+                                    fastLaneFlaggedRevisionPriority = option
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                let normalizedPriority = normalizedFastLaneDetailPriority(fastLaneFlaggedRevisionPriority)
+                                if !normalizedPriority.isEmpty {
+                                    Circle()
+                                        .fill(fastLaneDetailPriorityColor(normalizedPriority))
+                                        .frame(width: 10, height: 10)
+                                }
+                                Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
+                                    .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.72))
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: 42)
+                            .background(Color.white.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    switch fastLaneFlaggedDecisionStage {
+                    case .primary:
+                        fastLaneFlaggedPopupActionButton(
+                            "Confirm",
+                            fill: Color.blue,
+                            stroke: nil
+                        ) {
+                            applyFastLaneFlaggedUpdateDecision(
+                                pending,
+                                revisedReason: nil,
+                                revisedPriority: nil
+                            )
+                        }
+
+                        fastLaneFlaggedPopupActionButton(
+                            "Revise",
+                            fill: Color.white.opacity(0.10),
+                            stroke: Color.white.opacity(0.16)
+                        ) {
+                            fastLaneFlaggedRevisionText = pending.reason
+                            fastLaneFlaggedRevisionPriority = pending.priority
+                            fastLaneFlaggedDecisionStage = .reviseObservation
+                        }
+
+                        fastLaneFlaggedPopupActionButton(
+                            "Resolve",
+                            fill: Color.white.opacity(0.10),
+                            stroke: Color.white.opacity(0.16)
+                        ) {
+                            applyFastLaneFlaggedResolveDecision(pending)
+                        }
+                    case .reviseObservation:
+                        let revised = fastLaneFlaggedRevisionText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        fastLaneFlaggedPopupActionButton(
+                            "Update",
+                            fill: Color.blue,
+                            stroke: nil,
+                            isEnabled: !revised.isEmpty
+                        ) {
+                            applyFastLaneFlaggedUpdateDecision(
+                                pending,
+                                revisedReason: revised,
+                                revisedPriority: fastLaneFlaggedRevisionPriority
+                            )
+                        }
+
+                        fastLaneFlaggedPopupActionButton(
+                            "Back",
+                            fill: Color.white.opacity(0.10),
+                            stroke: Color.white.opacity(0.16)
+                        ) {
+                            fastLaneFlaggedDecisionStage = .primary
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .background(Color.black.opacity(0.76))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .frame(maxWidth: 330)
+            .padding(.horizontal, 24)
+            .rotationEffect(.degrees(glyphAngleDegrees))
+        }
+    }
+
+    @ViewBuilder
+    private func fastLaneFlaggedPopupActionButton(
+        _ title: String,
+        fontSize: CGFloat = 18,
+        fill: Color,
+        stroke: Color?,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: fontSize, weight: .semibold))
+                .foregroundColor(.white.opacity(isEnabled ? 1.0 : 0.55))
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .background(fill)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    if let stroke {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(stroke.opacity(isEnabled ? 1.0 : 0.55), lineWidth: 1)
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(FastLanePostCaptureActionButtonStyle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .disabled(!isEnabled)
+    }
+
+    private var fastLaneFlaggedDecisionTitle: String {
+        switch fastLaneFlaggedDecisionStage {
+        case .primary:
+            return "Flagged Capture"
+        case .reviseObservation:
+            return "Update Observation"
+        }
+    }
+
+    private var fastLaneFlaggedDecisionMessage: String {
+        switch fastLaneFlaggedDecisionStage {
+        case .primary:
+            return "Confirm this capture, revise the observation, or resolve it?"
+        case .reviseObservation:
+            return "Update the reason and priority for this observation."
+        }
+    }
+
+    private func presentFastLaneFlaggedDecision(issueID: UUID, shotID: UUID) {
+        let observation = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
+            appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+                .activeObservations
+                .first(where: { $0.id == issueID })
+        let reason = observation.map(fastLaneObservationReasonText) ?? "Flagged issue"
+        let priority = normalizedFastLaneDetailPriority(observation?.priority)
+        let displayPriority = priority.isEmpty ? "Medium" : priority
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = displayPriority
+        fastLanePendingFlaggedDecision = FastLanePendingFlaggedDecision(
+            issueID: issueID,
+            shotID: shotID,
+            reason: reason,
+            priority: displayPriority
+        )
+    }
+
+    private func fastLaneObservationReasonText(_ observation: Observation) -> String {
+        Observation.inferredCurrentReason(
+            note: observation.currentReason ?? observation.note,
+            statement: observation.statement
+        )
+        ?? fastLaneTrimmedNonEmpty(observation.resolutionStatement)
+        ?? fastLaneTrimmedNonEmpty(observation.previousReason)
+        ?? observation.statement
+    }
+
+    private func applyFastLaneFlaggedUpdateDecision(
+        _ pending: FastLanePendingFlaggedDecision,
+        revisedReason: String?,
+        revisedPriority: String?
+    ) {
+        guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
+        let didUpdate = appState.fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            observationID: pending.issueID,
+            shotID: pending.shotID,
+            revisedReason: revisedReason,
+            revisedPriority: revisedPriority
+        )
+        fastLanePendingFlaggedDecision = nil
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = "Medium"
+        refreshFastLaneIssueShotRecordFromLocalObservation(
+            issueID: pending.issueID,
+            shotID: pending.shotID,
+            captureKind: "follow_up_capture"
+        )
+        reloadFastLaneSideControlPayloadFromLocalStore()
+        refreshFastLaneSideControlCounts(force: true)
+        showFastLaneSideControlToast(didUpdate ? "Update captured" : "Could not save update")
+    }
+
+    private func applyFastLaneFlaggedResolveDecision(_ pending: FastLanePendingFlaggedDecision) {
+        guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
+        let didResolve = appState.fastRuntimeResolveFlaggedObservationAfterCapture(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            observationID: pending.issueID,
+            shotID: pending.shotID
+        )
+        fastLanePendingFlaggedDecision = nil
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = "Medium"
+        refreshFastLaneIssueShotRecordFromLocalObservation(
+            issueID: pending.issueID,
+            shotID: pending.shotID,
+            captureKind: "resolved_capture",
+            issueStatusOverride: Observation.Status.pendingReview.issueStatusValue,
+            reasonOverride: pending.reason,
+            priorityOverride: pending.priority
+        )
+        reloadFastLaneSideControlPayloadFromLocalStore()
+        showFastLaneSideControlToast(didResolve ? "Issue submitted for review" : "Could not resolve issue")
+    }
+
+    private func showFastLaneSideControlToast(_ text: String) {
+        fastLaneSideControlToastToken += 1
+        let token = fastLaneSideControlToastToken
+        fastLaneSideControlToastText = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            guard token == fastLaneSideControlToastToken else { return }
+            fastLaneSideControlToastText = nil
+        }
+    }
+
+    private func refreshFastLaneIssueShotRecordFromLocalObservation(
+        issueID: UUID,
+        shotID: UUID,
+        captureKind: String,
+        issueStatusOverride: String? = nil,
+        reasonOverride: String? = nil,
+        priorityOverride: String? = nil
+    ) {
+        let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+        let observation = (issuePayload.activeObservations + issuePayload.resolutionRequiredObservations)
+            .first(where: { $0.id == issueID })
+        let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root else { return }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let propertyID = context.propertyID
+        let sessionID = context.sessionID
+        let reason = fastLaneTrimmedNonEmpty(reasonOverride) ??
+            observation.map(fastLaneObservationReasonText)
+        let priority = normalizedFastLaneDetailPriority(priorityOverride ?? observation?.priority)
+        let issueStatus = fastLaneTrimmedNonEmpty(issueStatusOverride) ??
+            observation?.status.issueStatusValue
+
+        guard let data = try? Data(contentsOf: metadataURL) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard var shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data),
+              let index = shots.firstIndex(where: {
+                  $0.id == shotID &&
+                      $0.propertyID == propertyID &&
+                      $0.sessionID == sessionID
+              }) else {
+            return
+        }
+
+        let existing = shots[index]
+        let existingMetadata = AppState.normalizedFastRuntimeMetadataContext(
+            existing.metadataContext,
+            fallbackLocationMode: existing.captureLocationMode
+        )
+        let updatedMetadata = AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: existingMetadata.captureProfile,
+            locationMode: existingMetadata.locationMode,
+            building: existingMetadata.building,
+            elevation: existingMetadata.elevation,
+            detailType: existingMetadata.detailType,
+            trade: observation?.trade ?? existingMetadata.trade,
+            detailNote: reason ?? existingMetadata.detailNote,
+            priority: priority.isEmpty ? existingMetadata.priority : priority,
+            angleIndex: existingMetadata.angleIndex,
+            shotKey: existingMetadata.shotKey,
+            isGuided: existingMetadata.isGuided,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: issueStatus ?? existingMetadata.issueStatus,
+            captureIntentSource: existingMetadata.captureIntentSource
+        )
+        shots[index] = AppState.FastRuntimePrototypeShotRecord(
+            id: existing.id,
+            sessionID: existing.sessionID,
+            propertyID: existing.propertyID,
+            orgID: existing.orgID,
+            sessionType: existing.sessionType,
+            capturedAt: existing.capturedAt,
+            localFilePath: existing.localFilePath,
+            originalRelativePath: existing.originalRelativePath,
+            captureKind: captureKind,
+            firstCaptureKind: existing.firstCaptureKind,
+            captureLocationMode: existing.captureLocationMode,
+            metadataContext: updatedMetadata
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let updated = try? encoder.encode(shots) else { return }
+        try? updated.write(to: metadataURL, options: .atomic)
+    }
+
+    private func fastLanePostCaptureFeedback(for intent: FastLaneCaptureIntent) -> String? {
+        switch intent {
+        case .flagged:
+            return "Flagged photo captured"
+        case .resolution:
+            return "Resolution photo captured"
+        default:
+            return nil
+        }
+    }
+
+    private func refreshFastLaneCoreChecklistRows() {
+        let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root else {
+            fastLaneCoreChecklistRows = Self.emptyFastLaneCoreChecklistRows
+            return
+        }
+
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+
+        DispatchQueue.global(qos: .utility).async {
+            let rows: [FastLaneCoreChecklistRowState] = {
+                guard let data = try? Data(contentsOf: metadataURL) else {
+                    return Self.emptyFastLaneCoreChecklistRows
+                }
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                    return Self.emptyFastLaneCoreChecklistRows
+                }
+
+                let counts = shots
+                    .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
+                    .reduce(into: [FastLaneCoreChecklistCategory: Int]()) { partial, shot in
+                        let detailType = shot.metadataContext?.detailType ?? ""
+                        guard let category = FastLaneCoreChecklistCategory.category(for: detailType) else { return }
+                        partial[category, default: 0] += 1
+                    }
+
+                return FastLaneCoreChecklistCategory.allCases.map { category in
+                    FastLaneCoreChecklistRowState(category: category, count: counts[category, default: 0])
+                }
+            }()
+
+            DispatchQueue.main.async {
+                fastLaneCoreChecklistRows = rows
+            }
+        }
+    }
+
+    private static var emptyFastLaneCoreChecklistRows: [FastLaneCoreChecklistRowState] {
+        FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
+    }
+
+    private func pruneFastLaneRetakenIssueRecords(
+        issueID: UUID,
+        keepingShotID: UUID,
+        storageRoot: URL?
+    ) async {
+        let root = storageRoot ?? fastStorageRoot ?? self.storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root else { return }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let propertyID = context.propertyID
+        let sessionID = context.sessionID
+
+        await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: metadataURL) else { return }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard var shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                return
+            }
+
+            let originalCount = shots.count
+            shots.removeAll { shot in
+                guard shot.id != keepingShotID,
+                      shot.propertyID == propertyID,
+                      shot.sessionID == sessionID,
+                      shot.metadataContext?.isFlagged == true,
+                      shot.metadataContext?.issueID == issueID else {
+                    return false
+                }
+                return true
+            }
+            guard shots.count != originalCount else { return }
+
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let updated = try? encoder.encode(shots) else { return }
+            try? updated.write(to: metadataURL, options: .atomic)
+        }.value
+    }
+
+    private func pruneFastLaneRetakenGuidedRecords(
+        guidedID: UUID,
+        keepingShot: AppState.FastRuntimePrototypeShotRecord,
+        storageRoot: URL?
+    ) async {
+        let root = storageRoot ?? fastStorageRoot ?? self.storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root,
+              let metadata = keepingShot.metadataContext else {
+            return
+        }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let propertyID = context.propertyID
+        let sessionID = context.sessionID
+        let building = normalizedFastLaneComparable(metadata.building)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
+        let detail = normalizedFastLaneComparable(metadata.detailType)
+        let angle = max(1, metadata.angleIndex)
+
+        await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: metadataURL) else { return }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard var shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                return
+            }
+
+            let originalCount = shots.count
+            shots.removeAll { shot in
+                guard shot.id != keepingShot.id,
+                      shot.propertyID == propertyID,
+                      shot.sessionID == sessionID,
+                      shot.metadataContext?.isGuided == true,
+                      shot.metadataContext?.issueID == nil,
+                      normalizedFastLaneComparable(shot.metadataContext?.building) == building,
+                      normalizedFastLaneComparable(CanonicalElevation.normalize(shot.metadataContext?.elevation ?? "") ?? shot.metadataContext?.elevation) == elevation,
+                      normalizedFastLaneComparable(shot.metadataContext?.detailType) == detail,
+                      max(1, shot.metadataContext?.angleIndex ?? 1) == angle else {
+                    return false
+                }
+                return true
+            }
+            guard shots.count != originalCount else { return }
+
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let updated = try? encoder.encode(shots) else { return }
+            try? updated.write(to: metadataURL, options: .atomic)
+        }.value
+    }
+
+    private func reloadFastLaneGalleryAssets() {
+        guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
+            fastLaneGalleryAssets = []
+            fastLaneGalleryMetadataByAssetID = [:]
+            fastLanePreviousGallerySessionID = nil
+            fastLanePreviousGalleryAssets = []
+            fastLanePreviousGalleryMetadataByAssetID = [:]
+            fastLaneGalleryThumbnail = nil
+            fastLaneGalleryThumbnailAssetID = ""
+            fastLaneGalleryDisplayCount = 0
+            fastLaneGalleryRefreshToken = UUID()
+            return
+        }
+
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let observationByIssueID = ((try? appState.sharedLocalStore.fetchObservations(propertyID: context.propertyID)) ?? [])
+            .reduce(into: [UUID: Observation]()) { partial, observation in
+                partial[observation.id] = observation
+            }
+        let previousSession = fastLanePreviousGallerySession()
+        let projectedGuidedRows = fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots
+        let projectedObservations = Array(observationByIssueID.values)
+        DispatchQueue.global(qos: .utility).async {
+            let gallery: (
+                assets: [ReportAsset],
+                metadata: [String: FastLaneGalleryMetadata],
+                shots: [AppState.FastRuntimePrototypeShotRecord]
+            ) = {
+                guard let data = try? Data(contentsOf: metadataURL) else { return ([], [:], []) }
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                    return ([], [:], [])
+                }
+
+                var metadataByID: [String: FastLaneGalleryMetadata] = [:]
+                let scopedShots = shots
+                    .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
+                    .sorted {
+                        if $0.capturedAt != $1.capturedAt { return $0.capturedAt < $1.capturedAt }
+                        return $0.id.uuidString < $1.id.uuidString
+                    }
+                let assets = scopedShots
+                    .compactMap { shot -> ReportAsset? in
+                        guard let resolvedPath = fastLaneResolvedLocalPath(for: shot),
+                              FileManager.default.fileExists(atPath: resolvedPath) else {
+                            return nil
+                        }
+                        let url = URL(fileURLWithPath: resolvedPath, isDirectory: false)
+                        metadataByID[url.path] = FastLaneGalleryMetadata(
+                            propertyName: propertyName,
+                            metadataContext: shot.metadataContext,
+                            observation: shot.metadataContext?.issueID.flatMap { observationByIssueID[$0] }
+                        )
+                        return ReportAsset(
+                            localIdentifier: url.path,
+                            fileURL: url,
+                            creationDate: shot.capturedAt,
+                            pixelWidth: 0,
+                            pixelHeight: 0,
+                            originalFilename: url.lastPathComponent
+                        )
+                    }
+                return (assets, metadataByID, scopedShots)
+            }()
+            let previousGallery = fastLanePreviousGallerySnapshot(
+                session: previousSession,
+                observationByIssueID: observationByIssueID
+            )
+            let projectedPreviousGallery = fastLaneProjectedPreviousGallerySnapshot(
+                guidedShots: projectedGuidedRows,
+                observations: projectedObservations
+            )
+            let mergedPreviousGallery = fastLaneMergedPreviousGallery(
+                primary: previousGallery,
+                fallback: projectedPreviousGallery
+            )
+
+            DispatchQueue.main.async {
+                fastLaneGalleryAssets = gallery.assets
+                fastLaneGalleryMetadataByAssetID = gallery.metadata
+                fastLanePreviousGallerySessionID = previousSession?.id
+                fastLanePreviousGalleryAssets = mergedPreviousGallery.assets
+                fastLanePreviousGalleryMetadataByAssetID = mergedPreviousGallery.metadata
+                fastLaneGalleryDisplayCount = gallery.assets.count
+                fastLaneGalleryRefreshToken = UUID()
+                refreshFastLaneGalleryThumbnail(from: gallery.assets)
+                scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
+                scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(requests: mergedPreviousGallery.requests)
+            }
+        }
+    }
+
+    private func fastLanePreviousGallerySession() -> Session? {
+        ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+            .filter {
+                $0.id != context.sessionID &&
+                $0.status == .completed &&
+                $0.deletedAt == nil
+            }
+            .sorted { lhs, rhs in
+                let l = lhs.endedAt ?? lhs.startedAt
+                let r = rhs.endedAt ?? rhs.startedAt
+                return l > r
+            }
+            .first
+    }
+
+    private func fastLanePreviousGallerySnapshot(
+        session: Session?,
+        observationByIssueID: [UUID: Observation]
+    ) -> (
+        assets: [ReportAsset],
+        metadata: [String: FastLaneGalleryMetadata],
+        requests: [AppState.OperationalMediaHydrationRequest]
+    ) {
+        guard let session,
+              let metadata = try? appState.sharedLocalStore.loadSessionMetadata(
+                propertyID: context.propertyID,
+                sessionID: session.id
+              ) else {
+            return ([], [:], [])
+        }
+
+        var metadataByID: [String: FastLaneGalleryMetadata] = [:]
+        var requests: [AppState.OperationalMediaHydrationRequest] = []
+        let sessionRoot = appState.sharedLocalStore.sessionFolderURL(
+            propertyID: context.propertyID,
+            sessionID: session.id
+        )
+
+        let issueStatusByID = metadata.issues.reduce(into: [UUID: Observation.Status]()) { partial, issue in
+            partial[issue.issueID] = Observation.Status.status(from: issue.issueStatus)
+        }
+
+        let assets = metadata.shots
+            .filter { $0.shouldAppearInDefaultGallery }
+            .filter { $0.sessionID == session.id }
+            .filter {
+                fastLanePreviousGalleryShotIsRelevant(
+                    $0,
+                    issueStatusByID: issueStatusByID,
+                    observationByIssueID: observationByIssueID
+                )
+            }
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                return $0.shotID.uuidString < $1.shotID.uuidString
+            }
+            .compactMap { shot -> ReportAsset? in
+                let candidates = fastLaneGalleryRelativePathCandidates(for: shot)
+                guard let primaryRelative = candidates.first else { return nil }
+                let existingURL = candidates
+                    .compactMap { relative -> URL? in
+                        if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+                            propertyID: context.propertyID,
+                            sessionID: session.id,
+                            relativePath: relative
+                        ) {
+                            return resolved
+                        }
+                        let candidate = sessionRoot.appendingPathComponent(relative, isDirectory: false)
+                        return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+                    }
+                    .first
+
+                guard let url = existingURL else {
+                    requests.append(AppState.OperationalMediaHydrationRequest(
+                        propertyID: context.propertyID,
+                        sessionID: session.id,
+                        shotID: shot.shotID,
+                        relativePathOverride: primaryRelative
+                    ))
+                    return nil
+                }
+
+                metadataByID[url.path] = FastLaneGalleryMetadata(
+                    propertyName: propertyName,
+                    shot: shot,
+                    observation: shot.issueID.flatMap { observationByIssueID[$0] }
+                )
+                let filename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? url.lastPathComponent
+                    : shot.originalFilename
+                return ReportAsset(
+                    localIdentifier: url.path,
+                    fileURL: url,
+                    creationDate: shot.createdAt,
+                    pixelWidth: 0,
+                    pixelHeight: 0,
+                    originalFilename: filename
+                )
+            }
+
+        return (assets, metadataByID, Array(Set(requests)))
+    }
+
+    private func fastLaneProjectedPreviousGallerySnapshot(
+        guidedShots: [GuidedShot],
+        observations: [Observation]
+    ) -> (
+        assets: [ReportAsset],
+        metadata: [String: FastLaneGalleryMetadata],
+        requests: [AppState.OperationalMediaHydrationRequest]
+    ) {
+        var assetsByPath: [String: ReportAsset] = [:]
+        var metadataByPath: [String: FastLaneGalleryMetadata] = [:]
+
+        func addAsset(
+            path: String?,
+            creationDate: Date,
+            metadata: FastLaneGalleryMetadata
+        ) {
+            guard let existingPath = fastLaneExistingLocalPath(path) else { return }
+            guard !fastLanePathBelongsToCurrentSession(existingPath) else { return }
+            guard assetsByPath[existingPath] == nil else { return }
+            let url = URL(fileURLWithPath: existingPath)
+            assetsByPath[existingPath] = ReportAsset(
+                localIdentifier: existingPath,
+                fileURL: url,
+                creationDate: creationDate,
+                pixelWidth: 0,
+                pixelHeight: 0,
+                originalFilename: url.lastPathComponent
+            )
+            metadataByPath[existingPath] = metadata
+        }
+
+        for guidedShot in guidedShots {
+            let date = guidedShot.shot?.capturedAt ?? guidedShot.labelEditedAt ?? guidedShot.reassignedAt ?? Date.distantPast
+            let metadata = FastLaneGalleryMetadata(
+                propertyName: propertyName,
+                building: guidedShot.building,
+                elevation: guidedShot.targetElevation,
+                detail: guidedShot.detailType,
+                angleIndex: guidedShot.angleIndex,
+                flaggedNote: ""
+            )
+            let displayPath = fastLaneGuidedReferencePathByID[guidedShot.id] ??
+                fastLaneGuidedReferencePathByKey[fastLaneGuidedComparisonKey(guidedShot)] ??
+                fastLaneHistoricalGuidedReferenceDisplayImagePath(for: guidedShot) ??
+                fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
+            addAsset(path: displayPath, creationDate: date, metadata: metadata)
+        }
+
+        for observation in observations {
+            guard observation.status == .active else { continue }
+            let reason = Observation.inferredCurrentReason(
+                note: observation.currentReason ?? observation.note,
+                statement: observation.statement
+            ) ?? ""
+            let metadata = FastLaneGalleryMetadata(
+                propertyName: propertyName,
+                building: observation.building,
+                elevation: observation.targetElevation,
+                detail: observation.detailType,
+                angleIndex: observation.guidedShots.first?.angleIndex,
+                flaggedNote: reason
+            )
+            if let referencePath = fastLaneObservationReferenceDisplayImagePath(for: observation) {
+                addAsset(path: referencePath, creationDate: observation.updatedAt, metadata: metadata)
+            } else if let latestShot = observation.shots.sorted(by: { lhs, rhs in
+                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }).first(where: { fastLaneExistingLocalPath($0.imageLocalIdentifier) != nil }) {
+                addAsset(path: latestShot.imageLocalIdentifier, creationDate: latestShot.capturedAt, metadata: metadata)
+            }
+        }
+
+        let assets = assetsByPath.values.sorted {
+            let lhsDate = $0.creationDate ?? .distantPast
+            let rhsDate = $1.creationDate ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate < rhsDate }
+            return $0.localIdentifier < $1.localIdentifier
+        }
+        return (assets, metadataByPath, [])
+    }
+
+    private func fastLanePreviousGalleryShotIsRelevant(
+        _ shot: ShotMetadata,
+        issueStatusByID: [UUID: Observation.Status],
+        observationByIssueID: [UUID: Observation]
+    ) -> Bool {
+        if shot.isFlagged || shot.issueID != nil {
+            let shotStatus = Observation.Status.status(from: shot.issueStatus)
+            let issueStatus = shot.issueID.flatMap { issueStatusByID[$0] }
+            let observationStatus = shot.issueID.flatMap { observationByIssueID[$0]?.status }
+            let status = issueStatus ?? observationStatus ?? shotStatus
+            let captureKind = (shot.captureKind ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "-", with: "_")
+                .lowercased()
+            return status == .active && captureKind != "resolved_capture"
+        }
+
+        return shot.isGuided
+    }
+
+    private func fastLanePathBelongsToCurrentSession(_ path: String) -> Bool {
+        let normalizedPath = URL(fileURLWithPath: path, isDirectory: false)
+            .standardizedFileURL
+            .path
+            .lowercased()
+        return normalizedPath.contains(context.sessionID.uuidString.lowercased())
+    }
+
+    private func fastLaneGuidedReferenceDisplayImagePath(for guidedShot: GuidedShot) -> String? {
+        let storedReference = [
+            guidedShot.referenceImagePath,
+            guidedShot.referenceImageLocalIdentifier
+        ]
+        .compactMap { $0 }
+        .compactMap(fastLaneExistingLocalPath)
+        .first { !fastLanePathBelongsToCurrentSession($0) }
+        return storedReference ?? fastLaneHistoricalGuidedReferenceDisplayImagePath(for: guidedShot)
+    }
+
+    private func fastLaneHistoricalGuidedReferenceDisplayImagePath(for guidedShot: GuidedShot) -> String? {
+        let building = normalizedFastLaneComparable(guidedShot.building)
+        let elevation = normalizedFastLaneComparable(
+            CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation
+        )
+        let detail = normalizedFastLaneComparable(guidedShot.detailType)
+        let angle = max(1, guidedShot.angleIndex ?? 1)
+        guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { return nil }
+
+        let sessions = ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+            .filter {
+                $0.id != context.sessionID &&
+                $0.status == .completed &&
+                $0.deletedAt == nil
+            }
+            .sorted { lhs, rhs in
+                let l = lhs.endedAt ?? lhs.startedAt
+                let r = rhs.endedAt ?? rhs.startedAt
+                return l > r
+            }
+
+        for session in sessions {
+            guard let metadata = try? appState.sharedLocalStore.loadSessionMetadata(
+                propertyID: context.propertyID,
+                sessionID: session.id
+            ) else { continue }
+            let sessionRoot = appState.sharedLocalStore.sessionFolderURL(
+                propertyID: context.propertyID,
+                sessionID: session.id
+            )
+            let match = metadata.shots
+                .filter { $0.isGuided && $0.issueID == nil }
+                .filter { shot in
+                    normalizedFastLaneComparable(shot.building) == building &&
+                    normalizedFastLaneComparable(CanonicalElevation.normalize(shot.elevation) ?? shot.elevation) == elevation &&
+                    normalizedFastLaneComparable(shot.detailType) == detail &&
+                    max(1, shot.angleIndex) == angle
+                }
+                .sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                    return $0.shotID.uuidString < $1.shotID.uuidString
+                }
+                .first
+            guard let match else { continue }
+            for relative in fastLaneGalleryRelativePathCandidates(for: match) {
+                if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+                    propertyID: context.propertyID,
+                    sessionID: session.id,
+                    relativePath: relative
+                ) {
+                    return resolved.path
+                }
+                let candidate = sessionRoot.appendingPathComponent(relative, isDirectory: false)
+                if FileManager.default.fileExists(atPath: candidate.path) {
+                    return candidate.path
+                }
+            }
+        }
+        return nil
+    }
+
+    private func fastLaneObservationReferenceDisplayImagePath(for observation: Observation) -> String? {
+        if let latestHistoricalShot = observation.shots
+            .sorted(by: { lhs, rhs in
+                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            })
+            .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
+            .first(where: { !fastLanePathBelongsToCurrentSession($0) }) {
+            return latestHistoricalShot
+        }
+
+        if let resolutionPath = fastLaneExistingLocalPath(observation.resolutionPhotoRef),
+           !fastLanePathBelongsToCurrentSession(resolutionPath) {
+            return resolutionPath
+        }
+
+        return observation.guidedShots
+            .compactMap(fastLaneGuidedReferenceDisplayImagePath(for:))
+            .first
+    }
+
+    private func fastLaneMergedPreviousGallery(
+        primary: (
+            assets: [ReportAsset],
+            metadata: [String: FastLaneGalleryMetadata],
+            requests: [AppState.OperationalMediaHydrationRequest]
+        ),
+        fallback: (
+            assets: [ReportAsset],
+            metadata: [String: FastLaneGalleryMetadata],
+            requests: [AppState.OperationalMediaHydrationRequest]
+        )
+    ) -> (
+        assets: [ReportAsset],
+        metadata: [String: FastLaneGalleryMetadata],
+        requests: [AppState.OperationalMediaHydrationRequest]
+    ) {
+        var assetsByPath = Dictionary(uniqueKeysWithValues: primary.assets.map { ($0.localIdentifier, $0) })
+        var metadata = primary.metadata
+        for asset in fallback.assets where assetsByPath[asset.localIdentifier] == nil {
+            assetsByPath[asset.localIdentifier] = asset
+            metadata[asset.localIdentifier] = fallback.metadata[asset.localIdentifier]
+        }
+        let assets = assetsByPath.values.sorted {
+            let lhsDate = $0.creationDate ?? .distantPast
+            let rhsDate = $1.creationDate ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate < rhsDate }
+            return $0.localIdentifier < $1.localIdentifier
+        }
+        return (assets, metadata, primary.requests + fallback.requests)
+    }
+
+    private func fastLaneGalleryRelativePathCandidates(for shot: ShotMetadata) -> [String] {
+        let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !existing.isEmpty { return [existing] }
+        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !originalFilename.isEmpty { return ["Originals/\(originalFilename)"] }
+        return [
+            "Originals/\(OriginalPhotoFormat.defaultFilename(for: shot.shotID))",
+            "Originals/\(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID))"
+        ]
+    }
+
+    private func scheduleFastLaneGalleryMediaHydrationIfNeeded(
+        localShots: [AppState.FastRuntimePrototypeShotRecord]
+    ) {
+        let requests = appState.fastRuntimeGalleryMediaHydrationRequests(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            shots: localShots
+        )
+        let pending = requests.filter { request in
+            !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
+        }
+        guard !pending.isEmpty else { return }
+        for request in pending {
+            fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
+        }
+
+        Task {
+            let didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
+            guard didStart else { return }
+            await MainActor.run {
+                reloadFastLaneGalleryAssets()
+            }
+        }
+    }
+
+    private func scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(
+        requests: [AppState.OperationalMediaHydrationRequest]
+    ) {
+        let pending = requests.filter { request in
+            !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
+        }
+        guard !pending.isEmpty else { return }
+        for request in pending {
+            fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
+        }
+
+        Task {
+            let didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
+            guard didStart else { return }
+            await MainActor.run {
+                reloadFastLaneGalleryAssets()
+            }
+        }
+    }
+
+    private func refreshFastLaneGalleryThumbnail(from assets: [ReportAsset]) {
+        guard let asset = assets.last else {
+            fastLaneGalleryThumbnail = nil
+            fastLaneGalleryThumbnailAssetID = ""
+            return
+        }
+        let assetID = asset.localIdentifier
+        if assetID == fastLaneGalleryThumbnailAssetID, fastLaneGalleryThumbnail != nil {
+            return
+        }
+        fastLaneGalleryThumbnailAssetID = assetID
+        let px = max(260, 44 * UIScreen.currentScale * 3.0)
+        fastLaneGalleryImageCache.requestThumbnail(for: asset, pixelSize: px) { image in
+            DispatchQueue.main.async {
+                guard fastLaneGalleryThumbnailAssetID == assetID else { return }
+                fastLaneGalleryThumbnail = image
+            }
+        }
+    }
+
+    private func runCompleteDryRun() {
+        let photoCount = fastLaneCompletionCapturedPhotoCount()
+        guard photoCount > 0, !isRunningCompleteDryRun else { return }
+        isRunningCompleteDryRun = true
+        Task {
+            let result = await appState.runFastRuntimeCompleteDryRun(
+                context: context,
+                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: photoCount
+            )
+            await MainActor.run {
+                completeDryRunResult = result
+                isRunningCompleteDryRun = false
+            }
+        }
+    }
+
+    private func runCompleteUpload() {
+        let photoCount = fastLaneCompletionCapturedPhotoCount()
+        guard photoCount > 0, !isRunningCompleteUpload else { return }
+        isRunningCompleteUpload = true
+        Task {
+            let result = await appState.runFastRuntimeCompleteUpload(
+                context: context,
+                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: photoCount
+            )
+            await MainActor.run {
+                completeUploadResult = result
+                if result.success {
+                    didCompleteUpload = true
+                }
+                isRunningCompleteUpload = false
+            }
+        }
+    }
+
+    private func runReportPackageDryRun() {
+        guard didCompleteUpload, !isRunningReportPackageDryRun else { return }
+        isRunningReportPackageDryRun = true
+        Task {
+            let result = await appState.runFastRuntimeReportPackageDryRun(context: context)
+            await MainActor.run {
+                reportPackageDryRunResult = result
+                isRunningReportPackageDryRun = false
+            }
+        }
+    }
+
+    private func runReportHandoff() {
+        guard didCompleteUpload, !isRunningReportHandoff else { return }
+        isRunningReportHandoff = true
+        Task {
+            let result = await appState.runFastRuntimeReportHandoff(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            await MainActor.run {
+                reportHandoffResult = result
+                isRunningReportHandoff = false
+            }
+        }
+    }
+
+    private func runProductionComplete() {
+        primeFastLaneSideControlSnapshot()
+        let photoCount = fastLaneCompletionCapturedPhotoCount()
+        guard canRunProductionComplete else { return }
+        productionCompleteState = .validating
+        captureErrorMessage = nil
+        Task {
+            let dryRun = await appState.runFastRuntimeCompleteDryRun(
+                context: context,
+                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: photoCount
+            )
+            guard dryRun.isValid else {
+                let message = dryRun.missingFields.first.map { "Missing \($0)." } ??
+                    dryRun.corruptMetadataMessage ??
+                    dryRun.warnings.first ??
+                    "Could not validate saved photos."
+                await MainActor.run {
+                    productionCompleteState = .failed(message)
+                }
+                return
+            }
+
+            await MainActor.run {
+                productionCompleteState = .uploading
+                appState.markFastRuntimeCompletionUploading(context: context)
+                finishProductionComplete()
+            }
+
+            let upload = await appState.runFastRuntimeCompleteUpload(
+                context: context,
+                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: photoCount
+            )
+            guard upload.success else {
+                await MainActor.run {
+                    appState.markFastRuntimeCompletionFailed(
+                        context: context,
+                        message: upload.errorMessage ?? "Upload failed. Please try again."
+                    )
+                    if !isClosing {
+                        productionCompleteState = .failed(upload.errorMessage ?? "Upload failed. Please try again.")
+                    }
+                }
+                return
+            }
+
+            await MainActor.run {
+                didCompleteUpload = true
+                if !isClosing {
+                    productionCompleteState = .preparingReport
+                }
+            }
+
+            let handoff = await appState.runFastRuntimeReportHandoff(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            guard handoff.success else {
+                await MainActor.run {
+                    appState.markFastRuntimeCompletionFailed(
+                        context: context,
+                        message: handoff.errorMessage ?? "Report handoff failed. Please try again."
+                    )
+                    if !isClosing {
+                        productionCompleteState = .failed(handoff.errorMessage ?? "Report handoff failed. Please try again.")
+                    }
+                }
+                return
+            }
+
+            let didReleaseAfterHandoff = await appState.markFastRuntimeCompletionHandoffAccepted(
+                context: context,
+                snapshotID: handoff.snapshotID,
+                snapshotPath: handoff.snapshotPath
+            )
+            await MainActor.run {
+                guard didReleaseAfterHandoff else {
+                    let message = "Report handoff was accepted, but the property did not release. Please retry from the saved draft."
+                    appState.markFastRuntimeCompletionFailed(
+                        context: context,
+                        message: message
+                    )
+                    if !isClosing {
+                        productionCompleteState = .failed(message)
+                    }
+                    return
+                }
+                if !isClosing {
+                    productionCompleteState = .complete
+                    finishProductionComplete()
+                }
+            }
+        }
+    }
+
+    private func finishProductionComplete() {
+        guard !isClosing else { return }
+        fastLaneExitIntentActive = true
+        isClosing = true
+        releaseStartedAt = Date()
+        camera.stopPreviewAsync()
+        releaseFinishedAt = Date()
+        onDismiss(AppState.FastRuntimePrototypeCloseResult(
+            propertyID: context.propertyID,
+            propertyName: propertyName,
+            sessionID: context.sessionID,
+            draftPersisted: false,
+            photoCount: capturedCount,
+            lockAction: "completed_upload_report_handoff",
+            tempDiscarded: false,
+            draftRootPath: fastStorageRoot?.path,
+            errorMessage: nil,
+            timings: AppState.FastRuntimePrototypeCloseTimings(
+                persistMilliseconds: nil,
+                releaseMilliseconds: nil,
+                cleanupMilliseconds: nil,
+                totalMilliseconds: releaseStartedAt.map { Date().timeIntervalSince($0) * 1_000 } ?? 0
+            )
+        ))
+    }
+
+    private func applyFastLaneLocationMode(_ mode: CameraChromeLocationMode) {
+        let current = fastMetadataContext
+        let nextElevation: String
+        switch mode {
+        case .interior:
+            nextElevation = "Interior"
+        case .exterior:
+            nextElevation = Self.exteriorElevationOptions.contains(current.elevation) ? current.elevation : "North"
+        }
+        let details = fastDetailTypesModel.names(for: mode, profile: fastLaneCaptureProfile)
+        let nextDetail = details.contains(current.detailType) ? current.detailType : (details.first ?? "Overview")
+        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: fastLaneCaptureProfile.rawValue,
+            locationMode: mode.rawValue,
+            building: current.building,
+            elevation: nextElevation,
+            detailType: nextDetail,
+            trade: current.trade,
+            detailNote: current.detailNote,
+            priority: current.priority,
+            angleIndex: current.angleIndex
+        ))
+    }
+
+    private func applyFastLaneMetadataContext(_ context: AppState.FastRuntimeCaptureMetadataContext) {
+        let normalized = AppState.normalizedFastRuntimeMetadataContext(context, fallbackPosition: 1)
+        let profile = CaptureProfile(storedValue: normalized.captureProfile) ?? fastLaneCaptureProfile
+        if fastLaneCaptureProfileState != profile {
+            fastLaneCaptureProfileState = profile
+        }
+        let mode = CameraChromeLocationMode(fastRuntimeRawValue: normalized.locationMode)
+        let elevation = mode == .interior
+            ? "Interior"
+            : (Self.exteriorElevationOptions.contains(normalized.elevation) ? normalized.elevation : "North")
+        let details = fastDetailTypesModel.names(for: mode, profile: profile)
+        let detail = details.contains(normalized.detailType) ? normalized.detailType : (details.first ?? "Overview")
+        let candidate = AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: profile.rawValue,
+            locationMode: mode.rawValue,
+            building: normalizedFastLaneBuilding(normalized.building),
+            elevation: elevation,
+            detailType: detail,
+            trade: FastLaneMetadataOptions.canonicalTradeLabel(normalized.trade, preferredOptions: fastTradeOptions),
+            detailNote: normalized.detailNote,
+            priority: normalized.priority,
+            angleIndex: normalized.angleIndex,
+            isGuided: normalized.isGuided ?? fastMetadataContext.isGuided,
+            isFlagged: normalized.isFlagged ?? fastMetadataContext.isFlagged,
+            issueID: normalized.issueID ?? fastMetadataContext.issueID,
+            issueStatus: normalized.issueStatus ?? fastMetadataContext.issueStatus,
+            captureIntentSource: normalized.captureIntentSource ?? fastMetadataContext.captureIntentSource
+        )
+        if isFastLaneCaptureIntentArmed {
+            fastMetadataContext = candidate
+        } else {
+            fastMetadataContext = candidate.withAngleIndex(fastLaneAngleIndexForNextCapture(candidate))
+        }
+        chromeLocationMode = mode
+    }
+
+    private func fastMetadataOrientationLabel(for elevation: String) -> String {
+        switch elevation.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "interior":
+            return "Interior"
+        case "south":
+            return "S"
+        case "east":
+            return "E"
+        case "west":
+            return "W"
+        default:
+            return "N"
+        }
+    }
+
+    private var isFastLaneElevationHeadingAligned: Bool {
+        guard chromeLocationMode == .exterior else { return false }
+        guard let rawHeading = locationManager.headingDegrees else { return false }
+        let currentHeading = normalizedFastLaneHeadingForAlignment(rawHeading)
+        guard let ideal = idealFastLaneFacingHeading(for: CanonicalElevation.normalize(fastMetadataContext.elevation) ?? fastMetadataContext.elevation) else {
+            return false
+        }
+        return angularFastLaneDifferenceDegrees(currentHeading, ideal) <= 45
+    }
+
+    private func normalizedFastLaneHeadingForAlignment(_ heading: Double) -> Double {
+        let adjusted: Double
+        switch lastValidDeviceOrientation {
+        case .landscapeLeft:
+            adjusted = heading + 90
+        case .landscapeRight:
+            adjusted = heading - 90
+        case .portraitUpsideDown:
+            adjusted = heading + 180
+        default:
+            adjusted = heading
+        }
+        let wrapped = adjusted.truncatingRemainder(dividingBy: 360)
+        return wrapped >= 0 ? wrapped : wrapped + 360
+    }
+
+    private func idealFastLaneFacingHeading(for normalizedElevation: String) -> Double? {
+        switch normalizedElevation {
+        case "North":
+            return 180
+        case "South":
+            return 0
+        case "East":
+            return 270
+        case "West":
+            return 90
+        default:
+            return nil
+        }
+    }
+
+    private func angularFastLaneDifferenceDegrees(_ lhs: Double, _ rhs: Double) -> Double {
+        let a = lhs.truncatingRemainder(dividingBy: 360)
+        let b = rhs.truncatingRemainder(dividingBy: 360)
+        let diff = abs(a - b)
+        return min(diff, 360 - diff)
+    }
+
+    private func fastLaneShortShotTypeLabel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.caseInsensitiveCompare("General Elevation") == .orderedSame {
+            return "General"
+        }
+        return trimmed.isEmpty ? "Shot" : trimmed
+    }
+
+    private func normalizedFastLaneBuilding(_ value: String) -> String {
+        let code = FastLaneMetadataOptions.buildingCode(from: value)
+        if fastBuildingOptions.contains(where: { FastLaneMetadataOptions.buildingCode(from: $0) == code }) {
+            return code
+        }
+        return fastBuildingOptions.first.map(FastLaneMetadataOptions.buildingCode(from:)) ?? "B1"
+    }
+
+    private func loadFastLaneMetadataOptionsIfNeeded() {
+        guard !didLoadFastMetadataOptions else { return }
+        didLoadFastMetadataOptions = true
+        fastBuildingOptions = FastLaneMetadataOptions.loadBuildingOptions()
+        fastTradeOptions = FastLaneMetadataOptions.loadTradeOptions(selectedTrade: fastMetadataContext.trade)
+    }
+
+    private func warmFastLaneMetadataListsIfNeeded() {
+        guard !didWarmFastMetadataLists else { return }
+        didWarmFastMetadataLists = true
+        _ = fastDetailTypesModel.names(for: .interior, profile: fastLaneCaptureProfile)
+        _ = fastDetailTypesModel.names(for: .exterior, profile: fastLaneCaptureProfile)
+        _ = FastLaneMetadataOptions.canonicalTradeOptions(fastTradeOptions, selectedTrade: fastMetadataContext.trade)
+        _ = fastBuildingOptions.map(FastLaneMetadataOptions.buildingDisplayName(for:))
+    }
+
+    private static let exteriorElevationOptions = ["North", "South", "East", "West"]
+
+    private func closePreview() {
+        guard !isClosing else { return }
+        fastLaneExitIntentActive = true
+        isClosing = true
+        fastLanePendingFlaggedDecision = nil
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = "Medium"
+        fastLaneRetakeGuidedID = nil
+        fastLaneRetakeIssueID = nil
+        releaseStartedAt = Date()
+        camera.stopPreviewAsync()
+        if didCompleteUpload {
+            releaseFinishedAt = Date()
+            onDismiss(AppState.FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: capturedCount,
+                lockAction: "completed_upload",
+                tempDiscarded: false,
+                draftRootPath: fastStorageRoot?.path,
+                errorMessage: nil,
+                timings: AppState.FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: nil,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: releaseStartedAt.map { Date().timeIntervalSince($0) * 1_000 } ?? 0
+                )
+            ))
+            return
+        }
+        Task {
+            let closeResult = await appState.closeFastRuntimePrototypePreview(
+                context: context,
+                tempStorageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: capturedCount,
+                lastMetadataContext: isFastLaneCaptureIntentArmed
+                    ? fastLaneFreeMetadataContext(from: fastMetadataContext)
+                    : fastLaneFreeMetadataContextIfNeeded(fastMetadataContext)
+            )
+            await MainActor.run {
+                releaseFinishedAt = Date()
+                onDismiss(closeResult)
+            }
+        }
+    }
+}
+
+private enum FastLaneMetadataOptions {
+    nonisolated static let buildingOptionsDefaultsKey = "scout.capture.building.options.v1"
+    nonisolated static let tradeOptionsDefaultsKey = "scout.capture.trade.options.v1"
+    nonisolated static let defaultBuildingOptions = ["B1", "B2", "B3", "B4", "B5", "Add"]
+    nonisolated static let defaultTradeOptions = [
+        "Masonry", "Roofing", "Siding", "Windows", "Doors", "Stucco", "Foundation",
+        "Framing", "Electrical", "Plumbing", "HVAC", "Landscaping", "Interior Finish"
+    ]
+
+    nonisolated static func buildingCode(from option: String) -> String {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let rawCode: String
+        if let dashRange = trimmed.range(of: "-") {
+            rawCode = String(trimmed[..<dashRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            rawCode = trimmed
+        }
+        if rawCode.compare("add", options: .caseInsensitive) == .orderedSame {
+            return "Add"
+        }
+        return rawCode.uppercased()
+    }
+
+    nonisolated static func buildingDisplayName(for option: String) -> String {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(" - ") { return trimmed }
+        let code = buildingCode(from: trimmed)
+        if code == "Add" { return "Add - Additional" }
+        if code.hasPrefix("B") {
+            let suffix = code.dropFirst()
+            if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                return "\(code) - Building \(suffix)"
+            }
+        }
+        return code
+    }
+
+    static func loadBuildingOptions() -> [String] {
+        guard let data = UserDefaults.standard.data(forKey: buildingOptionsDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return defaultBuildingOptions
+        }
+        let cleaned = decoded.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return cleaned.isEmpty ? defaultBuildingOptions : cleaned
+    }
+
+    static func persistBuildingOptions(_ options: [String], selectedBuilding: inout String) {
+        let cleaned = options.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let final = cleaned.isEmpty ? defaultBuildingOptions : cleaned
+        let selectedCode = buildingCode(from: selectedBuilding)
+        selectedBuilding = final.contains(where: { buildingCode(from: $0) == selectedCode })
+            ? selectedCode
+            : buildingCode(from: final[0])
+        if let data = try? JSONEncoder().encode(final) {
+            UserDefaults.standard.set(data, forKey: buildingOptionsDefaultsKey)
+        }
+    }
+
+    nonisolated static func tradeKey(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    nonisolated static func canonicalTradeLabel(_ value: String?, preferredOptions: [String] = []) -> String {
+        let trimmed = (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let key = tradeKey(trimmed)
+        guard !key.isEmpty else { return "" }
+        if let builtIn = defaultTradeOptions.first(where: { tradeKey($0) == key }) { return builtIn }
+        if let preferred = preferredOptions.first(where: { tradeKey($0) == key }) {
+            return preferred.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    nonisolated static func canonicalTradeOptions(_ values: [String], selectedTrade: String? = nil) -> [String] {
+        var output: [String] = []
+        var seen: Set<String> = []
+        func append(_ raw: String?) {
+            let canonical = canonicalTradeLabel(raw, preferredOptions: output)
+            let key = tradeKey(canonical)
+            guard !key.isEmpty, seen.insert(key).inserted else { return }
+            output.append(canonical)
+        }
+        values.forEach { append($0) }
+        append(selectedTrade)
+        return output
+    }
+
+    static func loadTradeOptions(selectedTrade: String?) -> [String] {
+        guard let data = UserDefaults.standard.data(forKey: tradeOptionsDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return canonicalTradeOptions(defaultTradeOptions, selectedTrade: selectedTrade)
+        }
+        let cleaned = canonicalTradeOptions(decoded, selectedTrade: selectedTrade)
+        return cleaned.isEmpty ? defaultTradeOptions : cleaned
+    }
+
+    static func persistTradeOptions(_ options: inout [String], selectedTrade: inout String) {
+        let cleaned = canonicalTradeOptions(options, selectedTrade: selectedTrade)
+        options = cleaned.isEmpty ? defaultTradeOptions : cleaned
+        selectedTrade = canonicalTradeLabel(selectedTrade, preferredOptions: options)
+        if !selectedTrade.isEmpty,
+           options.contains(where: { tradeKey($0) == tradeKey(selectedTrade) }) == false {
+            selectedTrade = ""
+        }
+        if let data = try? JSONEncoder().encode(options) {
+            UserDefaults.standard.set(data, forKey: tradeOptionsDefaultsKey)
+        }
+    }
+}
+
+private final class FastLaneDetailTypesModel: ObservableObject {
+    struct DetailTypeItem: Identifiable, Codable, Equatable {
+        var id: UUID = UUID()
+        var name: String
+    }
+
+    @Published var residentialInteriorTypes: [DetailTypeItem] = []
+    @Published var residentialExteriorTypes: [DetailTypeItem] = []
+    @Published var commercialInteriorTypes: [DetailTypeItem] = []
+    @Published var commercialExteriorTypes: [DetailTypeItem] = []
+    @Published var selectedResidentialInterior: String = ""
+    @Published var selectedResidentialExterior: String = ""
+    @Published var selectedCommercialInterior: String = ""
+    @Published var selectedCommercialExterior: String = ""
+
+    private let residentialInteriorTypesKey = "scout.detailTypes.residential.interior.list.v1"
+    private let residentialExteriorTypesKey = "scout.detailTypes.residential.exterior.list.v1"
+    private let commercialInteriorTypesKey = "scout.detailTypes.commercial.interior.list.v1"
+    private let commercialExteriorTypesKey = "scout.detailTypes.commercial.exterior.list.v1"
+    private let selectedResidentialInteriorKey = "scout.detailTypes.residential.interior.selected.v1"
+    private let selectedResidentialExteriorKey = "scout.detailTypes.residential.exterior.selected.v1"
+    private let selectedCommercialInteriorKey = "scout.detailTypes.commercial.interior.selected.v1"
+    private let selectedCommercialExteriorKey = "scout.detailTypes.commercial.exterior.selected.v1"
+    private let legacyResidentialInteriorTypesKey = "scout.detailTypes.interior.list.v4"
+    private let legacyResidentialExteriorTypesKey = "scout.detailTypes.exterior.list.v4"
+    private let legacySelectedResidentialInteriorKey = "scout.detailTypes.interior.selected.v4"
+    private let legacySelectedResidentialExteriorKey = "scout.detailTypes.exterior.selected.v4"
+    private let legacyInteriorTypesKey = "scout.detailTypes.interior.list.v2"
+    private let legacyExteriorTypesKey = "scout.detailTypes.exterior.list.v2"
+    private let legacySelectedInteriorKey = "scout.detailTypes.interior.selected.v2"
+    private let legacySelectedExteriorKey = "scout.detailTypes.exterior.selected.v2"
+    private var pendingPersist: DispatchWorkItem?
+
+    private let defaultResidentialInteriorTypes = [
+        "Overview", "Entry / Foyer", "Living Room", "Kitchen", "Dining Area", "Primary Bedroom",
+        "Bedroom 2", "Bedroom 3", "Bedroom 4", "Bedroom 5", "Bathroom", "Hallway",
+        "Stairs", "Laundry", "Garage", "Mechanical / HVAC", "Storage"
+    ]
+    private let defaultResidentialExteriorTypes = [
+        "Overview", "Elevation", "Entry / Porch", "Window", "Roofline", "Cladding / Siding",
+        "Driveway / Garage", "Backyard / Patio", "Landscaping", "Fence / Gate", "Utility / HVAC",
+        "Pool / Outdoor Amenities", "Sidewalk", "Exterior Stairs / Ramp", "Downspout", "Chimney", "Foundation"
+    ]
+    private let defaultCommercialInteriorTypes = [
+        "Overview", "Lobby / Reception", "Corridor", "Stairs", "Elevator", "Office",
+        "Conference Room", "Open Workspace", "Break Room / Kitchenette", "Restroom", "Storage",
+        "Electrical Room", "Mechanical Room", "IT / Server Room", "Janitorial / Service Room",
+        "Retail Floor", "Suite Entry", "Leasing / Amenity Area"
+    ]
+    private let defaultCommercialExteriorTypes = [
+        "Overview", "Elevation", "Entry", "Storefront", "Loading Dock", "Parking Area",
+        "Site Circulation", "Signage", "Window / Glazing", "Roofline", "Cladding / Facade",
+        "Canopy / Awning", "Exterior Stairs / Ramp", "Trash / Service Area", "Fence / Gate",
+        "Utility / HVAC", "Mechanical Equipment", "Landscape / Hardscape", "Downspout", "Foundation"
+    ]
+
+    init() {
+        load()
+        normalizeDefaultsIfNeeded()
+    }
+
+    func items(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
+        switch (profile, mode) {
+        case (.residential, .interior): return residentialInteriorTypes
+        case (.residential, .exterior): return residentialExteriorTypes
+        case (.commercial, .interior): return commercialInteriorTypes
+        case (.commercial, .exterior): return commercialExteriorTypes
+        }
+    }
+
+    func names(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [String] {
+        items(for: mode, profile: profile).map(\.name).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    func selected(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> String {
+        switch (profile, mode) {
+        case (.residential, .interior): return selectedResidentialInterior
+        case (.residential, .exterior): return selectedResidentialExterior
+        case (.commercial, .interior): return selectedCommercialInterior
+        case (.commercial, .exterior): return selectedCommercialExterior
+        }
+    }
+
+    func setSelected(_ value: String, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior): selectedResidentialInterior = value
+        case (.residential, .exterior): selectedResidentialExterior = value
+        case (.commercial, .interior): selectedCommercialInterior = value
+        case (.commercial, .exterior): selectedCommercialExterior = value
+        }
+        persistSelected()
+    }
+
+    func resetSelectionsToOverview(for profile: CaptureProfile) {
+        let interiorOverview = names(for: .interior, profile: profile)
+            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
+            names(for: .interior, profile: profile).first ??
+            ""
+        let exteriorOverview = names(for: .exterior, profile: profile)
+            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
+            names(for: .exterior, profile: profile).first ??
+            ""
+        setSelected(interiorOverview, for: .interior, profile: profile)
+        setSelected(exteriorOverview, for: .exterior, profile: profile)
+    }
+
+    @discardableResult
+    func insertBlankItem(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> UUID {
+        let newItem = DetailTypeItem(name: "")
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes.append(newItem)
+        case (.residential, .exterior): residentialExteriorTypes.append(newItem)
+        case (.commercial, .interior): commercialInteriorTypes.append(newItem)
+        case (.commercial, .exterior): commercialExteriorTypes.append(newItem)
+        }
+        persistAll()
+        return newItem.id
+    }
+
+    func updateItem(_ value: String, id: UUID, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        let cleaned = value.trimmingCharacters(in: .newlines)
+        switch (profile, mode) {
+        case (.residential, .interior):
+            guard let idx = residentialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            residentialInteriorTypes[idx].name = cleaned
+        case (.residential, .exterior):
+            guard let idx = residentialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            residentialExteriorTypes[idx].name = cleaned
+        case (.commercial, .interior):
+            guard let idx = commercialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            commercialInteriorTypes[idx].name = cleaned
+        case (.commercial, .exterior):
+            guard let idx = commercialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            commercialExteriorTypes[idx].name = cleaned
+        }
+        normalizeDefaultsIfNeeded()
+        persistAll()
+    }
+
+    func delete(at offsets: IndexSet, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior):
+            let deleting = offsets.compactMap { residentialInteriorTypes.indices.contains($0) ? residentialInteriorTypes[$0].name : nil }
+            residentialInteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedResidentialInterior) { selectedResidentialInterior = residentialInteriorTypes.first?.name ?? "" }
+        case (.residential, .exterior):
+            let deleting = offsets.compactMap { residentialExteriorTypes.indices.contains($0) ? residentialExteriorTypes[$0].name : nil }
+            residentialExteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedResidentialExterior) { selectedResidentialExterior = residentialExteriorTypes.first?.name ?? "" }
+        case (.commercial, .interior):
+            let deleting = offsets.compactMap { commercialInteriorTypes.indices.contains($0) ? commercialInteriorTypes[$0].name : nil }
+            commercialInteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedCommercialInterior) { selectedCommercialInterior = commercialInteriorTypes.first?.name ?? "" }
+        case (.commercial, .exterior):
+            let deleting = offsets.compactMap { commercialExteriorTypes.indices.contains($0) ? commercialExteriorTypes[$0].name : nil }
+            commercialExteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedCommercialExterior) { selectedCommercialExterior = commercialExteriorTypes.first?.name ?? "" }
+        }
+        normalizeDefaultsIfNeeded()
+        persistAll()
+    }
+
+    func move(from source: IndexSet, to destination: Int, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.residential, .exterior): residentialExteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.commercial, .interior): commercialInteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.commercial, .exterior): commercialExteriorTypes.move(fromOffsets: source, toOffset: destination)
+        }
+        schedulePersist()
+    }
+
+    private func schedulePersist() {
+        pendingPersist?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.normalizeDefaultsIfNeeded()
+            self.persistAll()
+        }
+        pendingPersist = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
+    }
+
+    private func load() {
+        residentialInteriorTypes = loadItems(key: residentialInteriorTypesKey, legacyKeys: [legacyResidentialInteriorTypesKey, legacyInteriorTypesKey])
+        residentialExteriorTypes = loadItems(key: residentialExteriorTypesKey, legacyKeys: [legacyResidentialExteriorTypesKey, legacyExteriorTypesKey])
+        commercialInteriorTypes = loadItems(key: commercialInteriorTypesKey, legacyKeys: [])
+        commercialExteriorTypes = loadItems(key: commercialExteriorTypesKey, legacyKeys: [])
+        selectedResidentialInterior = UserDefaults.standard.string(forKey: selectedResidentialInteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialInteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedInteriorKey)
+            ?? ""
+        selectedResidentialExterior = UserDefaults.standard.string(forKey: selectedResidentialExteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialExteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedExteriorKey)
+            ?? ""
+        selectedCommercialInterior = UserDefaults.standard.string(forKey: selectedCommercialInteriorKey) ?? ""
+        selectedCommercialExterior = UserDefaults.standard.string(forKey: selectedCommercialExteriorKey) ?? ""
+    }
+
+    private func persistAll() {
+        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
+        saveItems(residentialExteriorTypes, key: residentialExteriorTypesKey)
+        saveItems(commercialInteriorTypes, key: commercialInteriorTypesKey)
+        saveItems(commercialExteriorTypes, key: commercialExteriorTypesKey)
+        persistSelected()
+    }
+
+    private func persistSelected() {
+        UserDefaults.standard.set(selectedResidentialInterior, forKey: selectedResidentialInteriorKey)
+        UserDefaults.standard.set(selectedResidentialExterior, forKey: selectedResidentialExteriorKey)
+        UserDefaults.standard.set(selectedCommercialInterior, forKey: selectedCommercialInteriorKey)
+        UserDefaults.standard.set(selectedCommercialExterior, forKey: selectedCommercialExteriorKey)
+    }
+
+    private func normalizeDefaultsIfNeeded() {
+        if residentialInteriorTypes.isEmpty { residentialInteriorTypes = defaultResidentialInteriorTypes.map { DetailTypeItem(name: $0) } }
+        if residentialExteriorTypes.isEmpty { residentialExteriorTypes = defaultResidentialExteriorTypes.map { DetailTypeItem(name: $0) } }
+        if commercialInteriorTypes.isEmpty { commercialInteriorTypes = defaultCommercialInteriorTypes.map { DetailTypeItem(name: $0) } }
+        if commercialExteriorTypes.isEmpty { commercialExteriorTypes = defaultCommercialExteriorTypes.map { DetailTypeItem(name: $0) } }
+        if selectedResidentialInterior.isEmpty { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
+        if selectedResidentialExterior.isEmpty { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
+        if selectedCommercialInterior.isEmpty { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
+        if selectedCommercialExterior.isEmpty { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
+        if !residentialInteriorTypes.contains(where: { $0.name == selectedResidentialInterior }) { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
+        if !residentialExteriorTypes.contains(where: { $0.name == selectedResidentialExterior }) { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
+        if !commercialInteriorTypes.contains(where: { $0.name == selectedCommercialInterior }) { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
+        if !commercialExteriorTypes.contains(where: { $0.name == selectedCommercialExterior }) { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
+    }
+
+    private func firstNonEmpty(from list: [DetailTypeItem]) -> String? {
+        list.first(where: { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.name
+    }
+
+    private func loadItems(key: String, legacyKeys: [String]) -> [DetailTypeItem] {
+        if let data = UserDefaults.standard.data(forKey: key),
+           let decoded = try? JSONDecoder().decode([DetailTypeItem].self, from: data) {
+            return decoded
+        }
+        for legacyKey in legacyKeys {
+            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
+               let decodedItems = try? JSONDecoder().decode([DetailTypeItem].self, from: legacyData) {
+                return decodedItems
+            }
+            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
+               let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
+                return decodedStrings.map { DetailTypeItem(name: $0) }
+            }
+        }
+        return []
+    }
+
+    private func saveItems(_ items: [DetailTypeItem], key: String) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+private struct FastLaneSessionActionsSummary: Equatable {
+    let guidedRemainingCount: Int
+    let flaggedRemainingCount: Int
+    let currentSessionCaptureCount: Int
+    let sessionType: SessionType
+    let canComplete: Bool
+    let isComplete: Bool
+    let disabledReason: String?
+
+    var isPunchlistVisit: Bool {
+        sessionType == .punchlistVisit
+    }
+
+    var hasCaptures: Bool {
+        currentSessionCaptureCount > 0
+    }
+
+    var exportActionTitle: String {
+        AppState.sessionCompletionActionTitle(sessionType: sessionType)
+    }
+
+    var exitActionTitle: String {
+        hasCaptures ? "Exit as Draft" : "Exit"
+    }
+
+    var isExportActionEnabled: Bool {
+        canComplete && !isComplete
+    }
+}
+
+private struct FastLaneSessionActionsSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let summary: FastLaneSessionActionsSummary
+    let isEndingSession: Bool
+    let endingTitle: String
+    let onResume: () -> Void
+    let onSaveDraftAndExit: () -> Void
+    let onComplete: () -> Void
+
+    private var neutralFill: Color {
+        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+    }
+
+    private var neutralStroke: Color {
+        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+    }
+
+    private var neutralLabel: Color {
+        colorScheme == .light ? Color.black.opacity(0.88) : .white
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let constrainedHeight = geo.size.height < 620
+
+            ZStack {
+                Color.black.opacity(0.52)
+                    .ignoresSafeArea()
+                    .onTapGesture { }
+
+                VStack {
+                    Spacer(minLength: 0)
+
+                    VStack(spacing: 14) {
+                        Text("Session Actions")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(.white)
+
+                        VStack(spacing: 8) {
+                            summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
+                            if !summary.isPunchlistVisit {
+                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+
+                        if constrainedHeight {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                actionButtonsStack
+                            }
+                            .frame(maxHeight: geo.size.height * 0.38)
+                        } else {
+                            actionButtonsStack
+                        }
+                    }
+                    .padding(18)
+                    .frame(width: min(max(310, geo.size.width * 0.84), 470))
+                    .background(Color.black.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func summaryRow(title: String, value: Int) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.white.opacity(0.92))
+            Spacer(minLength: 0)
+            Text("\(value)")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtonsStack: some View {
+        VStack(spacing: 10) {
+            actionButton(
+                title: "Resume",
+                role: .primary,
+                isEnabled: !isEndingSession,
+                action: onResume
+            )
+            actionButton(
+                title: summary.exitActionTitle,
+                role: .secondary,
+                isEnabled: !isEndingSession,
+                action: onSaveDraftAndExit
+            )
+            actionButton(
+                title: isEndingSession ? endingTitle : summary.exportActionTitle,
+                role: .tertiary,
+                isEnabled: !isEndingSession && summary.isExportActionEnabled,
+                action: onComplete
+            )
+
+            if !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
+                Text(disabledReason)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    private enum ActionRole {
+        case primary
+        case secondary
+        case tertiary
+    }
+
+    @ViewBuilder
+    private func actionButton(
+        title: String,
+        role: ActionRole,
+        isEnabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        let fill: Color = {
+            switch role {
+            case .primary:
+                return .blue
+            case .secondary:
+                return neutralFill
+            case .tertiary:
+                return .white
+            }
+        }()
+        let stroke: Color = {
+            switch role {
+            case .primary:
+                return .blue.opacity(0.85)
+            case .secondary:
+                return neutralStroke
+            case .tertiary:
+                return Color.red.opacity(0.30)
+            }
+        }()
+        let label: Color = {
+            switch role {
+            case .primary:
+                return .white
+            case .secondary:
+                return neutralLabel
+            case .tertiary:
+                return .red.opacity(0.88)
+            }
+        }()
+
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(isEnabled ? label : label.opacity(0.45))
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .background(isEnabled ? fill : fill.opacity(0.45))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
+                )
+        }
+        .opacity(isEnabled ? 1.0 : 0.72)
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+}
+
+private struct FastLaneIssueListSheet: View {
+    enum Mode {
+        case activeIssues
+        case resolutionRequired
+
+        var title: String {
+            switch self {
+            case .activeIssues: return "Active Issues"
+            case .resolutionRequired: return "Resolution Required"
+            }
+        }
+
+        var emptyIcon: String {
+            switch self {
+            case .activeIssues: return "flag.slash"
+            case .resolutionRequired: return "flag.checkered"
+            }
+        }
+
+        var emptyText: String {
+            switch self {
+            case .activeIssues: return "No active issues"
+            case .resolutionRequired: return "No resolution required"
+            }
+        }
+
+        var accent: Color {
+            switch self {
+            case .activeIssues: return .red
+            case .resolutionRequired: return .green
+            }
+        }
+    }
+
+    let mode: Mode
+    let observations: [Observation]
+    let thumbnailPathByID: [UUID: String]
+    let handledObservationIDs: Set<UUID>
+    @ObservedObject var imageCache: AssetImageCache
+    let isLoading: Bool
+    let onSelect: (Observation) -> Void
+    let onOpenImage: (Observation) -> Void
+    let onClose: () -> Void
+
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var inlineToastText: String?
+    @State private var inlineToastToken: Int = 0
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let contentW = isLandscape ? geo.size.height : geo.size.width
+            let contentH = isLandscape ? geo.size.width : geo.size.height
+
+            NavigationStack {
+                ZStack {
+                    Color(uiColor: .secondarySystemGroupedBackground)
+                        .ignoresSafeArea()
+
+                    if observations.isEmpty && isLoading {
+                        loadingState
+                    } else if observations.isEmpty {
+                        emptyState
+                    } else {
+                        List(observations) { observation in
+                            FastLaneIssueListRow(
+                                observation: observation,
+                                mode: mode,
+                                thumbnailPath: thumbnailPathByID[observation.id],
+                                isHandledInCurrentSession: handledObservationIDs.contains(observation.id),
+                                imageCache: imageCache,
+                                onTap: {
+                                    guard !handledObservationIDs.contains(observation.id) else { return }
+                                    onSelect(observation)
+                                },
+                                onOpenImage: {
+                                    onOpenImage(observation)
+                                }
+                            )
+                        }
+                        .listStyle(.insetGrouped)
+                        .scrollIndicators(.hidden)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if isLoading && !observations.isEmpty {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.secondary)
+                            .scaleEffect(0.82)
+                            .padding(8)
+                            .background(.thinMaterial)
+                            .clipShape(Circle())
+                            .padding(.top, 66)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if let inlineToastText {
+                        Text(inlineToastText)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.black.opacity(0.72))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                            .padding(.top, 64)
+                            .transition(.opacity)
+                    }
+                }
+                .toolbar(.hidden, for: .navigationBar)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    sheetHeader(title: mode.title)
+                }
+            }
+            .frame(width: contentW, height: contentH, alignment: .center)
+            .rotationEffect(.degrees(rotationDegrees))
+            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+    }
+
+    private var loadingState: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.secondary)
+            Text("Loading")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: mode.emptyIcon)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(.secondary)
+            Text(mode.emptyText)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func sheetHeader(title: String) -> some View {
+        ZStack {
+            Text(title)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(.primary)
+                .minimumScaleFactor(0.75)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
+
+                Button(action: onClose) {
+                    Text("Done")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.primary)
+                        .frame(width: 72, height: 42)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastValidOrientation = orientation
+        default:
+            break
+        }
+    }
+
+    private func showInlineToast(_ text: String) {
+        inlineToastText = text
+        inlineToastToken += 1
+        let token = inlineToastToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard token == inlineToastToken else { return }
+            inlineToastText = nil
+        }
+    }
+}
+
+private struct FastLanePanelThumbnail: View {
+    let path: String?
+    let fallbackSystemImage: String
+    let fallbackColor: Color
+    @ObservedObject var cache: AssetImageCache
+
+    @State private var image: UIImage?
+    @State private var loadedPath: String?
+
+    var body: some View {
+        ZStack {
+            Color.white.opacity(0.08)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 56, height: 56)
+                    .clipped()
+            } else {
+                Image(systemName: fallbackSystemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(path == nil ? fallbackColor.opacity(0.55) : fallbackColor)
+            }
+        }
+        .frame(width: 56, height: 56)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear(perform: loadImageIfNeeded)
+        .onChange(of: path) { _, _ in
+            image = nil
+            loadedPath = nil
+            loadImageIfNeeded()
+        }
+    }
+
+    private func loadImageIfNeeded() {
+        guard image == nil,
+              loadedPath != path,
+              let path,
+              FileManager.default.fileExists(atPath: path) else {
+            return
+        }
+        loadedPath = path
+        let url = URL(fileURLWithPath: path, isDirectory: false)
+        let asset = ReportAsset(
+            localIdentifier: path,
+            fileURL: url,
+            creationDate: nil,
+            pixelWidth: 0,
+            pixelHeight: 0,
+            originalFilename: url.lastPathComponent
+        )
+        let px = max(120, 56 * UIScreen.currentScale * 2.0)
+        cache.requestThumbnail(for: asset, pixelSize: px) { thumbnail in
+            DispatchQueue.main.async {
+                guard loadedPath == path else { return }
+                image = thumbnail
+            }
+        }
+    }
+}
+
+private struct FastLaneIssueListRow: View {
+    let observation: Observation
+    let mode: FastLaneIssueListSheet.Mode
+    let thumbnailPath: String?
+    let isHandledInCurrentSession: Bool
+    @ObservedObject var imageCache: AssetImageCache
+    let onTap: () -> Void
+    let onOpenImage: () -> Void
+
+    private var contextLabel: String {
+        let composed = fastLaneConciseContextLabel(
+            building: observation.building,
+            elevation: observation.targetElevation,
+            detailType: observation.detailType
+        )
+        let base = composed.isEmpty ? "Flagged Issue" : composed
+        guard let angle = fastLaneObservationDisplayAngleIndex(observation) else { return base }
+        return "\(base) - Angle \(max(1, angle))"
+    }
+
+    private var reasonText: String {
+        Observation.inferredCurrentReason(
+            note: observation.currentReason ?? observation.note,
+            statement: observation.statement
+        )
+        ?? fastLaneTrimmedNonEmpty(observation.resolutionStatement)
+        ?? fastLaneTrimmedNonEmpty(observation.previousReason)
+        ?? "No reason"
+    }
+
+    private var supportingReasonText: String? {
+        let candidates: [(String, String?)] = [
+            ("Resolution", observation.resolutionStatement),
+            ("Previous", observation.previousReason)
+        ]
+        for candidate in candidates {
+            guard let value = fastLaneTrimmedNonEmpty(candidate.1), value != reasonText else { continue }
+            return "\(candidate.0): \(value)"
+        }
+        return nil
+    }
+
+    private var statusLabel: String {
+        switch observation.status {
+        case .resolutionRequired:
+            return mode == .resolutionRequired ? "" : "Resolution Required"
+        case .pendingReview:
+            return "Pending Review"
+        case .resolved:
+            return "Resolved"
+        case .active:
+            return isHandledInCurrentSession ? "Captured" : ""
+        }
+    }
+
+    private var statusColor: Color {
+        switch observation.status {
+        case .resolutionRequired, .resolved:
+            return .green
+        case .pendingReview:
+            return .blue
+        case .active:
+            return isHandledInCurrentSession ? .green : .orange
+        }
+    }
+
+    private var priorityText: String {
+        normalizedFastLaneDetailPriority(observation.priority)
+    }
+
+    private var tradeText: String {
+        FastLaneMetadataOptions.canonicalTradeLabel(observation.trade)
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onTap) {
+                FastLanePanelThumbnail(
+                    path: thumbnailPath,
+                    fallbackSystemImage: mode == .activeIssues ? "flag.fill" : "flag.checkered",
+                    fallbackColor: mode.accent,
+                    cache: imageCache
+                )
+            }
+            .buttonStyle(.borderless)
+            .overlay(alignment: .topTrailing) {
+                if isHandledInCurrentSession {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                        .padding(4)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(contextLabel)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(observation.status == .resolved ? .secondary : .primary)
+                    .lineLimit(1)
+
+                if !statusLabel.isEmpty {
+                    Text(statusLabel)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(statusColor)
+                }
+
+                if !priorityText.isEmpty || !tradeText.isEmpty {
+                    HStack(spacing: 8) {
+                        if !priorityText.isEmpty {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(fastLaneDetailPriorityColor(priorityText))
+                                    .frame(width: 8, height: 8)
+                                Text(priorityText)
+                            }
+                        }
+                        if !tradeText.isEmpty {
+                            HStack(spacing: 5) {
+                                Image(systemName: "wrench.adjustable")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(tradeText)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
+                            }
+                        }
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.92))
+                }
+
+                Text("\(Text("Reason: ").font(.system(size: 12, weight: .semibold)))\(Text(reasonText).font(.system(size: 12, weight: .regular)))")
+                    .foregroundColor(.white.opacity(0.86))
+                    .lineLimit(2)
+
+                if let supportingReasonText {
+                    Text(supportingReasonText)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(.white.opacity(0.66))
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .opacity(observation.status == .resolved ? 0.70 : 1.0)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+        .listRowBackground(Color.clear)
+    }
+}
+
+private struct FastLaneGuidedChecklistSheet: View {
+    let guidedShots: [GuidedShot]
+    let retiredGuidedShots: [GuidedShot]
+    let thumbnailPathByID: [UUID: String]
+    @ObservedObject var imageCache: AssetImageCache
+    let isLoading: Bool
+    let onClose: () -> Void
+    let onSelectGuided: (GuidedShot) -> Void
+    let onOpenImage: (GuidedShot) -> Void
+
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var inlineToastText: String?
+    @State private var inlineToastToken: Int = 0
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let contentW = isLandscape ? geo.size.height : geo.size.width
+            let contentH = isLandscape ? geo.size.width : geo.size.height
+
+            NavigationStack {
+                ZStack {
+                    Color(uiColor: .secondarySystemGroupedBackground)
+                        .ignoresSafeArea()
+
+                    if guidedShots.isEmpty && isLoading {
+                        VStack(spacing: 10) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.secondary)
+                            Text("Loading")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if guidedShots.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "safari")
+                                .font(.system(size: 28, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text("No guided photos")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List {
+                            Section {
+                                ForEach(guidedShots) { guidedShot in
+                                    FastLaneGuidedChecklistRow(
+                                        guidedShot: guidedShot,
+                                        thumbnailPath: thumbnailPathByID[guidedShot.id],
+                                        imageCache: imageCache,
+                                        onTap: {
+                                            onSelectGuided(guidedShot)
+                                        },
+                                        onOpenImage: {
+                                            onOpenImage(guidedShot)
+                                        }
+                                    )
+                                }
+                            }
+
+                            if !retiredGuidedShots.isEmpty {
+                                Section("Retired") {
+                                    ForEach(retiredGuidedShots) { guidedShot in
+                                        FastLaneGuidedChecklistRow(
+                                            guidedShot: guidedShot,
+                                            thumbnailPath: thumbnailPathByID[guidedShot.id],
+                                            imageCache: imageCache,
+                                            onTap: {
+                                                showInlineToast("Restore retired guided items is deferred")
+                                            },
+                                            onOpenImage: {
+                                                onOpenImage(guidedShot)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        .listStyle(.insetGrouped)
+                        .scrollIndicators(.hidden)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if let inlineToastText {
+                        Text(inlineToastText)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.black.opacity(0.72))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                            .padding(.top, 64)
+                    }
+                }
+                .toolbar(.hidden, for: .navigationBar)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    ZStack {
+                        Text("Guided Checklist")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(.primary)
+                            .minimumScaleFactor(0.75)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        HStack(spacing: 10) {
+                            Spacer(minLength: 0)
+
+                            Button(action: onClose) {
+                                Text("Done")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(.primary)
+                                    .frame(width: 72, height: 42)
+                                    .background(Color(uiColor: .secondarySystemBackground))
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+                }
+            }
+            .frame(width: contentW, height: contentH, alignment: .center)
+            .rotationEffect(.degrees(rotationDegrees))
+            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastValidOrientation = orientation
+        default:
+            break
+        }
+    }
+
+    private func showInlineToast(_ text: String) {
+        inlineToastText = text
+        inlineToastToken += 1
+        let token = inlineToastToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard token == inlineToastToken else { return }
+            inlineToastText = nil
+        }
+    }
+}
+
+private struct FastLaneGuidedChecklistRow: View {
+    let guidedShot: GuidedShot
+    let thumbnailPath: String?
+    @ObservedObject var imageCache: AssetImageCache
+    let onTap: () -> Void
+    let onOpenImage: () -> Void
+
+    private var fallbackTitleLabel: String {
+        let title = guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Guided Shot" : title
+    }
+
+    private var contextLabel: String {
+        let composed = fastLaneConciseContextLabel(
+            building: guidedShot.building,
+            elevation: guidedShot.targetElevation,
+            detailType: guidedShot.detailType
+        )
+        let base = composed.isEmpty ? fallbackTitleLabel : composed
+        return "\(base) - Angle \(max(1, guidedShot.angleIndex ?? 1))"
+    }
+
+    private var statusLabel: String {
+        if guidedShot.isRetired || guidedShot.status == .retired {
+            if let retiredAt = guidedShot.retiredAt {
+                return "Retired \(fastLaneFormatPanelTimestamp(retiredAt))"
+            }
+            return "Retired"
+        }
+        if guidedShot.skipReason != nil {
+            return guidedShot.skipReason.map(fastLaneSkipReasonTitle(for:)) ?? "Skipped"
+        }
+        if guidedShot.isCompleted {
+            return "Captured"
+        }
+        return "Pending"
+    }
+
+    private var statusColor: Color {
+        switch statusLabel {
+        case "Captured":
+            return .green
+        case "Skipped", "Retired":
+            return .gray
+        default:
+            return .orange
+        }
+    }
+
+    private var detailLine: String? {
+        if let note = fastLaneTrimmedNonEmpty(guidedShot.skipReasonNote), guidedShot.skipReason != nil {
+            return note
+        }
+        if let shotNote = fastLaneTrimmedNonEmpty(guidedShot.shot?.note), guidedShot.isCompleted {
+            return shotNote
+        }
+        return nil
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onTap) {
+                FastLanePanelThumbnail(
+                    path: thumbnailPath,
+                    fallbackSystemImage: "photo",
+                    fallbackColor: .secondary,
+                    cache: imageCache
+                )
+            }
+            .buttonStyle(.borderless)
+            .overlay(alignment: .topTrailing) {
+                if statusLabel == "Captured" {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                        .padding(4)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(contextLabel)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+
+                Text(statusLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(statusColor)
+
+                if let detailLine {
+                    Text(detailLine)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(.white.opacity(0.66))
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+        .listRowBackground(Color.clear)
+    }
+}
+
+private struct FastLaneCoreChecklistSheet: View {
+    let elevationTitle: String
+    let rows: [FastLaneCoreChecklistRowState]
+    let onClose: () -> Void
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+    private var rotationAngle: Angle {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return .zero }
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return .degrees(90)
+        case .landscapeRight:
+            return .degrees(-90)
+        default:
+            return .zero
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Core Elevation Checklist")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    if !elevationTitle.isEmpty {
+                        Text(elevationTitle)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 12)
+
+                Button(action: onClose) {
+                    Text("Done")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 36)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                ForEach(rows) { row in
+                    coreChecklistRow(row)
+                    if row.id != rows.last?.id {
+                        Divider()
+                            .padding(.leading, 14)
+                    }
+                }
+            }
+            .background(Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            )
+            .padding(.horizontal, 18)
+            .padding(.bottom, 18)
+        }
+        .frame(maxWidth: 450)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 16)
+        .rotationEffect(rotationAngle)
+        .onAppear {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            refreshOrientation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            refreshOrientation()
+        }
+        .onDisappear {
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        }
+    }
+
+    private func coreChecklistRow(_ row: FastLaneCoreChecklistRowState) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.category.title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let note = row.category.note {
+                    Text(note)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            Text(row.countLabel)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(.primary)
+                .frame(minWidth: 36, alignment: .trailing)
+
+            if row.category.showsCompletionIndicator {
+                Image(systemName: row.isComplete ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(row.isComplete ? Color.green : Color.gray)
+                    .frame(width: 22)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastValidOrientation = orientation
+        default:
+            break
+        }
+    }
+}
+
+private struct FastLaneGalleryMetadata: Equatable {
+    let propertyName: String
+    let shotLabel: String
+    let flaggedNote: String
+
+    init(
+        propertyName: String,
+        metadataContext: AppState.FastRuntimeCaptureMetadataContext?,
+        observation: Observation? = nil
+    ) {
+        self.propertyName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let metadataContext else {
+            self.shotLabel = "Shot"
+            self.flaggedNote = ""
+            return
+        }
+
+        var parts: [String] = []
+        let building = metadataContext.building.trimmingCharacters(in: .whitespacesAndNewlines)
+        let elevation = (CanonicalElevation.normalize(metadataContext.elevation) ?? metadataContext.elevation)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = metadataContext.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !building.isEmpty { parts.append(building) }
+        if !elevation.isEmpty { parts.append(elevation) }
+        if !detail.isEmpty { parts.append(detail) }
+        parts.append("Angle \(max(1, metadataContext.angleIndex))")
+        self.shotLabel = parts.isEmpty ? "Shot" : parts.joined(separator: " | ")
+        self.flaggedNote = metadataContext.isFlagged == true
+            ? (
+                observation.flatMap {
+                    Observation.inferredCurrentReason(note: $0.currentReason ?? $0.note, statement: $0.statement)
+                } ?? metadataContext.detailNote ?? ""
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+    }
+
+    init(
+        propertyName: String,
+        shot: ShotMetadata,
+        observation: Observation? = nil
+    ) {
+        self.propertyName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var parts: [String] = []
+        let building = shot.building.trimmingCharacters(in: .whitespacesAndNewlines)
+        let elevation = (CanonicalElevation.normalize(shot.elevation) ?? shot.elevation)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = shot.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !building.isEmpty { parts.append(building) }
+        if !elevation.isEmpty { parts.append(elevation) }
+        if !detail.isEmpty { parts.append(detail) }
+        parts.append("Angle \(max(1, shot.angleIndex))")
+        self.shotLabel = parts.isEmpty ? "Shot" : parts.joined(separator: " | ")
+        self.flaggedNote = shot.isFlagged
+            ? (
+                observation.flatMap {
+                    Observation.inferredCurrentReason(note: $0.currentReason ?? $0.note, statement: $0.statement)
+                } ?? shot.noteText ?? ""
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+    }
+
+    init(
+        propertyName: String,
+        building: String?,
+        elevation: String?,
+        detail: String?,
+        angleIndex: Int?,
+        flaggedNote: String
+    ) {
+        self.propertyName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var parts: [String] = []
+        let building = building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let elevation = (CanonicalElevation.normalize(elevation ?? "") ?? (elevation ?? ""))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !building.isEmpty { parts.append(building) }
+        if !elevation.isEmpty { parts.append(elevation) }
+        if !detail.isEmpty { parts.append(detail) }
+        if let angleIndex {
+            parts.append("Angle \(max(1, angleIndex))")
+        }
+        self.shotLabel = parts.isEmpty ? "Shot" : parts.joined(separator: " | ")
+        self.flaggedNote = flaggedNote.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct FastLanePhotoLibraryFullscreen: View {
+    let title: String
+    let assets: [ReportAsset]
+    let metadataByAssetID: [String: FastLaneGalleryMetadata]
+    let previousSessionID: UUID?
+    let previousAssets: [ReportAsset]
+    let previousMetadataByAssetID: [String: FastLaneGalleryMetadata]
+    @ObservedObject var cache: AssetImageCache
+    let thumbnailRefreshToken: UUID
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var viewerState: ViewerState?
+    @State private var viewingCurrentSession: Bool = true
+
+    private struct ViewerState: Identifiable {
+        let id = UUID()
+        let startIndex: Int
+    }
+
+    private var displayedAssets: [ReportAsset] {
+        viewingCurrentSession ? assets : previousAssets
+    }
+
+    private var displayedMetadataByAssetID: [String: FastLaneGalleryMetadata] {
+        viewingCurrentSession ? metadataByAssetID : previousMetadataByAssetID
+    }
+
+    private var canTogglePreviousSession: Bool {
+        previousSessionID != nil || !previousAssets.isEmpty
+    }
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let contentW = isLandscape ? h : w
+            let contentH = isLandscape ? w : h
+            let columnsCount = isLandscape ? 5 : 3
+            let spacing: CGFloat = 2
+            let horizontalPadding: CGFloat = isLandscape ? 0 : 2
+            let totalSpacing = CGFloat(max(0, columnsCount - 1)) * spacing
+            let rawSide = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
+            let side = rawSide.isFinite ? max(0, rawSide) : 0
+            let headerH: CGFloat = 80
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ZStack {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
+                            alignment: .center,
+                            spacing: spacing
+                        ) {
+                            ForEach(Array(displayedAssets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                                FastLaneLibraryThumb(
+                                    asset: asset,
+                                    cache: cache,
+                                    side: side,
+                                    refreshToken: thumbnailRefreshToken
+                                )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    viewerState = ViewerState(startIndex: index)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, horizontalPadding)
+                        .padding(.top, headerH)
+                        .padding(.bottom, isLandscape ? 0 : 8)
+                    }
+                    .ignoresSafeArea(isLandscape ? .all : [])
+
+                    if displayedAssets.isEmpty {
+                        emptyState
+                    }
+
+                    headerOverlay()
+                        .zIndex(50)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    sessionSourceToggle(bottomInset: isLandscape ? 26 : 22)
+                }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+            }
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+        .fullScreenCover(item: $viewerState) { state in
+            FastLanePhotoViewer(
+                title: title,
+                assets: displayedAssets,
+                startIndex: state.startIndex,
+                metadataByAssetID: displayedMetadataByAssetID,
+                cache: cache,
+                viewerToken: state.startIndex + (viewingCurrentSession ? 0 : 100_000)
+            )
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.on.rectangle")
+                .font(.system(size: 32, weight: .medium))
+                .foregroundColor(.white.opacity(0.55))
+            Text(viewingCurrentSession ? "No Photos" : "No Previous Photos")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.white.opacity(0.78))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func headerOverlay() -> some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.92),
+                        Color.black.opacity(0.70),
+                        Color.black.opacity(0.35),
+                        Color.black.opacity(0.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+
+                HStack(spacing: 10) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(title)
+                        .font(.system(size: 38, weight: .medium))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.4)
+                        .allowsTightening(true)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, isLandscape ? 8 : 6)
+                .padding(.bottom, 8)
+            }
+            .frame(height: 96)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(true)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        let newValue: UIDeviceOrientation? = {
+            switch orientation {
+            case .portrait:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return orientation
+            default:
+                return nil
+            }
+        }()
+        guard let newValue, newValue != lastValidOrientation else { return }
+        lastValidOrientation = newValue
+    }
+
+    @ViewBuilder
+    private func sessionSourceToggle(bottomInset: CGFloat) -> some View {
+        if canTogglePreviousSession {
+            Button {
+                viewingCurrentSession.toggle()
+                viewerState = nil
+            } label: {
+                Text(viewingCurrentSession ? "Current" : "Previous")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 42)
+                    .background(viewingCurrentSession ? Color.black.opacity(0.58) : Color.blue.opacity(0.85))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, isLandscape ? 20 : 16)
+            .padding(.bottom, bottomInset)
+        }
+    }
+}
+
+private struct FastLaneLibraryThumb: View {
+    let asset: ReportAsset
+    @ObservedObject var cache: AssetImageCache
+    let side: CGFloat
+    let refreshToken: UUID
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: side, height: side)
+                    .clipped()
+            } else {
+                Color.white.opacity(0.06)
+                    .frame(width: side, height: side)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipped()
+        .onAppear {
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: refreshToken) { _, _ in
+            image = nil
+            loadThumbnailIfNeeded()
+        }
+    }
+
+    private func loadThumbnailIfNeeded() {
+        if image != nil { return }
+        let scale = UIScreen.currentScale
+        let px = max(140, side * 1.35) * scale
+        cache.requestThumbnail(for: asset, pixelSize: px) { thumbnail in
+            DispatchQueue.main.async {
+                image = thumbnail
+            }
+        }
+    }
+}
+
+private struct FastLanePhotoViewer: View {
+    let title: String
+    let assets: [ReportAsset]
+    let startIndex: Int
+    let metadataByAssetID: [String: FastLaneGalleryMetadata]
+    @ObservedObject var cache: AssetImageCache
+    let viewerToken: Int
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var index: Int
+    @State private var barVisible: Bool = true
+    @State private var isPagingDrag: Bool = false
+
+    init(
+        title: String,
+        assets: [ReportAsset],
+        startIndex: Int,
+        metadataByAssetID: [String: FastLaneGalleryMetadata] = [:],
+        cache: AssetImageCache,
+        viewerToken: Int
+    ) {
+        self.title = title
+        self.assets = assets
+        self.startIndex = startIndex
+        self.metadataByAssetID = metadataByAssetID
+        self.cache = cache
+        self.viewerToken = viewerToken
+        _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
+    }
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let contentW = isLandscape ? h : w
+            let contentH = isLandscape ? w : h
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ZStack {
+                    TabView(selection: $index) {
+                        ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                            FastLaneFullImage(asset: asset, cache: cache)
+                                .tag(idx)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    withAnimation(.easeOut(duration: 0.18)) {
+                                        barVisible.toggle()
+                                    }
+                                }
+                        }
+                    }
+                    .id(viewerToken)
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .ignoresSafeArea()
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8)
+                            .onChanged { _ in
+                                if !isPagingDrag { isPagingDrag = true }
+                            }
+                            .onEnded { _ in
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                                    isPagingDrag = false
+                                }
+                            }
+                    )
+                    .overlay(alignment: .bottom) {
+                        if barVisible, assets.count > 1 {
+                            FastLaneFilmStrip(
+                                assets: assets,
+                                selectedIndex: $index,
+                                isPagingDrag: $isPagingDrag,
+                                cache: cache
+                            )
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 18)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    .overlay(alignment: .top) {
+                        if barVisible {
+                            headerOverlay()
+                        }
+                    }
+                }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+            }
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+                index = min(max(0, startIndex), max(0, assets.count - 1))
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func headerOverlay() -> some View {
+        let safeIndex = min(max(0, index), max(0, assets.count - 1))
+        let asset = assets.isEmpty ? nil : assets[safeIndex]
+        let metadata = asset.flatMap { metadataByAssetID[$0.localIdentifier] }
+        let propertyName = metadata?.propertyName.isEmpty == false ? (metadata?.propertyName ?? title) : title
+        let shotLabel = metadata?.shotLabel ?? "Shot"
+        let flaggedNote = metadata?.flaggedNote ?? ""
+
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.92),
+                        Color.black.opacity(0.70),
+                        Color.black.opacity(0.35),
+                        Color.black.opacity(0.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+
+                HStack(spacing: 10) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(propertyName)
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        Text(shotLabel)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        Text(flaggedNote)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.red)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .frame(height: 18, alignment: .leading)
+                        Text("Photo \(min(index + 1, max(assets.count, 1))) of \(max(assets.count, 1))")
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundColor(.white.opacity(0.78))
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, isLandscape ? 8 : 6)
+                .padding(.bottom, 8)
+            }
+            .frame(height: 96)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(true)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        let newValue: UIDeviceOrientation? = {
+            switch orientation {
+            case .portrait:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return orientation
+            default:
+                return nil
+            }
+        }()
+        guard let newValue, newValue != lastValidOrientation else { return }
+        lastValidOrientation = newValue
+    }
+}
+
+private struct FastLaneFullImage: View {
+    let asset: ReportAsset
+    @ObservedObject var cache: AssetImageCache
+
+    @State private var full: UIImage?
+    @State private var thumb: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if let full {
+                Image(uiImage: full)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            } else if let thumb {
+                Image(uiImage: thumb)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            } else {
+                Color.black.ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            loadImagesIfNeeded()
+        }
+        .onChange(of: asset.localIdentifier) { _, _ in
+            full = nil
+            thumb = nil
+            loadImagesIfNeeded()
+        }
+    }
+
+    private func loadImagesIfNeeded() {
+        if thumb == nil {
+            let px = 420 * UIScreen.currentScale
+            cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                DispatchQueue.main.async {
+                    thumb = image
+                }
+            }
+        }
+        if full != nil { return }
+        cache.requestFull(for: asset) { image in
+            DispatchQueue.main.async {
+                full = image
+            }
+        }
+    }
+}
+
+private struct FastLaneFilmStrip: View {
+    let assets: [ReportAsset]
+    @Binding var selectedIndex: Int
+    @Binding var isPagingDrag: Bool
+    @ObservedObject var cache: AssetImageCache
+
+    private let thumbSide: CGFloat = 36
+    private let spacing: CGFloat = 2
+    private let selectedScale: CGFloat = 1.28
+    private let selectedExtraSidePadding: CGFloat = 10
+
+    @State private var isUserDragging: Bool = false
+    @State private var momentumHapticsUntil: Date = .distantPast
+    @State private var lastHapticIndex: Int = -1
+    @State private var hasUserInteractedWithStrip: Bool = false
+    @State private var settleWorkItem: DispatchWorkItem?
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+
+    private struct ItemMidXKey: PreferenceKey {
+        static var defaultValue: [Int: CGFloat] = [:]
+        static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+            value.merge(nextValue(), uniquingKeysWith: { $1 })
+        }
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.45))
+
+                GeometryReader { outerGeo in
+                    let width = outerGeo.size.width
+                    let maxThumbWidth = (thumbSide * selectedScale) + (selectedExtraSidePadding * 2)
+                    let sidePad = max(0, (width - maxThumbWidth) * 0.5)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: spacing) {
+                            ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                let selected = idx == selectedIndex
+                                FastLaneFilmThumb(asset: asset, isSelected: selected, cache: cache, side: thumbSide)
+                                    .scaleEffect(selected ? selectedScale : 1.0)
+                                    .padding(.horizontal, selected ? selectedExtraSidePadding : 0)
+                                    .animation(.easeOut(duration: 0.10), value: selectedIndex)
+                                    .id(idx)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        isUserDragging = false
+                                        momentumHapticsUntil = .distantPast
+                                        selectedIndex = idx
+                                        haptic.impactOccurred()
+                                        haptic.prepare()
+                                        lastHapticIndex = idx
+                                        withAnimation(.easeOut(duration: 0.12)) {
+                                            proxy.scrollTo(idx, anchor: .center)
+                                        }
+                                    }
+                                    .background(
+                                        GeometryReader { itemGeo in
+                                            Color.clear.preference(
+                                                key: ItemMidXKey.self,
+                                                value: [idx: itemGeo.frame(in: .named("fastLaneFilmstripViewport")).midX]
+                                            )
+                                        }
+                                    )
+                            }
+                        }
+                        .padding(.horizontal, sidePad)
+                        .padding(.vertical, 6)
+                    }
+                    .scrollIndicators(.hidden)
+                    .coordinateSpace(name: "fastLaneFilmstripViewport")
+                    .onAppear {
+                        lastHapticIndex = selectedIndex
+                        hasUserInteractedWithStrip = false
+                        isUserDragging = false
+                        momentumHapticsUntil = .distantPast
+                        haptic.prepare()
+                        DispatchQueue.main.async {
+                            haptic.prepare()
+                            proxy.scrollTo(selectedIndex, anchor: .center)
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in
+                                if isPagingDrag { return }
+                                if !isUserDragging {
+                                    isUserDragging = true
+                                    hasUserInteractedWithStrip = true
+                                    haptic.prepare()
+                                }
+                                momentumHapticsUntil = Date().addingTimeInterval(0.90)
+                                settleWorkItem?.cancel()
+                                settleWorkItem = nil
+                            }
+                            .onEnded { _ in
+                                if isPagingDrag { return }
+                                isUserDragging = false
+                                momentumHapticsUntil = Date().addingTimeInterval(0.90)
+                            },
+                        including: .all
+                    )
+                    .onPreferenceChange(ItemMidXKey.self) { midXs in
+                        if isPagingDrag { return }
+                        guard width > 1, !midXs.isEmpty else { return }
+                        let allowSelectionUpdates = hasUserInteractedWithStrip && (isUserDragging || (Date() < momentumHapticsUntil))
+                        if !allowSelectionUpdates { return }
+
+                        let centerX = width * 0.5
+                        var bestIdx = selectedIndex
+                        var bestDist = CGFloat.greatestFiniteMagnitude
+                        for (idx, midX) in midXs {
+                            let dist = abs(midX - centerX)
+                            if dist < bestDist {
+                                bestDist = dist
+                                bestIdx = idx
+                            }
+                        }
+
+                        if bestIdx != selectedIndex {
+                            selectedIndex = bestIdx
+                            if bestIdx != lastHapticIndex {
+                                haptic.impactOccurred()
+                                haptic.prepare()
+                                lastHapticIndex = bestIdx
+                            }
+                        }
+
+                        settleWorkItem?.cancel()
+                        let work = DispatchWorkItem {
+                            guard !isUserDragging else { return }
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                proxy.scrollTo(selectedIndex, anchor: .center)
+                            }
+                        }
+                        settleWorkItem = work
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+                    }
+                }
+                .frame(height: thumbSide + 12)
+            }
+            .frame(height: thumbSide + 12)
+            .onChange(of: selectedIndex) { _, newValue in
+                if isPagingDrag || isUserDragging || Date() < momentumHapticsUntil { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(newValue, anchor: .center)
+                }
+            }
+        }
+    }
+}
+
+private struct FastLaneFilmThumb: View {
+    let asset: ReportAsset
+    let isSelected: Bool
+    @ObservedObject var cache: AssetImageCache
+    let side: CGFloat
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.white.opacity(0.10))
+                .frame(width: side, height: side)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: side, height: side)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 2))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 2)
+                .stroke(isSelected ? Color.white.opacity(0.95) : Color.white.opacity(0.10), lineWidth: isSelected ? 2 : 1)
+        )
+        .onAppear {
+            if image != nil { return }
+            let px = max(180, side * 2) * UIScreen.currentScale
+            cache.requestThumbnail(for: asset, pixelSize: px) { thumbnail in
+                DispatchQueue.main.async {
+                    image = thumbnail
+                }
+            }
+        }
+    }
+}
+
+private struct FastLaneSheetControlTheme {
+    let fill: Color
+    let stroke: Color
+    let label: Color
+
+    static func forScheme(_ scheme: ColorScheme) -> FastLaneSheetControlTheme {
+        if scheme == .light {
+            return FastLaneSheetControlTheme(fill: Color.white.opacity(0.90), stroke: Color.black.opacity(0.14), label: Color.black.opacity(0.88))
+        }
+        return FastLaneSheetControlTheme(fill: Color.black.opacity(0.55), stroke: Color.white.opacity(0.28), label: Color.white)
+    }
+}
+
+private enum FastLaneMetadataSelectionKind: Hashable {
+    case building
+    case elevation
+    case detailType
+    case trade
+}
+
+private enum FastLanePendingManageDestination {
+    case buildings
+    case interior
+    case exterior
+    case trades
+}
+
+private struct FastLaneMetadataSelectionContext: Identifiable, Hashable {
+    let id = UUID()
+    let kind: FastLaneMetadataSelectionKind
+    let title: String
+}
+
+private struct FastLaneMetadataFilterSheet: View {
+    let profile: CaptureProfile
+    let context: AppState.FastRuntimeCaptureMetadataContext
+    @Binding var buildingOptions: [String]
+    @Binding var tradeOptions: [String]
+    @ObservedObject var detailTypesModel: FastLaneDetailTypesModel
+    let onCancel: () -> Void
+    let onConfirm: (AppState.FastRuntimeCaptureMetadataContext) -> Void
+
+    @State private var selectedBuilding: String
+    @State private var selectedElevation: String
+    @State private var selectedDetailType: String
+    @State private var selectedTrade: String
+    @State private var selectionContext: FastLaneMetadataSelectionContext?
+    @State private var showManageBuildingsSheet = false
+    @State private var showManageTradesSheet = false
+    @State private var manageDetailMode: CameraChromeLocationMode?
+    @Environment(\.colorScheme) private var colorScheme
+    private var sheetTheme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+
+    init(
+        profile: CaptureProfile,
+        context: AppState.FastRuntimeCaptureMetadataContext,
+        buildingOptions: Binding<[String]>,
+        tradeOptions: Binding<[String]>,
+        detailTypesModel: FastLaneDetailTypesModel,
+        onCancel: @escaping () -> Void,
+        onConfirm: @escaping (AppState.FastRuntimeCaptureMetadataContext) -> Void
+    ) {
+        let normalized = AppState.normalizedFastRuntimeMetadataContext(context, fallbackPosition: 1)
+        self.profile = profile
+        self.context = normalized
+        self._buildingOptions = buildingOptions
+        self._tradeOptions = tradeOptions
+        self.detailTypesModel = detailTypesModel
+        self.onCancel = onCancel
+        self.onConfirm = onConfirm
+        _selectedBuilding = State(initialValue: normalized.building)
+        _selectedElevation = State(initialValue: normalized.elevation)
+        _selectedDetailType = State(initialValue: normalized.detailType)
+        _selectedTrade = State(initialValue: FastLaneMetadataOptions.canonicalTradeLabel(normalized.trade, preferredOptions: tradeOptions.wrappedValue))
+    }
+
+    private var selectedLocationMode: CameraChromeLocationMode {
+        selectedElevation.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Interior") == .orderedSame
+            ? .interior
+            : .exterior
+    }
+
+    private var tradePickerOptions: [String] {
+        FastLaneMetadataOptions.canonicalTradeOptions(tradeOptions, selectedTrade: selectedTrade)
+    }
+
+    private var buildingSelectionLabel: String {
+        guard let option = buildingOptions.first(where: { FastLaneMetadataOptions.buildingCode(from: $0) == selectedBuilding }) else {
+            return selectedBuilding.isEmpty ? "Select" : selectedBuilding
+        }
+        return FastLaneMetadataOptions.buildingDisplayName(for: option)
+    }
+
+    private var detailTypeSelectionLabel: String {
+        let trimmed = selectedDetailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.caseInsensitiveCompare("General Elevation") == .orderedSame { return "General" }
+        return trimmed.isEmpty ? "Select" : trimmed
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Metadata") {
+                    metadataSelectorRow(
+                        title: "Building",
+                        value: buildingSelectionLabel,
+                        context: FastLaneMetadataSelectionContext(kind: .building, title: "Building"),
+                        manageDestination: .buildings
+                    )
+
+                    if selectedLocationMode == .exterior {
+                        metadataSelectorRow(
+                            title: "Elevation",
+                            value: selectedElevation,
+                            context: FastLaneMetadataSelectionContext(kind: .elevation, title: "Elevation"),
+                            titleColor: .white
+                        )
+                    }
+
+                    metadataSelectorRow(
+                        title: "Detail Type",
+                        value: detailTypeSelectionLabel,
+                        context: FastLaneMetadataSelectionContext(
+                            kind: .detailType,
+                            title: selectedLocationMode == .interior ? "Interior Detail Type" : "Exterior Detail Type"
+                        ),
+                        titleColor: .blue,
+                        manageDestination: selectedLocationMode == .interior ? .interior : .exterior
+                    )
+
+                    metadataSelectorRow(
+                        title: "Trade",
+                        value: selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "None" : selectedTrade,
+                        context: FastLaneMetadataSelectionContext(kind: .trade, title: "Trade"),
+                        titleColor: .blue,
+                        manageDestination: .trades
+                    )
+                }
+            }
+            .navigationDestination(item: $selectionContext) { context in
+                FastLaneMetadataSelectionListView(
+                    title: context.title,
+                    options: selectionOptions(for: context.kind),
+                    selectedValue: currentSelectionValue(for: context.kind),
+                    onSelect: { value in applySelection(value, for: context.kind) }
+                )
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Color.clear.frame(width: 78, height: 42)
+                    Spacer(minLength: 0)
+                    Text("Filter")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button {
+                        onConfirm(AppState.FastRuntimeCaptureMetadataContext(
+                            locationMode: selectedLocationMode.rawValue,
+                            building: selectedBuilding,
+                            elevation: selectedLocationMode == .interior ? "Interior" : selectedElevation,
+                            detailType: selectedDetailType,
+                            trade: selectedTrade,
+                            detailNote: context.detailNote,
+                            priority: context.priority,
+                            angleIndex: context.angleIndex,
+                            isGuided: context.isGuided,
+                            isFlagged: context.isFlagged,
+                            issueID: context.issueID,
+                            issueStatus: context.issueStatus,
+                            captureIntentSource: context.captureIntentSource
+                        ))
+                    } label: {
+                        Text("Done")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(sheetTheme.label)
+                            .frame(minHeight: 42)
+                            .padding(.horizontal, 14)
+                            .background(sheetTheme.fill)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(sheetTheme.stroke, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+                .background(Color.clear)
+            }
+            .sheet(isPresented: $showManageBuildingsSheet, onDismiss: normalizeBuildingSelection) {
+                FastLaneManageBuildingsSheet(
+                    options: $buildingOptions,
+                    selectedBuilding: $selectedBuilding,
+                    onClose: { showManageBuildingsSheet = false }
+                )
+            }
+            .sheet(item: $manageDetailMode, onDismiss: normalizeDetailSelection) { mode in
+                FastLaneManageDetailTypesView(mode: mode, profile: profile, model: detailTypesModel)
+            }
+            .sheet(isPresented: $showManageTradesSheet, onDismiss: normalizeTradeOptions) {
+                FastLaneManageTradesSheet(
+                    options: $tradeOptions,
+                    selectedTrade: $selectedTrade,
+                    onClose: { showManageTradesSheet = false }
+                )
+            }
+            .onAppear {
+                normalizeBuildingSelection()
+                normalizeDetailSelection()
+                normalizeTradeOptions()
+            }
+            .onChange(of: selectedElevation) { _, _ in normalizeDetailSelection() }
+            .onChange(of: buildingOptions) { _, _ in normalizeBuildingSelection() }
+        }
+    }
+
+    @ViewBuilder
+    private func metadataFieldLabel(
+        _ title: String,
+        titleColor: Color = .primary,
+        manageDestination: FastLanePendingManageDestination? = nil
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(title).foregroundColor(titleColor)
+            if let manageDestination {
+                Button {
+                    switch manageDestination {
+                    case .buildings:
+                        showManageBuildingsSheet = true
+                    case .interior:
+                        manageDetailMode = .interior
+                    case .exterior:
+                        manageDetailMode = .exterior
+                    case .trades:
+                        showManageTradesSheet = true
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.86))
+                }
+                .buttonStyle(.plain)
+                .contentShape(Circle())
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func metadataSelectorRow(
+        title: String,
+        value: String,
+        context: FastLaneMetadataSelectionContext,
+        titleColor: Color = .primary,
+        manageDestination: FastLanePendingManageDestination? = nil
+    ) -> some View {
+        HStack(spacing: 12) {
+            metadataFieldLabel(title, titleColor: titleColor, manageDestination: manageDestination)
+            Spacer(minLength: 0)
+            Button {
+                selectionContext = context
+            } label: {
+                HStack(spacing: 8) {
+                    Text(value)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.8))
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func selectionOptions(for kind: FastLaneMetadataSelectionKind) -> [(title: String, value: String)] {
+        switch kind {
+        case .building:
+            return buildingOptions.map { option in
+                (FastLaneMetadataOptions.buildingDisplayName(for: option), FastLaneMetadataOptions.buildingCode(from: option))
+            }
+        case .elevation:
+            return Self.exteriorElevationOptions.map { ($0, $0) }
+        case .detailType:
+            return detailTypesModel.items(for: selectedLocationMode, profile: profile).compactMap { item in
+                let name = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return nil }
+                return (name.caseInsensitiveCompare("General Elevation") == .orderedSame ? "General" : name, name)
+            }
+        case .trade:
+            return [("None", "")] + tradePickerOptions.map { ($0, $0) }
+        }
+    }
+
+    private func currentSelectionValue(for kind: FastLaneMetadataSelectionKind) -> String {
+        switch kind {
+        case .building: return selectedBuilding
+        case .elevation: return selectedElevation
+        case .detailType: return selectedDetailType
+        case .trade: return selectedTrade
+        }
+    }
+
+    private func applySelection(_ value: String, for kind: FastLaneMetadataSelectionKind) {
+        switch kind {
+        case .building:
+            selectedBuilding = value
+        case .elevation:
+            selectedElevation = value
+        case .detailType:
+            selectedDetailType = value
+            detailTypesModel.setSelected(value, for: selectedLocationMode, profile: profile)
+        case .trade:
+            selectedTrade = FastLaneMetadataOptions.canonicalTradeLabel(value, preferredOptions: tradeOptions)
+        }
+    }
+
+    private func normalizeBuildingSelection() {
+        FastLaneMetadataOptions.persistBuildingOptions(buildingOptions, selectedBuilding: &selectedBuilding)
+        let code = FastLaneMetadataOptions.buildingCode(from: selectedBuilding)
+        selectedBuilding = buildingOptions.contains(where: { FastLaneMetadataOptions.buildingCode(from: $0) == code })
+            ? code
+            : (buildingOptions.first.map(FastLaneMetadataOptions.buildingCode(from:)) ?? "B1")
+    }
+
+    private func normalizeTradeOptions() {
+        FastLaneMetadataOptions.persistTradeOptions(&tradeOptions, selectedTrade: &selectedTrade)
+    }
+
+    private func normalizeDetailSelection() {
+        let options = detailTypesModel.names(for: selectedLocationMode, profile: profile)
+        guard !options.contains(selectedDetailType) else { return }
+        selectedDetailType = options.first ?? "Overview"
+        detailTypesModel.setSelected(selectedDetailType, for: selectedLocationMode, profile: profile)
+    }
+
+    private static let exteriorElevationOptions = ["North", "South", "East", "West"]
+}
+
+private struct FastLaneMetadataSelectionListView: View {
+    let title: String
+    let options: [(title: String, value: String)]
+    let selectedValue: String
+    let onSelect: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+
+    var body: some View {
+        List(options, id: \.value) { option in
+            Button {
+                dismiss()
+                DispatchQueue.main.async { onSelect(option.value) }
+            } label: {
+                HStack(spacing: 10) {
+                    Text(option.title)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    if selectedValue == option.value {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.blue)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .listStyle(.insetGrouped)
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 12) {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(theme.label)
+                        .frame(width: 44, height: 44)
+                        .background(theme.fill)
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(theme.stroke, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+                Text(title)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(theme.label)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Color.clear.frame(width: 44, height: 44)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+            .background(Color(uiColor: .systemGroupedBackground))
+        }
+    }
+}
+
+private struct FastLaneManageDetailTypesView: View {
+    let mode: CameraChromeLocationMode
+    let profile: CaptureProfile
+    @ObservedObject var model: FastLaneDetailTypesModel
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    @State private var editModeState: EditMode = .inactive
+    @FocusState private var focusedRow: UUID?
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+    private var titleText: String { "\(profile.title) \(mode == .interior ? "Interior Detail Types" : "Exterior Detail Types")" }
+    private var isEditing: Bool { editModeState == .active }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(model.items(for: mode, profile: profile)) { item in
+                    rowView(item: item)
+                }
+                .onDelete { offsets in
+                    withAnimation(.none) { model.delete(at: offsets, for: mode, profile: profile) }
+                }
+                .onMove { source, destination in
+                    withAnimation(.none) { model.move(from: source, to: destination, for: mode, profile: profile) }
+                }
+            }
+            .environment(\.editMode, $editModeState)
+            .listStyle(.insetGrouped)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Button { dismiss() } label: {
+                        toolbarCapsuleLabel {
+                            Text("Done")
+                                .font(.system(size: 17, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Text(titleText)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .minimumScaleFactor(0.72)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 0) {
+                        Button {
+                            if editModeState != .active { editModeState = .active }
+                            let newId = model.insertBlankItem(for: mode, profile: profile)
+                            DispatchQueue.main.async { focusedRow = newId }
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .frame(width: 44, height: 42)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            if editModeState == .active {
+                                editModeState = .inactive
+                                focusedRow = nil
+                            } else {
+                                editModeState = .active
+                            }
+                        } label: {
+                            Group {
+                                if editModeState == .active {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 17, weight: .medium))
+                                } else {
+                                    Text("Edit")
+                                        .font(.system(size: 17, weight: .medium))
+                                }
+                            }
+                            .foregroundColor(theme.label)
+                            .frame(width: 72, height: 42)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(theme.fill)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+                .background(Color.clear)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func toolbarCapsuleLabel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .foregroundColor(theme.label)
+            .frame(minHeight: 42)
+            .padding(.horizontal, 14)
+            .background(theme.fill)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func rowView(item: FastLaneDetailTypesModel.DetailTypeItem) -> some View {
+        if isEditing {
+            TextField("Name", text: bindingForRow(id: item.id))
+                .focused($focusedRow, equals: item.id)
+                .submitLabel(.done)
+                .onSubmit { focusedRow = nil }
+        } else {
+            HStack(spacing: 10) {
+                Text(item.name.isEmpty ? " " : item.name)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func bindingForRow(id: UUID) -> Binding<String> {
+        Binding(
+            get: { model.items(for: mode, profile: profile).first(where: { $0.id == id })?.name ?? "" },
+            set: { newValue in
+                withAnimation(.none) {
+                    model.updateItem(newValue, id: id, for: mode, profile: profile)
+                }
+            }
+        )
+    }
+}
+
+private struct FastLaneManageTradesSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+    @State private var editModeState: EditMode = .inactive
+    @FocusState private var focusedIndex: Int?
+    @Binding var options: [String]
+    @Binding var selectedTrade: String
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(options.indices), id: \.self) { index in
+                    if editModeState == .active {
+                        TextField("Trade", text: Binding(
+                            get: { options.indices.contains(index) ? options[index] : "" },
+                            set: { newValue in
+                                guard options.indices.contains(index) else { return }
+                                options[index] = newValue
+                            }
+                        ))
+                        .focused($focusedIndex, equals: index)
+                        .submitLabel(.done)
+                    } else {
+                        HStack(spacing: 10) {
+                            Text(options[index])
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .onDelete { offsets in options.remove(atOffsets: offsets) }
+                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
+            }
+            .listStyle(.insetGrouped)
+            .environment(\.editMode, $editModeState)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                manageToolbar(title: "Trades")
+            }
+            .onDisappear {
+                FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
+            }
+        }
+    }
+
+    private func manageToolbar(title: String) -> some View {
+        HStack(spacing: 10) {
+            Button(action: onClose) {
+                Text("Done")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(theme.label)
+                    .frame(minHeight: 42)
+                    .padding(.horizontal, 14)
+                    .background(theme.fill)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+
+            Text(title)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(theme.label)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 0) {
+                Button {
+                    if editModeState != .active { editModeState = .active }
+                    options.append("New Trade")
+                    focusedIndex = max(0, options.count - 1)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .frame(width: 44, height: 42)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    if editModeState == .active {
+                        editModeState = .inactive
+                        focusedIndex = nil
+                    } else {
+                        editModeState = .active
+                    }
+                } label: {
+                    Group {
+                        if editModeState == .active {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 17, weight: .medium))
+                        } else {
+                            Text("Edit")
+                                .font(.system(size: 17, weight: .medium))
+                        }
+                    }
+                    .foregroundColor(theme.label)
+                    .frame(width: 72, height: 42)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(theme.fill)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+    }
+}
+
+private struct FastLaneManageBuildingsSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+    @State private var editModeState: EditMode = .inactive
+    @FocusState private var focusedIndex: Int?
+    @Binding var options: [String]
+    @Binding var selectedBuilding: String
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(options.indices), id: \.self) { index in
+                    if editModeState == .active {
+                        TextField("Building", text: Binding(
+                            get: { options.indices.contains(index) ? options[index] : "" },
+                            set: { newValue in
+                                guard options.indices.contains(index) else { return }
+                                options[index] = newValue
+                            }
+                        ))
+                        .focused($focusedIndex, equals: index)
+                        .submitLabel(.done)
+                    } else {
+                        HStack(spacing: 10) {
+                            Text(FastLaneMetadataOptions.buildingDisplayName(for: options[index]))
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .onDelete { offsets in options.remove(atOffsets: offsets) }
+                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
+            }
+            .listStyle(.insetGrouped)
+            .environment(\.editMode, $editModeState)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Button(action: onClose) {
+                        Text("Done")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(theme.label)
+                            .frame(minHeight: 42)
+                            .padding(.horizontal, 14)
+                            .background(theme.fill)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Text("Buildings")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 0) {
+                        Button {
+                            if editModeState != .active { editModeState = .active }
+                            options.append("New Building")
+                            focusedIndex = max(0, options.count - 1)
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .frame(width: 44, height: 42)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            if editModeState == .active {
+                                editModeState = .inactive
+                                focusedIndex = nil
+                            } else {
+                                editModeState = .active
+                            }
+                        } label: {
+                            Group {
+                                if editModeState == .active {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 17, weight: .medium))
+                                } else {
+                                    Text("Edit")
+                                        .font(.system(size: 17, weight: .medium))
+                                }
+                            }
+                            .foregroundColor(theme.label)
+                            .frame(width: 72, height: 42)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(theme.fill)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+            }
+            .onDisappear {
+                FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
+            }
+        }
+    }
+}
+
+private struct FastLaneDetailNoteModal: View {
+    let elevation: String
+    let detailType: String
+    let existingNote: String
+    let isNoteEditable: Bool
+    let tradeOptions: [String]
+    let priorityOptions: [String]
+    @Binding var selectedTrade: String
+    @Binding var selectedPriority: String
+
+    let onCancel: () -> Void
+    let onSave: (String) -> Void
+
+    @State private var draft: String
+    @FocusState private var isFocused: Bool
+
+    init(
+        elevation: String,
+        detailType: String,
+        existingNote: String,
+        isNoteEditable: Bool,
+        tradeOptions: [String],
+        priorityOptions: [String],
+        selectedTrade: Binding<String>,
+        selectedPriority: Binding<String>,
+        onCancel: @escaping () -> Void,
+        onSave: @escaping (String) -> Void
+    ) {
+        self.elevation = elevation
+        self.detailType = detailType
+        self.existingNote = existingNote
+        self.isNoteEditable = isNoteEditable
+        self.tradeOptions = tradeOptions
+        self.priorityOptions = priorityOptions
+        self._selectedTrade = selectedTrade
+        self._selectedPriority = selectedPriority
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _draft = State(initialValue: existingNote)
+    }
+
+    private var hasExistingNote: Bool {
+        !existingNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var trimmedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var needsPrioritySelection: Bool {
+        !trimmedDraft.isEmpty
+    }
+
+    private var hasValidPriority: Bool {
+        !normalizedFastLaneDetailPriority(selectedPriority).isEmpty
+    }
+
+    private var canSave: Bool {
+        !needsPrioritySelection || hasValidPriority
+    }
+
+    private var fixedModalLift: CGFloat {
+        isNoteEditable ? 128 : 0
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.55)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isFocused = false
+                    onCancel()
+                }
+
+            VStack(spacing: 12) {
+                Text("\(elevation)  \(detailType)")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(1)
+
+                ZStack(alignment: .trailing) {
+                    TextField("Enter detail note", text: $draft)
+                        .textInputAutocapitalization(.sentences)
+                        .autocorrectionDisabled(false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 12)
+                        .padding(.trailing, draft.isEmpty ? 12 : 34)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .foregroundColor(.primary)
+                        .focused($isFocused)
+                        .disabled(!isNoteEditable)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            guard canSave else { return }
+                            onSave(trimmedDraft)
+                        }
+
+                    if !draft.isEmpty && isNoteEditable {
+                        Button { draft = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .padding(.trailing, 10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Text("Priority")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.90))
+                        .frame(width: 62, alignment: .leading)
+
+                    Menu {
+                        ForEach(priorityOptions, id: \.self) { option in
+                            Button(option) {
+                                selectedPriority = option
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            let normalizedPriority = normalizedFastLaneDetailPriority(selectedPriority)
+                            if !normalizedPriority.isEmpty {
+                                Circle()
+                                    .fill(fastLaneDetailPriorityColor(normalizedPriority))
+                                    .frame(width: 10, height: 10)
+                            }
+                            Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
+                                .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 42)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                HStack(spacing: 10) {
+                    Text("Trade")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.90))
+                        .frame(width: 62, alignment: .leading)
+
+                    Menu {
+                        Button("None") {
+                            selectedTrade = ""
+                        }
+                        ForEach(tradeOptions, id: \.self) { option in
+                            Button(option) {
+                                selectedTrade = option
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(selectedTrade.isEmpty ? "Optional" : selectedTrade)
+                                .foregroundColor(.white.opacity(selectedTrade.isEmpty ? 0.75 : 0.95))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 42)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if needsPrioritySelection && !hasValidPriority {
+                    Text("Priority is required for flagged items.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.red.opacity(0.95))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(spacing: 10) {
+                    Button(action: {
+                        isFocused = false
+                        onCancel()
+                    }) {
+                        Text("Cancel")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white.opacity(0.90))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+
+                    Button(action: {
+                        isFocused = false
+                        guard canSave else { return }
+                        onSave(trimmedDraft)
+                    }) {
+                        Text(hasExistingNote ? "Update" : "Save")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(canSave ? .black : .black.opacity(0.45))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white.opacity(canSave ? 0.92 : 0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.black.opacity(0.10), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                    .disabled(!canSave)
+                }
+            }
+            .padding(16)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
+            .padding(.horizontal, 18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .offset(y: -fixedModalLift)
+        }
+        .onAppear {
+            isFocused = isNoteEditable
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+}
+
+private func normalizedFastLaneDetailPriority(_ value: String?) -> String {
+    AppState.normalizedFastRuntimePriority(value)
+}
+
+private func fastLaneTrimmedNonEmpty(_ value: String?) -> String? {
+    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+private func normalizedFastLaneComparable(_ value: String?) -> String {
+    (value ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+}
+
+private func fastLaneShortElevationLabel(_ value: String?) -> String {
+    let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let lower = raw.lowercased()
+    if lower.contains("north") { return "N" }
+    if lower.contains("south") { return "S" }
+    if lower.contains("east") { return "E" }
+    if lower.contains("west") { return "W" }
+    return raw
+}
+
+private func fastLaneConciseContextLabel(building: String?, elevation: String?, detailType: String?) -> String {
+    [
+        fastLaneTrimmedNonEmpty(building),
+        fastLaneTrimmedNonEmpty(fastLaneShortElevationLabel(elevation)),
+        fastLaneTrimmedNonEmpty(detailType)
+    ]
+    .compactMap { $0 }
+    .joined(separator: " ")
+}
+
+private func fastLaneObservationDisplayAngleIndex(_ observation: Observation) -> Int? {
+    observation.guidedShots
+        .compactMap { $0.angleIndex.map { max(1, $0) } }
+        .sorted()
+        .first
+}
+
+private func fastLaneFormatPanelTimestamp(_ date: Date) -> String {
+    date.formatted(date: .abbreviated, time: .shortened)
+}
+
+private func fastLaneSkipReasonTitle(for reason: SkipReason) -> String {
+    switch reason {
+    case .inaccessible: return "Skipped - Inaccessible"
+    case .obstructed: return "Skipped - Obstructed"
+    case .activeConstruction: return "Skipped - Active construction"
+    case .safetyConcern: return "Skipped - Safety concern"
+    case .other: return "Skipped - Other"
+    case .notVisible: return "Skipped - Not visible"
+    case .unsafe: return "Skipped - Unsafe"
+    case .blocked: return "Skipped - Blocked"
+    case .notApplicable: return "Skipped - Not applicable"
+    }
+}
+
+private func fastLaneDetailPriorityOrDefault(_ value: String?) -> String {
+    let normalized = normalizedFastLaneDetailPriority(value)
+    return normalized.isEmpty ? "Low" : normalized
+}
+
+private func fastLaneDetailPriorityColor(_ priority: String) -> Color {
+    switch normalizedFastLaneDetailPriority(priority) {
+    case "Critical":
+        return .red
+    case "High":
+        return .orange
+    case "Medium":
+        return .yellow
+    case "Low":
+        return .blue
+    default:
+        return .clear
+    }
+}
+
+private struct FastLaneCameraControlsSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+
+    let glyphRotationAngle: Angle
+    let flashSetting: CameraManager.FlashSetting
+    let isFrontCamera: Bool
+
+    @Binding var isGridOn: Bool
+    @Binding var isLevelOn: Bool
+
+    let onBuildingList: () -> Void
+    let onInteriorList: () -> Void
+    let onExteriorList: () -> Void
+    let onTrades: () -> Void
+    let onFlash: () -> Void
+    let onCameraSwap: () -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let spacing: CGFloat = 12
+            let rawContentW = geo.size.width - 36
+            let contentW = rawContentW.isFinite ? max(0, rawContentW) : 0
+            let rawBtnW = (contentW - (spacing * 2)) / 3.0
+            let btnW = rawBtnW.isFinite ? max(0, rawBtnW) : 0
+            let rawTopBtnW = (contentW - (spacing * 3)) / 4.0
+            let topBtnW = rawTopBtnW.isFinite ? max(0, rawTopBtnW) : 0
+            let bottomInset = (btnW / 2.0) + (spacing / 2.0)
+
+            NavigationStack {
+                ZStack {
+                    Color.clear
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 18) {
+                        HStack(spacing: spacing) {
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "building.2",
+                                title: "BUILDINGS",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onBuildingList
+                            )
+                            .frame(width: topBtnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "list.bullet",
+                                title: "INTERIOR",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onInteriorList
+                            )
+                            .frame(width: topBtnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "list.bullet",
+                                title: "EXTERIOR",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onExteriorList
+                            )
+                            .frame(width: topBtnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "wrench.and.screwdriver",
+                                title: "TRADES",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onTrades
+                            )
+                            .frame(width: topBtnW)
+                        }
+
+                        Rectangle()
+                            .fill(theme.stroke.opacity(0.55))
+                            .frame(height: 1)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 2)
+                            .padding(.bottom, 8)
+
+                        HStack(spacing: spacing) {
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: flashIcon,
+                                title: "FLASH",
+                                isSelected: flashSetting != .off,
+                                selectedStyle: true,
+                                theme: theme,
+                                action: onFlash
+                            )
+                            .frame(width: btnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "square.grid.3x3",
+                                title: "GRID",
+                                isSelected: isGridOn,
+                                selectedStyle: true,
+                                theme: theme
+                            ) {
+                                isGridOn.toggle()
+                            }
+                            .frame(width: btnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "level",
+                                title: "LEVEL",
+                                isSelected: isLevelOn,
+                                selectedStyle: true,
+                                theme: theme
+                            ) {
+                                isLevelOn.toggle()
+                            }
+                            .frame(width: btnW)
+                        }
+                        .padding(.horizontal, bottomInset)
+
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "camera.rotate",
+                                title: "CAMERA",
+                                isSelected: isFrontCamera,
+                                selectedStyle: true,
+                                theme: theme,
+                                action: onCameraSwap
+                            )
+                            .frame(width: btnW)
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 8)
+                    }
+                    .padding(.top, 30)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 4)
+                }
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+    }
+
+    private var flashIcon: String {
+        switch flashSetting {
+        case .off:
+            return "bolt.slash"
+        case .auto:
+            return "bolt.badge.a"
+        case .on:
+            return "bolt"
+        }
+    }
+}
+
+private struct FastLaneCameraControlsButton: View {
+    let glyphRotationAngle: Angle
+    let icon: String
+    let title: String
+    let isSelected: Bool
+    let selectedStyle: Bool
+    let theme: FastLaneSheetControlTheme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                Circle()
+                    .fill(buttonFill)
+                    .frame(width: 74, height: 74)
+                    .overlay(
+                        Circle()
+                            .stroke(buttonStroke, lineWidth: 1)
+                    )
+                    .overlay(
+                        Image(systemName: icon)
+                            .font(.system(size: 30, weight: .medium))
+                            .foregroundColor(iconColor)
+                    )
+
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(titleColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .rotationEffect(glyphRotationAngle)
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var buttonFill: Color {
+        if isSelected { return theme.fill.opacity(0.96) }
+        return selectedStyle ? theme.fill.opacity(0.82) : theme.fill
+    }
+
+    private var iconColor: Color {
+        if isSelected { return .blue }
+        return selectedStyle ? theme.label.opacity(0.92) : theme.label
+    }
+
+    private var buttonStroke: Color {
+        isSelected ? Color.blue.opacity(0.72) : theme.stroke.opacity(0.70)
+    }
+
+    private var titleColor: Color {
+        isSelected ? Color.blue.opacity(0.96) : theme.label.opacity(0.88)
+    }
+}
+
+private struct FastLaneGridOverlay: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let x1 = rect.minX + rect.width / 3
+        let x2 = rect.minX + 2 * rect.width / 3
+        let y1 = rect.minY + rect.height / 3
+        let y2 = rect.minY + 2 * rect.height / 3
+
+        path.move(to: CGPoint(x: x1, y: rect.minY))
+        path.addLine(to: CGPoint(x: x1, y: rect.maxY))
+        path.move(to: CGPoint(x: x2, y: rect.minY))
+        path.addLine(to: CGPoint(x: x2, y: rect.maxY))
+        path.move(to: CGPoint(x: rect.minX, y: y1))
+        path.addLine(to: CGPoint(x: rect.maxX, y: y1))
+        path.move(to: CGPoint(x: rect.minX, y: y2))
+        path.addLine(to: CGPoint(x: rect.maxX, y: y2))
+        return path
+    }
+}
+
+private struct FastLaneLevelOverlay: View {
+    let rollDegrees: Double
+    let isLevel: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = min(geo.size.width, geo.size.height) * 0.46
+
+            Rectangle()
+                .fill(isLevel ? Color.green : Color.white)
+                .frame(width: size * 0.72, height: 3)
+                .rotationEffect(.degrees(rollDegrees))
+                .shadow(color: Color.black.opacity(0.25), radius: 2, x: 0, y: 1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+private final class FastLaneLevelMotionModel: ObservableObject {
+    @Published var rollDegrees: Double = 0
+    @Published var isLevel: Bool = false
+
+    private let motion = CMMotionManager()
+    private var filteredDegrees: Double = 0
+    private let alpha: Double = 0.18
+    private let levelOnThreshold: Double = 1.0
+    private let levelOffThreshold: Double = 1.4
+    private(set) var isRunning: Bool = false
+
+    func start() {
+        guard !isRunning, motion.isDeviceMotionAvailable else { return }
+
+        isRunning = true
+        motion.deviceMotionUpdateInterval = 1.0 / 60.0
+        motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, _ in
+            guard let self, let motion else { return }
+            let gx = motion.gravity.x
+            let gy = motion.gravity.y
+            let usePortraitAxis = abs(gy) >= abs(gx)
+            var angleRad: Double
+            if usePortraitAxis {
+                angleRad = motion.attitude.roll
+                if gy < 0 { angleRad = -angleRad }
+            } else {
+                angleRad = motion.attitude.pitch
+                if gx > 0 { angleRad = -angleRad }
+            }
+
+            var degrees = angleRad * 180.0 / .pi
+            degrees = min(90, max(-90, degrees))
+            filteredDegrees += alpha * (degrees - filteredDegrees)
+            rollDegrees = filteredDegrees
+
+            let absDegrees = abs(filteredDegrees)
+            if isLevel {
+                if absDegrees > levelOffThreshold {
+                    isLevel = false
+                }
+            } else if absDegrees < levelOnThreshold {
+                isLevel = true
+            }
+        }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        motion.stopDeviceMotionUpdates()
+        filteredDegrees = 0
+        rollDegrees = 0
+        isLevel = false
+    }
+}
+
+private struct FastRuntimePreviewCaptureTiming {
+    let shutterTappedAt: Date
+    let hapticAt: Date
+    let imageCapturedAt: Date
+    let savedAt: Date?
+    let saveResult: AppState.FastRuntimePrototypeCaptureSaveResult?
+
+    var hapticMilliseconds: Double {
+        hapticAt.timeIntervalSince(shutterTappedAt) * 1_000
+    }
+
+    var imageCapturedMilliseconds: Double {
+        imageCapturedAt.timeIntervalSince(shutterTappedAt) * 1_000
+    }
+
+    var fileWriteMilliseconds: Double? {
+        saveResult?.timings.fileWriteMilliseconds
+    }
+
+    var metadataMilliseconds: Double? {
+        saveResult?.timings.metadataMilliseconds
+    }
+
+    var totalMilliseconds: Double? {
+        savedAt.map { $0.timeIntervalSince(shutterTappedAt) * 1_000 }
+    }
+}
+
+private struct FastRuntimeCompleteDryRunResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeCompleteDryRunResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Valid", result.isValid ? "true" : "false")
+                    diagnosticRow("Photo Count", "\(result.photoCount)")
+                    diagnosticRow("Metadata Count", "\(result.metadataPhotoCount)")
+                    diagnosticRow("Missing Files", "\(result.missingFilesCount)")
+                    diagnosticRow("Session Type", result.sessionType.rawValue)
+                    diagnosticRow("Metadata Source", result.metadataSource)
+                    diagnosticRow("Total Bytes", "\(result.totalBytes)")
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.sessionID.uuidString)
+                    diagnosticRow("Owner User", result.ownerUserID?.uuidString ?? "missing")
+                    diagnosticRow("Owner Email", result.ownerEmail ?? "none")
+                    diagnosticRow("Owner Device", result.ownerDeviceID ?? "missing")
+                }
+
+                if !result.missingFields.isEmpty {
+                    Section("Missing Fields") {
+                        diagnosticBlock("Fields", result.missingFields.joined(separator: "\n"))
+                    }
+                }
+
+                if let corruptMetadataMessage = result.corruptMetadataMessage {
+                    Section("Metadata Error") {
+                        diagnosticBlock("Error", corruptMetadataMessage)
+                    }
+                }
+
+                if !result.warnings.isEmpty {
+                    Section("Warnings") {
+                        diagnosticBlock("Warnings", result.warnings.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Would Create") {
+                    diagnosticBlock("Dry Run Only", result.wouldCreate.joined(separator: "\n"))
+                }
+
+                Section("Would Upload") {
+                    if result.wouldUpload.isEmpty {
+                        Text("No upload candidates.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        diagnosticBlock("Files", result.wouldUpload.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Shots") {
+                    ForEach(result.shots) { shot in
+                        VStack(alignment: .leading, spacing: 5) {
+                            diagnosticRow("Shot", shot.id.uuidString)
+                            diagnosticRow("Capture Kind", shot.captureKind)
+                            diagnosticRow("File Exists", shot.fileExists ? "true" : "false")
+                            diagnosticRow("Bytes", shot.byteSize.map(String.init) ?? "missing")
+                            diagnosticBlock("Resolved Path", shot.resolvedLocalFilePath ?? "missing")
+                            if shot.resolvedLocalFilePath != shot.metadataLocalFilePath {
+                                diagnosticBlock("Metadata Path", shot.metadataLocalFilePath)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Dry run only. No Supabase write, storage upload, report, email, Complete, or local draft deletion was performed.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct FastRuntimeCompleteUploadResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeCompleteUploadResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Success", result.success ? "true" : "false")
+                    diagnosticRow("Dry Run Valid", result.dryRun.isValid ? "true" : "false")
+                    diagnosticRow("Uploaded Files", "\(result.uploadedFilesCount)")
+                    diagnosticRow("Session Status", result.sessionStatus)
+                    diagnosticRow("Property Status", result.propertyStatus)
+                    diagnosticRow("Lock Released", result.lockReleased ? "true" : "false")
+                    diagnosticRow("Draft Hidden", result.localDraftMarkedUploaded ? "true" : "false")
+                    diagnosticRow("Total", String(format: "%.1f ms", result.totalMilliseconds))
+                }
+
+                if let errorMessage = result.errorMessage {
+                    Section("Error") {
+                        diagnosticBlock("Message", errorMessage)
+                    }
+                }
+
+                Section("Rows") {
+                    if result.createdRowsSummary.isEmpty {
+                        Text("No rows written.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        diagnosticBlock("Summary", result.createdRowsSummary.joined(separator: "\n"))
+                    }
+                    diagnosticBlock("Package", result.packageSummary)
+                }
+
+                if !result.diagnostics.isEmpty {
+                    Section("Diagnostics") {
+                        diagnosticBlock("Stages", result.diagnostics.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.dryRun.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.dryRun.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.dryRun.sessionID.uuidString)
+                    diagnosticRow("Session Type", result.dryRun.sessionType.rawValue)
+                }
+
+                Section("Shots") {
+                    if result.shots.isEmpty {
+                        Text("No shot uploads completed.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(result.shots) { shot in
+                            VStack(alignment: .leading, spacing: 5) {
+                                diagnosticRow("Shot", shot.id.uuidString)
+                                diagnosticRow("Uploaded", shot.uploaded ? "true" : "false")
+                                diagnosticRow("Bucket", shot.storageBucket ?? "none")
+                                diagnosticBlock("Storage Path", shot.storagePath ?? "none")
+                                diagnosticRow("Bytes", shot.byteSize.map(String.init) ?? "missing")
+                                diagnosticBlock("Checksum", shot.checksumSHA256 ?? "none")
+                                diagnosticBlock("Local File", shot.localFilePath)
+                                if let errorMessage = shot.errorMessage {
+                                    diagnosticBlock("Error", errorMessage)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Experimental fast-lane write. It uploaded originals and wrote session/shot/property status rows only. It did not create session snapshots, dispatch report workers, send email, delete local files, or touch legacy drafts.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct FastRuntimeReportPackageDryRunResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeReportPackageDryRunResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Valid", result.isValid ? "true" : "false")
+                    diagnosticRow("Session Type", result.sessionType.rawValue)
+                    diagnosticRow("Session Status", result.sessionStatus ?? "missing")
+                    diagnosticRow("Property Status", result.propertyStatus ?? "missing")
+                    diagnosticRow("Shot Count", "\(result.shotCount)")
+                    diagnosticRow("Storage Objects", "\(result.storageObjectCount)")
+                    diagnosticRow("Report Mode", result.reportMode)
+                    diagnosticRow("Email Wording", result.emailWordingType)
+                    diagnosticRow("Total", String(format: "%.1f ms", result.totalMilliseconds))
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.sessionID?.uuidString ?? "missing")
+                    diagnosticRow("Pending Export Session", result.propertyStatusPendingExportSessionID?.uuidString ?? "missing")
+                }
+
+                Section("Snapshot Candidate") {
+                    diagnosticRow("Snapshot ID", result.snapshotID?.uuidString ?? "missing")
+                    diagnosticRow("Bucket", result.snapshotStorageBucket ?? "missing")
+                    diagnosticBlock("Path", result.snapshotStoragePath ?? "missing")
+                    diagnosticRow("Payload Bytes", result.snapshotPayloadBytes.map(String.init) ?? "missing")
+                    diagnosticBlock("Raw JSON SHA", result.rawSessionJSONSHA256 ?? "missing")
+                    diagnosticBlock("Payload SHA", result.snapshotPayloadSHA256 ?? "missing")
+                }
+
+                Section("Package Candidate") {
+                    diagnosticRow("Package ID", result.reportPackageID?.uuidString ?? "missing")
+                    diagnosticBlock("Idempotency Key", result.reportPackageIdempotencyKey ?? "missing")
+                    if result.fileCandidates.isEmpty {
+                        Text("No package file candidates.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(result.fileCandidates) { file in
+                            VStack(alignment: .leading, spacing: 5) {
+                                diagnosticRow("Report Type", file.reportType)
+                                diagnosticRow("Bucket", file.storageBucket)
+                                diagnosticRow("Filename", file.filename)
+                                diagnosticBlock("Path", file.storagePath)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section("Would Create") {
+                    if result.wouldCreate.isEmpty {
+                        Text("No create candidates.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        diagnosticBlock("Dry Run Only", result.wouldCreate.joined(separator: "\n"))
+                    }
+                }
+
+                if !result.sideEffectCounts.isEmpty {
+                    Section("Existing Side Effects") {
+                        ForEach(result.sideEffectCounts.keys.sorted(), id: \.self) { key in
+                            diagnosticRow(key, "\(result.sideEffectCounts[key] ?? 0)")
+                        }
+                    }
+                }
+
+                if !result.missingFields.isEmpty {
+                    Section("Missing Fields") {
+                        diagnosticBlock("Fields", result.missingFields.joined(separator: "\n"))
+                    }
+                }
+
+                if !result.errors.isEmpty {
+                    Section("Errors") {
+                        diagnosticBlock("Errors", result.errors.joined(separator: "\n"))
+                    }
+                }
+
+                if !result.warnings.isEmpty {
+                    Section("Warnings") {
+                        diagnosticBlock("Warnings", result.warnings.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Shots") {
+                    if result.shots.isEmpty {
+                        Text("No shots.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(result.shots) { shot in
+                            VStack(alignment: .leading, spacing: 5) {
+                                diagnosticRow("Shot", shot.id.uuidString)
+                                diagnosticRow("Capture Kind", shot.captureKind ?? "missing")
+                                diagnosticRow("Upload State", shot.uploadState)
+                                diagnosticRow("Object Exists", shot.storageObjectExists ? "true" : "false")
+                                diagnosticRow("Shot Bytes", shot.shotByteSize.map(String.init) ?? "missing")
+                                diagnosticRow("Storage Bytes", shot.storageByteSize.map(String.init) ?? "missing")
+                                diagnosticRow("Bucket", shot.storageBucket ?? "missing")
+                                diagnosticBlock("Path", shot.storagePath ?? "missing")
+                                diagnosticBlock("Checksum", shot.checksumSHA256 ?? "missing")
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Dry run only. No session snapshot row, report package, package file, storage upload, worker dispatch, email, property status update, or local deletion was performed.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct FastRuntimeReportHandoffResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeReportHandoffResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Success", result.success ? "true" : "false")
+                    diagnosticRow("Function Status", result.functionStatus)
+                    diagnosticRow("Session Type", result.sessionType.rawValue)
+                    diagnosticRow("Report Mode", result.reportMode)
+                    diagnosticRow("Shot Count", result.shotCount.map(String.init) ?? "missing")
+                    diagnosticRow("Reused Snapshot", result.reused.map { $0 ? "true" : "false" } ?? "unknown")
+                    diagnosticRow("Dispatch Expected", result.dispatchExpected.map { $0 ? "true" : "false" } ?? "unknown")
+                    diagnosticRow("Dispatch Status", result.dispatchStatus ?? "unknown")
+                    diagnosticRow("Total", String(format: "%.1f ms", result.totalMilliseconds))
+                    if let errorMessage = result.errorMessage, !errorMessage.isEmpty {
+                        diagnosticBlock("Error", errorMessage)
+                    }
+                }
+
+                Section("Snapshot") {
+                    diagnosticRow("Snapshot ID", result.snapshotID?.uuidString ?? "missing")
+                    diagnosticRow("Bucket", result.snapshotBucket ?? "missing")
+                    diagnosticBlock("Path", result.snapshotPath ?? "missing")
+                    diagnosticBlock("Payload SHA", result.snapshotPayloadSHA256 ?? "missing")
+                    diagnosticBlock("Raw JSON SHA", result.rawSessionJSONSHA256 ?? "missing")
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.dryRun.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.dryRun.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.sessionID?.uuidString ?? result.dryRun.sessionID?.uuidString ?? "missing")
+                    diagnosticBlock("Idempotency Key", result.idempotencyKey ?? "missing")
+                }
+
+                Section("Dry Run Gate") {
+                    diagnosticRow("Valid", result.dryRun.isValid ? "true" : "false")
+                    diagnosticRow("Session Status", result.dryRun.sessionStatus ?? "missing")
+                    diagnosticRow("Property Status", result.dryRun.propertyStatus ?? "missing")
+                    diagnosticRow("Storage Objects", "\(result.dryRun.storageObjectCount)")
+                    if !result.dryRun.errors.isEmpty {
+                        diagnosticBlock("Dry Run Errors", result.dryRun.errors.joined(separator: "\n"))
+                    }
+                    if !result.dryRun.missingFields.isEmpty {
+                        diagnosticBlock("Missing Fields", result.dryRun.missingFields.joined(separator: "\n"))
+                    }
+                    if !result.dryRun.warnings.isEmpty {
+                        diagnosticBlock("Warnings", result.dryRun.warnings.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Debug-only handoff. The app ran the report dry run first, then called the authenticated fast-lane-report-handoff Edge Function. It did not use a service-role key, delete local files, hide pending export, or touch legacy sessions.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -11986,7 +22879,27 @@ private struct DebugToolsView: View {
     @State private var showPreflightReportSheet: Bool = false
     @State private var showLocalOrgRepairSheet: Bool = false
     @State private var showLocalDiagnosticsSheet: Bool = false
+    @State private var showFastRuntimePrototypeSheet: Bool = false
+    @State private var selectedFastLaneLauncherPropertyID: UUID? = nil
+    @State private var isStartingFastLaneSession: Bool = false
+    @State private var fastLaneLauncherResult: AppState.FastRuntimePrototypeResult? = nil
+    @State private var fastLaneLauncherPreviewRequest: FastRuntimeCameraPreviewRequest? = nil
+    @State private var fastLaneLauncherCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
+    @State private var isRunningFastLaneReportDryRun: Bool = false
+    @State private var fastLaneReportDryRunResult: AppState.FastRuntimeReportPackageDryRunResult? = nil
+    @State private var isRunningFastLaneReportHandoff: Bool = false
+    @State private var fastLaneReportHandoffResult: AppState.FastRuntimeReportHandoffResult? = nil
+    @State private var isMarkingFastLanePendingExportDelivered: Bool = false
+    @State private var fastLanePendingExportCleanupResult: AppState.FastRuntimePendingExportCleanupResult? = nil
+    @State private var isClearingFastRuntimeDrafts: Bool = false
+    @State private var fastRuntimeCleanupResult: AppState.FastRuntimePrototypeCleanupResult? = nil
     @State private var showCaptureProfileMaintenanceBackfillConfirm: Bool = false
+
+    private var fastLaneLauncherProperties: [Property] {
+        appState.properties
+            .filter { $0.deletedAt == nil && !$0.isArchived }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
@@ -12069,6 +22982,33 @@ private struct DebugToolsView: View {
                             buttonTitle: "Open Diagnostics"
                         ) {
                             showLocalDiagnosticsSheet = true
+                        }
+
+                        debugActionCard(
+                            title: "Fast Runtime Prototype",
+                            detail: "Runs the lightweight Supabase entry claim with a new in-memory ActiveCaptureContext and temp-only folders. Does NOT set currentSession, call startSession, open camera, create drafts, export, or upload.",
+                            role: .normal,
+                            buttonTitle: "Open Prototype"
+                        ) {
+                            showFastRuntimePrototypeSheet = true
+                        }
+
+                        fastLaneLauncherCard
+
+                        fastLaneReportPackageDryRunCard
+
+                        debugActionCard(
+                            title: "Clear Fast-Lane Drafts",
+                            detail: "Deletes only the fast-lane prototype draft index/root and temp prototype folders, then releases any safely identified current-user fast-lane claims. Does NOT touch legacy drafts, sessions, uploads, exports, or normal app data.",
+                            role: .destructive,
+                            buttonTitle: isClearingFastRuntimeDrafts ? "Clearing..." : "Clear Fast-Lane Drafts"
+                        ) {
+                            clearFastRuntimeDrafts()
+                        }
+                        .disabled(isClearingFastRuntimeDrafts)
+
+                        if let fastRuntimeCleanupResult {
+                            fastRuntimeCleanupResultBlock(fastRuntimeCleanupResult)
                         }
 
                         debugActionCard(
@@ -12419,6 +23359,11 @@ private struct DebugToolsView: View {
                 }
             }
         }
+        .onAppear {
+            if selectedFastLaneLauncherPropertyID == nil {
+                selectedFastLaneLauncherPropertyID = fastLaneLauncherProperties.first?.id
+            }
+        }
         .alert("Nuclear Reset (Local Only)?", isPresented: $showNuclearConfirm) {
             Button("Reset", role: .destructive) {
                 appState.nuclearResetLocalOnly()
@@ -12488,6 +23433,559 @@ private struct DebugToolsView: View {
             DebugLocalDiagnosticsView()
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $showFastRuntimePrototypeSheet) {
+            DebugFastRuntimePrototypeView()
+                .environmentObject(appState)
+        }
+        .sheet(item: $fastLaneReportDryRunResult) { result in
+            FastRuntimeReportPackageDryRunResultView(result: result)
+        }
+        .sheet(item: $fastLaneReportHandoffResult) { result in
+            FastRuntimeReportHandoffResultView(result: result)
+        }
+        .fullScreenCover(item: $fastLaneLauncherPreviewRequest) { request in
+            DebugFastRuntimePrototypeCameraPreviewView(
+                context: request.context,
+                propertyName: request.propertyName,
+                prototypeResult: request.result,
+                buttonTappedAt: request.buttonTappedAt,
+                contextReadyAt: request.contextReadyAt,
+                previewRequestedAt: request.previewRequestedAt,
+                    initialCapturedCount: request.initialCapturedCount,
+                    storageRoot: request.storageRoot,
+                    isDraftResume: request.isDraftResume,
+                    initialLocationMode: request.initialLocationMode,
+                    initialMetadataContext: request.initialMetadataContext,
+                    initialProfileLocked: request.initialProfileLocked,
+                    isDebugMode: true,
+                onDismiss: { closeResult in
+                    fastLaneLauncherCloseResult = closeResult
+                    fastLaneLauncherPreviewRequest = nil
+                }
+            )
+            .environmentObject(appState)
+            .interactiveDismissDisabled(true)
+        }
+    }
+
+    private var fastLaneReportPackageDryRunCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Fast Report Package Dry Run")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.primary)
+            Text("Debug-only read from completed fast-lane pending-export rows. Builds in-memory session snapshot, report package, file, and worker/email candidates. It does not insert snapshots, create packages, dispatch workers, email, upload, or change property state.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.secondary)
+
+            if fastLaneLauncherProperties.isEmpty {
+                Text("No active properties loaded.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+            } else {
+                Picker("Property", selection: $selectedFastLaneLauncherPropertyID) {
+                    ForEach(fastLaneLauncherProperties) { property in
+                        Text(property.name)
+                            .tag(Optional(property.id))
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isRunningFastLaneReportDryRun ? "Checking..." : "Report Dry Run Full",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && !isMarkingFastLanePendingExportDelivered && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.green.opacity(0.78),
+                    stroke: Color.green.opacity(0.90),
+                    label: .white
+                ) {
+                    runFastLaneReportPackageDryRun(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isRunningFastLaneReportDryRun ? "Checking..." : "Report Dry Run Punch",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && !isMarkingFastLanePendingExportDelivered && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.indigo.opacity(0.78),
+                    stroke: Color.indigo.opacity(0.90),
+                    label: .white
+                ) {
+                    runFastLaneReportPackageDryRun(sessionType: .punchlistVisit)
+                }
+            }
+
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isRunningFastLaneReportHandoff ? "Handing Off..." : "Fast Report Handoff Full",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && !isMarkingFastLanePendingExportDelivered && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.teal.opacity(0.80),
+                    stroke: Color.teal.opacity(0.92),
+                    label: .white
+                ) {
+                    runFastLaneReportHandoff(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isRunningFastLaneReportHandoff ? "Handing Off..." : "Fast Report Handoff Punch",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && !isMarkingFastLanePendingExportDelivered && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.cyan.opacity(0.78),
+                    stroke: Color.cyan.opacity(0.90),
+                    label: .white
+                ) {
+                    runFastLaneReportHandoff(sessionType: .punchlistVisit)
+                }
+            }
+
+            Text("Debug cleanup below marks a completed fast-lane pending-export test row delivered/exported after a valid dry run and readable report/package side effects. It does not delete sessions, shots, storage, reports, packages, or email records.")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isMarkingFastLanePendingExportDelivered ? "Marking..." : "Mark Delivered Full",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && !isMarkingFastLanePendingExportDelivered && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.orange.opacity(0.78),
+                    stroke: Color.orange.opacity(0.90),
+                    label: .white
+                ) {
+                    markFastLanePendingExportDelivered(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isMarkingFastLanePendingExportDelivered ? "Marking..." : "Mark Delivered Punch",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && !isMarkingFastLanePendingExportDelivered && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.orange.opacity(0.68),
+                    stroke: Color.orange.opacity(0.84),
+                    label: .white
+                ) {
+                    markFastLanePendingExportDelivered(sessionType: .punchlistVisit)
+                }
+            }
+
+            if let result = fastLaneReportDryRunResult {
+                fastLaneReportPackageDryRunResultBlock(result)
+            }
+
+            if let result = fastLaneReportHandoffResult {
+                fastLaneReportHandoffResultBlock(result)
+            }
+
+            if let result = fastLanePendingExportCleanupResult {
+                fastLanePendingExportCleanupResultBlock(result)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var fastLaneLauncherCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Start Fast-Lane Session")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.primary)
+            Text("Debug-only launcher for clean fast-lane upload testing. Uses the lightweight RPC gate and opens the fast preview directly only on unlocked_and_claimed. It does not call openProperty, startSession, currentSession, or legacy camera routing.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.secondary)
+
+            if fastLaneLauncherProperties.isEmpty {
+                Text("No active properties loaded.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+            } else {
+                Picker("Property", selection: $selectedFastLaneLauncherPropertyID) {
+                    ForEach(fastLaneLauncherProperties) { property in
+                        Text(property.name)
+                            .tag(Optional(property.id))
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isStartingFastLaneSession ? "Starting..." : "Start Fast-Lane Full",
+                    isEnabled: !isStartingFastLaneSession && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.blue.opacity(0.86),
+                    stroke: Color.blue.opacity(0.92),
+                    label: .white
+                ) {
+                    startFastLaneLauncher(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isStartingFastLaneSession ? "Starting..." : "Start Fast-Lane Punch",
+                    isEnabled: !isStartingFastLaneSession && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.purple.opacity(0.78),
+                    stroke: Color.purple.opacity(0.90),
+                    label: .white
+                ) {
+                    startFastLaneLauncher(sessionType: .punchlistVisit)
+                }
+            }
+
+            customCapsuleButton(
+                title: isClearingFastRuntimeDrafts ? "Clearing..." : "Release/Clear Fast-Lane State",
+                isEnabled: !isClearingFastRuntimeDrafts,
+                fill: Color.red.opacity(0.86),
+                stroke: Color.red.opacity(0.90),
+                label: .white
+            ) {
+                clearFastRuntimeDrafts()
+            }
+
+            if let fastLaneLauncherResult {
+                fastLaneLauncherResultBlock(fastLaneLauncherResult)
+            }
+
+            if let fastLaneLauncherCloseResult {
+                fastLaneLauncherCloseResultBlock(fastLaneLauncherCloseResult)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func runFastLaneReportPackageDryRun(sessionType: SessionType) {
+        guard !isRunningFastLaneReportDryRun,
+              let propertyID = selectedFastLaneLauncherPropertyID else {
+            return
+        }
+        isRunningFastLaneReportDryRun = true
+        fastLaneReportDryRunResult = nil
+        fastLanePendingExportCleanupResult = nil
+        Task {
+            let result = await appState.runFastRuntimeReportPackageDryRun(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            await MainActor.run {
+                fastLaneReportDryRunResult = result
+                isRunningFastLaneReportDryRun = false
+            }
+        }
+    }
+
+    private func runFastLaneReportHandoff(sessionType: SessionType) {
+        guard !isRunningFastLaneReportHandoff,
+              let propertyID = selectedFastLaneLauncherPropertyID else {
+            return
+        }
+        isRunningFastLaneReportHandoff = true
+        fastLaneReportDryRunResult = nil
+        fastLaneReportHandoffResult = nil
+        fastLanePendingExportCleanupResult = nil
+        Task {
+            let result = await appState.runFastRuntimeReportHandoff(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            await MainActor.run {
+                fastLaneReportDryRunResult = result.dryRun
+                fastLaneReportHandoffResult = result
+                isRunningFastLaneReportHandoff = false
+            }
+        }
+    }
+
+    private func markFastLanePendingExportDelivered(sessionType: SessionType) {
+        guard !isMarkingFastLanePendingExportDelivered,
+              let propertyID = selectedFastLaneLauncherPropertyID else {
+            return
+        }
+        isMarkingFastLanePendingExportDelivered = true
+        fastLaneReportDryRunResult = nil
+        fastLanePendingExportCleanupResult = nil
+        Task {
+            let result = await appState.runFastRuntimeDebugMarkPendingExportDelivered(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            await MainActor.run {
+                fastLaneReportDryRunResult = result.dryRun
+                fastLanePendingExportCleanupResult = result
+                isMarkingFastLanePendingExportDelivered = false
+            }
+        }
+    }
+
+    private func startFastLaneLauncher(sessionType: SessionType) {
+        guard !isStartingFastLaneSession,
+              let propertyID = selectedFastLaneLauncherPropertyID,
+              let property = fastLaneLauncherProperties.first(where: { $0.id == propertyID }) else {
+            return
+        }
+        isStartingFastLaneSession = true
+        fastLaneLauncherResult = nil
+        fastLaneLauncherCloseResult = nil
+        let buttonTappedAt = Date()
+        Task {
+            let result = await appState.runFastRuntimePrototype(
+                propertyID: propertyID,
+                sessionType: sessionType,
+                prepareTempStorage: true,
+                releaseClaim: false,
+                allowCurrentUserOccupiedContext: false
+            )
+            let contextReadyAt = Date()
+            await MainActor.run {
+                fastLaneLauncherResult = result
+                isStartingFastLaneSession = false
+                guard result.entryState == .unlockedAndClaimed,
+                      result.requiresFallback == false,
+                      result.contextSource == "unlocked_and_claimed",
+                      let context = result.context,
+                      context.propertyID == propertyID,
+                      context.sessionID == result.timings.targetSessionID,
+                      context.sessionType == sessionType,
+                      context.canCapture else {
+                    return
+                }
+                fastLaneLauncherPreviewRequest = FastRuntimeCameraPreviewRequest(
+                    context: context,
+                    propertyName: property.name,
+                    result: result,
+                    buttonTappedAt: buttonTappedAt,
+                    contextReadyAt: contextReadyAt,
+                    previewRequestedAt: Date(),
+                    initialCapturedCount: 0,
+                    storageRoot: result.tempStorageRoot,
+                    isDraftResume: false,
+                    initialLocationMode: .exterior,
+                    initialMetadataContext: nil,
+                    initialProfileLocked: appState.fastRuntimeCaptureProfileShouldLock(propertyID: propertyID)
+                )
+            }
+        }
+    }
+
+    private func clearFastRuntimeDrafts() {
+        guard !isClearingFastRuntimeDrafts else { return }
+        isClearingFastRuntimeDrafts = true
+        fastRuntimeCleanupResult = nil
+        Task {
+            let result = await appState.clearFastRuntimePrototypeState()
+            await MainActor.run {
+                fastRuntimeCleanupResult = result
+                isClearingFastRuntimeDrafts = false
+            }
+        }
+    }
+
+    private func fastLaneReportPackageDryRunResultBlock(
+        _ result: AppState.FastRuntimeReportPackageDryRunResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Report Package Dry Run")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "valid=\(result.isValid)",
+                "session_type=\(result.sessionType.rawValue)",
+                "session=\(result.sessionID?.uuidString ?? "missing")",
+                "shots=\(result.shotCount)",
+                "storage=\(result.storageObjectCount)",
+                "report_mode=\(result.reportMode)",
+                "total=\(String(format: "%.1f", result.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if !result.errors.isEmpty {
+                Text(result.errors.joined(separator: "\n"))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastLaneReportHandoffResultBlock(
+        _ result: AppState.FastRuntimeReportHandoffResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast Report Handoff")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "success=\(result.success)",
+                "status=\(result.functionStatus)",
+                "session_type=\(result.sessionType.rawValue)",
+                "session=\(result.sessionID?.uuidString ?? "missing")",
+                "snapshot=\(result.snapshotID?.uuidString ?? "missing")",
+                "dispatch=\(result.dispatchStatus ?? "unknown")",
+                "total=\(String(format: "%.1f", result.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if let errorMessage = result.errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastLanePendingExportCleanupResultBlock(
+        _ result: AppState.FastRuntimePendingExportCleanupResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(result.success ? "Pending Export Cleanup Complete" : "Pending Export Cleanup Failed")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(result.success ? .green : .orange)
+            Text([
+                "success=\(result.success)",
+                "session_type=\(result.dryRun.sessionType.rawValue)",
+                "session=\(result.sessionID?.uuidString ?? "missing")",
+                "property_status=\(result.propertyStatus ?? "missing")",
+                "total=\(String(format: "%.1f", result.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if let errorMessage = result.errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastLaneLauncherResultBlock(
+        _ result: AppState.FastRuntimePrototypeResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast-Lane Launcher Result")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "property=\(result.propertyName)",
+                "session_type=\(result.sessionType.rawValue)",
+                "entry_state=\(result.entryState?.rawValue ?? "none")",
+                "fallback=\(result.requiresFallback)",
+                "context=\(result.context == nil ? "none" : result.contextSource)",
+                "total=\(String(format: "%.1f", result.timings.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if let reason = result.reason {
+                Text(reason)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundColor(buttonLabel.opacity(0.70))
+                    .textSelection(.enabled)
+            }
+
+            if result.entryState != .unlockedAndClaimed || result.requiresFallback || result.context == nil {
+                Text("Fast-lane preview did not open. Use Release/Clear Fast-Lane State above if this is a stale current-user claim, then retry. No legacy path was opened.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastLaneLauncherCloseResultBlock(
+        _ result: AppState.FastRuntimePrototypeCloseResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast-Lane Close Result")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "property=\(result.propertyName)",
+                "session=\(result.sessionID.uuidString)",
+                "draft=\(result.draftPersisted)",
+                "photos=\(result.photoCount)",
+                "lock=\(result.lockAction)",
+                "total=\(String(format: "%.1f", result.timings.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+            if let error = result.errorMessage {
+                Text(error)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundColor(buttonLabel.opacity(0.70))
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastRuntimeCleanupResultBlock(
+        _ result: AppState.FastRuntimePrototypeCleanupResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast-Lane Cleanup Result")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text(result.summary)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundColor(buttonLabel.opacity(0.80))
+                .textSelection(.enabled)
+            if !result.claimReleaseMessages.isEmpty {
+                Text(result.claimReleaseMessages.joined(separator: "\n"))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(buttonLabel.opacity(0.70))
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
     }
 
     private func captureProfileBackfillSummaryHint(
@@ -12671,6 +24169,7 @@ struct PropertySessionView: View {
     @Environment(\.dismiss) private var dismiss
     let propertyID: UUID
     let resumeDraft: Bool
+    let initialSessionType: SessionType?
     let onPendingExportRecovered: (Property, Session) -> Void
 
     @State private var didSetup: Bool = false
@@ -12683,8 +24182,10 @@ struct PropertySessionView: View {
     @State private var isCheckingSessionCoordination: Bool = false
     @State private var isAwaitingInitialSessionTypeSelection: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
+    @State private var pendingExportRecoveryMessage: String? = nil
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
     @State private var isVerifyingSessionAfterPresentation: Bool = false
+    @State private var didUseLightweightFastEntry: Bool = false
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -12776,6 +24277,7 @@ struct PropertySessionView: View {
         switch lightweightStatus.entryState {
         case .unlockedAndClaimed:
             let session = appState.startSession(
+                sessionType: initialSessionType ?? .fullDocumentation,
                 skipPropertyStatusPreflight: true,
                 preferredNewSessionID: targetSessionID
             )
@@ -12783,7 +24285,7 @@ struct PropertySessionView: View {
                 await runLegacyCheckingSession(reason: "lightweight_session_mismatch")
                 return
             }
-            finishAllowedFastEntry()
+            finishAllowedFastEntry(deferInitialSessionTypePersistence: true)
 
         case .lockedByCurrentUser:
             let desiredSessionID = lightweightStatus.lockSessionID ?? targetSessionID
@@ -12798,11 +24300,25 @@ struct PropertySessionView: View {
                     skipPropertyStatusPreflight: true
                 )
             }
-            guard loadedSession?.id == desiredSessionID else {
-                await runLegacyCheckingSession(reason: "lightweight_current_user_lock_missing_local_draft")
-                return
+            if loadedSession?.id != desiredSessionID {
+                guard appState.canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+                    lightweightStatus,
+                    propertyID: propertyID
+                ) else {
+                    await runLegacyCheckingSession(reason: "lightweight_current_user_lock_missing_local_draft")
+                    return
+                }
+                let rebuiltSession = appState.rebuildLightweightCurrentUserSessionShell(
+                    propertyID: propertyID,
+                    sessionID: desiredSessionID,
+                    sessionType: initialSessionType ?? .fullDocumentation
+                )
+                guard rebuiltSession?.id == desiredSessionID else {
+                    await runLegacyCheckingSession(reason: "lightweight_current_user_lock_rebuild_failed")
+                    return
+                }
             }
-            finishAllowedFastEntry()
+            finishAllowedFastEntry(deferInitialSessionTypePersistence: true)
 
         case .lockedByOtherUser, .pendingExport:
             guard let block = appState.sessionEntryBlock(for: lightweightStatus) else {
@@ -12866,15 +24382,14 @@ struct PropertySessionView: View {
     }
 
     @MainActor
-    private func finishAllowedFastEntry() {
+    private func finishAllowedFastEntry(deferInitialSessionTypePersistence: Bool = false) {
+        didUseLightweightFastEntry = deferInitialSessionTypePersistence
         refreshSessionReadiness()
         isCheckingSessionBeforeOpen = false
         if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
             beginOpenFlow(forceRetry: true)
-            beginSessionCoordinationFlow(openAfterAllowed: false)
         } else {
             continueAfterSessionCoordinationAllowed()
-            beginSessionCoordinationFlow(openAfterAllowed: false)
         }
     }
 
@@ -12957,11 +24472,18 @@ struct PropertySessionView: View {
                         .foregroundColor(.white.opacity(0.86))
                         .multilineTextAlignment(.center)
 
+                    if let pendingExportRecoveryMessage {
+                        Text(pendingExportRecoveryMessage)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.orange)
+                            .multilineTextAlignment(.center)
+                    }
+
                     HStack(spacing: 10) {
                         Button {
                             claimBlockedSession()
                         } label: {
-                            Text(isCheckingSessionCoordination ? "Claiming..." : "Claim Session")
+                            Text(primaryBlockedSessionActionTitle(for: sessionEntryBlock))
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
@@ -13034,6 +24556,11 @@ struct PropertySessionView: View {
         camera.prepareForPreviewAsync()
         camera.ensurePreviewRunningAsync()
 
+        refreshSessionReadiness()
+        if hasSessionReadyForProperty {
+            completeOpenFlow()
+        }
+
         // Do not hard-gate view transition on preview startup; preview can finish after ContentView appears.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             guard token == openFlowToken else { return }
@@ -13072,6 +24599,16 @@ struct PropertySessionView: View {
 
     private func continueAfterSessionCoordinationAllowed() {
         if appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: propertyID) {
+            if let initialSessionType {
+                if didUseLightweightFastEntry {
+                    guard appState.applyCurrentSessionTypeForFastEntry(initialSessionType) != nil else { return }
+                    appState.persistCurrentSessionTypeAfterFastEntry(initialSessionType)
+                } else {
+                    guard appState.persistCurrentSessionType(initialSessionType) != nil else { return }
+                }
+                beginOpenFlow(forceRetry: true)
+                return
+            }
             isAwaitingInitialSessionTypeSelection = true
             return
         }
@@ -13125,7 +24662,7 @@ struct PropertySessionView: View {
             return
         }
         isCheckingSessionCoordination = openAfterAllowed
-        isVerifyingSessionAfterPresentation = !openAfterAllowed
+        isVerifyingSessionAfterPresentation = false
         sessionEntryBlock = nil
         Task {
             let status = await appState.evaluateSessionEntryCoordination(
@@ -13174,12 +24711,43 @@ struct PropertySessionView: View {
         if sessionEntryBlock?.blockContext == "pending_export",
            let recovery = appState.recoverLocalPendingExportForPropertyOpen(propertyID: propertyID) {
             sessionEntryBlock = nil
+            pendingExportRecoveryMessage = nil
             isCheckingSessionCoordination = false
             onPendingExportRecovered(recovery.property, recovery.session)
             exitCaptureScreen()
             return
         }
+        if sessionEntryBlock?.blockContext == "pending_export" {
+            isCheckingSessionCoordination = true
+            pendingExportRecoveryMessage = nil
+            Task {
+                let result = await appState.recoverFastRuntimePendingExportReportHandoff(propertyID: propertyID)
+                await MainActor.run {
+                    isCheckingSessionCoordination = false
+                    if result.success {
+                        sessionEntryBlock = nil
+                        pendingExportRecoveryMessage = nil
+                        exitCaptureScreen()
+                    } else {
+                        pendingExportRecoveryMessage = AppState.diagnosticsPreviewText(
+                            result.message ?? "Unable to retry export.",
+                            maxLength: 180
+                        )
+                    }
+                }
+            }
+            return
+        }
         beginSessionCoordinationFlow(forceClaim: true)
+    }
+
+    private func primaryBlockedSessionActionTitle(
+        for block: AppState.SessionEntryCoordinationBlock
+    ) -> String {
+        if block.blockContext == "pending_export" {
+            return isCheckingSessionCoordination ? "Retrying..." : "Retry Export"
+        }
+        return isCheckingSessionCoordination ? "Claiming..." : "Claim Session"
     }
 
     private func exitCaptureScreen() {

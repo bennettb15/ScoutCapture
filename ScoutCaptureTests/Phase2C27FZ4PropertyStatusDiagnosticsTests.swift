@@ -2143,6 +2143,104 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(status?.requiresFallback ?? true)
     }
 
+    func testLightweightCurrentUserOccupiedMissingLocalShellCanRebuild() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let status = AppState.LightweightPropertyEntryStatus(
+            entryState: .lockedByCurrentUser,
+            propertyID: fixture.property.id,
+            lockSessionID: sessionID,
+            lockedByUserID: fixture.userID,
+            lockedByEmail: "entry-a@example.com",
+            lockedByDeviceID: "other-device",
+            lockedAt: Date(),
+            updatedAt: Date(),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 0,
+            requiresFallback: false,
+            reason: "current_user_occupied"
+        )
+
+        XCTAssertTrue(
+            fixture.appState.canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+                status,
+                propertyID: fixture.property.id
+            )
+        )
+    }
+
+    func testLightweightCurrentUserDraftMissingLocalShellDoesNotRebuild() throws {
+        let fixture = try makeCutoverFixture()
+        let status = AppState.LightweightPropertyEntryStatus(
+            entryState: .lockedByCurrentUser,
+            propertyID: fixture.property.id,
+            lockSessionID: UUID(),
+            lockedByUserID: fixture.userID,
+            lockedByEmail: "entry-a@example.com",
+            lockedByDeviceID: "other-device",
+            lockedAt: Date(),
+            updatedAt: Date(),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 0,
+            requiresFallback: false,
+            reason: "current_user_draft"
+        )
+
+        XCTAssertFalse(
+            fixture.appState.canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+                status,
+                propertyID: fixture.property.id
+            )
+        )
+    }
+
+    func testLightweightOtherUserLockDoesNotRebuildMissingLocalShell() throws {
+        let fixture = try makeCutoverFixture()
+        let status = AppState.LightweightPropertyEntryStatus(
+            entryState: .lockedByOtherUser,
+            propertyID: fixture.property.id,
+            lockSessionID: UUID(),
+            lockedByUserID: UUID(),
+            lockedByEmail: "entry-b@example.com",
+            lockedByDeviceID: "other-device",
+            lockedAt: Date(),
+            updatedAt: Date(),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 0,
+            requiresFallback: false,
+            reason: "other_user_occupied"
+        )
+
+        XCTAssertFalse(
+            fixture.appState.canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+                status,
+                propertyID: fixture.property.id
+            )
+        )
+    }
+
+    func testFastEntrySessionTypeAppliesInMemoryWithoutChangingSessionIdentity() throws {
+        let fixture = try makeCutoverFixture()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let sessionID = UUID()
+        let session = try XCTUnwrap(
+            fixture.appState.rebuildLightweightCurrentUserSessionShell(
+                propertyID: fixture.property.id,
+                sessionID: sessionID,
+                sessionType: .fullDocumentation
+            )
+        )
+
+        XCTAssertEqual(session.id, sessionID)
+        XCTAssertEqual(session.sessionType, .fullDocumentation)
+
+        let updated = try XCTUnwrap(fixture.appState.applyCurrentSessionTypeForFastEntry(.punchlistVisit))
+        XCTAssertEqual(updated.id, sessionID)
+        XCTAssertEqual(updated.sessionType, .punchlistVisit)
+        XCTAssertEqual(fixture.appState.currentSession?.id, sessionID)
+        XCTAssertEqual(fixture.appState.currentSession?.sessionType, .punchlistVisit)
+    }
+
     private struct CutoverFixture {
         let localStore: LocalStore
         let appState: AppState

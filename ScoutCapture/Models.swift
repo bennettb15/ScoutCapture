@@ -1911,6 +1911,78 @@ struct Session: Codable, Identifiable, Equatable {
     }
 }
 
+struct CaptureRuntimeContext: Equatable {
+    let sessionID: UUID
+    let propertyID: UUID
+    let sessionType: SessionType
+    let startedAt: Date
+    let status: Session.Status
+    let endedAt: Date?
+    let isSealed: Bool
+    let captureProfile: CaptureProfile?
+
+    var canCapture: Bool {
+        status == .draft && !isSealed
+    }
+
+    nonisolated init(session: Session) {
+        sessionID = session.id
+        propertyID = session.propertyID
+        sessionType = session.sessionType
+        startedAt = session.startedAt
+        status = session.status
+        endedAt = session.endedAt
+        isSealed = session.isSealed
+        captureProfile = session.captureProfile
+    }
+}
+
+struct ActiveCaptureContext: Codable, Equatable, Identifiable {
+    var id: UUID { sessionID }
+
+    let sessionID: UUID
+    let propertyID: UUID
+    let orgID: UUID?
+    let sessionType: SessionType
+    let ownerUserID: UUID?
+    let ownerEmail: String?
+    let ownerDeviceID: String?
+    let createdAt: Date
+    let status: Session.Status
+    let statusReason: String?
+
+    var canCapture: Bool {
+        status == .draft
+    }
+}
+
+struct ActiveCaptureTarget: Equatable {
+    let propertyID: UUID
+    let sessionID: UUID
+    let sessionType: SessionType
+    let canCapture: Bool
+    let startedAt: Date
+    let status: Session.Status
+
+    nonisolated init(context: CaptureRuntimeContext) {
+        propertyID = context.propertyID
+        sessionID = context.sessionID
+        sessionType = context.sessionType
+        canCapture = context.status == .draft && !context.isSealed
+        startedAt = context.startedAt
+        status = context.status
+    }
+
+    nonisolated init(context: ActiveCaptureContext) {
+        propertyID = context.propertyID
+        sessionID = context.sessionID
+        sessionType = context.sessionType
+        canCapture = context.status == .draft
+        startedAt = context.createdAt
+        status = context.status
+    }
+}
+
 enum SkipReason: String, Codable, CaseIterable {
     case inaccessible
     case obstructed

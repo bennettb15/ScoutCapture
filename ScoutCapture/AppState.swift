@@ -1,6 +1,8 @@
 import Foundation
 import Combine
 import CryptoKit
+import Functions
+import Network
 import Supabase
 #if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
@@ -599,6 +601,20 @@ struct OrganizationAccessMember: Equatable, Identifiable {
     let role: String
     let accessScope: String
 
+    init(
+        id: UUID,
+        email: String?,
+        fullName: String?,
+        role: String,
+        accessScope: String
+    ) {
+        self.id = id
+        self.email = email
+        self.fullName = fullName
+        self.role = role
+        self.accessScope = accessScope
+    }
+
     var displayName: String {
         if let fullName = OrganizationAccessMember.normalizedText(fullName) {
             return fullName
@@ -719,6 +735,17 @@ final class AppState: ObservableObject {
         case uploaded
     }
 
+    enum PropertyRowCloudGlyphState: String, Equatable {
+        case current
+        case uploading
+        case warning
+    }
+
+    enum PropertyRowStatusChipState: String, Equatable {
+        case pendingExport = "pending_export"
+        case uploading
+    }
+
     struct SessionSnapshotCloudStatus: Equatable {
         enum Tint: String, Equatable {
             case neutral
@@ -828,6 +855,25 @@ final class AppState: ObservableObject {
                 return false
             }
         }
+    }
+
+    struct FastRuntimePendingExportRecoveryResult: Equatable {
+        let success: Bool
+        let sessionID: UUID?
+        let sessionType: SessionType?
+        let message: String?
+    }
+
+    private struct FastRuntimeCompletionRecoveryCandidate {
+        let context: ActiveCaptureContext
+        let storageRoot: URL
+        let photoCount: Int
+        let metadataModifiedAt: Date?
+    }
+
+    struct PropertyUploadRetryResult: Equatable {
+        let success: Bool
+        let message: String
     }
 
     struct SessionSnapshotAuthPreflightRemoteParentStatus: Equatable {
@@ -1002,7 +1048,7 @@ final class AppState: ObservableObject {
         let capturedBy: SessionSnapshotActorIdentity?
         let uploadedBy: SessionSnapshotActorIdentity?
 
-        init(
+        nonisolated init(
             media: [SessionSnapshotMediaManifestItem],
             actor: SessionSnapshotActorIdentity? = nil,
             capturedBy: SessionSnapshotActorIdentity? = nil,
@@ -3715,7 +3761,7 @@ final class AppState: ObservableObject {
         let failedCount: Int
         let message: String
 
-        init(
+        nonisolated init(
             insertedCount: Int,
             duplicateSkippedCount: Int,
             remoteNewerConflictCount: Int = 0,
@@ -4427,7 +4473,7 @@ final class AppState: ObservableObject {
     typealias PropertyDeletePreflightRefreshOverride = (UUID, UUID) async throws -> PropertyDeletePreflightSnapshot
     typealias PropertySessionOccupancyPersistOverride = (UUID, UUID) async -> Bool
     typealias PropertyStatusFetchOverride = (UUID, [UUID]) async throws -> [PropertyStatusRecord]
-    typealias LightweightPropertyEntryStatusOverride = (UUID, UUID, String) async throws -> LightweightPropertyEntryStatus
+    typealias LightweightPropertyEntryStatusOverride = (UUID, UUID?, String) async throws -> LightweightPropertyEntryStatus
     typealias SessionSoftDeleteRPCOverride = (UUID) async throws -> Void
     typealias SessionSoftDeleteRefreshOverride = () async -> Bool
     typealias SessionDeletePreflightRefreshOverride = (UUID, UUID, UUID) async throws -> SessionDeletePreflightSnapshot
@@ -4591,22 +4637,15 @@ final class AppState: ObservableObject {
         }
         switch block.blockContext {
         case "occupied":
-            return "Property is currently occupied by \(block.ownerDescription)."
+            return "Locked by: \(block.ownerDescription)"
         case "draft":
-            return "A draft is in progress by \(block.ownerDescription)."
+            return "Draft in progress by: \(block.ownerDescription)"
         case "pending_export":
-            var lines = ["Locked by: \(block.ownerDescription)"]
-            if let lockedAt = block.lockedAt, let lockedAtFormatter {
-                lines.append("Pending since: \(lockedAtFormatter(lockedAt))")
-            }
-            return lines.joined(separator: "\n")
+            return "Locked by: \(block.ownerDescription)"
         case "verification_failed":
             return coordinationUnavailableLockMessage
         default:
             break
-        }
-        if let lockedAt = block.lockedAt, let lockedAtFormatter {
-            return "Locked by \(block.ownerDescription) since \(lockedAtFormatter(lockedAt))."
         }
         return "Locked by \(block.ownerDescription)."
     }
@@ -4910,6 +4949,512 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimePrototypeTimings: Equatable {
+        let targetSessionID: UUID
+        let rpcMilliseconds: Double
+        let contextMilliseconds: Double
+        let tempStorageMilliseconds: Double?
+        let releaseMilliseconds: Double?
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePrototypeResult: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let sessionType: SessionType
+        let entryState: LightweightPropertyEntryState?
+        let lockSessionID: UUID?
+        let entryBlock: SessionEntryCoordinationBlock?
+        let isCurrentDeviceOccupiedClaim: Bool
+        let requiresFallback: Bool
+        let reason: String?
+        let contextSource: String
+        let context: ActiveCaptureContext?
+        let tempStorageRoot: URL?
+        let didReleasePrototypeClaim: Bool
+        let releaseErrorMessage: String?
+        let timings: FastRuntimePrototypeTimings
+    }
+
+    struct FastRuntimePrototypeReleaseResult: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let probeSessionID: UUID
+        let lockSessionID: UUID?
+        let entryState: LightweightPropertyEntryState?
+        let reason: String?
+        let didRelease: Bool
+        let message: String
+        let rpcMilliseconds: Double
+        let releaseMilliseconds: Double?
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePreviewSideControlCounts: Equatable {
+        let resolutionRequiredCount: Int
+        let activeIssueCount: Int
+        let guidedRemainingCount: Int
+        let checklistCount: Int
+
+        static let empty = FastRuntimePreviewSideControlCounts(
+            resolutionRequiredCount: 0,
+            activeIssueCount: 0,
+            guidedRemainingCount: 0,
+            checklistCount: 0
+        )
+    }
+
+    struct FastRuntimePreviewSideControlPayload: Equatable {
+        let resolutionRequiredObservations: [Observation]
+        let activeObservations: [Observation]
+        let guidedShots: [GuidedShot]
+        let retiredGuidedShots: [GuidedShot]
+
+        static let empty = FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: [],
+            activeObservations: [],
+            guidedShots: [],
+            retiredGuidedShots: []
+        )
+    }
+
+    struct FastRuntimeAngleReservation: Equatable {
+        let building: String
+        let elevation: String
+        let detailType: String
+        let angleIndex: Int
+    }
+
+    struct FastRuntimePrototypeCaptureTimings: Equatable {
+        let storageMilliseconds: Double
+        let fileWriteMilliseconds: Double
+        let metadataMilliseconds: Double
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimeCaptureMetadataContext: Codable, Equatable {
+        let captureProfile: String?
+        let locationMode: String
+        let building: String
+        let elevation: String
+        let detailType: String
+        let trade: String?
+        let detailNote: String?
+        let priority: String?
+        let angleIndex: Int
+        let shotKey: String
+        let isGuided: Bool?
+        let isFlagged: Bool?
+        let issueID: UUID?
+        let issueStatus: String?
+        let captureIntentSource: String?
+
+        nonisolated init(
+            captureProfile: String? = nil,
+            locationMode: String? = nil,
+            building: String? = nil,
+            elevation: String? = nil,
+            detailType: String? = nil,
+            trade: String? = nil,
+            detailNote: String? = nil,
+            priority: String? = nil,
+            angleIndex: Int? = nil,
+            shotKey: String? = nil,
+            isGuided: Bool? = nil,
+            isFlagged: Bool? = nil,
+            issueID: UUID? = nil,
+            issueStatus: String? = nil,
+            captureIntentSource: String? = nil
+        ) {
+            let normalizedLocationMode = AppState.normalizedFastRuntimeLocationMode(locationMode)
+            let normalizedBuilding = AppState.normalizedFastRuntimeMetadataText(building, fallback: "B1")
+            let normalizedElevation = AppState.normalizedFastRuntimeMetadataText(
+                elevation,
+                fallback: normalizedLocationMode == "Interior" ? "Interior" : "North"
+            )
+            let normalizedDetailType = AppState.normalizedFastRuntimeMetadataText(detailType, fallback: "Overview")
+            let normalizedTrade = AppState.normalizedFastRuntimeMetadataText(trade, fallback: "")
+            let normalizedDetailNote = AppState.normalizedFastRuntimeMetadataText(detailNote, fallback: "")
+            let normalizedPriority = AppState.normalizedFastRuntimePriority(priority)
+            let normalizedAngleIndex = max(1, angleIndex ?? 1)
+            let trimmedCaptureProfile = (captureProfile ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let normalizedCaptureProfile: String?
+            switch trimmedCaptureProfile {
+            case CaptureProfile.residential.rawValue, CaptureProfile.commercial.rawValue:
+                normalizedCaptureProfile = trimmedCaptureProfile
+            default:
+                normalizedCaptureProfile = nil
+            }
+            let normalizedShotKey = AppState.normalizedFastRuntimeMetadataText(
+                shotKey,
+                fallback: AppState.makeFastRuntimeMetadataShotKey(
+                    building: normalizedBuilding,
+                    elevation: normalizedElevation,
+                    detailType: normalizedDetailType,
+                    angleIndex: normalizedAngleIndex
+                )
+            )
+
+            self.captureProfile = normalizedCaptureProfile
+            self.locationMode = normalizedLocationMode
+            self.building = normalizedBuilding
+            self.elevation = normalizedElevation
+            self.detailType = normalizedDetailType
+            self.trade = normalizedTrade.isEmpty ? nil : normalizedTrade
+            self.detailNote = normalizedDetailNote.isEmpty ? nil : normalizedDetailNote
+            self.priority = normalizedPriority.isEmpty ? nil : normalizedPriority
+            self.angleIndex = normalizedAngleIndex
+            self.shotKey = normalizedShotKey
+            self.isGuided = isGuided
+            self.isFlagged = isFlagged
+            self.issueID = issueID
+            self.issueStatus = AppState.normalizedFastRuntimeMetadataText(issueStatus, fallback: "").isEmpty
+                ? nil
+                : AppState.normalizedFastRuntimeMetadataText(issueStatus, fallback: "")
+            let normalizedIntent = AppState.normalizedFastRuntimeMetadataText(captureIntentSource, fallback: "")
+            self.captureIntentSource = normalizedIntent.isEmpty ? nil : normalizedIntent
+        }
+
+        nonisolated func withAngleIndex(_ angleIndex: Int) -> FastRuntimeCaptureMetadataContext {
+            FastRuntimeCaptureMetadataContext(
+                captureProfile: captureProfile,
+                locationMode: locationMode,
+                building: building,
+                elevation: elevation,
+                detailType: detailType,
+                trade: trade,
+                detailNote: detailNote,
+                priority: priority,
+                angleIndex: max(1, angleIndex),
+                shotKey: nil,
+                isGuided: isGuided,
+                isFlagged: isFlagged,
+                issueID: issueID,
+                issueStatus: issueStatus,
+                captureIntentSource: captureIntentSource
+            )
+        }
+    }
+
+    struct FastRuntimePrototypeShotRecord: Codable, Equatable, Identifiable {
+        let id: UUID
+        let sessionID: UUID
+        let propertyID: UUID
+        let orgID: UUID?
+        let sessionType: SessionType
+        let capturedAt: Date
+        let localFilePath: String
+        let originalRelativePath: String
+        let captureKind: String
+        let firstCaptureKind: String
+        let captureLocationMode: String?
+        let metadataContext: FastRuntimeCaptureMetadataContext?
+    }
+
+    struct FastRuntimePrototypeCaptureSaveResult: Equatable {
+        let success: Bool
+        let shot: FastRuntimePrototypeShotRecord?
+        let storageRoot: URL?
+        let errorMessage: String?
+        let timings: FastRuntimePrototypeCaptureTimings
+    }
+
+    struct FastRuntimeDraftSummary: Codable, Equatable, Identifiable {
+        var id: UUID { sessionID }
+
+        let propertyID: UUID
+        let sessionID: UUID
+        let orgID: UUID?
+        let sessionType: SessionType
+        let ownerUserID: UUID?
+        let ownerEmail: String?
+        let ownerDeviceID: String?
+        let createdAt: Date
+        let updatedAt: Date
+        let photoCount: Int
+        let lastLocationMode: String?
+        let lastMetadataContext: FastRuntimeCaptureMetadataContext?
+        let draftRootPath: String
+        let metadataPath: String
+    }
+
+    struct FastRuntimePrototypeCloseTimings: Equatable {
+        let persistMilliseconds: Double?
+        let releaseMilliseconds: Double?
+        let cleanupMilliseconds: Double?
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePrototypeCloseResult: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let sessionID: UUID
+        let draftPersisted: Bool
+        let photoCount: Int
+        let lockAction: String
+        let tempDiscarded: Bool
+        let draftRootPath: String?
+        let errorMessage: String?
+        let timings: FastRuntimePrototypeCloseTimings
+    }
+
+    struct FastRuntimeDraftResumeState: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let summary: FastRuntimeDraftSummary?
+        let context: ActiveCaptureContext?
+        let storageRoot: URL?
+        let errorMessage: String?
+
+        var canResume: Bool {
+            summary != nil && context != nil && storageRoot != nil && errorMessage == nil
+        }
+    }
+
+    struct FastRuntimePrototypeCleanupResult: Equatable {
+        let indexDeleted: Bool
+        let draftFolderDeleted: Bool
+        let tempFoldersDeletedCount: Int
+        let claimReleaseAttemptCount: Int
+        let claimReleaseSuccessCount: Int
+        let claimReleaseMessages: [String]
+
+        var summary: String {
+            [
+                "index_deleted=\(indexDeleted)",
+                "draft_folder_deleted=\(draftFolderDeleted)",
+                "temp_folders_deleted=\(tempFoldersDeletedCount)",
+                "claim_release_success=\(claimReleaseSuccessCount)/\(claimReleaseAttemptCount)"
+            ].joined(separator: " ")
+        }
+    }
+
+    struct FastRuntimeCompleteDryRunShotSummary: Equatable, Identifiable {
+        let id: UUID
+        let capturedAt: Date
+        let captureKind: String
+        let captureLocationMode: String?
+        let metadataContext: FastRuntimeCaptureMetadataContext?
+        let originalRelativePath: String
+        let resolvedLocalFilePath: String?
+        let metadataLocalFilePath: String
+        let fileExists: Bool
+        let byteSize: Int64?
+    }
+
+    struct FastRuntimeCompleteDryRunResult: Equatable, Identifiable {
+        let id = UUID()
+        let isValid: Bool
+        let propertyID: UUID
+        let sessionID: UUID
+        let sessionType: SessionType
+        let orgID: UUID?
+        let ownerUserID: UUID?
+        let ownerEmail: String?
+        let ownerDeviceID: String?
+        let metadataSource: String
+        let photoCount: Int
+        let metadataPhotoCount: Int
+        let missingFilesCount: Int
+        let missingFields: [String]
+        let warnings: [String]
+        let corruptMetadataMessage: String?
+        let totalBytes: Int64
+        let wouldCreate: [String]
+        let wouldUpload: [String]
+        let shots: [FastRuntimeCompleteDryRunShotSummary]
+
+        var title: String {
+            isValid ? "Complete Dry Run Valid" : "Complete Dry Run Failed"
+        }
+
+        var summary: String {
+            [
+                "valid=\(isValid)",
+                "photos=\(photoCount)",
+                "metadata=\(metadataPhotoCount)",
+                "missing_files=\(missingFilesCount)",
+                "session_type=\(sessionType.rawValue)"
+            ].joined(separator: " ")
+        }
+    }
+
+    struct FastRuntimeCompleteUploadShotResult: Equatable, Identifiable {
+        let id: UUID
+        let localFilePath: String
+        let storageBucket: String?
+        let storagePath: String?
+        let byteSize: Int?
+        let checksumSHA256: String?
+        let uploaded: Bool
+        let errorMessage: String?
+    }
+
+    struct FastRuntimeCompleteUploadResult: Equatable, Identifiable {
+        let id = UUID()
+        let success: Bool
+        let dryRun: FastRuntimeCompleteDryRunResult
+        let uploadedFilesCount: Int
+        let createdRowsSummary: [String]
+        let sessionStatus: String
+        let propertyStatus: String
+        let packageSummary: String
+        let lockReleased: Bool
+        let localDraftMarkedUploaded: Bool
+        let errorMessage: String?
+        let diagnostics: [String]
+        let shots: [FastRuntimeCompleteUploadShotResult]
+        let totalMilliseconds: Double
+
+        var title: String {
+            success ? "Fast Upload Complete" : "Fast Upload Failed"
+        }
+    }
+
+    struct FastRuntimeReportPackageFileCandidate: Equatable, Identifiable {
+        let id = UUID()
+        let reportType: String
+        let storageBucket: String
+        let storagePath: String
+        let filename: String
+    }
+
+    struct FastRuntimeReportPackageDryRunShot: Equatable, Identifiable {
+        let id: UUID
+        let captureKind: String?
+        let storageBucket: String?
+        let storagePath: String?
+        let storageObjectExists: Bool
+        let shotByteSize: Int?
+        let storageByteSize: Int?
+        let checksumSHA256: String?
+        let uploadState: String
+    }
+
+    struct FastRuntimeReportPackageDryRunResult: Equatable, Identifiable {
+        let id = UUID()
+        let isValid: Bool
+        let propertyID: UUID
+        let sessionID: UUID?
+        let sessionType: SessionType
+        let orgID: UUID?
+        let sessionStatus: String?
+        let propertyStatus: String?
+        let propertyStatusPendingExportSessionID: UUID?
+        let snapshotID: UUID?
+        let snapshotStorageBucket: String?
+        let snapshotStoragePath: String?
+        let snapshotPayloadBytes: Int?
+        let rawSessionJSONSHA256: String?
+        let snapshotPayloadSHA256: String?
+        let reportPackageID: UUID?
+        let reportPackageIdempotencyKey: String?
+        let reportMode: String
+        let emailWordingType: String
+        let shotCount: Int
+        let storageObjectCount: Int
+        let missingFields: [String]
+        let errors: [String]
+        let warnings: [String]
+        let wouldCreate: [String]
+        let fileCandidates: [FastRuntimeReportPackageFileCandidate]
+        let shots: [FastRuntimeReportPackageDryRunShot]
+        let sideEffectCounts: [String: Int]
+        let totalMilliseconds: Double
+
+        var title: String {
+            isValid ? "Report Package Dry Run Valid" : "Report Package Dry Run Failed"
+        }
+    }
+
+    struct FastRuntimeReportHandoffResult: Equatable, Identifiable {
+        let id = UUID()
+        let success: Bool
+        let dryRun: FastRuntimeReportPackageDryRunResult
+        let snapshotID: UUID?
+        let snapshotPath: String?
+        let snapshotBucket: String?
+        let snapshotPayloadSHA256: String?
+        let rawSessionJSONSHA256: String?
+        let sessionID: UUID?
+        let sessionType: SessionType
+        let reportMode: String
+        let shotCount: Int?
+        let idempotencyKey: String?
+        let dispatchExpected: Bool?
+        let dispatchStatus: String?
+        let reused: Bool?
+        let functionStatus: String
+        let errorMessage: String?
+        let totalMilliseconds: Double
+
+        var title: String {
+            success ? "Fast Report Handoff Succeeded" : "Fast Report Handoff Failed"
+        }
+    }
+
+    struct FastRuntimePendingExportCleanupResult: Equatable, Identifiable {
+        let id = UUID()
+        let success: Bool
+        let dryRun: FastRuntimeReportPackageDryRunResult
+        let sessionID: UUID?
+        let propertyStatus: String?
+        let errorMessage: String?
+        let totalMilliseconds: Double
+
+        var title: String {
+            success ? "Pending Export Marked Delivered" : "Pending Export Cleanup Failed"
+        }
+    }
+
+    private struct FastRuntimeReportHandoffPayload: Encodable {
+        let orgID: String
+        let propertyID: String
+        let sessionID: String
+        let sessionType: String
+        let reportMode: String
+    }
+
+    private struct FastRuntimeReportHandoffFunctionResponse: Decodable {
+        let ok: Bool?
+        let reused: Bool?
+        let snapshotID: UUID?
+        let snapshotPath: String?
+        let snapshotBucket: String?
+        let snapshotPayloadSHA256: String?
+        let rawSessionJSONSHA256: String?
+        let sessionID: UUID?
+        let sessionType: String?
+        let reportMode: String?
+        let shotCount: Int?
+        let idempotencyKey: String?
+        let dispatchExpected: Bool?
+        let dispatchStatus: String?
+        let error: String?
+        let retrySafe: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case ok
+            case reused
+            case snapshotID = "snapshot_id"
+            case snapshotPath = "snapshot_path"
+            case snapshotBucket = "snapshot_bucket"
+            case snapshotPayloadSHA256 = "snapshot_payload_sha256"
+            case rawSessionJSONSHA256 = "raw_session_json_sha256"
+            case sessionID = "session_id"
+            case sessionType = "session_type"
+            case reportMode = "report_mode"
+            case shotCount = "shot_count"
+            case idempotencyKey = "idempotency_key"
+            case dispatchExpected = "dispatch_expected"
+            case dispatchStatus = "dispatch_status"
+            case error
+            case retrySafe = "retry_safe"
+        }
+    }
+
     struct PropertyStatusDerivedSummary: Equatable {
         let draftBadgeDecision: Bool
         let pendingExportDecision: Bool
@@ -5018,6 +5563,17 @@ final class AppState: ObservableObject {
         let createdAt: Date
         let displayTitle: String
         let displaySubtitle: String
+    }
+
+    private struct LocalActivityFeedRecord: Codable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID?
+        let propertyID: UUID?
+        let actorUserID: UUID?
+        let eventType: String
+        let payload: [String: AnyJSON]
+        let createdAt: Date
     }
 
 #if DEBUG
@@ -5786,7 +6342,7 @@ final class AppState: ObservableObject {
     private struct LightweightPropertyEntryStatusRPCPayload: Encodable {
         let targetPropertyID: UUID
         let targetDeviceID: String
-        let targetSessionID: UUID
+        let targetSessionID: UUID?
 
         enum CodingKeys: String, CodingKey {
             case targetPropertyID = "target_property_id"
@@ -5842,6 +6398,7 @@ final class AppState: ObservableObject {
         let city: String?
         let state: String?
         let postalCode: String?
+        let isArchived: Bool
         let updatedBy: UUID?
 
         init(
@@ -5856,6 +6413,7 @@ final class AppState: ObservableObject {
             city: String?,
             state: String?,
             postalCode: String?,
+            isArchived: Bool = false,
             updatedBy: UUID? = nil
         ) {
             self.id = id
@@ -5869,6 +6427,7 @@ final class AppState: ObservableObject {
             self.city = city
             self.state = state
             self.postalCode = postalCode
+            self.isArchived = isArchived
             self.updatedBy = updatedBy
         }
 
@@ -5884,6 +6443,7 @@ final class AppState: ObservableObject {
             case city
             case state
             case postalCode = "postal_code"
+            case isArchived = "is_archived"
             case updatedBy = "updated_by"
         }
     }
@@ -6429,6 +6989,38 @@ final class AppState: ObservableObject {
             case uploadState = "upload_state"
             case uploadAttempts = "upload_attempts"
             case lastUploadError = "last_upload_error"
+        }
+    }
+
+    private struct FastRuntimeReportRemoteSessionRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String?
+        let startedAt: Date?
+        let completedAt: Date?
+        let exportedAt: Date?
+        let isSealed: Bool?
+        let firstDeliveredAt: Date?
+        let captureProfile: String?
+        let updatedBy: UUID?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case title
+            case status
+            case startedAt = "started_at"
+            case completedAt = "completed_at"
+            case exportedAt = "exported_at"
+            case isSealed = "is_sealed"
+            case firstDeliveredAt = "first_delivered_at"
+            case captureProfile = "capture_profile"
+            case updatedBy = "updated_by"
+            case deletedAt = "deleted_at"
         }
     }
 
@@ -7066,25 +7658,61 @@ final class AppState: ObservableObject {
     @Published var organizations: [Organization] = []
     @Published private(set) var isLoading: Bool = true
     @Published private(set) var sessionIndexByProperty: [UUID: [Session]] = [:]
-    @Published private(set) var draftSessionByProperty: [UUID: Session] = [:]
-    @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:]
+    @Published private(set) var draftSessionByProperty: [UUID: Session] = [:] {
+        didSet { refreshPropertyRowDraftBadgeCache() }
+    }
+    @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:] {
+        didSet { refreshPropertyRowStatusChipCache() }
+    }
     @Published private(set) var hubMetaByProperty: [UUID: HubPropertyMeta] = [:]
     @Published private(set) var hubRowRefreshToken: UUID = UUID()
     @Published private(set) var sessionSnapshotCloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var propertyRowReExportSessionByPropertyID: [UUID: Session] = [:]
-    @Published private(set) var propertyRowPendingDeliverySessionByPropertyID: [UUID: Session] = [:]
-    @Published private(set) var propertyRowSnapshotCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
+    @Published private(set) var propertyRowPendingDeliverySessionByPropertyID: [UUID: Session] = [:] {
+        didSet { refreshPropertyRowStatusChipCache() }
+    }
+    @Published private(set) var propertyRowSnapshotCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:] {
+        didSet {
+            refreshPropertyRowCloudGlyphCache()
+            refreshPropertyRowStatusChipCache()
+        }
+    }
+    @Published private(set) var fastRuntimeDraftsByPropertyID: [UUID: FastRuntimeDraftSummary] = AppState.loadFastRuntimeDraftIndexFromDisk() {
+        didSet { refreshPropertyRowDraftBadgeCache() }
+    }
+    @Published private(set) var propertyRowDraftCount: Int = 0
+    @Published private(set) var propertyRowDraftBadgeByPropertyID: [UUID: Bool] = [:]
+    @Published private(set) var propertyRowLockBadgeByPropertyID: [UUID: Bool] = [:]
+    @Published private(set) var propertyRowCloudGlyphByPropertyID: [UUID: PropertyRowCloudGlyphState] = [:]
+    @Published private(set) var propertyRowStatusChipByPropertyID: [UUID: PropertyRowStatusChipState] = [:]
+    @Published private(set) var propertyRowSubtitleByPropertyID: [UUID: String] = [:]
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
     @Published private(set) var isAuthenticationReady: Bool = false
     @Published private(set) var isAuthenticating: Bool = false
+    @Published private(set) var isNetworkAvailable: Bool = true
     @Published private(set) var isLoadingPropertiesForOrgSwitch: Bool = false
-    @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser?
+    @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser? {
+        didSet {
+            refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowLockBadgeCache()
+        }
+    }
     @Published var authenticationErrorMessage: String?
-    @Published var locallyLockedPropertyIDs: Set<UUID> = []
+    @Published var locallyLockedPropertyIDs: Set<UUID> = [] {
+        didSet { refreshPropertyRowLockBadgeCache() }
+    }
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
-    @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
+    @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:] {
+        didSet {
+            refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowLockBadgeCache()
+            refreshPropertyRowCloudGlyphCache()
+            refreshPropertyRowStatusChipCache()
+        }
+    }
+    private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     private(set) var lastPropertyStatusRefreshAt: Date?
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
@@ -7095,6 +7723,7 @@ final class AppState: ObservableObject {
     private let propertyStatusDiagnosticsDedupeInterval: TimeInterval = 5
     private var persistentDataCacheRefreshScheduled = false
     private var persistentDataCacheRefreshRunning = false
+    private var suppressedPersistentDataChangeNotificationCount = 0
     private var reconcilingDeliveredSessionState = false
     private var deliveredSessionStateReconcileQueued = false
     private var deliveredSessionStateReconciliationWriteCount = 0
@@ -7108,6 +7737,7 @@ final class AppState: ObservableObject {
     @Published private(set) var propertyOpenFreshnessByPropertyID: [UUID: PropertyOpenFreshnessSnapshot] = [:]
     private var propertyOpenFreshnessHydrationRecheckPropertyIDs: Set<UUID> = []
     private var propertyOpenFreshnessCheckInFlightPropertyIDs: Set<UUID> = []
+    private var propertyOpenHeaderStatusCheckInFlightPropertyIDs: Set<UUID> = []
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -7371,6 +8001,31 @@ final class AppState: ObservableObject {
     var selectedProperty: Property? {
         guard let selectedPropertyID else { return nil }
         return properties.first { $0.id == selectedPropertyID }
+    }
+
+    var captureRuntimeContext: CaptureRuntimeContext? {
+        currentSession.map(CaptureRuntimeContext.init)
+    }
+
+    var selectedCaptureRuntimeContext: CaptureRuntimeContext? {
+        guard let selectedPropertyID,
+              let context = captureRuntimeContext,
+              context.propertyID == selectedPropertyID else {
+            return nil
+        }
+        return context
+    }
+
+    func activeCaptureTarget(ensuringCurrentSessionPersisted: Bool = false) -> ActiveCaptureTarget? {
+        guard let context = selectedCaptureRuntimeContext else { return nil }
+        let target = ActiveCaptureTarget(context: context)
+        guard ensuringCurrentSessionPersisted else { return target }
+        guard let session = ensureCurrentSessionPersisted() ?? currentSession,
+              session.propertyID == target.propertyID,
+              session.id == target.sessionID else {
+            return nil
+        }
+        return target
     }
 
     func clearLocalDiagnostics() {
@@ -7655,6 +8310,7 @@ final class AppState: ObservableObject {
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
     private let userDefaults: UserDefaults
+    private let cachedDeviceIdentifier: String
     private let cloudBackupManager: CloudBackupManager?
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
@@ -7677,6 +8333,7 @@ final class AppState: ObservableObject {
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
+    private let localActivityFeedDefaultsKey = "scoutcapture.localActivityFeed.v1"
     private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
@@ -7684,12 +8341,18 @@ final class AppState: ObservableObject {
     private let sessionCoordinationStaleLockThreshold: TimeInterval = AppState.propertyStatusOccupiedStaleThreshold
     private let sessionOccupancyHeartbeatInterval: TimeInterval = 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
+    private let propertyArchiveLocalPreservationInterval: TimeInterval = 120
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
     private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
     private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
     private let offlineReplayStateQueue = DispatchQueue(label: "ScoutCapture.AppState.offlineReplay")
     private let sessionSnapshotUploadRetryStateQueue = DispatchQueue(label: "ScoutCapture.AppState.sessionSnapshotUploadRetry")
+    private let networkMonitor = NWPathMonitor()
+    private let networkMonitorQueue = DispatchQueue(label: "ScoutCapture.AppState.networkMonitor")
+    private let launchOfflineReplaySettlingDelay: TimeInterval = 20
+    private let automaticLaunchOfflineReplayAttemptLimit = 5
+    private var automaticFastRuntimeCompletionRecoveryInFlight = false
     private var cloudBackupLogRunOpen: Bool = false
     private var cloudBackupLogHasPrintedStart: Bool = false
     private var cloudBackupLogHasPrintedTerminal: Bool = false
@@ -7705,6 +8368,7 @@ final class AppState: ObservableObject {
     private var lastLiveSyncFingerprint: String?
     private var lastBackgroundRemoteFingerprint: String?
     private var lastBackgroundRemoteAttemptCompletedAt: Date?
+    private var lastForegroundRemotePropertyRefreshCompletedAt: Date?
     private var liveSyncBurstUntil: Date?
     private var lastLiveSyncRefreshAt: Date?
     private var isBackgroundRefreshInFlight: Bool = false
@@ -7756,6 +8420,7 @@ final class AppState: ObservableObject {
     private var deferredPropertyRefreshWorkItem: DispatchWorkItem?
     private var deferredSceneActiveWorkItem: DispatchWorkItem?
     private var deferredForegroundBackupStatusWorkItem: DispatchWorkItem?
+    private var deferredLifecycleBackupWorkItem: DispatchWorkItem?
 #if DEBUG
     private var passwordRecoveryRequestOverride: PasswordRecoveryRequestOverride?
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
@@ -8063,6 +8728,10 @@ final class AppState: ObservableObject {
     ) {
         self.injectedLocalStore = localStore
         self.userDefaults = userDefaults
+        self.cachedDeviceIdentifier = Self.resolvedDeviceIdentifier(
+            userDefaults: userDefaults,
+            key: "scoutcapture.deviceIdentifier.v1"
+        )
         #if DEBUG
         if disableCloudBackupForTests || AppStateTestEnvironment.isRunningUnderXCTest {
             self.cloudBackupManager = nil
@@ -8111,10 +8780,18 @@ final class AppState: ObservableObject {
         }
 
         self.currentSession = nil
-        self.sessionSnapshotCloudStatusBySessionID = Self.makeSessionSnapshotCloudStatusBySessionID(
+        let initialSessionSnapshotCloudStatusBySessionID = Self.makeSessionSnapshotCloudStatusBySessionID(
             records: (try? self.localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0.2)) ?? [],
             retryItems: (try? self.localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0.2)) ?? []
         )
+        self.sessionSnapshotCloudStatusBySessionID = initialSessionSnapshotCloudStatusBySessionID
+        self.propertyRowSnapshotCloudStatusByPropertyID = Self.makePropertyRowSnapshotCloudStatusByPropertyID(
+            statuses: Array(initialSessionSnapshotCloudStatusBySessionID.values)
+        )
+        refreshPropertyRowDraftBadgeCache()
+        refreshPropertyRowCloudGlyphCache()
+        refreshPropertyRowStatusChipCache()
+        refreshPropertyRowSubtitleCache(properties: properties, organizations: organizations)
 
         if let cloudBackupManager {
             cloudBackupManager.$status
@@ -8129,19 +8806,50 @@ final class AppState: ObservableObject {
         NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
+                guard let self else { return }
                 print("[AppStateDiag] scoutPersistentDataDidChange_sink")
-                self?.schedulePersistentDataCacheRefresh(reason: "persistent_data_changed")
-                self?.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
+                if self.suppressedPersistentDataChangeNotificationCount > 0 {
+                    self.suppressedPersistentDataChangeNotificationCount -= 1
+                    self.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
+                    return
+                }
+                self.schedulePersistentDataCacheRefresh(reason: "persistent_data_changed")
+                self.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
             }
             .store(in: &cancellables)
 
         print("[AppStateDiag] init")
+        startNetworkMonitoring()
         logCutoverConfiguration()
         prepareCollaborativeBackendBootstrap()
     }
 
     deinit {
         print("[AppStateDiag] deinit_enter")
+        networkMonitor.cancel()
+    }
+
+    private func startNetworkMonitoring() {
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let wasAvailable = self.isNetworkAvailable
+                let isAvailable = path.status == .satisfied
+                self.isNetworkAvailable = isAvailable
+                if isAvailable && !wasAvailable {
+                    self.scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect()
+                }
+            }
+        }
+        networkMonitor.start(queue: networkMonitorQueue)
+    }
+
+    @MainActor
+    private func scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await self?.retryFailedFastRuntimeCompletionUploadsAfterReconnect()
+        }
     }
 
     static func loadSupabaseConfiguration(
@@ -8564,7 +9272,7 @@ final class AppState: ObservableObject {
             if !previousReady {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    await self.performRemoteConvergenceCycle(source: "launch")
+                    await self.performLaunchRemoteConvergenceAfterHomeSettles()
                 }
             } else if let resolvedActiveOrganizationID = activeOrganizationID,
                       previousActiveOrganizationID != resolvedActiveOrganizationID {
@@ -8822,12 +9530,14 @@ final class AppState: ObservableObject {
         propertyRowReExportSessionByPropertyID = [:]
         propertyRowPendingDeliverySessionByPropertyID = [:]
         propertyRowSnapshotCloudStatusByPropertyID = [:]
+        propertyRowLockBadgeByPropertyID = [:]
         pendingPropertyRowDetailHydrationIDs = []
         propertyRowDetailHydrationTask?.cancel()
         propertyRowDetailHydrationTask = nil
         lastLiveSyncFingerprint = nil
         lastBackgroundRemoteFingerprint = nil
         lastBackgroundRemoteAttemptCompletedAt = nil
+        lastForegroundRemotePropertyRefreshCompletedAt = nil
         lastLiveSyncRefreshAt = nil
         lastBackgroundRefreshStartedAt = nil
         nextPropertyRefreshToken = 0
@@ -9374,18 +10084,66 @@ final class AppState: ObservableObject {
                 .value as [SupabaseSessionEventRecord]
         }
 
-        let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID)))
+        let localRecords = cachedLocalActivityFeedRecords().filter { record in
+            guard record.orgID == orgID else { return false }
+            guard let propertyID else { return true }
+            if record.propertyID == propertyID { return true }
+            if let sessionID = record.sessionID {
+                return sessionIDFilterValues.contains(sessionID.uuidString.lowercased())
+            }
+            return false
+        }
+
+        let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID) + localRecords.compactMap(\.sessionID)))
         let sessionLookupByID = try await fetchActivitySessionLookupByID(
             sessionIDs: eventSessionIDs,
             client: client
         )
 
-        return eventRecords.map { record in
+        let remoteItems = eventRecords.map { record in
             makeActivityFeedItem(
-                record: record,
+                id: record.id,
+                orgID: record.orgID,
+                sessionID: record.sessionID,
+                propertyID: record.propertyID,
+                actorUserID: record.actorUserID,
+                eventType: record.eventType,
+                payload: record.payload,
+                createdAt: parseSupabaseDateString(record.createdAt) ?? Date(),
                 sessionLookup: record.sessionID.flatMap { sessionLookupByID[$0] }
             )
         }
+        let remoteClientEventIDs = Set(
+            eventRecords.compactMap { activityPayloadString($0.payload, keys: ["client_event_id", "clientEventID"]) }
+        )
+        let localItems = localRecords
+            .filter { record in
+                guard let clientEventID = activityPayloadString(record.payload, keys: ["client_event_id", "clientEventID"]) else {
+                    return true
+                }
+                return !remoteClientEventIDs.contains(clientEventID)
+            }
+            .map { record in
+                makeActivityFeedItem(
+                    id: record.id,
+                    orgID: record.orgID,
+                    sessionID: record.sessionID,
+                    propertyID: record.propertyID,
+                    actorUserID: record.actorUserID,
+                    eventType: record.eventType,
+                    payload: record.payload,
+                    createdAt: record.createdAt,
+                    sessionLookup: record.sessionID.flatMap { sessionLookupByID[$0] }
+                )
+            }
+
+        return (remoteItems + localItems)
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.id.uuidString > $1.id.uuidString
+            }
+            .prefix(normalizedLimit)
+            .map { $0 }
     }
 
     private func clampedActivityFeedLimit(_ limit: Int) -> Int {
@@ -9422,21 +10180,28 @@ final class AppState: ObservableObject {
         propertyID: UUID? = nil,
         payload: [String: Any]
     ) async {
-        var payloadWithActor = payload
-        if let actorID = authenticatedSupabaseUser?.id,
-           payloadWithActor["actor_user_id"] == nil,
-           payloadWithActor["actorUserID"] == nil {
-            payloadWithActor["actor_user_id"] = actorID.uuidString.lowercased()
+        let shouldCacheLocal = activityPayloadString(
+            normalizedAuditEventPayload(payload),
+            keys: ["client_event_id", "clientEventID"]
+        ) == nil
+        let clientEventID = shouldCacheLocal ? UUID() : nil
+        var payloadWithClientID = payload
+        if let clientEventID {
+            payloadWithClientID["client_event_id"] = clientEventID.uuidString.lowercased()
         }
-        if let actorEmail = normalizedSupabaseText(authenticatedSupabaseUser?.email),
-           payloadWithActor["actor_email"] == nil,
-           payloadWithActor["actorEmail"] == nil,
-           payloadWithActor["actor_name"] == nil,
-           payloadWithActor["actorName"] == nil,
-           payloadWithActor["actor"] == nil {
-            payloadWithActor["actor_email"] = actorEmail
-        }
+        let payloadWithActor = auditPayloadAddingActor(payloadWithClientID)
         let normalizedPayload = normalizedAuditEventPayload(payloadWithActor)
+        if let clientEventID {
+            cacheLocalActivityFeedRecord(
+                id: clientEventID,
+                orgID: orgID,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                actorUserID: authenticatedSupabaseUser?.id,
+                eventType: eventType,
+                payload: normalizedPayload
+            )
+        }
 #if DEBUG
         if let auditEventEmitOverride {
             do {
@@ -9467,6 +10232,100 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func auditPayloadAddingActor(_ payload: [String: Any]) -> [String: Any] {
+        var payloadWithActor = payload
+        if let actorID = authenticatedSupabaseUser?.id,
+           payloadWithActor["actor_user_id"] == nil,
+           payloadWithActor["actorUserID"] == nil {
+            payloadWithActor["actor_user_id"] = actorID.uuidString.lowercased()
+        }
+        if let actorEmail = normalizedSupabaseText(authenticatedSupabaseUser?.email),
+           payloadWithActor["actor_email"] == nil,
+           payloadWithActor["actorEmail"] == nil,
+           payloadWithActor["actor_name"] == nil,
+           payloadWithActor["actorName"] == nil,
+           payloadWithActor["actor"] == nil {
+            payloadWithActor["actor_email"] = actorEmail
+        }
+        return payloadWithActor
+    }
+
+    private func emitCachedAuditEvent(
+        orgID: UUID,
+        eventType: String,
+        sessionID: UUID? = nil,
+        propertyID: UUID? = nil,
+        payload: [String: Any]
+    ) {
+        let clientEventID = UUID()
+        var payloadWithClientID = payload
+        payloadWithClientID["client_event_id"] = clientEventID.uuidString.lowercased()
+        let payloadWithActor = auditPayloadAddingActor(payloadWithClientID)
+        let normalizedPayload = normalizedAuditEventPayload(payloadWithActor)
+        cacheLocalActivityFeedRecord(
+            id: clientEventID,
+            orgID: orgID,
+            sessionID: sessionID,
+            propertyID: propertyID,
+            actorUserID: authenticatedSupabaseUser?.id,
+            eventType: eventType,
+            payload: normalizedPayload
+        )
+        Task {
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: eventType,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                payload: payloadWithClientID
+            )
+        }
+    }
+
+    private func cachedLocalActivityFeedRecords() -> [LocalActivityFeedRecord] {
+        guard let data = userDefaults.data(forKey: localActivityFeedDefaultsKey),
+              let decoded = try? JSONDecoder().decode([LocalActivityFeedRecord].self, from: data) else {
+            return []
+        }
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        return decoded
+            .filter { $0.createdAt >= cutoff }
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.id.uuidString > $1.id.uuidString
+            }
+            .prefix(100)
+            .map { $0 }
+    }
+
+    private func cacheLocalActivityFeedRecord(
+        id: UUID,
+        orgID: UUID,
+        sessionID: UUID?,
+        propertyID: UUID?,
+        actorUserID: UUID?,
+        eventType: String,
+        payload: [String: AnyJSON]
+    ) {
+        let record = LocalActivityFeedRecord(
+            id: id,
+            orgID: orgID,
+            sessionID: sessionID,
+            propertyID: propertyID,
+            actorUserID: actorUserID,
+            eventType: eventType,
+            payload: payload,
+            createdAt: Date()
+        )
+        var records = cachedLocalActivityFeedRecords()
+        records.removeAll { $0.id == id }
+        records.insert(record, at: 0)
+        records = Array(records.prefix(100))
+        if let data = try? JSONEncoder().encode(records) {
+            userDefaults.set(data, forKey: localActivityFeedDefaultsKey)
+        }
+    }
+
     private func fetchActivitySessionLookupByID(
         sessionIDs: [UUID],
         client: SupabaseClient
@@ -9484,35 +10343,41 @@ final class AppState: ObservableObject {
     }
 
     private func makeActivityFeedItem(
-        record: SupabaseSessionEventRecord,
+        id: UUID,
+        orgID: UUID,
+        sessionID: UUID?,
+        propertyID: UUID?,
+        actorUserID: UUID?,
+        eventType: String,
+        payload: [String: AnyJSON],
+        createdAt: Date,
         sessionLookup: SupabaseActivitySessionLookupRecord?
     ) -> ActivityFeedItem {
-        let createdAt = parseSupabaseDateString(record.createdAt) ?? Date()
         let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
-            ?? record.propertyID.flatMap { activityPropertyName(for: $0) }
+            ?? propertyID.flatMap { activityPropertyName(for: $0) }
         let sessionTitle = normalizedSupabaseText(sessionLookup?.title)
         let title = normalizedActivityDisplayText(
-            activityFeedTitle(for: record.eventType, payload: record.payload),
+            activityFeedTitle(for: eventType, payload: payload),
             fallback: "Activity event"
         )
         let subtitle = normalizedActivityDisplayText(
             activityFeedSubtitle(
-                eventType: record.eventType,
-                actorUserID: record.actorUserID,
-                payload: record.payload,
+                eventType: eventType,
+                actorUserID: actorUserID,
+                payload: payload,
                 propertyName: propertyName,
                 sessionTitle: sessionTitle,
-                sessionID: record.sessionID
+                sessionID: sessionID
             ),
             fallback: "Organization activity"
         )
 
         return ActivityFeedItem(
-            id: record.id,
-            orgID: record.orgID,
-            sessionID: record.sessionID,
-            eventType: record.eventType,
-            payload: record.payload,
+            id: id,
+            orgID: orgID,
+            sessionID: sessionID,
+            eventType: eventType,
+            payload: payload,
             createdAt: createdAt,
             displayTitle: title,
             displaySubtitle: subtitle
@@ -9531,6 +10396,12 @@ final class AppState: ObservableObject {
             return "Session completed"
         case "session.exported":
             return "Session exported"
+        case "session.draft_saved":
+            return "Draft saved"
+        case "session.deleted":
+            return "Session deleted"
+        case "session.restored":
+            return "Session restored"
         case "member.invited":
             return "Member invited"
         case "member.accepted":
@@ -9541,6 +10412,12 @@ final class AppState: ObservableObject {
             return "Property access granted"
         case "property.access.revoked":
             return "Property access revoked"
+        case "property.archived":
+            return "Property archived"
+        case "property.restored":
+            return "Property restored"
+        case "property.deleted":
+            return "Property deleted"
         case "observation.created":
             if activityPayloadBool(payload, keys: ["is_flagged"]) == true {
                 return "Flagged observation created"
@@ -9620,6 +10497,30 @@ final class AppState: ObservableObject {
                 return actor
             }
             return resolvedPropertyName ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
+        case "session.draft_saved":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) saved a draft for \(resolvedPropertyName)"
+            }
+            if let resolvedPropertyName {
+                return "Draft saved for \(resolvedPropertyName)"
+            }
+            return resolvedSessionName ?? fallbackSession ?? fallbackScope
+        case "session.deleted":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) deleted a session for \(resolvedPropertyName)"
+            }
+            if let resolvedPropertyName {
+                return "Session deleted for \(resolvedPropertyName)"
+            }
+            return resolvedSessionName ?? fallbackSession ?? fallbackScope
+        case "session.restored":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) restored a session for \(resolvedPropertyName)"
+            }
+            if let resolvedPropertyName {
+                return "Session restored for \(resolvedPropertyName)"
+            }
+            return resolvedSessionName ?? fallbackSession ?? fallbackScope
         case "member.invited":
             if let subject, let resolvedRole {
                 return "\(actor) invited \(subject) as \(resolvedRole)"
@@ -9663,6 +10564,21 @@ final class AppState: ObservableObject {
                 return "\(actor) revoked property access from \(subject)"
             }
             return "\(actor) revoked property access"
+        case "property.archived":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) archived \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? fallbackScope
+        case "property.restored":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) restored \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? fallbackScope
+        case "property.deleted":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) deleted \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? fallbackScope
         case "observation.created":
             let context = [actor, resolvedPropertyName, resolvedPriority, resolvedTrade, resolvedReason]
                 .compactMap { value -> String? in
@@ -10257,18 +11173,29 @@ final class AppState: ObservableObject {
         let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedSessionIDs = Set(scopedSessionIndex.values.flatMap { $0.map(\.id) })
+        refreshLightweightPropertyRowCloudStatusCache(downloadTimeout: 0)
+        refreshPropertyRowSubtitleCache(
+            properties: scopedProperties,
+            organizations: scopedOrganizations
+        )
 
         if organizations != scopedOrganizations {
             organizations = scopedOrganizations
         }
-        if properties != scopedProperties {
+        let visiblePropertiesChanged = properties != scopedProperties
+        var draftInputsChanged = visiblePropertiesChanged
+        if visiblePropertiesChanged {
             properties = scopedProperties
         }
         if sessionIndexByProperty != scopedSessionIndex {
             sessionIndexByProperty = scopedSessionIndex
         }
         if draftSessionByProperty != scopedDrafts {
+            draftInputsChanged = false
             draftSessionByProperty = scopedDrafts
+        }
+        if draftInputsChanged {
+            refreshPropertyRowDraftBadgeCache()
         }
         if pendingExportSessionByProperty != scopedPending {
             pendingExportSessionByProperty = scopedPending
@@ -10310,6 +11237,8 @@ final class AppState: ObservableObject {
         if !propertyRowSnapshotCloudStatusByPropertyID.isEmpty {
             propertyRowSnapshotCloudStatusByPropertyID = propertyRowSnapshotCloudStatusByPropertyID.filter { scopedPropertyIDs.contains($0.key) }
         }
+        refreshPropertyRowLockBadgeCache()
+        refreshPropertyRowCloudGlyphCache()
 
         if let selectedPropertyID,
            !scopedPropertyIDs.contains(selectedPropertyID) {
@@ -10341,6 +11270,36 @@ final class AppState: ObservableObject {
         }
         let authorizedIDs = authorizedPropertyIDsByOrganization[activeOrganizationID] ?? []
         return orgScoped.filter { authorizedIDs.contains($0.id) }
+    }
+
+    private func scopedArchivedProperties(from properties: [Property]) -> [Property] {
+        let scopedArchived = scopedProperties(from: properties).filter { $0.isArchived }
+        guard requiresAuthentication else { return scopedArchived }
+
+        let visibleIDs = Set(scopedArchived.map(\.id))
+        let accessibleOrgIDs = Set(accessibleOrganizations.map(\.id))
+            .union(activeOrganizationID.map { [$0] } ?? [])
+        let legacyLocalOrgIDs = Set(
+            allOrganizations
+                .filter {
+                    $0.name
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .caseInsensitiveCompare("Individual") == .orderedSame
+                }
+                .map(\.id)
+        )
+        let recoverableLegacyArchived = Self.uniquePropertiesByID(properties).filter { property in
+            guard property.deletedAt == nil,
+                  property.isArchived,
+                  !visibleIDs.contains(property.id) else {
+                return false
+            }
+            guard let orgID = property.orgId else { return true }
+            return legacyLocalOrgIDs.contains(orgID) || !accessibleOrgIDs.contains(orgID)
+        }
+
+        return (scopedArchived + recoverableLegacyArchived)
+            .sorted(by: Self.propertyIsOrderedBefore)
     }
 
     private func scopedRecentlyDeletedProperties(from properties: [Property]) -> [Property] {
@@ -10445,6 +11404,36 @@ final class AppState: ObservableObject {
                 self.authenticationErrorMessage = error.localizedDescription
             }
             throw error
+        }
+    }
+
+    @MainActor
+    func restoreAuthenticatedStartupAfterNetworkReconnect() async -> Bool {
+        guard requiresAuthentication else {
+            isAuthenticationReady = true
+            isOrganizationContextReady = true
+            return true
+        }
+        guard let client = supabaseClient else {
+            isAuthenticationReady = true
+            return false
+        }
+
+        do {
+            let session = try await client.auth.session
+            let user = AuthenticatedSupabaseUser(
+                id: session.user.id,
+                email: session.user.email
+            )
+            applyAuthenticationStateNow(user: user, ready: true)
+            await runPostAuthenticationRebuild(for: session.user.id)
+            return isAuthenticated && isOrganizationContextReady
+        } catch {
+            print("[SupabaseAuth] reconnect_session_restore_failed error=\(error.localizedDescription)")
+            if !isAuthenticationReady {
+                isAuthenticationReady = true
+            }
+            return false
         }
     }
 
@@ -11586,6 +12575,13 @@ final class AppState: ObservableObject {
         )
     }
 
+    @MainActor
+    private func performLaunchRemoteConvergenceAfterHomeSettles() async {
+        try? await Task.sleep(nanoseconds: UInt64(launchOfflineReplaySettlingDelay * 1_000_000_000))
+        guard !Task.isCancelled else { return }
+        await performRemoteConvergenceCycle(source: "launch_deferred")
+    }
+
     private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
         print("[OfflineReplay] skipped source=\(source) reason=not_ready detail=\(reason)")
         let summary = OfflineReplayRunSummary(
@@ -11710,17 +12706,8 @@ final class AppState: ObservableObject {
         let orgMutations = queuedMutations.filter { $0.organizationID == orgID && $0.status != .completed }
         let now = Date()
         var skippedBackoffCount = 0
-        let replayable = orgMutations.filter { mutation in
+        let replayableCandidates = orgMutations.filter { mutation in
             if mutation.isAcknowledgedHistoricalDebt {
-                print(
-                    "[OfflineReplay] skipped " +
-                    "source=\(source) " +
-                    "reason=acknowledged_historical_queue_debt " +
-                    "queueItemID=\(mutation.id.uuidString) " +
-                    "entityType=\(mutation.entityType) " +
-                    "entityID=\(mutation.entityID.uuidString) " +
-                    "operation=\(mutation.operation)"
-                )
                 return false
             }
             if mutation.status == .failed,
@@ -11737,13 +12724,41 @@ final class AppState: ObservableObject {
             }
             return lhs.id.uuidString < rhs.id.uuidString
         }
+        let replayLimit = automaticOfflineReplayAttemptLimit(for: source)
+        let replayable: [LocalStore.QueuedMutation]
+        let cappedReplayCount: Int
+        if let replayLimit, replayableCandidates.count > replayLimit {
+            replayable = Array(replayableCandidates.prefix(replayLimit))
+            cappedReplayCount = replayableCandidates.count - replayLimit
+        } else {
+            replayable = replayableCandidates
+            cappedReplayCount = 0
+        }
+        let acknowledgedHistoricalDebtCount = orgMutations.filter(\.isAcknowledgedHistoricalDebt).count
+        if acknowledgedHistoricalDebtCount > 0 {
+            print(
+                "[OfflineReplay] skipped_summary " +
+                "source=\(source) " +
+                "reason=acknowledged_historical_queue_debt " +
+                "count=\(acknowledgedHistoricalDebtCount)"
+            )
+        }
+        if cappedReplayCount > 0 {
+            print(
+                "[OfflineReplay] capped " +
+                "source=\(source) " +
+                "limit=\(replayLimit ?? 0) " +
+                "deferredCount=\(cappedReplayCount)"
+            )
+        }
 
         print(
             "[OfflineReplay] start " +
             "source=\(source) " +
             "orgID=\(orgID.uuidString) " +
             "discoveredCount=\(orgMutations.count) " +
-            "eligibleCount=\(replayable.count) " +
+            "eligibleCount=\(replayableCandidates.count) " +
+            "attemptLimit=\(replayLimit.map(String.init) ?? "none") " +
             "preAcknowledgedHistoricalDebtCount=\(preAcknowledgedHistoricalDebtCount) " +
             "normalizedInFlightCount=\(normalizedInFlightCount)"
         )
@@ -11978,19 +12993,6 @@ final class AppState: ObservableObject {
             updatedQueue[index] = acknowledged
         }
 
-        for item in acknowledgedItems {
-            print(
-                "[OfflineReplay] item_terminal_preacknowledged " +
-                "source=\(source) " +
-                "queueItemID=\(item.id.uuidString) " +
-                "entityType=\(item.entityType) " +
-                "entityID=\(item.entityID.uuidString) " +
-                "operation=\(item.operation) " +
-                "attemptCount=\(item.attemptCount) " +
-                "classification=\(item.acknowledgedClassification ?? "unknown")"
-            )
-        }
-
         print(
             "[OfflineReplay] historical_debt_preacknowledged " +
             "source=\(source) " +
@@ -12045,7 +13047,7 @@ final class AppState: ObservableObject {
                 message.contains("rls") else {
             return false
         }
-        guard message.contains("properties") else { return false }
+        guard message.contains("properties") || message.contains("sessions") else { return false }
         if Self.isTransientReplayErrorMessage(message) {
             return false
         }
@@ -12345,6 +13347,10 @@ final class AppState: ObservableObject {
         default:
             return 1800
         }
+    }
+
+    private func automaticOfflineReplayAttemptLimit(for source: String) -> Int? {
+        source.hasPrefix("launch") ? automaticLaunchOfflineReplayAttemptLimit : nil
     }
 
     private func beginOfflineReplayRun() -> Bool {
@@ -16499,6 +17505,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static func makePropertyRowSnapshotCloudStatusByPropertyID(
+        statuses: [SessionSnapshotCloudStatus]
+    ) -> [UUID: SessionSnapshotCloudStatus] {
+        statuses.reduce(into: [:]) { partial, status in
+            guard let existing = partial[status.propertyID] else {
+                partial[status.propertyID] = status
+                return
+            }
+            if sessionSnapshotCloudStatus(status, isNewerThan: existing) {
+                partial[status.propertyID] = status
+            }
+        }
+    }
+
     private static func sessionSnapshotRetryItem(
         for record: LocalStore.SessionSnapshotUploadStatusRecord,
         retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
@@ -16602,6 +17622,23 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static func statusRecordStatus(
+        for state: SessionSnapshotCloudState
+    ) -> LocalStore.SessionSnapshotUploadStatusRecord.Status {
+        switch state {
+        case .queued:
+            return .queued
+        case .uploading:
+            return .uploading
+        case .retryScheduled:
+            return .retryScheduled
+        case .failed:
+            return .failed
+        case .uploaded:
+            return .uploaded
+        }
+    }
+
     private static func cloudState(
         for status: LocalStore.SessionSnapshotUploadStatusRecord.Status
     ) -> SessionSnapshotCloudState {
@@ -16628,6 +17665,26 @@ final class AppState: ObservableObject {
         )
         if sessionSnapshotCloudStatusBySessionID != next {
             sessionSnapshotCloudStatusBySessionID = next
+        }
+        let nextRow = Self.makePropertyRowSnapshotCloudStatusByPropertyID(statuses: Array(next.values))
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRow {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRow
+        }
+    }
+
+    private func refreshLightweightPropertyRowCloudStatusCache(downloadTimeout: TimeInterval = 0.2) {
+        let records = (try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: downloadTimeout)) ?? []
+        let retryItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: downloadTimeout)) ?? []
+        let nextSession = Self.makeSessionSnapshotCloudStatusBySessionID(
+            records: records,
+            retryItems: retryItems
+        )
+        if sessionSnapshotCloudStatusBySessionID != nextSession {
+            sessionSnapshotCloudStatusBySessionID = nextSession
+        }
+        let nextRow = Self.makePropertyRowSnapshotCloudStatusByPropertyID(statuses: Array(nextSession.values))
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRow {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRow
         }
     }
 
@@ -16954,7 +18011,9 @@ final class AppState: ObservableObject {
     @discardableResult
     private func performSessionSnapshotUploadRetry(
         source: String,
-        now: Date = Date()
+        now: Date = Date(),
+        propertyID: UUID? = nil,
+        ignoreBackoff: Bool = false
     ) async -> SessionSnapshotUploadRetryRunSummary {
         guard beginSessionSnapshotUploadRetryRun() else {
             return SessionSnapshotUploadRetryRunSummary(
@@ -16991,8 +18050,11 @@ final class AppState: ObservableObject {
                 skippedIneligibleCount: 0
             )
         }
+        let scopedStatusRecords = propertyID.map { propertyID in
+            statusRecords.filter { $0.propertyID == propertyID }
+        } ?? statusRecords
         let recoveredMissingRetryCount = recoverMissingSessionSnapshotUploadRetryItems(
-            statusRecords: statusRecords,
+            statusRecords: scopedStatusRecords,
             retryItems: initialItems,
             now: now
         )
@@ -17003,13 +18065,16 @@ final class AppState: ObservableObject {
             activeItems = initialItems
         }
 
-        let supersededUploadedItems = activeItems.filter {
+        let scopedActiveItems = propertyID.map { propertyID in
+            activeItems.filter { $0.propertyID == propertyID }
+        } ?? activeItems
+        let supersededUploadedItems = scopedActiveItems.filter {
             Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: statusRecords)
         }
         for item in supersededUploadedItems {
             try? localStore.removeSessionSnapshotUploadRetryWorkItem(id: item.id)
         }
-        let activeInitialItems = activeItems.filter { item in
+        let activeInitialItems = scopedActiveItems.filter { item in
             !supersededUploadedItems.contains(where: { $0.id == item.id })
         }
 
@@ -17023,7 +18088,10 @@ final class AppState: ObservableObject {
             persistSessionSnapshotCloudStatus(for: normalized, status: .queued, updatedAt: now)
         }
 
-        let items = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        let fetchedItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        let items = propertyID.map { propertyID in
+            fetchedItems.filter { $0.propertyID == propertyID }
+        } ?? fetchedItems
         var skippedBackoffCount = 0
         var attemptedCount = 0
         var succeededCount = 0
@@ -17039,10 +18107,14 @@ final class AppState: ObservableObject {
         }
 
         for item in replayable {
-            guard shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
+            guard ignoreBackoff || shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
                 if item.status == .failed, let next = item.nextAttemptAt, now < next {
                     skippedBackoffCount += 1
                 }
+                continue
+            }
+            guard item.status != .terminalFailed else {
+                terminalFailedCount += 1
                 continue
             }
 
@@ -17273,6 +18345,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func pruneLocalArchiveSnapshotAfterSuccessfulUpload(
+        archivePath: String,
+        propertyID: UUID,
+        sessionID: UUID,
+        trigger: String
+    ) {
+        guard localStore.removeSessionArchiveSnapshot(atPath: archivePath) else { return }
+        print(
+            "[LocalStoragePrune] result=removed_uploaded_archive " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "trigger=\(trigger)"
+        )
+    }
+
     private func prepareCanonicalShotStateForNoZIPSnapshotUpload(
         item: LocalStore.SessionSnapshotUploadRetryWorkItem
     ) async throws {
@@ -17476,6 +18563,12 @@ final class AppState: ObservableObject {
                 sessionID: inFlight.sessionID,
                 path: inFlight.storagePath,
                 kind: .completed,
+                trigger: inFlight.trigger
+            )
+            pruneLocalArchiveSnapshotAfterSuccessfulUpload(
+                archivePath: inFlight.archivePath,
+                propertyID: inFlight.propertyID,
+                sessionID: inFlight.sessionID,
                 trigger: inFlight.trigger
             )
             recordSessionSnapshotAutoUploadResult(result, triggerSource: inFlight.triggerSource)
@@ -26634,39 +27727,46 @@ final class AppState: ObservableObject {
             } else {
                 updateType = "created"
             }
-            let updateCreatedAt = linkedShot?.createdAt ?? issue.firstSeenAt ?? metadata.startedAt
-            let updateUpdatedAt = issue.resolvedAt ??
-                issue.lastSeenAt ??
-                linkedShot?.updatedAt ??
-                updateCreatedAt
-            let updateID = deterministicObservationUpdateID(
-                orgID: orgID,
-                propertyID: propertyID,
-                observationID: issue.issueID,
-                sessionID: sessionID,
-                shotID: linkedShot?.shotID,
-                updateType: updateType
-            )
-            updateRows.append(
-                NormalizedObservationUpdateReplayRow(
-                    id: updateID,
+            // observation_updates intentionally does not model pending-review submissions:
+            // its database constraint only accepts active/resolved history rows. The
+            // observation row and shot metadata remain the source of truth for app-
+            // resolved pending review, while portal approval/rejection activity comes
+            // through punchlist_activity.
+            if status != "pending_review" {
+                let updateCreatedAt = linkedShot?.createdAt ?? issue.firstSeenAt ?? metadata.startedAt
+                let updateUpdatedAt = issue.resolvedAt ??
+                    issue.lastSeenAt ??
+                    linkedShot?.updatedAt ??
+                    updateCreatedAt
+                let updateID = deterministicObservationUpdateID(
                     orgID: orgID,
                     propertyID: propertyID,
                     observationID: issue.issueID,
                     sessionID: sessionID,
                     shotID: linkedShot?.shotID,
-                    updateType: updateType,
-                    status: status,
-                    message: normalizedReplayText(issue.currentReason) ?? normalizedReplayText(issue.detailNote),
-                    note: normalizedReplayText(issue.detailNote),
-                    priority: normalizedReplayText(linkedShot?.priority),
-                    trade: normalizedReplayText(linkedShot?.trade),
-                    capturedAt: linkedShot?.createdAt ?? issue.lastSeenAt ?? issue.firstSeenAt,
-                    createdAt: updateCreatedAt,
-                    updatedAt: updateUpdatedAt,
-                    updatedBy: updatedBy
+                    updateType: updateType
                 )
-            )
+                updateRows.append(
+                    NormalizedObservationUpdateReplayRow(
+                        id: updateID,
+                        orgID: orgID,
+                        propertyID: propertyID,
+                        observationID: issue.issueID,
+                        sessionID: sessionID,
+                        shotID: linkedShot?.shotID,
+                        updateType: updateType,
+                        status: status,
+                        message: normalizedReplayText(issue.currentReason) ?? normalizedReplayText(issue.detailNote),
+                        note: normalizedReplayText(issue.detailNote),
+                        priority: normalizedReplayText(linkedShot?.priority),
+                        trade: normalizedReplayText(linkedShot?.trade),
+                        capturedAt: linkedShot?.createdAt ?? issue.lastSeenAt ?? issue.firstSeenAt,
+                        createdAt: updateCreatedAt,
+                        updatedAt: updateUpdatedAt,
+                        updatedBy: updatedBy
+                    )
+                )
+            }
         }
 
         return (observationRows, updateRows)
@@ -26794,7 +27894,7 @@ final class AppState: ObservableObject {
                     continue
                 }
                 if normalizedReplayStatus(remote.status) != normalizedReplayStatus(row.status),
-                   row.status == "resolved" {
+                   ["active", "pending_review", "resolved"].contains(row.status) {
                     observationRowsToUpdate.append(row)
                 } else {
                     existingObservationSkippedCount += 1
@@ -32950,7 +34050,7 @@ final class AppState: ObservableObject {
             state: payload.state,
             zip: payload.postalCode,
             baselineSessionID: nil,
-            isArchived: false,
+            isArchived: payload.isArchived,
             createdAt: queueItem.createdAt,
             updatedAt: queueItem.updatedAt
         )
@@ -32972,7 +34072,8 @@ final class AppState: ObservableObject {
                 addressLine1: payload.addressLine1,
                 city: payload.city,
                 state: payload.state,
-                postalCode: payload.postalCode
+                postalCode: payload.postalCode,
+                isArchived: payload.isArchived
             )
         )
     }
@@ -33394,21 +34495,45 @@ final class AppState: ObservableObject {
         relativePathOverride: String? = nil
     ) async {
         guard let client = supabaseClient else { return }
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
-              let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
-            return
-        }
+        let localShot = (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID))?
+            .shots
+            .first(where: { $0.shotID == shotID })
         guard canAccessProperty(propertyID) else {
             print("[SupabaseMediaDownload] skipped reason=inactiveOrg propertyID=\(propertyID.uuidString)")
             return
         }
 
-        let resolvedShot = await resolveShotStorageMetadata(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shot: shot,
-            allowRelaxedLookupFallback: allowRelaxedRemoteLookupFallback
-        )
+        let remoteFallback: SupabaseShotStorageRecord?
+        if localShot == nil, allowRelaxedRemoteLookupFallback {
+            remoteFallback = try? await fetchShotStorageMetadataFromSupabaseForBackfillRepair(shotID: shotID)
+        } else {
+            remoteFallback = nil
+        }
+
+        if let remotePropertyID = remoteFallback?.propertyID, remotePropertyID != propertyID {
+            return
+        }
+
+        let resolvedShot: ShotMetadata?
+        if let localShot {
+            resolvedShot = await resolveShotStorageMetadata(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shot: localShot,
+                allowRelaxedLookupFallback: allowRelaxedRemoteLookupFallback
+            )
+        } else if let remoteFallback {
+            resolvedShot = fastRuntimeHydrationShotMetadata(
+                propertyID: propertyID,
+                sessionID: remoteFallback.sessionID ?? sessionID,
+                shotID: shotID,
+                remote: remoteFallback,
+                relativePathOverride: relativePathOverride
+            )
+        } else {
+            resolvedShot = nil
+        }
+        guard let resolvedShot else { return }
 
         let relativePath = {
             let resolved = resolvedShot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -33487,6 +34612,93 @@ final class AppState: ObservableObject {
                 "error=\(error.localizedDescription)"
             )
         }
+    }
+
+    private func fastRuntimeHydrationShotMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        remote: SupabaseShotStorageRecord,
+        relativePathOverride: String?
+    ) -> ShotMetadata {
+        let storagePath = remote.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relativePath = fastRuntimeHydrationRelativePath(
+            relativePathOverride: relativePathOverride,
+            storagePath: storagePath,
+            shotID: shotID
+        )
+        let filename = URL(fileURLWithPath: relativePath).lastPathComponent
+        let createdAt = remote.createdAt ?? Date()
+        return ShotMetadata(
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: createdAt,
+            capturedAtLocal: nil,
+            updatedAt: remote.updatedAt ?? createdAt,
+            capturedByUserID: nil,
+            capturedByEmail: nil,
+            uploadedByUserID: nil,
+            uploadedByEmail: nil,
+            building: remote.building ?? "",
+            elevation: remote.elevation ?? "",
+            detailType: remote.detailType ?? "",
+            angleIndex: max(1, remote.angleIndex ?? 1),
+            trade: remote.trade,
+            priority: remote.priority,
+            shotKey: remote.shotKey ?? "",
+            isGuided: remote.isGuided ?? false,
+            isFlagged: remote.isFlagged ?? false,
+            issueID: remote.issueID,
+            issueStatus: remote.issueStatus,
+            captureKind: remote.captureKind,
+            firstCaptureKind: remote.firstCaptureKind,
+            noteText: remote.reason,
+            noteCategory: nil,
+            originalFilename: filename.isEmpty ? "\(shotID.uuidString).jpg" : filename,
+            originalRelativePath: relativePath,
+            originalByteSize: remote.byteSize,
+            storageBucket: remote.storageBucket,
+            storagePath: storagePath,
+            checksumSHA256: remote.checksumSHA256,
+            byteSize: remote.byteSize,
+            uploadState: remote.uploadState,
+            uploadAttempts: remote.uploadAttempts,
+            lastUploadError: remote.lastUploadError,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: remote.captureMode,
+            lens: remote.lens,
+            exifOrientation: nil,
+            latitude: remote.latitude,
+            longitude: remote.longitude,
+            accuracyMeters: remote.accuracyMeters,
+            imageWidth: remote.imageWidth,
+            imageHeight: remote.imageHeight
+        )
+    }
+
+    private func fastRuntimeHydrationRelativePath(
+        relativePathOverride: String?,
+        storagePath: String?,
+        shotID: UUID
+    ) -> String {
+        let override = relativePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !override.isEmpty, !override.hasPrefix("/") {
+            return override
+        }
+        let filenameCandidates = [
+            override,
+            storagePath ?? ""
+        ]
+        for candidate in filenameCandidates {
+            let filename = URL(fileURLWithPath: candidate).lastPathComponent
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !filename.isEmpty {
+                return "Originals/\(filename)"
+            }
+        }
+        return "Originals/\(shotID.uuidString).jpg"
     }
 
     private func ensureSupabaseSessionPrerequisites(
@@ -34106,6 +35318,7 @@ final class AppState: ObservableObject {
             city: normalizedSupabaseText(property?.city ?? metadata?.propertyCityAtCapture),
             state: normalizedSupabaseText(property?.state ?? metadata?.propertyStateAtCapture),
             postalCode: normalizedSupabaseText(property?.zip ?? metadata?.propertyZipAtCapture),
+            isArchived: property?.isArchived ?? false,
             updatedBy: authenticatedSupabaseUser?.id
         )
     }
@@ -34320,46 +35533,48 @@ final class AppState: ObservableObject {
 
     private func upsertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
         guard let client = supabaseClient else {
-            print(
-                "[PropertyUpsertDiag] event=upsert_skipped " +
-                "reason=missing_client " +
-                "propertyID=\(payload.id.uuidString) " +
-                "payloadOrgID=\(payload.orgID.uuidString) " +
-                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
-                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
-                "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
-                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
-                "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
-                "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
-                "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
-                "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
-                "supabaseClientExists=false " +
-                "organizationContextReady=\(isOrganizationContextReady) " +
+            let diagnosticParts = [
+                "[PropertyUpsertDiag] event=upsert_skipped ",
+                "reason=missing_client ",
+                "propertyID=\(payload.id.uuidString) ",
+                "payloadOrgID=\(payload.orgID.uuidString) ",
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") ",
+                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") ",
+                "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") ",
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") ",
+                "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) ",
+                "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) ",
+                "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) ",
+                "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) ",
+                "supabaseClientExists=false ",
+                "organizationContextReady=\(isOrganizationContextReady) ",
                 "upsertConflictTarget=id"
-            )
+            ]
+            print(diagnosticParts.joined())
             return
         }
 
         let clientAuth = await supabaseClientAuthDiagnostic(client)
-        print(
-            "[PropertyUpsertDiag] event=upsert_attempt " +
-            "propertyID=\(payload.id.uuidString) " +
-            "payloadOrgID=\(payload.orgID.uuidString) " +
-            "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
-            "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
-            "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
-            "clientAuthUserID=\(clientAuth.userID) " +
-            "clientAuthEmail=\(clientAuth.email) " +
-            "clientAuthError=\(clientAuth.error) " +
-            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
-            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
-            "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
-            "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
-            "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
-            "supabaseClientExists=true " +
-            "organizationContextReady=\(isOrganizationContextReady) " +
+        let attemptDiagnosticParts = [
+            "[PropertyUpsertDiag] event=upsert_attempt ",
+            "propertyID=\(payload.id.uuidString) ",
+            "payloadOrgID=\(payload.orgID.uuidString) ",
+            "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") ",
+            "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") ",
+            "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") ",
+            "clientAuthUserID=\(clientAuth.userID) ",
+            "clientAuthEmail=\(clientAuth.email) ",
+            "clientAuthError=\(clientAuth.error) ",
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") ",
+            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) ",
+            "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) ",
+            "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) ",
+            "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) ",
+            "supabaseClientExists=true ",
+            "organizationContextReady=\(isOrganizationContextReady) ",
             "upsertConflictTarget=id"
-        )
+        ]
+        print(attemptDiagnosticParts.joined())
 
         do {
             try await client
@@ -34481,6 +35696,21 @@ final class AppState: ObservableObject {
         try await client
             .from("sessions")
             .upsert(payload, onConflict: "id", returning: .minimal)
+            .execute()
+    }
+
+    private func updateSessionRowToSupabase(
+        _ payload: SupabaseSessionPayload,
+        propertyID: UUID,
+        orgID: UUID
+    ) async throws {
+        guard let client = supabaseClient else { return }
+        try await client
+            .from("sessions")
+            .update(payload, returning: .minimal)
+            .eq("id", value: payload.id.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
             .execute()
     }
 
@@ -35645,8 +36875,10 @@ final class AppState: ObservableObject {
     }
 
     private func combineOwnerAndDeviceDescription(owner: String, device: String?) -> String {
-        guard let device else { return owner }
-        return "\(owner) on \(device)"
+        guard let device = normalizedSupabaseText(device) else {
+            return owner
+        }
+        return "\(owner) • \(device)"
     }
 
     private func setSessionCoordinationState(
@@ -36046,30 +37278,34 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
     private func releasePropertySessionOccupancyIfOwned(
         propertyID: UUID,
         sessionID: UUID? = nil,
         emitReleasedEvent: Bool = false,
         ownershipState: PropertySessionOccupancyState? = nil
-    ) async {
+    ) async -> Bool {
         guard backendFeatureFlags.sessionCoordinationEnabled,
               let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
               let orgID = property.orgId else {
-            return
+            return false
         }
 
         let state = ownershipState ?? propertySessionOccupancyByPropertyID[propertyID]
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
         let sameOccupancyDevice = normalizedSupabaseText(state?.occupiedByDeviceID) == currentDeviceID
-        let sameOrUnknownOccupancyUser =
-            state?.occupiedByUserID == nil ||
-            currentUserID == nil ||
+        let occupancyHasExplicitOwner =
+            state?.occupiedByUserID != nil ||
+            normalizedSupabaseText(state?.occupiedByDeviceID) != nil
+        let sameOccupancyUser = state?.occupiedByUserID != nil &&
+            currentUserID != nil &&
             state?.occupiedByUserID == currentUserID
         let ownsOccupancy =
-            sameOccupancyDevice &&
-            sameOrUnknownOccupancyUser
-        guard ownsOccupancy else { return }
+            !occupancyHasExplicitOwner ||
+            sameOccupancyUser ||
+            (sameOccupancyDevice && state?.occupiedByUserID == nil)
+        guard ownsOccupancy else { return false }
 
         setPropertySessionOccupancyState(
             propertyID: propertyID,
@@ -36090,7 +37326,7 @@ final class AppState: ObservableObject {
                     payload: [:]
                 )
             }
-            return
+            return true
         }
 #endif
 
@@ -36116,7 +37352,10 @@ final class AppState: ObservableObject {
                     payload: [:]
                 )
             }
-        } catch {}
+            return true
+        } catch {
+            return false
+        }
     }
 
     @MainActor
@@ -37033,11 +38272,17 @@ final class AppState: ObservableObject {
     }
 
     private func currentDeviceIdentifier() -> String {
-        if let existing = normalizedSupabaseText(userDefaults.string(forKey: deviceIdentifierDefaultsKey)) {
+        cachedDeviceIdentifier
+    }
+
+    private static func resolvedDeviceIdentifier(userDefaults: UserDefaults, key: String) -> String {
+        let existing = userDefaults.string(forKey: key)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let existing, !existing.isEmpty {
             return existing
         }
         let generated = UUID().uuidString.lowercased()
-        userDefaults.set(generated, forKey: deviceIdentifierDefaultsKey)
+        userDefaults.set(generated, forKey: key)
         return generated
     }
 
@@ -40587,12 +41832,11 @@ final class AppState: ObservableObject {
         guard !propertyIDs.isEmpty else {
             return
         }
-        await hydratePropertyRowDetails(
-            reason: reason,
+        refreshLightweightPropertyRowCloudStatusCache(downloadTimeout: 0.2)
+        await refreshPropertyStatusCacheForInitialDisplay(
             propertyIDs: propertyIDs,
-            refreshCloudStatus: true
+            reason: reason
         )
-        await waitForInitialPropertyRowDetailsToSettle(propertyIDs: propertyIDs, reason: reason)
         suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
         pendingPropertyRowDetailHydrationIDs.subtract(propertyIDs)
         if pendingPropertyRowDetailHydrationIDs.isEmpty {
@@ -40605,6 +41849,47 @@ final class AppState: ObservableObject {
 
     func prepareInitialHomePropertyListForDisplay(reason: String) async {
         await prepareInitialPropertyListForDisplay(reason: reason)
+    }
+
+    private func refreshPropertyStatusCacheForInitialDisplay(
+        propertyIDs requestedPropertyIDs: [UUID],
+        reason: String
+    ) async {
+        guard backendFeatureFlags.supabaseEnabled,
+              let activeOrganizationID,
+              supabaseClient != nil else {
+            return
+        }
+        let propertyIDs = Self.uniquePropertyIDs(requestedPropertyIDs)
+            .filter { canAccessProperty($0) }
+        guard !propertyIDs.isEmpty else { return }
+
+        do {
+            let rows = try await fetchPropertyStatusRecords(
+                orgID: activeOrganizationID,
+                propertyIDs: propertyIDs
+            )
+            let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
+            var nextCache = propertyStatusByPropertyID
+            for propertyID in propertyIDs {
+                if let row = rowsByPropertyID[propertyID] {
+                    nextCache[propertyID] = row
+                } else {
+                    nextCache.removeValue(forKey: propertyID)
+                }
+            }
+            if propertyStatusByPropertyID != nextCache {
+                propertyStatusByPropertyID = nextCache
+            }
+            lastPropertyStatusRefreshAt = Date()
+        } catch {
+            print(
+                "[PropertyStatusInitialDisplay] refresh_failed " +
+                    "reason=\(reason) " +
+                    "propertyCount=\(propertyIDs.count) " +
+                    "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
+            )
+        }
     }
 
     func markHomePropertyListVisible() {
@@ -40632,6 +41917,9 @@ final class AppState: ObservableObject {
             )
             if !propertyIDs.isEmpty {
                 return propertyIDs
+            }
+            if lastForegroundRemotePropertyRefreshCompletedAt != nil {
+                return []
             }
             if Date().timeIntervalSince(start) >= timeout {
                 return []
@@ -41040,26 +42328,46 @@ final class AppState: ObservableObject {
     func propertyCardBadgeModel(for propertyID: UUID) -> PropertyCardBadgeModel {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
         let reExportSession = propertyRowReExportSessionByPropertyID[propertyID]
         let showReExport = reExportSession != nil
         let reExportReason = showReExport ? "local_archive_available" : "deferred_local_archive_availability"
 
         if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-            let propertyStatusAnswer = makePropertyStatusCompareAnswer(
+            let basePropertyStatusAnswer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
                 propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
+            let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
+                basePropertyStatusAnswer.visibleBadgeState != .locked &&
+                basePropertyStatusAnswer.visibleBadgeState != .pendingExport
+            let propertyStatusAnswer = canOverlayFastRuntimeDraft
+                ? PropertyStatusCompareAnswer(
+                    visibleBadgeState: .draft,
+                    draftCountIncluded: true,
+                    pendingExportCountIncluded: false,
+                    entryBlocked: false,
+                    deleteEligible: false
+                )
+                : makePropertyStatusCompareAnswer(
+                    record: propertyStatus,
+                    propertyID: propertyID,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
             let propertyStatusBadgeState = propertyStatusAnswer.visibleBadgeState
             let propertyStatusOwnedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
                 record: propertyStatus,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
-            let propertyStatusShowsLock =
-                propertyStatusBadgeState == .locked ||
-                (propertyStatus.status == .pendingExport && propertyStatusAnswer.entryBlocked)
+            let propertyStatusShowsLock = propertyStatusBadgeState == .locked
             let propertyStatusSourceSessionID: UUID? = {
                 switch propertyStatus.status {
                 case .occupied:
@@ -41075,6 +42383,9 @@ final class AppState: ObservableObject {
                 }
             }()
             let propertyStatusReasonPrefix = "property_status:\(propertyStatus.status.rawValue)"
+            let draftSessionID = propertyStatusBadgeState == .draft
+                ? (fastRuntimeDraft?.sessionID ?? propertyStatusSourceSessionID)
+                : nil
             return PropertyCardBadgeModel(
                 propertyID: propertyID,
                 activeOccupancySessionID: propertyStatus.status == .occupied ? propertyStatus.activeSessionID : nil,
@@ -41082,9 +42393,9 @@ final class AppState: ObservableObject {
                 occupancyOwnerDeviceID: propertyStatus.status == .occupied ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID,
-                materialDraftSessionID: propertyStatus.status == .draft ? propertyStatusSourceSessionID : nil,
-                draftOwnerUserID: propertyStatus.status == .draft ? propertyStatus.ownerUserID : nil,
-                draftOwnerDeviceID: propertyStatus.status == .draft ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
+                materialDraftSessionID: draftSessionID,
+                draftOwnerUserID: propertyStatusBadgeState == .draft ? (fastRuntimeDraft?.ownerUserID ?? propertyStatus.ownerUserID) : nil,
+                draftOwnerDeviceID: propertyStatusBadgeState == .draft ? (fastRuntimeDraft?.ownerDeviceID ?? normalizedSupabaseText(propertyStatus.ownerDeviceID)) : nil,
                 finalizedOrExported: propertyStatus.status == .exported || propertyStatusBadgeState == .exported,
                 showLock: propertyStatusShowsLock,
                 showDraft: propertyStatusBadgeState == .draft,
@@ -41094,7 +42405,7 @@ final class AppState: ObservableObject {
                     ? "\(propertyStatusReasonPrefix):owner_mismatch"
                     : "\(propertyStatusReasonPrefix):lock_hidden",
                 draftReason: propertyStatusBadgeState == .draft
-                    ? "\(propertyStatusReasonPrefix):owner_match"
+                    ? "\(propertyStatusReasonPrefix):\(fastRuntimeDraft == nil ? "owner_match" : "fast_runtime_draft_index")"
                     : "\(propertyStatusReasonPrefix):draft_hidden_owner_match=\(propertyStatusOwnedByCurrentActor)",
                 pendingExportReason: propertyStatusBadgeState == .pendingExport
                     ? "\(propertyStatusReasonPrefix):pending_export"
@@ -41106,7 +42417,7 @@ final class AppState: ObservableObject {
 
         let localDraft = draftSessionByProperty[propertyID]
         let localPending = pendingExportSessionByProperty[propertyID]
-        let localShowsDraft = localDraft != nil
+        let localShowsDraft = localDraft != nil || fastRuntimeDraft != nil
         let localShowsPendingExport = localPending != nil
 
         return PropertyCardBadgeModel(
@@ -41116,20 +42427,262 @@ final class AppState: ObservableObject {
             occupancyOwnerDeviceID: nil,
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID,
-            materialDraftSessionID: localDraft?.id,
-            draftOwnerUserID: nil,
-            draftOwnerDeviceID: nil,
+            materialDraftSessionID: fastRuntimeDraft?.sessionID ?? localDraft?.id,
+            draftOwnerUserID: fastRuntimeDraft?.ownerUserID,
+            draftOwnerDeviceID: fastRuntimeDraft?.ownerDeviceID,
             finalizedOrExported: localShowsPendingExport,
             showLock: false,
             showDraft: localShowsDraft,
             showPendingExport: localShowsPendingExport,
             showReExport: showReExport,
             lockReason: "missing_property_status_row",
-            draftReason: localShowsDraft ? "local_cache:draft" : "missing_property_status_row",
+            draftReason: localShowsDraft ? (fastRuntimeDraft == nil ? "local_cache:draft" : "fast_runtime_draft_index") : "missing_property_status_row",
             pendingExportReason: localShowsPendingExport ? "local_cache:pending_export" : "missing_property_status_row",
             reExportReason: reExportReason,
-            badgeSource: "property_status_missing"
+            badgeSource: fastRuntimeDraft == nil ? "property_status_missing" : "fast_runtime_draft_index"
         )
+    }
+
+    private func refreshPropertyRowDraftBadgeCache() {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        var next: [UUID: Bool] = [:]
+
+        let propertyIDs = Set(propertyStatusByPropertyID.keys)
+            .union(draftSessionByProperty.keys)
+            .union(fastRuntimeDraftsByPropertyID.keys)
+
+        for propertyID in propertyIDs {
+            let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
+                for: propertyID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+
+            if let propertyStatus = propertyStatusByPropertyID[propertyID] {
+                let basePropertyStatusAnswer = makePropertyStatusCompareAnswer(
+                    record: propertyStatus,
+                    propertyID: propertyID,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
+                let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
+                    basePropertyStatusAnswer.visibleBadgeState != .locked &&
+                    basePropertyStatusAnswer.visibleBadgeState != .pendingExport
+                let propertyStatusAnswer = canOverlayFastRuntimeDraft
+                    ? PropertyStatusCompareAnswer(
+                        visibleBadgeState: .draft,
+                        draftCountIncluded: true,
+                        pendingExportCountIncluded: false,
+                        entryBlocked: false,
+                        deleteEligible: false
+                    )
+                    : makePropertyStatusCompareAnswer(
+                        record: propertyStatus,
+                        propertyID: propertyID,
+                        currentUserID: currentUserID,
+                        currentDeviceID: currentDeviceID
+                    )
+                if propertyStatusAnswer.visibleBadgeState == .draft {
+                    next[propertyID] = true
+                }
+            } else if draftSessionByProperty[propertyID] != nil || fastRuntimeDraft != nil {
+                next[propertyID] = true
+            }
+        }
+
+        if propertyRowDraftBadgeByPropertyID != next {
+            propertyRowDraftBadgeByPropertyID = next
+        }
+        let nextDraftCount = properties.reduce(0) { count, property in
+            count + (next[property.id] == true ? 1 : 0)
+        }
+        if propertyRowDraftCount != nextDraftCount {
+            propertyRowDraftCount = nextDraftCount
+        }
+    }
+
+    private func refreshPropertyRowLockBadgeCache() {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        var next: [UUID: Bool] = [:]
+
+        for (propertyID, propertyStatus) in propertyStatusByPropertyID {
+            let answer = makePropertyStatusCompareAnswer(
+                record: propertyStatus,
+                propertyID: propertyID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            if answer.visibleBadgeState == .locked {
+                next[propertyID] = true
+            }
+        }
+
+        for propertyID in locallyLockedPropertyIDs where propertyStatusByPropertyID[propertyID] == nil {
+            next[propertyID] = true
+        }
+
+        if propertyRowLockBadgeByPropertyID != next {
+            propertyRowLockBadgeByPropertyID = next
+        }
+    }
+
+    private func refreshPropertyRowCloudGlyphCache() {
+        let next = propertyRowSnapshotCloudStatusByPropertyID.reduce(into: [UUID: PropertyRowCloudGlyphState]()) { partial, entry in
+            partial[entry.key] = Self.propertyRowCloudGlyphState(for: entry.value)
+        }
+        var serverAwareNext = propertyStatusByPropertyID.reduce(into: next) { partial, entry in
+            switch entry.value.status {
+            case .exported:
+                partial[entry.key] = .current
+            case .pendingExport:
+                if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[entry.key],
+                   Self.propertyRowStatusChipShowsUploading(cloudStatus) {
+                    partial[entry.key] = .uploading
+                } else {
+                    partial[entry.key] = .warning
+                }
+            case .idle, .draft, .occupied:
+                if entry.value.lastExportedSessionID != nil {
+                    partial[entry.key] = .current
+                }
+            }
+        }
+        let localPendingIssuePropertyIDs = Set(pendingExportSessionByProperty.keys)
+            .union(propertyRowPendingDeliverySessionByPropertyID.keys)
+        for propertyID in localPendingIssuePropertyIDs {
+            if propertyStatusByPropertyID[propertyID]?.status == .exported {
+                serverAwareNext[propertyID] = .current
+                continue
+            }
+            if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+               cloudStatus.state == .uploaded,
+               !cloudStatus.isConfigurationBlocked {
+                serverAwareNext[propertyID] = .current
+            } else if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+               Self.propertyRowStatusChipShowsUploading(cloudStatus) {
+                serverAwareNext[propertyID] = .uploading
+            } else {
+                serverAwareNext[propertyID] = .warning
+            }
+        }
+        if propertyRowCloudGlyphByPropertyID != serverAwareNext {
+            propertyRowCloudGlyphByPropertyID = serverAwareNext
+        }
+    }
+
+    private static func propertyRowCloudGlyphState(
+        for status: SessionSnapshotCloudStatus
+    ) -> PropertyRowCloudGlyphState {
+        if status.isConfigurationBlocked {
+            return .warning
+        }
+        switch status.state {
+        case .uploaded:
+            return .current
+        case .uploading:
+            return .uploading
+        case .queued, .retryScheduled, .failed:
+            return .warning
+        }
+    }
+
+    private func refreshPropertyRowStatusChipCache() {
+        var next: [UUID: PropertyRowStatusChipState] = [:]
+        let propertyIDs = Set(propertyStatusByPropertyID.keys)
+            .union(pendingExportSessionByProperty.keys)
+            .union(propertyRowPendingDeliverySessionByPropertyID.keys)
+            .union(propertyRowSnapshotCloudStatusByPropertyID.keys)
+
+        for propertyID in propertyIDs {
+            if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+               Self.propertyRowStatusChipShowsUploading(cloudStatus) {
+                next[propertyID] = .uploading
+                continue
+            }
+
+            if let propertyStatus = propertyStatusByPropertyID[propertyID],
+               propertyStatus.status == .exported {
+                continue
+            }
+
+            if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+               cloudStatus.state == .uploaded,
+               !cloudStatus.isConfigurationBlocked {
+                continue
+            }
+
+            if let propertyStatus = propertyStatusByPropertyID[propertyID],
+               propertyStatus.status == .pendingExport {
+                next[propertyID] = .pendingExport
+                continue
+            }
+
+            if pendingExportSessionByProperty[propertyID] != nil ||
+                propertyRowPendingDeliverySessionByPropertyID[propertyID] != nil {
+                next[propertyID] = .pendingExport
+            }
+        }
+
+        if propertyRowStatusChipByPropertyID != next {
+            propertyRowStatusChipByPropertyID = next
+        }
+    }
+
+    private static func propertyRowStatusChipShowsUploading(
+        _ status: SessionSnapshotCloudStatus
+    ) -> Bool {
+        status.state == .uploading && !status.isConfigurationBlocked
+    }
+
+    private func refreshPropertyRowSubtitleCache(
+        properties: [Property],
+        organizations: [Organization]
+    ) {
+        var subtitleOrganizations = organizations
+        subtitleOrganizations.append(contentsOf: organizationSelectionOptions)
+        subtitleOrganizations.append(
+            contentsOf: accessibleOrganizations.map { membership in
+                Organization(id: membership.id, name: membership.name)
+            }
+        )
+
+        let subtitleOrganizationList = deduplicatedOrganizationsByIDPreservingOrder(subtitleOrganizations)
+        let organizationNameByID = subtitleOrganizationList.reduce(into: [UUID: String]()) { partial, organization in
+            let name = organization.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                partial[organization.id] = name
+            }
+        }
+        let activeOrganizationName = activeOrganizationID.flatMap { organizationNameByID[$0] }
+        let singleOrganizationName = subtitleOrganizationList.count == 1
+            ? subtitleOrganizationList.first?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+
+        var next: [UUID: String] = [:]
+        for property in properties {
+            let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let organization = property.orgId.flatMap { organizationNameByID[$0] }
+                ?? activeOrganizationName
+                ?? singleOrganizationName
+                ?? ""
+            let subtitle: String
+            if client.isEmpty {
+                subtitle = organization
+            } else if organization.isEmpty {
+                subtitle = client
+            } else {
+                subtitle = "\(client) (\(organization))"
+            }
+            if !subtitle.isEmpty {
+                next[property.id] = subtitle
+            }
+        }
+
+        if propertyRowSubtitleByPropertyID != next {
+            propertyRowSubtitleByPropertyID = next
+        }
     }
 
     func reExportCandidateSession(for propertyID: UUID, now: Date = Date()) -> Session? {
@@ -41159,7 +42712,28 @@ final class AppState: ObservableObject {
     }
 
     func propertyRowSessionSnapshotCloudStatus(propertyID: UUID) -> SessionSnapshotCloudStatus? {
-        propertyRowSnapshotCloudStatusByPropertyID[propertyID]
+        fastRuntimeCompletionCloudStatusByPropertyID[propertyID] ??
+            propertyRowSnapshotCloudStatusByPropertyID[propertyID]
+    }
+
+    func isFastRuntimeCompletionUploading(propertyID: UUID) -> Bool {
+        guard let status = fastRuntimeCompletionCloudStatusByPropertyID[propertyID] else {
+            return false
+        }
+        return status.state == .uploading && !status.isConfigurationBlocked
+    }
+
+    @MainActor
+    func showHubTransientStatusMessage(_ message: String) {
+        hubTransientStatusMessage = message
+    }
+
+    var isInitialPropertyListUpdateStillActive: Bool {
+        isLoading ||
+            isLoadingPropertiesForOrgSwitch ||
+            isStartupHydrationInProgress ||
+            propertyRowDetailHydrationTask != nil ||
+            !pendingPropertyRowDetailHydrationIDs.isEmpty
     }
 
     private struct PropertyRowDetailsHydrationBatch {
@@ -41208,8 +42782,7 @@ final class AppState: ObservableObject {
     ) -> Bool {
         guard reason == "property_row_appeared" else { return true }
         if let suppressUntil = suppressPropertyRowAppearHydrationUntil,
-           now < suppressUntil,
-           propertyRowDetailsHydratedAtByPropertyID[propertyID] != nil {
+           now < suppressUntil {
             return false
         }
         guard !pendingPropertyRowDetailHydrationIDs.contains(propertyID) else { return false }
@@ -41425,15 +42998,41 @@ final class AppState: ObservableObject {
         for snapshot in batch.snapshots {
             nextAllSessionIndex[snapshot.propertyID] = snapshot.sessions
             _ = setPropertyRowSession(snapshot.latestDraft, for: snapshot.propertyID, in: &nextAllDrafts)
-            _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextAllPending)
+            let initialPropertyStatus = propertyStatusByPropertyID[snapshot.propertyID]
+            let initialCloudStatus = nextRowCloud[snapshot.propertyID] ?? snapshot.cloudStatus
+            let shouldSuppressPending = Self.propertyRowDeliveryIsComplete(
+                propertyStatus: initialPropertyStatus,
+                cloudStatus: initialCloudStatus
+            )
+            _ = setPropertyRowSession(
+                shouldSuppressPending ? nil : snapshot.pendingSession,
+                for: snapshot.propertyID,
+                in: &nextAllPending
+            )
             if canAccessProperty(snapshot.propertyID) {
                 nextSessionIndex[snapshot.propertyID] = snapshot.sessions
                 _ = setPropertyRowSession(snapshot.latestDraft, for: snapshot.propertyID, in: &nextDrafts)
-                _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextPending)
-                _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextRowPending)
                 _ = setPropertyRowSession(snapshot.reExportSession, for: snapshot.propertyID, in: &nextRowReExport)
+                let existingPropertyStatus = initialPropertyStatus
+                let existingCloudStatus = nextRowCloud[snapshot.propertyID]
                 if batch.updatesCloudStatus {
-                    _ = setPropertyRowSnapshotCloudStatus(snapshot.cloudStatus, for: snapshot.propertyID, in: &nextRowCloud)
+                    let mergedCloudStatus = Self.mergedPropertyRowSnapshotCloudStatus(
+                        hydratedStatus: snapshot.cloudStatus,
+                        existingStatus: existingCloudStatus,
+                        propertyStatus: existingPropertyStatus
+                    )
+                    _ = setPropertyRowSnapshotCloudStatus(mergedCloudStatus, for: snapshot.propertyID, in: &nextRowCloud)
+                }
+                let rowCloudStatus = nextRowCloud[snapshot.propertyID] ?? existingCloudStatus
+                if Self.propertyRowDeliveryIsComplete(
+                    propertyStatus: existingPropertyStatus,
+                    cloudStatus: rowCloudStatus
+                ) {
+                    _ = setPropertyRowSession(nil, for: snapshot.propertyID, in: &nextPending)
+                    _ = setPropertyRowSession(nil, for: snapshot.propertyID, in: &nextRowPending)
+                } else {
+                    _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextPending)
+                    _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextRowPending)
                 }
             }
             propertyRowDetailsHydratedAtByPropertyID[snapshot.propertyID] = hydratedAt
@@ -41465,6 +43064,47 @@ final class AppState: ObservableObject {
         }
         if propertyRowSnapshotCloudStatusByPropertyID != nextRowCloud {
             propertyRowSnapshotCloudStatusByPropertyID = nextRowCloud
+        }
+    }
+
+    private static func mergedPropertyRowSnapshotCloudStatus(
+        hydratedStatus: SessionSnapshotCloudStatus?,
+        existingStatus: SessionSnapshotCloudStatus?,
+        propertyStatus: PropertyStatusRecord?
+    ) -> SessionSnapshotCloudStatus? {
+        guard let existingStatus else {
+            return hydratedStatus
+        }
+
+        if let hydratedStatus {
+            return sessionSnapshotCloudStatus(hydratedStatus, isNewerThan: existingStatus)
+                ? hydratedStatus
+                : existingStatus
+        }
+
+        guard shouldPreserveExistingPropertyRowCloudStatus(
+            existingStatus,
+            propertyStatus: propertyStatus
+        ) else {
+            return nil
+        }
+        return existingStatus
+    }
+
+    private static func shouldPreserveExistingPropertyRowCloudStatus(
+        _ status: SessionSnapshotCloudStatus,
+        propertyStatus: PropertyStatusRecord?
+    ) -> Bool {
+        switch status.state {
+        case .queued:
+            return false
+        case .uploading:
+            return true
+        case .retryScheduled, .failed, .uploaded:
+            if propertyStatus?.status == .pendingExport {
+                return false
+            }
+            return true
         }
     }
 
@@ -41520,17 +43160,37 @@ final class AppState: ObservableObject {
 
         var didChange = false
         didChange = setPropertyRowSession(
-            pendingSession,
-            for: propertyID,
-            in: &propertyRowPendingDeliverySessionByPropertyID
-        ) || didChange
-        didChange = setPropertyRowSession(
             reExportSession,
             for: propertyID,
             in: &propertyRowReExportSessionByPropertyID
         ) || didChange
-        didChange = setPropertyRowSnapshotCloudStatus(cloudStatus, for: propertyID) || didChange
+        let mergedCloudStatus = Self.mergedPropertyRowSnapshotCloudStatus(
+            hydratedStatus: cloudStatus,
+            existingStatus: propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+            propertyStatus: propertyStatusByPropertyID[propertyID]
+        )
+        let resolvedPendingSession = Self.propertyRowDeliveryIsComplete(
+            propertyStatus: propertyStatusByPropertyID[propertyID],
+            cloudStatus: mergedCloudStatus
+        ) ? nil : pendingSession
+        didChange = setPropertyRowSession(
+            resolvedPendingSession,
+            for: propertyID,
+            in: &propertyRowPendingDeliverySessionByPropertyID
+        ) || didChange
+        didChange = setPropertyRowSnapshotCloudStatus(mergedCloudStatus, for: propertyID) || didChange
         return didChange
+    }
+
+    private static func propertyRowDeliveryIsComplete(
+        propertyStatus: PropertyStatusRecord?,
+        cloudStatus: SessionSnapshotCloudStatus?
+    ) -> Bool {
+        if propertyStatus?.status == .exported {
+            return true
+        }
+        guard let cloudStatus else { return false }
+        return cloudStatus.state == .uploaded && !cloudStatus.isConfigurationBlocked
     }
 
     private func setPropertyRowSession(
@@ -41609,6 +43269,11 @@ final class AppState: ObservableObject {
         var nextCache = propertyStatusByPropertyID
         nextCache[propertyID] = record
         propertyStatusByPropertyID = nextCache
+        if status == .exported {
+            pendingExportSessionByProperty.removeValue(forKey: propertyID)
+            allPendingExportSessionByProperty.removeValue(forKey: propertyID)
+            propertyRowPendingDeliverySessionByPropertyID.removeValue(forKey: propertyID)
+        }
         lastPropertyStatusRefreshAt = Date()
         reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
     }
@@ -41639,6 +43304,152 @@ final class AppState: ObservableObject {
         return decision
     }
 
+    @MainActor
+    func evaluateFreshPropertyTapEntryPreflight(
+        propertyID: UUID,
+        context: String
+    ) async -> PropertyStatusEntryPreflightDecision? {
+        do {
+            guard let freshRecord = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
+                if propertyStatusByPropertyID[propertyID] != nil {
+                    var nextCache = propertyStatusByPropertyID
+                    nextCache.removeValue(forKey: propertyID)
+                    propertyStatusByPropertyID = nextCache
+                    lastPropertyStatusRefreshAt = Date()
+                    reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_missing")
+                }
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: nil,
+                    context: "\(context)_fresh_missing"
+                )
+                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                    propertyID: propertyID,
+                    context: "\(context)_property_status_missing"
+                ) {
+                    return lightweightDecision
+                }
+                return nil
+            }
+
+            var nextCache = propertyStatusByPropertyID
+            nextCache[propertyID] = freshRecord
+            propertyStatusByPropertyID = nextCache
+            lastPropertyStatusRefreshAt = Date()
+            reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_fresh")
+
+            let decision = makePropertyStatusEntryPreflightDecision(
+                propertyID: propertyID,
+                record: freshRecord
+            )
+            let resolvedDecision = await resolvedPropertyStatusEntryPreflightDecisionOwner(
+                decision,
+                record: freshRecord
+            )
+            logPropertyStatusEntryPreflight(
+                propertyID: propertyID,
+                decision: resolvedDecision,
+                context: "\(context)_fresh"
+            )
+            if resolvedDecision.isBlocked {
+                return resolvedDecision
+            }
+            if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                propertyID: propertyID,
+                context: "\(context)_property_status_allowed"
+            ) {
+                return lightweightDecision
+            }
+            return resolvedDecision
+        } catch {
+            if let cachedRecord = propertyStatusByPropertyID[propertyID] {
+                let cachedDecision = makePropertyStatusEntryPreflightDecision(
+                    propertyID: propertyID,
+                    record: cachedRecord
+                )
+                let resolvedCachedDecision = await resolvedPropertyStatusEntryPreflightDecisionOwner(
+                    cachedDecision,
+                    record: cachedRecord
+                )
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: resolvedCachedDecision,
+                    context: "\(context)_fresh_failed_cached"
+                )
+                if resolvedCachedDecision.isBlocked {
+                    return resolvedCachedDecision
+                }
+                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                    propertyID: propertyID,
+                    context: "\(context)_fresh_failed_cached_allowed"
+                ) {
+                    return lightweightDecision
+                }
+                return nil
+            }
+            print(
+                "[PropertyStatusEntry] " +
+                "context=\(context) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "entry_source=property_status_unverified " +
+                "property_status_entry_decision=allow_existing_flow " +
+                "property_status_entry_reason=fresh_tap_read_failed " +
+                "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
+            )
+            return nil
+        }
+    }
+
+    private func evaluateLightweightPropertyEntryBlockProbe(
+        propertyID: UUID,
+        context: String
+    ) async -> PropertyStatusEntryPreflightDecision? {
+        guard let status = await evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: nil
+        ) else {
+            return nil
+        }
+        guard let block = sessionEntryBlock(for: status) else {
+            return nil
+        }
+        cacheLockPresentation(from: status, reason: "\(context)_lightweight_probe")
+        let decision = PropertyStatusEntryPreflightDecision(
+            source: "lightweight_property_entry_status",
+            decision: "block",
+            reason: status.reason ?? status.entryState.rawValue,
+            block: block
+        )
+        logPropertyStatusEntryPreflight(
+            propertyID: propertyID,
+            decision: decision,
+            context: context
+        )
+        return decision
+    }
+
+    @MainActor
+    func refreshLightweightPropertyEntryLocks(
+        propertyIDs: [UUID],
+        reason: String
+    ) async {
+        let uniquePropertyIDs = Array(Set(propertyIDs))
+        guard !uniquePropertyIDs.isEmpty else { return }
+
+        for propertyID in uniquePropertyIDs {
+            guard canAccessProperty(propertyID),
+                  let status = await evaluateLightweightPropertyEntryStatus(
+                    propertyID: propertyID,
+                    targetSessionID: nil
+                  ) else {
+                continue
+            }
+            if sessionEntryBlock(for: status) != nil {
+                cacheLockPresentation(from: status, reason: "\(reason)_lightweight_probe")
+            }
+        }
+    }
+
     func preferredPropertyEntrySessionID(for propertyID: UUID) -> UUID {
         if let currentSession,
            currentSession.propertyID == propertyID,
@@ -41654,7 +43465,7 @@ final class AppState: ObservableObject {
 
     func evaluateLightweightPropertyEntryStatus(
         propertyID: UUID,
-        targetSessionID: UUID
+        targetSessionID: UUID?
     ) async -> LightweightPropertyEntryStatus? {
         let deviceID = currentDeviceIdentifier()
         guard backendFeatureFlags.sessionCoordinationEnabled,
@@ -41697,6 +43508,4698 @@ final class AppState: ObservableObject {
         }
     }
 
+    func runFastRuntimePrototype(
+        propertyID: UUID,
+        sessionType: SessionType,
+        prepareTempStorage: Bool = true,
+        releaseClaim: Bool = true,
+        allowCurrentUserOccupiedContext: Bool = false
+    ) async -> FastRuntimePrototypeResult {
+        let startedAt = Date()
+        let targetSessionID = UUID()
+        let property = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let propertyName = property?.name ?? propertyID.uuidString
+        let orgID = property?.orgId ?? activeOrganizationID
+
+        let rpcStartedAt = Date()
+        let status = await evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: targetSessionID
+        )
+        let rpcMilliseconds = Date().timeIntervalSince(rpcStartedAt) * 1_000
+
+        let contextStartedAt = Date()
+        var contextSource = "none"
+        let context: ActiveCaptureContext? = {
+            guard let status,
+                  status.requiresFallback == false else {
+                return nil
+            }
+            let contextSessionID: UUID
+            switch status.entryState {
+            case .unlockedAndClaimed:
+                contextSource = "unlocked_and_claimed"
+                contextSessionID = targetSessionID
+            case .lockedByCurrentUser
+                where allowCurrentUserOccupiedContext &&
+                prototypeStatusIsCurrentUserOccupiedByThisClient(status):
+                contextSource = "locked_by_current_user_current_user_occupied"
+                contextSessionID = status.lockSessionID ?? targetSessionID
+            case .lockedByCurrentUser, .lockedByOtherUser, .staleClaimable, .pendingExport, .unknownRequiresFallback:
+                return nil
+            }
+            return ActiveCaptureContext(
+                sessionID: contextSessionID,
+                propertyID: propertyID,
+                orgID: orgID,
+                sessionType: sessionType,
+                ownerUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
+                ownerEmail: normalizedSupabaseText(status.lockedByEmail) ??
+                    normalizedSupabaseText(authenticatedSupabaseUser?.email),
+                ownerDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
+                createdAt: status.lockedAt ?? status.serverTimestamp ?? Date(),
+                status: .draft,
+                statusReason: status.reason
+            )
+        }()
+        let contextMilliseconds = Date().timeIntervalSince(contextStartedAt) * 1_000
+
+        var tempStorageRoot: URL?
+        var tempStorageMilliseconds: Double?
+        var tempStorageErrorMessage: String?
+        if prepareTempStorage, let context {
+            let tempStorageStartedAt = Date()
+            do {
+                tempStorageRoot = try prepareFastRuntimePrototypeTempStorage(context: context)
+            } catch {
+                tempStorageErrorMessage = "temp_storage_failed: \(error.localizedDescription)"
+            }
+            tempStorageMilliseconds = Date().timeIntervalSince(tempStorageStartedAt) * 1_000
+        }
+
+        var releaseMilliseconds: Double?
+        var didReleasePrototypeClaim = false
+        var releaseErrorMessage: String?
+        if releaseClaim,
+           let status,
+           status.entryState == .unlockedAndClaimed,
+           status.requiresFallback == false {
+            let releaseStartedAt = Date()
+            let ownershipState = PropertySessionOccupancyState(
+                occupiedByUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
+                occupiedByDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
+                occupiedAt: status.lockedAt ?? status.serverTimestamp ?? Date()
+            )
+            await releasePropertySessionOccupancyIfOwned(
+                propertyID: propertyID,
+                sessionID: targetSessionID,
+                emitReleasedEvent: false,
+                ownershipState: ownershipState
+            )
+            didReleasePrototypeClaim = true
+            releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+        } else if releaseClaim, status?.entryState == .unlockedAndClaimed {
+            releaseErrorMessage = "Skipped release because the RPC result required fallback."
+        }
+
+        let reason = [status?.reason, tempStorageErrorMessage]
+            .compactMap { $0 }
+            .joined(separator: " | ")
+
+        return FastRuntimePrototypeResult(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            sessionType: sessionType,
+            entryState: status?.entryState,
+            lockSessionID: status?.lockSessionID,
+            entryBlock: status.flatMap { sessionEntryBlock(for: $0) },
+            isCurrentDeviceOccupiedClaim: status.map(prototypeStatusIsCurrentUserOccupiedByThisDevice) ?? false,
+            requiresFallback: status?.requiresFallback ?? true,
+            reason: reason.isEmpty ? nil : reason,
+            contextSource: contextSource,
+            context: context,
+            tempStorageRoot: tempStorageRoot,
+            didReleasePrototypeClaim: didReleasePrototypeClaim,
+            releaseErrorMessage: releaseErrorMessage,
+            timings: FastRuntimePrototypeTimings(
+                targetSessionID: targetSessionID,
+                rpcMilliseconds: rpcMilliseconds,
+                contextMilliseconds: contextMilliseconds,
+                tempStorageMilliseconds: tempStorageMilliseconds,
+                releaseMilliseconds: releaseMilliseconds,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        )
+    }
+
+    func releaseFastRuntimePrototypeCurrentUserClaim(
+        propertyID: UUID,
+        requireCurrentDeviceMatch: Bool = false
+    ) async -> FastRuntimePrototypeReleaseResult {
+        let startedAt = Date()
+        let probeSessionID = UUID()
+        let property = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let propertyName = property?.name ?? propertyID.uuidString
+
+        let rpcStartedAt = Date()
+        let status = await evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: probeSessionID
+        )
+        let rpcMilliseconds = Date().timeIntervalSince(rpcStartedAt) * 1_000
+
+        guard let status else {
+            return FastRuntimePrototypeReleaseResult(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                probeSessionID: probeSessionID,
+                lockSessionID: nil,
+                entryState: nil,
+                reason: nil,
+                didRelease: false,
+                message: "RPC returned no status.",
+                rpcMilliseconds: rpcMilliseconds,
+                releaseMilliseconds: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let isOwnedByThisClient = prototypeStatusIsCurrentUserOccupiedByThisClient(status)
+        let isOwnedByThisDevice = prototypeStatusIsCurrentUserOccupiedByThisDevice(status)
+        guard status.entryState == .lockedByCurrentUser,
+              isOwnedByThisClient,
+              (!requireCurrentDeviceMatch || isOwnedByThisDevice) else {
+            return FastRuntimePrototypeReleaseResult(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                probeSessionID: probeSessionID,
+                lockSessionID: status.lockSessionID,
+                entryState: status.entryState,
+                reason: status.reason,
+                didRelease: false,
+                message: requireCurrentDeviceMatch
+                    ? "Selected property is not a current-device fast-lane claim."
+                    : "Selected property is not a current-user occupied claim owned by this client.",
+                rpcMilliseconds: rpcMilliseconds,
+                releaseMilliseconds: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let releaseStartedAt = Date()
+        let releaseSessionID = status.lockSessionID ?? probeSessionID
+        let ownershipState = PropertySessionOccupancyState(
+            occupiedByUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
+            occupiedByDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
+            occupiedAt: status.lockedAt ?? status.serverTimestamp ?? Date()
+        )
+        await releasePropertySessionOccupancyIfOwned(
+            propertyID: propertyID,
+            sessionID: releaseSessionID,
+            emitReleasedEvent: false,
+            ownershipState: ownershipState
+        )
+        let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+
+        return FastRuntimePrototypeReleaseResult(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            probeSessionID: probeSessionID,
+            lockSessionID: status.lockSessionID,
+            entryState: status.entryState,
+            reason: status.reason,
+            didRelease: true,
+            message: "Released current-user occupied claim. Rerun prototype to test clean unlocked_and_claimed.",
+            rpcMilliseconds: rpcMilliseconds,
+            releaseMilliseconds: releaseMilliseconds,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    func releaseFastRuntimePrototypeClaim(
+        context: ActiveCaptureContext
+    ) async -> FastRuntimePrototypeReleaseResult {
+        let startedAt = Date()
+        let property = properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID })
+        let propertyName = property?.name ?? context.propertyID.uuidString
+        let releaseStartedAt = Date()
+        let ownershipState = PropertySessionOccupancyState(
+            occupiedByUserID: context.ownerUserID ?? authenticatedSupabaseUser?.id,
+            occupiedByDeviceID: normalizedSupabaseText(context.ownerDeviceID) ?? currentDeviceIdentifier(),
+            occupiedAt: context.createdAt
+        )
+        await releasePropertySessionOccupancyIfOwned(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            emitReleasedEvent: false,
+            ownershipState: ownershipState
+        )
+        let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+
+        return FastRuntimePrototypeReleaseResult(
+            propertyID: context.propertyID,
+            propertyName: propertyName,
+            probeSessionID: context.sessionID,
+            lockSessionID: context.sessionID,
+            entryState: .unlockedAndClaimed,
+            reason: context.statusReason,
+            didRelease: true,
+            message: "Released prototype camera preview claim.",
+            rpcMilliseconds: 0,
+            releaseMilliseconds: releaseMilliseconds,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    func saveFastRuntimePrototypeCapture(
+        data: Data,
+        context: ActiveCaptureContext,
+        capturedAt: Date,
+        storageRootOverride: URL? = nil,
+        metadataContext: FastRuntimeCaptureMetadataContext? = nil
+    ) async -> FastRuntimePrototypeCaptureSaveResult {
+        let startedAt = Date()
+        let target = ActiveCaptureTarget(context: context)
+        guard target.canCapture else {
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: false,
+                shot: nil,
+                storageRoot: nil,
+                errorMessage: "ActiveCaptureContext cannot capture.",
+                timings: FastRuntimePrototypeCaptureTimings(
+                    storageMilliseconds: 0,
+                    fileWriteMilliseconds: 0,
+                    metadataMilliseconds: 0,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+
+        let storageStartedAt = Date()
+        let storageRoot: URL
+        do {
+            if let storageRootOverride {
+                try prepareFastRuntimePrototypeStorage(at: storageRootOverride, context: context)
+                storageRoot = storageRootOverride
+            } else {
+                storageRoot = try prepareFastRuntimePrototypeTempStorage(context: context)
+            }
+        } catch {
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: false,
+                shot: nil,
+                storageRoot: nil,
+                errorMessage: "temp_storage_failed: \(error.localizedDescription)",
+                timings: FastRuntimePrototypeCaptureTimings(
+                    storageMilliseconds: Date().timeIntervalSince(storageStartedAt) * 1_000,
+                    fileWriteMilliseconds: 0,
+                    metadataMilliseconds: 0,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+        let storageMilliseconds = Date().timeIntervalSince(storageStartedAt) * 1_000
+
+        return await Task.detached(priority: .userInitiated) {
+            let shotID = UUID()
+            let filename = "\(shotID.uuidString).jpg"
+            let originalRelativePath = "Originals/\(filename)"
+            let originalURL = storageRoot.appendingPathComponent(originalRelativePath, isDirectory: false)
+            let metadataURL = storageRoot
+                .appendingPathComponent("Metadata", isDirectory: true)
+                .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+            let captureKind = context.sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
+
+            let fileWriteStartedAt = Date()
+            do {
+                try data.write(to: originalURL, options: .atomic)
+            } catch {
+                return FastRuntimePrototypeCaptureSaveResult(
+                    success: false,
+                    shot: nil,
+                    storageRoot: storageRoot,
+                    errorMessage: "image_write_failed: \(error.localizedDescription)",
+                    timings: FastRuntimePrototypeCaptureTimings(
+                        storageMilliseconds: storageMilliseconds,
+                        fileWriteMilliseconds: Date().timeIntervalSince(fileWriteStartedAt) * 1_000,
+                        metadataMilliseconds: 0,
+                        totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                    )
+                )
+            }
+            let fileWriteMilliseconds = Date().timeIntervalSince(fileWriteStartedAt) * 1_000
+
+            let metadataStartedAt = Date()
+            var savedShot: FastRuntimePrototypeShotRecord?
+            do {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                var shots: [FastRuntimePrototypeShotRecord] = []
+                if FileManager.default.fileExists(atPath: metadataURL.path) {
+                    let existingData = try Data(contentsOf: metadataURL)
+                    shots = (try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: existingData)) ?? []
+                }
+                let normalizedMetadataContext = AppState.fastRuntimeMetadataContextForCapture(
+                    metadataContext,
+                    existingShots: shots
+                )
+                let shot = FastRuntimePrototypeShotRecord(
+                    id: shotID,
+                    sessionID: target.sessionID,
+                    propertyID: target.propertyID,
+                    orgID: context.orgID,
+                    sessionType: target.sessionType,
+                    capturedAt: capturedAt,
+                    localFilePath: originalURL.path,
+                    originalRelativePath: originalRelativePath,
+                    captureKind: captureKind,
+                    firstCaptureKind: "captured",
+                    captureLocationMode: normalizedMetadataContext.locationMode,
+                    metadataContext: normalizedMetadataContext
+                )
+                savedShot = shot
+                shots.append(shot)
+
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let metadataData = try encoder.encode(shots)
+                try metadataData.write(to: metadataURL, options: .atomic)
+            } catch {
+                let fallbackMetadataContext = AppState.normalizedFastRuntimeMetadataContext(metadataContext)
+                let shot = FastRuntimePrototypeShotRecord(
+                    id: shotID,
+                    sessionID: target.sessionID,
+                    propertyID: target.propertyID,
+                    orgID: context.orgID,
+                    sessionType: target.sessionType,
+                    capturedAt: capturedAt,
+                    localFilePath: originalURL.path,
+                    originalRelativePath: originalRelativePath,
+                    captureKind: captureKind,
+                    firstCaptureKind: "captured",
+                    captureLocationMode: fallbackMetadataContext.locationMode,
+                    metadataContext: fallbackMetadataContext
+                )
+                return FastRuntimePrototypeCaptureSaveResult(
+                    success: false,
+                    shot: shot,
+                    storageRoot: storageRoot,
+                    errorMessage: "metadata_write_failed: \(error.localizedDescription)",
+                    timings: FastRuntimePrototypeCaptureTimings(
+                        storageMilliseconds: storageMilliseconds,
+                        fileWriteMilliseconds: fileWriteMilliseconds,
+                        metadataMilliseconds: Date().timeIntervalSince(metadataStartedAt) * 1_000,
+                        totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                    )
+                )
+            }
+
+            let metadataMilliseconds = Date().timeIntervalSince(metadataStartedAt) * 1_000
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: true,
+                shot: savedShot,
+                storageRoot: storageRoot,
+                errorMessage: nil,
+                timings: FastRuntimePrototypeCaptureTimings(
+                    storageMilliseconds: storageMilliseconds,
+                    fileWriteMilliseconds: fileWriteMilliseconds,
+                    metadataMilliseconds: metadataMilliseconds,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }.value
+    }
+
+    func projectFastRuntimeCaptureToLocalCameraState(
+        context: ActiveCaptureContext,
+        shot record: FastRuntimePrototypeShotRecord,
+        guidedID: UUID? = nil
+    ) {
+        guard canAccessProperty(context.propertyID),
+              record.propertyID == context.propertyID,
+              record.sessionID == context.sessionID else {
+            return
+        }
+
+        let metadata = Self.normalizedFastRuntimeMetadataContext(
+            record.metadataContext,
+            fallbackLocationMode: record.captureLocationMode
+        )
+        let localPath = fastRuntimeDurableProjectionPath(for: record) ??
+            fastRuntimeResolvedLocalPath(for: record)
+        let projectedShot = Shot(
+            id: record.id,
+            capturedAt: record.capturedAt,
+            imageLocalIdentifier: localPath,
+            note: metadata.detailNote
+        )
+
+        if context.sessionType != .punchlistVisit,
+           metadata.isGuided == true {
+            projectFastRuntimeGuidedCapture(
+                context: context,
+                shot: projectedShot,
+                metadata: metadata,
+                guidedID: guidedID,
+                localPath: localPath
+            )
+        }
+
+        if metadata.isFlagged == true {
+            projectFastRuntimeObservationCapture(
+                context: context,
+                shot: projectedShot,
+                metadata: metadata,
+                localPath: localPath
+            )
+        }
+    }
+
+    private func projectFastRuntimeGuidedCapture(
+        context: ActiveCaptureContext,
+        shot: Shot,
+        metadata: FastRuntimeCaptureMetadataContext,
+        guidedID: UUID?,
+        localPath: String?
+    ) {
+        let propertyID = context.propertyID
+        let normalizedBuilding = metadata.building.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedElevation = (CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDetail = metadata.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedBuilding.isEmpty,
+              !normalizedElevation.isEmpty,
+              !normalizedDetail.isEmpty else {
+            return
+        }
+
+        do {
+            var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            let targetIndex: Array<GuidedShot>.Index? = {
+                if let guidedID,
+                   let index = guidedRows.firstIndex(where: { $0.id == guidedID }) {
+                    return index
+                }
+                if let index = guidedRows.firstIndex(where: { $0.shot?.id == shot.id }) {
+                    return index
+                }
+                return nil
+            }()
+            let title = fastRuntimeConciseContextLabel(
+                building: normalizedBuilding,
+                elevation: normalizedElevation,
+                detailType: normalizedDetail
+            )
+
+            if let targetIndex {
+                guidedRows[targetIndex].status = .active
+                guidedRows[targetIndex].title = title.isEmpty ? guidedRows[targetIndex].title : title
+                guidedRows[targetIndex].building = normalizedBuilding
+                guidedRows[targetIndex].targetElevation = normalizedElevation
+                guidedRows[targetIndex].detailType = normalizedDetail
+                guidedRows[targetIndex].angleIndex = max(1, metadata.angleIndex)
+                guidedRows[targetIndex].referenceImageLocalIdentifier = localPath ?? guidedRows[targetIndex].referenceImageLocalIdentifier
+                guidedRows[targetIndex].referenceImagePath = localPath ?? guidedRows[targetIndex].referenceImagePath
+                guidedRows[targetIndex].shot = shot
+                guidedRows[targetIndex].isCompleted = true
+                guidedRows[targetIndex].skipReason = nil
+                guidedRows[targetIndex].skipReasonNote = nil
+                guidedRows[targetIndex].skipSessionID = nil
+                guidedRows[targetIndex].isRetired = false
+                guidedRows[targetIndex].retiredAt = nil
+                guidedRows[targetIndex].retiredInSessionID = nil
+            } else {
+                let guided = GuidedShot(
+                    id: guidedID ?? shot.id,
+                    title: title.isEmpty ? "Guided Shot" : title,
+                    building: normalizedBuilding,
+                    targetElevation: normalizedElevation,
+                    detailType: normalizedDetail,
+                    angleIndex: max(1, metadata.angleIndex),
+                    referenceImageLocalIdentifier: localPath,
+                    referenceImagePath: localPath,
+                    shot: shot,
+                    isCompleted: true
+                )
+                guidedRows.append(guided)
+            }
+
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+        } catch {
+            print("[FastLaneProjection] guided_projection_failed propertyID=\(propertyID.uuidString) shotID=\(shot.id.uuidString) error=\(error.localizedDescription)")
+        }
+    }
+
+    private func projectFastRuntimeObservationCapture(
+        context: ActiveCaptureContext,
+        shot: Shot,
+        metadata: FastRuntimeCaptureMetadataContext,
+        localPath: String?
+    ) {
+        guard let issueID = metadata.issueID else { return }
+        let propertyID = context.propertyID
+        let status = Observation.Status.status(from: metadata.issueStatus)
+        let reason = metadata.detailNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let statement = reason?.isEmpty == false ? (reason ?? "") : metadata.detailType
+        let capturedEvent = ObservationHistoryEvent(
+            timestamp: shot.capturedAt,
+            sessionID: context.sessionID,
+            kind: .captured,
+            shotID: shot.id
+        )
+
+        do {
+            let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+            if var existing = observations.first(where: { $0.id == issueID }) {
+                let existingShotIDs = Set(existing.shots.map(\.id))
+                existing.status = status
+                existing.linkedShotID = shot.id
+                if !existingShotIDs.contains(shot.id) {
+                    existing.shots.append(shot)
+                }
+                upsertFastRuntimeIssueGuidedReference(
+                    into: &existing.guidedShots,
+                    shot: shot,
+                    metadata: metadata,
+                    localPath: localPath
+                )
+                if status == .resolutionRequired {
+                    existing.resolutionPhotoRef = localPath ?? existing.resolutionPhotoRef
+                    existing.resolutionStatement = reason ?? existing.resolutionStatement
+                }
+                existing.updatedInSessionID = context.sessionID
+                existing.building = fastRuntimeTrimmedNonEmpty(metadata.building) ?? existing.building
+                existing.targetElevation = fastRuntimeTrimmedNonEmpty(metadata.elevation) ?? existing.targetElevation
+                existing.detailType = fastRuntimeTrimmedNonEmpty(metadata.detailType) ?? existing.detailType
+                existing.priority = fastRuntimeTrimmedNonEmpty(metadata.priority) ?? existing.priority
+                existing.trade = fastRuntimeTrimmedNonEmpty(metadata.trade) ?? existing.trade
+                existing.currentReason = reason ?? existing.currentReason
+                existing.note = reason ?? existing.note
+                if !existing.historyEvents.contains(where: { $0.shotID == shot.id && $0.kind == .captured }) {
+                    existing.historyEvents.append(capturedEvent)
+                    existing.historyEvents.sort { $0.timestamp < $1.timestamp }
+                }
+                _ = try localStore.updateObservation(existing)
+            } else {
+                var historyEvents = [
+                    ObservationHistoryEvent(
+                        timestamp: shot.capturedAt,
+                        sessionID: context.sessionID,
+                        kind: .created,
+                        afterValue: statement,
+                        field: "reason",
+                        shotID: shot.id
+                    ),
+                    capturedEvent
+                ]
+                historyEvents.sort { $0.timestamp < $1.timestamp }
+                let observation = Observation(
+                    id: issueID,
+                    propertyID: propertyID,
+                    sessionID: context.sessionID,
+                    createdAt: shot.capturedAt,
+                    updatedAt: shot.capturedAt,
+                    statement: statement,
+                    status: status,
+                    linkedShotID: shot.id,
+                    resolutionPhotoRef: status == .resolutionRequired ? localPath : nil,
+                    resolutionStatement: status == .resolutionRequired ? reason : nil,
+                    updatedInSessionID: context.sessionID,
+                    building: metadata.building,
+                    targetElevation: metadata.elevation,
+                    detailType: metadata.detailType,
+                    priority: metadata.priority,
+                    trade: metadata.trade,
+                    currentReason: reason,
+                    historyEvents: historyEvents,
+                    note: reason,
+                    shots: [shot],
+                    guidedShots: [
+                        fastRuntimeIssueGuidedReference(
+                            shot: shot,
+                            metadata: metadata,
+                            localPath: localPath
+                        )
+                    ]
+                )
+                _ = try localStore.createObservation(observation)
+            }
+        } catch {
+            print("[FastLaneProjection] observation_projection_failed propertyID=\(propertyID.uuidString) shotID=\(shot.id.uuidString) issueID=\(issueID.uuidString) error=\(error.localizedDescription)")
+        }
+    }
+
+    private func fastRuntimeResolvedLocalPath(for shot: FastRuntimePrototypeShotRecord) -> String? {
+        let direct = shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.isEmpty, FileManager.default.fileExists(atPath: direct) {
+            return direct
+        }
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = localStore.resolveSessionRelativeFileURL(
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            relativePath: relativePath
+        ) {
+            return resolved.path
+        }
+        let filename = URL(fileURLWithPath: relativePath.isEmpty ? direct : relativePath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filename.isEmpty {
+            let originalsFallback = localStore
+                .originalsFolderURL(propertyID: shot.propertyID, sessionID: shot.sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: originalsFallback.path) {
+                return originalsFallback.path
+            }
+        }
+        return direct.isEmpty ? nil : direct
+    }
+
+    private func fastRuntimeDurableProjectionPath(for shot: FastRuntimePrototypeShotRecord) -> String? {
+        let sourcePath = fastRuntimeResolvedLocalPath(for: shot)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !sourcePath.isEmpty,
+              FileManager.default.fileExists(atPath: sourcePath) else {
+            return nil
+        }
+
+        let sourceURL = URL(fileURLWithPath: sourcePath, isDirectory: false)
+        let filename: String = {
+            let relativeLeaf = URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !relativeLeaf.isEmpty {
+                return relativeLeaf
+            }
+            let sourceLeaf = sourceURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sourceLeaf.isEmpty {
+                return sourceLeaf
+            }
+            return "\(shot.id.uuidString).jpg"
+        }()
+
+        do {
+            try localStore.ensureSessionFileStorage(propertyID: shot.propertyID, sessionID: shot.sessionID)
+            let originalsRoot = localStore.originalsFolderURL(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID
+            )
+            let destinationURL = originalsRoot.appendingPathComponent(filename, isDirectory: false)
+            if destinationURL.standardizedFileURL.path == sourceURL.standardizedFileURL.path {
+                return destinationURL.path
+            }
+            if !FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            }
+            return destinationURL.path
+        } catch {
+            print("[FastLaneProjection] durable_projection_copy_failed propertyID=\(shot.propertyID.uuidString) sessionID=\(shot.sessionID.uuidString) shotID=\(shot.id.uuidString) error=\(error.localizedDescription)")
+            return sourcePath
+        }
+    }
+
+    private func upsertFastRuntimeIssueGuidedReference(
+        into guidedShots: inout [GuidedShot],
+        shot: Shot,
+        metadata: FastRuntimeCaptureMetadataContext,
+        localPath: String?
+    ) {
+        let reference = fastRuntimeIssueGuidedReference(
+            shot: shot,
+            metadata: metadata,
+            localPath: localPath
+        )
+        if let index = guidedShots.firstIndex(where: { $0.id == reference.id || $0.shot?.id == shot.id }) {
+            guidedShots[index] = reference
+        } else {
+            guidedShots.append(reference)
+        }
+    }
+
+    private func fastRuntimeIssueGuidedReference(
+        shot: Shot,
+        metadata: FastRuntimeCaptureMetadataContext,
+        localPath: String?
+    ) -> GuidedShot {
+        let title = fastRuntimeConciseContextLabel(
+            building: metadata.building,
+            elevation: metadata.elevation,
+            detailType: metadata.detailType
+        )
+        return GuidedShot(
+            id: shot.id,
+            title: title.isEmpty ? "Issue Photo" : title,
+            building: metadata.building,
+            targetElevation: metadata.elevation,
+            detailType: metadata.detailType,
+            angleIndex: max(1, metadata.angleIndex),
+            referenceImageLocalIdentifier: localPath,
+            referenceImagePath: localPath,
+            shot: shot,
+            isCompleted: true
+        )
+    }
+
+    private func fastRuntimeConciseContextLabel(
+        building: String?,
+        elevation: String?,
+        detailType: String?
+    ) -> String {
+        [building, elevation, detailType]
+            .compactMap(fastRuntimeTrimmedNonEmpty)
+            .joined(separator: " ")
+    }
+
+    private func fastRuntimeTrimmedNonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    @discardableResult
+    func fastRuntimeSetGuidedSkip(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShotID: UUID,
+        reason: SkipReason,
+        otherNote: String?
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var guidedRows = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let index = guidedRows.firstIndex(where: { $0.id == guidedShotID }) else { return false }
+            guidedRows[index].skipReason = reason
+            guidedRows[index].skipReasonNote = reason == .other ? fastRuntimeTrimmedNonEmpty(otherNote) : nil
+            guidedRows[index].skipSessionID = sessionID
+            guidedRows[index].shot = nil
+            guidedRows[index].isCompleted = false
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            return true
+        } catch {
+            print("[FastLanePanel] guided_skip_failed propertyID=\(propertyID.uuidString) guidedID=\(guidedShotID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeUndoGuidedSkip(
+        propertyID: UUID,
+        guidedShotID: UUID
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var guidedRows = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let index = guidedRows.firstIndex(where: { $0.id == guidedShotID }) else { return false }
+            guidedRows[index].skipReason = nil
+            guidedRows[index].skipReasonNote = nil
+            guidedRows[index].skipSessionID = nil
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            return true
+        } catch {
+            print("[FastLanePanel] guided_undo_skip_failed propertyID=\(propertyID.uuidString) guidedID=\(guidedShotID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeRetireGuidedShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShotID: UUID,
+        reason: String
+    ) -> Bool {
+        guard canAccessProperty(propertyID),
+              fastRuntimeTrimmedNonEmpty(reason) != nil else { return false }
+        do {
+            var guidedRows = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let index = guidedRows.firstIndex(where: { $0.id == guidedShotID }) else { return false }
+            guidedRows[index].status = .retired
+            guidedRows[index].isRetired = true
+            guidedRows[index].retiredAt = Date()
+            guidedRows[index].retiredInSessionID = sessionID
+            guidedRows[index].skipReason = nil
+            guidedRows[index].skipReasonNote = nil
+            guidedRows[index].skipSessionID = nil
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            return true
+        } catch {
+            print("[FastLanePanel] guided_retire_failed propertyID=\(propertyID.uuidString) guidedID=\(guidedShotID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeRestoreGuidedShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShotID: UUID
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var guidedRows = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let index = guidedRows.firstIndex(where: { $0.id == guidedShotID }) else { return false }
+            guidedRows[index].status = .active
+            guidedRows[index].isRetired = false
+            guidedRows[index].retiredAt = nil
+            guidedRows[index].retiredInSessionID = nil
+            guidedRows[index].reassignedAt = Date()
+            guidedRows[index].reassignedInSessionID = sessionID
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            return true
+        } catch {
+            print("[FastLanePanel] guided_restore_failed propertyID=\(propertyID.uuidString) guidedID=\(guidedShotID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeReclassifyGuidedShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShotID: UUID,
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int? = nil
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        let nextBuilding = fastRuntimeTrimmedNonEmpty(building)
+        let nextElevation = fastRuntimeTrimmedNonEmpty(CanonicalElevation.normalize(elevation) ?? elevation)
+        let nextDetail = fastRuntimeTrimmedNonEmpty(detailType)
+        guard nextBuilding != nil || nextElevation != nil || nextDetail != nil else { return false }
+        do {
+            var guidedRows = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let index = guidedRows.firstIndex(where: { $0.id == guidedShotID }) else { return false }
+            guidedRows[index].building = nextBuilding ?? guidedRows[index].building
+            guidedRows[index].targetElevation = nextElevation ?? guidedRows[index].targetElevation
+            guidedRows[index].detailType = nextDetail ?? guidedRows[index].detailType
+            if let angleIndex {
+                guidedRows[index].angleIndex = max(1, angleIndex)
+            }
+            let title = fastRuntimeConciseContextLabel(
+                building: guidedRows[index].building,
+                elevation: guidedRows[index].targetElevation,
+                detailType: guidedRows[index].detailType
+            )
+            if !title.isEmpty {
+                guidedRows[index].title = title
+            }
+            guidedRows[index].labelEditedAt = Date()
+            guidedRows[index].labelEditedInSessionID = sessionID
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            return true
+        } catch {
+            print("[FastLanePanel] guided_reclassify_failed propertyID=\(propertyID.uuidString) guidedID=\(guidedShotID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeReclassifyObservation(
+        propertyID: UUID,
+        observationID: UUID,
+        building: String,
+        elevation: String,
+        detailType: String
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return false }
+            observations[index].building = fastRuntimeTrimmedNonEmpty(building) ?? observations[index].building
+            observations[index].targetElevation = fastRuntimeTrimmedNonEmpty(CanonicalElevation.normalize(elevation) ?? elevation) ?? observations[index].targetElevation
+            observations[index].detailType = fastRuntimeTrimmedNonEmpty(detailType) ?? observations[index].detailType
+            _ = try localStore.updateObservation(observations[index])
+            return true
+        } catch {
+            print("[FastLanePanel] observation_reclassify_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeReopenObservation(
+        propertyID: UUID,
+        observationID: UUID
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return false }
+            observations[index].status = .active
+            observations[index].resolutionPhotoRef = nil
+            observations[index].resolutionStatement = nil
+            _ = try localStore.updateObservation(observations[index])
+            return true
+        } catch {
+            print("[FastLanePanel] observation_reopen_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeResolveFlaggedObservationAfterCapture(
+        propertyID: UUID,
+        sessionID: UUID,
+        observationID: UUID,
+        shotID: UUID
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return false }
+            var observation = observations[index]
+            guard observation.status != .resolutionRequired else { return false }
+            let shot = observation.shots.first(where: { $0.id == shotID })
+            observation.status = .pendingReview
+            observation.linkedShotID = shotID
+            observation.resolutionPhotoRef = shot?.imageLocalIdentifier ?? observation.resolutionPhotoRef
+            observation.resolutionStatement = "Condition no longer visibly present at time of documentation."
+            observation.updatedAt = Date()
+            observation.updatedInSessionID = sessionID
+            observation.resolvedInSessionID = sessionID
+            observation.historyEvents.append(ObservationHistoryEvent(
+                timestamp: Date(),
+                sessionID: sessionID,
+                kind: .pendingReview,
+                beforeValue: Observation.Status.active.issueStatusValue,
+                afterValue: Observation.Status.pendingReview.issueStatusValue,
+                field: "status",
+                shotID: shotID
+            ))
+            observation.historyEvents.sort { $0.timestamp < $1.timestamp }
+            _ = try localStore.updateObservation(observation)
+            _ = try? localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                observation: observation,
+                shotID: shotID,
+                trade: observation.trade,
+                activeCaptureKind: "resolved_capture",
+                updatedAt: observation.updatedAt
+            )
+            return true
+        } catch {
+            print("[FastLanePanel] observation_resolve_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
+        propertyID: UUID,
+        sessionID: UUID,
+        observationID: UUID,
+        shotID: UUID,
+        revisedReason: String? = nil,
+        revisedPriority: String? = nil
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+        do {
+            var observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return false }
+            var observation = observations[index]
+            guard observation.status != .resolutionRequired else { return false }
+            let shot = observation.shots.first(where: { $0.id == shotID })
+            let priorStatus = observation.status
+            let wasResolved = observation.status == .resolved ||
+                observation.status == .pendingReview ||
+                observation.resolvedInSessionID != nil ||
+                (observation.resolutionPhotoRef?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ||
+                (observation.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            observation.status = .active
+            observation.linkedShotID = shotID
+            observation.updatedAt = Date()
+            observation.updatedInSessionID = sessionID
+            observation.resolvedInSessionID = nil
+            observation.resolutionPhotoRef = nil
+            observation.resolutionStatement = nil
+
+            if !observation.historyEvents.contains(where: { $0.shotID == shotID && ($0.kind == .captured || $0.kind == .retake) }) {
+                let isRetake = observation.historyEvents.contains {
+                    $0.sessionID == sessionID &&
+                    ($0.kind == .captured || $0.kind == .retake) &&
+                    $0.shotID != shotID
+                }
+                observation.historyEvents.append(ObservationHistoryEvent(
+                    timestamp: shot?.capturedAt ?? Date(),
+                    sessionID: sessionID,
+                    kind: isRetake ? .retake : .captured,
+                    shotID: shotID
+                ))
+            }
+            if wasResolved {
+                observation.historyEvents.append(ObservationHistoryEvent(
+                    timestamp: Date(),
+                    sessionID: sessionID,
+                    kind: .reopened,
+                    beforeValue: priorStatus.issueStatusValue,
+                    afterValue: Observation.Status.active.issueStatusValue,
+                    field: "status",
+                    shotID: shotID
+                ))
+            }
+
+            let trimmedReason = revisedReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedReason.isEmpty {
+                let priorReason = Observation.inferredCurrentReason(
+                    note: observation.currentReason ?? observation.note,
+                    statement: observation.statement
+                )
+                observation.previousReason = priorReason
+                observation.currentReason = trimmedReason
+                observation.note = trimmedReason
+                observation.statement = trimmedReason
+                observation.updateHistory.append(ObservationUpdateEntry(
+                    kind: .revisedObservation,
+                    text: trimmedReason,
+                    shotID: shotID
+                ))
+                observation.historyEvents.append(ObservationHistoryEvent(
+                    timestamp: Date(),
+                    sessionID: sessionID,
+                    kind: .reasonUpdated,
+                    beforeValue: priorReason,
+                    afterValue: trimmedReason,
+                    field: "reason",
+                    shotID: shotID
+                ))
+            } else {
+                observation.updateHistory.append(ObservationUpdateEntry(
+                    kind: .followUpCapture,
+                    shotID: shotID
+                ))
+            }
+
+            let trimmedPriority = revisedPriority?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedPriority.isEmpty, trimmedPriority != observation.priority {
+                let priorPriority = observation.priority
+                observation.priority = trimmedPriority
+                observation.historyEvents.append(ObservationHistoryEvent(
+                    timestamp: Date(),
+                    sessionID: sessionID,
+                    kind: .reasonUpdated,
+                    beforeValue: priorPriority,
+                    afterValue: trimmedPriority,
+                    field: "priority",
+                    shotID: shotID
+                ))
+            }
+
+            observation.historyEvents.sort { $0.timestamp < $1.timestamp }
+            _ = try localStore.updateObservation(observation)
+            return true
+        } catch {
+            print("[FastLanePanel] observation_update_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func closeFastRuntimePrototypePreview(
+        context: ActiveCaptureContext,
+        tempStorageRoot: URL?,
+        capturedPhotoCount: Int,
+        lastMetadataContext: FastRuntimeCaptureMetadataContext? = nil
+    ) async -> FastRuntimePrototypeCloseResult {
+        let startedAt = Date()
+        let property = properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID })
+        let propertyName = property?.name ?? context.propertyID.uuidString
+        let photoCount = max(0, capturedPhotoCount)
+
+        if photoCount == 0 {
+            let releaseStartedAt = Date()
+            let release = await releaseFastRuntimePrototypeClaim(context: context)
+            let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+
+            var tempDiscarded = false
+            var cleanupMilliseconds: Double?
+            if let tempStorageRoot {
+                let cleanupStartedAt = Date()
+                tempDiscarded = (try? Self.removeFastRuntimePrototypeStorage(at: tempStorageRoot)) != nil
+                cleanupMilliseconds = Date().timeIntervalSince(cleanupStartedAt) * 1_000
+            }
+
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: 0,
+                lockAction: release.didRelease ? "released" : "release_failed",
+                tempDiscarded: tempDiscarded,
+                draftRootPath: nil,
+                errorMessage: release.didRelease ? nil : release.message,
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: nil,
+                    releaseMilliseconds: releaseMilliseconds,
+                    cleanupMilliseconds: cleanupMilliseconds,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+
+        let persistStartedAt = Date()
+        do {
+            let summary = try await Self.persistFastRuntimeDraftStorage(
+                context: context,
+                tempStorageRoot: tempStorageRoot,
+                photoCount: photoCount,
+                lastMetadataContext: lastMetadataContext
+            )
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts[context.propertyID] = summary
+            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+            fastRuntimeDraftsByPropertyID = nextDrafts
+            if let property, let orgID = property.orgId {
+                var payload = propertyAuditPayload(property: property)
+                payload["session_id"] = context.sessionID.uuidString.lowercased()
+                payload["session_title"] = "Session \(context.sessionID.uuidString.prefix(8))"
+                payload["session_status"] = Session.Status.draft.rawValue
+                payload["photo_count"] = photoCount
+                payload["session_source"] = "fast_lane"
+                emitCachedAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.draft_saved",
+                    sessionID: context.sessionID,
+                    propertyID: context.propertyID,
+                    payload: payload
+                )
+            }
+
+            let persistMilliseconds = Date().timeIntervalSince(persistStartedAt) * 1_000
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: true,
+                photoCount: photoCount,
+                lockAction: "kept_for_draft",
+                tempDiscarded: false,
+                draftRootPath: summary.draftRootPath,
+                errorMessage: nil,
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: persistMilliseconds,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        } catch {
+            let persistMilliseconds = Date().timeIntervalSince(persistStartedAt) * 1_000
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: photoCount,
+                lockAction: "kept_after_persist_failure",
+                tempDiscarded: false,
+                draftRootPath: nil,
+                errorMessage: "draft_persist_failed: \(error.localizedDescription)",
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: persistMilliseconds,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+    }
+
+    func runFastRuntimeCompleteDryRun(
+        context: ActiveCaptureContext,
+        storageRoot: URL?,
+        capturedPhotoCount: Int
+    ) async -> FastRuntimeCompleteDryRunResult {
+        let summaryCandidate = fastRuntimeDraftsByPropertyID[context.propertyID]
+        let summary = summaryCandidate?.sessionID == context.sessionID ? summaryCandidate : nil
+        let summaryStorageRoot = summary.map { URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) }
+        let root = storageRoot ?? summaryStorageRoot
+        let metadataURL = root?
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let metadataSource: String = {
+            if summary != nil, storageRoot?.standardizedFileURL.path == summaryStorageRoot?.standardizedFileURL.path {
+                return "fast_runtime_draft_index"
+            }
+            if summary != nil {
+                return "active_preview_with_draft_index"
+            }
+            return "active_preview_runtime_storage"
+        }()
+
+        var missingFields: [String] = []
+        var warnings: [String] = []
+        if context.orgID == nil { missingFields.append("orgID") }
+        if context.ownerUserID == nil { missingFields.append("ownerUserID") }
+        if normalizedSupabaseText(context.ownerDeviceID) == nil { missingFields.append("ownerDeviceID") }
+        if root == nil { missingFields.append("storageRoot") }
+        if metadataURL == nil { missingFields.append("metadataPath") }
+        if let summary, summary.photoCount != capturedPhotoCount {
+            warnings.append("draft_index_photo_count=\(summary.photoCount) preview_photo_count=\(capturedPhotoCount)")
+        }
+
+        var corruptMetadataMessage: String?
+        var shotRecords: [FastRuntimePrototypeShotRecord] = []
+        if let metadataURL {
+            do {
+                let data = try Data(contentsOf: metadataURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                shotRecords = try decoder.decode([FastRuntimePrototypeShotRecord].self, from: data)
+            } catch {
+                corruptMetadataMessage = "metadata_read_decode_failed: \(error.localizedDescription)"
+            }
+        }
+
+        if capturedPhotoCount <= 0 {
+            missingFields.append("photoCount")
+        }
+        if shotRecords.count != capturedPhotoCount {
+            missingFields.append("photoCountMismatch(metadata=\(shotRecords.count), preview=\(capturedPhotoCount))")
+        }
+
+        let fileManager = FileManager.default
+        var totalBytes: Int64 = 0
+        let shotSummaries: [FastRuntimeCompleteDryRunShotSummary] = shotRecords.map { shot in
+            if shot.propertyID != context.propertyID { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].propertyID") }
+            if shot.sessionID != context.sessionID { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].sessionID") }
+            if shot.sessionType != context.sessionType { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].sessionType") }
+            if shot.orgID == nil { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].orgID") }
+            if shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].originalRelativePath")
+            }
+            if shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].localFilePath")
+            }
+            if shot.captureKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].captureKind")
+            }
+
+            let metadataURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
+            let relativeURL = root?.appendingPathComponent(shot.originalRelativePath, isDirectory: false)
+            let resolvedURL: URL? = {
+                if fileManager.fileExists(atPath: metadataURL.path) {
+                    return metadataURL
+                }
+                if let relativeURL,
+                   fileManager.fileExists(atPath: relativeURL.path) {
+                    if metadataURL.path != relativeURL.path {
+                        warnings.append("shot[\(shot.id.uuidString.prefix(8))].localFilePath resolved from originalRelativePath")
+                    }
+                    return relativeURL
+                }
+                return nil
+            }()
+            let byteSize: Int64? = resolvedURL.flatMap { url in
+                let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+                return attributes?[.size] as? Int64
+            }
+            if let byteSize {
+                totalBytes += byteSize
+            }
+
+            return FastRuntimeCompleteDryRunShotSummary(
+                id: shot.id,
+                capturedAt: shot.capturedAt,
+                captureKind: shot.captureKind,
+                captureLocationMode: Self.normalizedFastRuntimeLocationMode(shot.captureLocationMode),
+                metadataContext: Self.normalizedFastRuntimeMetadataContext(
+                    shot.metadataContext,
+                    fallbackLocationMode: shot.captureLocationMode
+                ),
+                originalRelativePath: shot.originalRelativePath,
+                resolvedLocalFilePath: resolvedURL?.path,
+                metadataLocalFilePath: shot.localFilePath,
+                fileExists: resolvedURL != nil,
+                byteSize: byteSize
+            )
+        }
+
+        let missingFilesCount = shotSummaries.filter { !$0.fileExists }.count
+        let wouldCreate = [
+            "sessions row/session payload for \(context.sessionID.uuidString)",
+            "session metadata package with \(shotRecords.count) shot records",
+            "shot metadata rows for \(shotRecords.count) local captures",
+            context.sessionType == .punchlistVisit ? "punchlist package candidate" : "full documentation package candidate"
+        ]
+        let wouldUpload = shotSummaries.map {
+            "\($0.id.uuidString): \($0.originalRelativePath)"
+        }
+        let isValid = missingFields.isEmpty &&
+            corruptMetadataMessage == nil &&
+            missingFilesCount == 0 &&
+            capturedPhotoCount > 0 &&
+            shotRecords.count == capturedPhotoCount
+
+        return FastRuntimeCompleteDryRunResult(
+            isValid: isValid,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            sessionType: context.sessionType,
+            orgID: context.orgID,
+            ownerUserID: context.ownerUserID,
+            ownerEmail: context.ownerEmail,
+            ownerDeviceID: context.ownerDeviceID,
+            metadataSource: metadataSource,
+            photoCount: capturedPhotoCount,
+            metadataPhotoCount: shotRecords.count,
+            missingFilesCount: missingFilesCount,
+            missingFields: Array(Set(missingFields)).sorted(),
+            warnings: Array(Set(warnings)).sorted(),
+            corruptMetadataMessage: corruptMetadataMessage,
+            totalBytes: totalBytes,
+            wouldCreate: wouldCreate,
+            wouldUpload: wouldUpload,
+            shots: shotSummaries
+        )
+    }
+
+    @MainActor
+    func runFastRuntimeCompleteUpload(
+        context: ActiveCaptureContext,
+        storageRoot: URL?,
+        capturedPhotoCount: Int
+    ) async -> FastRuntimeCompleteUploadResult {
+        let startedAt = Date()
+        let dryRun = await runFastRuntimeCompleteDryRun(
+            context: context,
+            storageRoot: storageRoot,
+            capturedPhotoCount: capturedPhotoCount
+        )
+        guard dryRun.isValid else {
+            return FastRuntimeCompleteUploadResult(
+                success: false,
+                dryRun: dryRun,
+                uploadedFilesCount: 0,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_dry_run_invalid",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                errorMessage: "Dry run validation failed.",
+                diagnostics: ["stage=dry_run_validation"],
+                shots: [],
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_missing_supabase_client",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                diagnostics: ["stage=supabase_gate"],
+                shots: [],
+                message: "Supabase writes are unavailable."
+            )
+        }
+        let property = properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID })
+        let resolvedOrgID = property?.orgId ?? context.orgID
+        guard let orgID = resolvedOrgID,
+              canAccessOrganization(orgID) else {
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_missing_or_inactive_org",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                diagnostics: [
+                    "stage=org_resolution",
+                    "context_org_id=\(context.orgID?.uuidString ?? "nil")",
+                    "property_org_id=\(property?.orgId?.uuidString ?? "nil")",
+                    "active_org_id=\(activeOrganizationID?.uuidString ?? "nil")"
+                ],
+                shots: [],
+                message: "Fast-lane context has no writable organization."
+            )
+        }
+
+        let completedAt = Date()
+        var createdRowsSummary: [String] = []
+        var shotResults: [FastRuntimeCompleteUploadShotResult] = []
+        var sessionStatus = "not_started"
+        var propertyStatus = "unchanged"
+        var lockReleased = false
+        var localDraftMarkedUploaded = false
+        var diagnostics: [String] = [
+            "stage=start",
+            "session_write_shape=ensure_insert_then_update",
+            "auth_user_id=\(authenticatedSupabaseUser?.id.uuidString ?? "nil")",
+            "active_org_id=\(activeOrganizationID?.uuidString ?? "nil")",
+            "context_org_id=\(context.orgID?.uuidString ?? "nil")",
+            "resolved_org_id=\(orgID.uuidString)",
+            "property_id=\(context.propertyID.uuidString)",
+            "session_id=\(context.sessionID.uuidString)"
+        ]
+
+        do {
+            let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: context.propertyID)
+            let metadata = makeFastRuntimeCompleteSessionMetadata(
+                context: context,
+                dryRun: dryRun,
+                property: property,
+                completedAt: completedAt,
+                localObservationByIssueID: localObservationByIssueID
+            )
+            let session = Session(
+                id: context.sessionID,
+                propertyID: context.propertyID,
+                sessionType: context.sessionType,
+                startedAt: context.createdAt,
+                status: .completed,
+                endedAt: completedAt,
+                exportedAt: nil,
+                isSealed: true,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil,
+                captureProfile: property?.captureProfile
+            )
+            let sessionPayload = makeSupabaseSessionPayload(
+                sessionID: context.sessionID,
+                propertyID: context.propertyID,
+                orgID: orgID,
+                property: property,
+                metadata: metadata,
+                session: session
+            )
+            diagnostics.append("stage=property_upsert")
+            try await upsertPropertyRowToSupabase(
+                makeSupabasePropertyPayload(
+                    propertyID: context.propertyID,
+                    orgID: orgID,
+                    property: property,
+                    metadata: metadata
+                )
+            )
+            createdRowsSummary.append("properties upserted 1")
+            diagnostics.append("stage=session_ensure")
+            try await ensureSupabaseSessionPrerequisites(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                metadata: metadata,
+                orgID: orgID
+            )
+            createdRowsSummary.append("sessions ensured 1")
+            diagnostics.append("stage=session_update")
+            try await updateSessionRowToSupabase(
+                sessionPayload,
+                propertyID: context.propertyID,
+                orgID: orgID
+            )
+            sessionStatus = sessionPayload.status
+            createdRowsSummary.append("sessions updated 1")
+
+            for (index, shotSummary) in dryRun.shots.enumerated() {
+                diagnostics.append("stage=shot_prepare:\(shotSummary.id.uuidString)")
+                guard let localPath = shotSummary.resolvedLocalFilePath else {
+                    throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 10, userInfo: [
+                        NSLocalizedDescriptionKey: "Missing local file for shot \(shotSummary.id.uuidString)."
+                    ])
+                }
+                let localFileURL = URL(fileURLWithPath: localPath, isDirectory: false)
+                let fileData = try Data(contentsOf: localFileURL, options: [.mappedIfSafe])
+                let checksum = sha256Hex(for: fileData)
+                let byteSize = fileData.count
+                let storagePath = operationalMediaStoragePath(
+                    sessionID: context.sessionID,
+                    shotID: shotSummary.id,
+                    originalFilename: localFileURL.lastPathComponent
+                )
+                let shot = makeFastRuntimeCompleteShotMetadata(
+                    context: context,
+                    dryRunShot: shotSummary,
+                    position: index,
+                    originalFilename: localFileURL.lastPathComponent,
+                    byteSize: byteSize,
+                    checksumSHA256: checksum,
+                    storagePath: storagePath,
+                    localObservationByIssueID: localObservationByIssueID
+                )
+                diagnostics.append("stage=shot_metadata_insert:\(shotSummary.id.uuidString)")
+                try await persistShotRichMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    metadata: metadata,
+                    shot: shot,
+                    allowInsert: true
+                )
+                diagnostics.append("stage=blob_upload:\(shotSummary.id.uuidString)")
+                _ = try await client.storage.from(supabaseOperationalMediaBucket).upload(
+                    storagePath,
+                    fileURL: localFileURL,
+                    options: FileOptions(
+                        cacheControl: "31536000",
+                        contentType: contentType(for: localFileURL),
+                        upsert: true
+                    )
+                )
+                diagnostics.append("stage=shot_storage_metadata:\(shotSummary.id.uuidString)")
+                try await persistShotStorageMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    shotID: shotSummary.id,
+                    storageBucket: supabaseOperationalMediaBucket,
+                    storagePath: storagePath,
+                    checksumSHA256: checksum,
+                    byteSize: byteSize,
+                    uploadState: "uploaded",
+                    uploadAttempts: 1,
+                    lastUploadError: nil
+                )
+                shotResults.append(FastRuntimeCompleteUploadShotResult(
+                    id: shotSummary.id,
+                    localFilePath: localPath,
+                    storageBucket: supabaseOperationalMediaBucket,
+                    storagePath: storagePath,
+                    byteSize: byteSize,
+                    checksumSHA256: checksum,
+                    uploaded: true,
+                    errorMessage: nil
+                ))
+            }
+            createdRowsSummary.append("shots upserted \(shotResults.count)")
+            createdRowsSummary.append("storage originals uploaded \(shotResults.count)")
+
+            if !metadata.issues.isEmpty {
+                diagnostics.append("stage=observation_lineage_replay")
+                let observationReplay = try await replayFastRuntimeCompleteObservationLineage(
+                    orgID: orgID,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    metadata: metadata
+                )
+                createdRowsSummary.append(
+                    "observations replayed insert=\(observationReplay.insertedObservationCount) " +
+                    "update=\(observationReplay.updatedObservationCount) " +
+                    "updates=\(observationReplay.insertedUpdateCount)"
+                )
+            }
+
+            diagnostics.append("stage=property_status_pending_export")
+            let didSetPendingExport = await performPropertyStatusShadowWrite(
+                transition: .pendingExport,
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                deviceID: currentDeviceIdentifier(),
+                reason: "fast_lane_complete_upload_experimental"
+            )
+            guard didSetPendingExport else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 20, userInfo: [
+                    NSLocalizedDescriptionKey: "Uploaded files and metadata, but failed to mark property_status pending_export."
+                ])
+            }
+            updateLocalPropertyStatusPresentationCache(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                status: .pendingExport,
+                reason: "fast_lane_complete_upload_experimental"
+            )
+            propertyStatus = "pending_export"
+
+            do {
+                diagnostics.append("stage=occupancy_release")
+                try await deletePropertySessionOccupancyRowFromSupabase(
+                    orgID: orgID,
+                    propertyID: context.propertyID
+                )
+                setPropertySessionOccupancyState(
+                    propertyID: context.propertyID,
+                    occupiedByUserID: nil,
+                    occupiedByDeviceID: nil,
+                    occupiedAt: nil
+                )
+                lockReleased = true
+            } catch {
+                lockReleased = false
+            }
+
+            let completedDraftSummary = fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID
+                ? fastRuntimeDraftsByPropertyID[context.propertyID]
+                : nil
+            if completedDraftSummary != nil {
+                diagnostics.append("stage=local_draft_index_hide")
+                var nextDrafts = fastRuntimeDraftsByPropertyID
+                nextDrafts.removeValue(forKey: context.propertyID)
+                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                fastRuntimeDraftsByPropertyID = nextDrafts
+                localDraftMarkedUploaded = true
+            }
+            let removedLocalCaptureStores = Self.removeFastRuntimeCompletionStorageRoots(
+                storageRoot: storageRoot,
+                summary: completedDraftSummary,
+                context: context
+            )
+            if removedLocalCaptureStores > 0 {
+                diagnostics.append("local_capture_storage_pruned=\(removedLocalCaptureStores)")
+            }
+            emitCachedAuditEvent(
+                orgID: orgID,
+                eventType: "session.completed",
+                sessionID: context.sessionID,
+                propertyID: context.propertyID,
+                payload: fastRuntimeSessionLifecycleAuditPayload(
+                    context: context,
+                    property: property,
+                    photoCount: shotResults.count,
+                    status: .completed
+                )
+            )
+            diagnostics.append("stage=success")
+
+            return FastRuntimeCompleteUploadResult(
+                success: true,
+                dryRun: dryRun,
+                uploadedFilesCount: shotResults.filter(\.uploaded).count,
+                createdRowsSummary: createdRowsSummary,
+                sessionStatus: sessionStatus,
+                propertyStatus: propertyStatus,
+                packageSummary: "session_snapshots/report package skipped by fast-lane scope",
+                lockReleased: lockReleased,
+                localDraftMarkedUploaded: localDraftMarkedUploaded,
+                errorMessage: nil,
+                diagnostics: diagnostics,
+                shots: shotResults,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        } catch {
+            diagnostics.append("error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 240) ?? error.localizedDescription)")
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: createdRowsSummary,
+                sessionStatus: sessionStatus,
+                propertyStatus: propertyStatus,
+                packageSummary: "session_snapshots/report package skipped by fast-lane scope",
+                lockReleased: lockReleased,
+                localDraftMarkedUploaded: localDraftMarkedUploaded,
+                diagnostics: diagnostics,
+                shots: shotResults,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func makeFastRuntimeCompleteUploadFailure(
+        dryRun: FastRuntimeCompleteDryRunResult,
+        startedAt: Date,
+        createdRowsSummary: [String],
+        sessionStatus: String,
+        propertyStatus: String,
+        packageSummary: String,
+        lockReleased: Bool,
+        localDraftMarkedUploaded: Bool,
+        diagnostics: [String],
+        shots: [FastRuntimeCompleteUploadShotResult],
+        message: String
+    ) -> FastRuntimeCompleteUploadResult {
+        FastRuntimeCompleteUploadResult(
+            success: false,
+            dryRun: dryRun,
+            uploadedFilesCount: shots.filter(\.uploaded).count,
+            createdRowsSummary: createdRowsSummary,
+            sessionStatus: sessionStatus,
+            propertyStatus: propertyStatus,
+            packageSummary: packageSummary,
+            lockReleased: lockReleased,
+            localDraftMarkedUploaded: localDraftMarkedUploaded,
+            errorMessage: message,
+            diagnostics: diagnostics,
+            shots: shots,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    private func replayFastRuntimeCompleteObservationLineage(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata
+    ) async throws -> NormalizedObservationLineageReplayWriteSummary {
+        guard !metadata.issues.isEmpty else {
+            return NormalizedObservationLineageReplayWriteSummary(message: "no_observation_issues")
+        }
+        let localRows = Self.normalizedObservationLineageReplayRows(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            updatedBy: authenticatedSupabaseUser?.id
+        )
+
+        guard let remote = await fetchCanonicalReadRemoteSnapshotIfAvailable(
+            activeOrganizationID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ), let remoteObservations = remote.observations else {
+            return try await upsertFastRuntimeCompleteObservationLineageRows(localRows)
+        }
+        guard let idPreflightRows = await fetchObservationIDPreflightRowsIfAvailable(
+            observationIDs: localRows.observations.map(\.id)
+        ) else {
+            return try await upsertFastRuntimeCompleteObservationLineageRows(localRows)
+        }
+        guard let remoteObservationUpdates = await fetchObservationUpdateRowsIfAvailable(
+            updateIDs: localRows.updates.map(\.id),
+            naturalRows: localRows.updates
+        ) else {
+            return try await upsertFastRuntimeCompleteObservationLineageRows(localRows)
+        }
+
+        let plan = Self.makeNormalizedObservationLineageReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            remoteProperties: remote.properties,
+            remoteSessions: remote.sessions,
+            remoteObservations: Self.mergedObservationReplayPreflightRows(
+                scopedSessionRows: remoteObservations,
+                idPreflightRows: idPreflightRows
+            ),
+            remoteObservationUpdates: remoteObservationUpdates,
+            updatedBy: authenticatedSupabaseUser?.id
+        )
+        guard plan.allowed else {
+            return try await upsertFastRuntimeCompleteObservationLineageRows(localRows)
+        }
+
+        let summary = try await executeObservationLineageReplayToSupabaseFailClosed(plan)
+        guard summary.failedCount == 0 else {
+            return try await upsertFastRuntimeCompleteObservationLineageRows(localRows)
+        }
+        return summary
+    }
+
+    private func upsertFastRuntimeCompleteObservationLineageRows(
+        _ rows: (observations: [NormalizedObservationReplayRow], updates: [NormalizedObservationUpdateReplayRow])
+    ) async throws -> NormalizedObservationLineageReplayWriteSummary {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.FastRuntimeObservationReplay", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for fast-lane observation replay."
+            ])
+        }
+
+        var upsertedObservationCount = 0
+        var upsertedUpdateCount = 0
+
+        for row in rows.observations {
+            guard canAccessOrganization(row.orgID) else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeObservationReplay", code: 7, userInfo: [
+                    NSLocalizedDescriptionKey: "Blocked fast-lane observation replay outside active organization."
+                ])
+            }
+            let payload = SupabaseObservationPayload(
+                id: row.id,
+                orgID: row.orgID,
+                propertyID: row.propertyID,
+                sessionID: row.sessionID,
+                shotID: row.shotID,
+                category: row.category,
+                status: row.status,
+                title: row.title,
+                detail: row.detail,
+                createdAt: row.createdAt.ISO8601Format(),
+                updatedAt: row.updatedAt.ISO8601Format(),
+                updatedBy: row.updatedBy
+            )
+            try await client
+                .from("observations")
+                .upsert(payload, onConflict: "id", returning: .minimal)
+                .execute()
+            upsertedObservationCount += 1
+        }
+
+        for row in rows.updates {
+            guard canAccessOrganization(row.orgID) else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeObservationReplay", code: 8, userInfo: [
+                    NSLocalizedDescriptionKey: "Blocked fast-lane observation update replay outside active organization."
+                ])
+            }
+            let payload = SupabaseObservationUpdatePayload(
+                id: row.id,
+                orgID: row.orgID,
+                propertyID: row.propertyID,
+                observationID: row.observationID,
+                sessionID: row.sessionID,
+                shotID: row.shotID,
+                updateType: row.updateType,
+                status: row.status,
+                message: row.message,
+                note: row.note,
+                priority: row.priority,
+                trade: row.trade,
+                capturedAt: row.capturedAt?.ISO8601Format(),
+                createdAt: row.createdAt.ISO8601Format(),
+                updatedAt: row.updatedAt.ISO8601Format(),
+                updatedBy: row.updatedBy
+            )
+            try await client
+                .from("observation_updates")
+                .upsert(payload, onConflict: "id", returning: .minimal)
+                .execute()
+            upsertedUpdateCount += 1
+        }
+
+        return NormalizedObservationLineageReplayWriteSummary(
+            insertedObservationCount: upsertedObservationCount,
+            insertedUpdateCount: upsertedUpdateCount,
+            message: "fast_lane_observation_lineage_upserted"
+        )
+    }
+
+    private func fastRuntimeCompletionRecoveryCandidates(
+        propertyID: UUID
+    ) -> [FastRuntimeCompletionRecoveryCandidate] {
+        let fileManager = FileManager.default
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var candidates: [FastRuntimeCompletionRecoveryCandidate] = []
+        var seenKeys: Set<String> = []
+
+        func appendCandidate(context: ActiveCaptureContext, storageRoot: URL) {
+            let standardizedRoot = storageRoot.standardizedFileURL
+            let key = "\(context.sessionID.uuidString.lowercased())|\(standardizedRoot.path)"
+            guard context.propertyID == propertyID,
+                  seenKeys.insert(key).inserted,
+                  fileManager.fileExists(atPath: standardizedRoot.path) else {
+                return
+            }
+
+            let metadataURL = Self.fastRuntimeDraftMetadataURL(root: standardizedRoot)
+            guard let data = try? Data(contentsOf: metadataURL),
+                  let shots = try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: data) else {
+                return
+            }
+            let scopedShots = shots.filter {
+                $0.propertyID == propertyID && $0.sessionID == context.sessionID
+            }
+            guard !scopedShots.isEmpty else { return }
+            let metadataModifiedAt = (try? metadataURL.resourceValues(forKeys: [.contentModificationDateKey]))
+                .flatMap(\.contentModificationDate)
+            candidates.append(FastRuntimeCompletionRecoveryCandidate(
+                context: ActiveCaptureContext(
+                    sessionID: context.sessionID,
+                    propertyID: context.propertyID,
+                    orgID: context.orgID,
+                    sessionType: context.sessionType,
+                    ownerUserID: context.ownerUserID,
+                    ownerEmail: context.ownerEmail,
+                    ownerDeviceID: context.ownerDeviceID,
+                    createdAt: context.createdAt,
+                    status: .completed,
+                    statusReason: "fast_lane_complete_retry_recovery"
+                ),
+                storageRoot: standardizedRoot,
+                photoCount: scopedShots.count,
+                metadataModifiedAt: metadataModifiedAt
+            ))
+        }
+
+        let tempRoot = Self.fastRuntimePrototypeTempRootURL()
+        for context in Self.loadFastRuntimePrototypeTempContexts() where context.propertyID == propertyID {
+            appendCandidate(
+                context: context,
+                storageRoot: tempRoot
+                    .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+                    .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+            )
+        }
+
+        if let summary = fastRuntimeDraftsByPropertyID[propertyID] {
+            let resolved = Self.resolvedFastRuntimeDraftStorage(for: summary)
+            let context = ActiveCaptureContext(
+                sessionID: summary.sessionID,
+                propertyID: summary.propertyID,
+                orgID: summary.orgID,
+                sessionType: summary.sessionType,
+                ownerUserID: summary.ownerUserID,
+                ownerEmail: summary.ownerEmail,
+                ownerDeviceID: summary.ownerDeviceID,
+                createdAt: summary.createdAt,
+                status: .completed,
+                statusReason: "fast_lane_draft_complete_retry_recovery"
+            )
+            appendCandidate(context: context, storageRoot: resolved.storageRoot)
+        }
+
+        return candidates.sorted { lhs, rhs in
+            let lhsDate = lhs.metadataModifiedAt ?? lhs.context.createdAt
+            let rhsDate = rhs.metadataModifiedAt ?? rhs.context.createdAt
+            if lhsDate == rhsDate {
+                return lhs.context.sessionID.uuidString < rhs.context.sessionID.uuidString
+            }
+            return lhsDate > rhsDate
+        }
+    }
+
+    @MainActor
+    private func recoverFastRuntimeCompleteUploadAndReportHandoff(
+        propertyID: UUID,
+        source: String
+    ) async -> FastRuntimePendingExportRecoveryResult {
+        let candidates = fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID)
+        guard !candidates.isEmpty else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: nil,
+                sessionType: nil,
+                message: "No local completed fast-lane upload was ready to retry."
+            )
+        }
+
+        for candidate in candidates {
+            markFastRuntimeCompletionUploading(context: candidate.context)
+            let upload = await runFastRuntimeCompleteUpload(
+                context: candidate.context,
+                storageRoot: candidate.storageRoot,
+                capturedPhotoCount: candidate.photoCount
+            )
+            guard upload.success else {
+                let detail = upload.errorMessage ??
+                    upload.dryRun.corruptMetadataMessage ??
+                    upload.dryRun.missingFields.first ??
+                    upload.diagnostics.last ??
+                    "Fast-lane upload retry failed."
+                markFastRuntimeCompletionFailed(context: candidate.context, message: detail)
+                refreshLightweightPropertyRowCloudStatusCache()
+                refreshPropertyRowStatusChipCache()
+                refreshPropertyRowCloudGlyphCache()
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: candidate.context.sessionID,
+                    sessionType: candidate.context.sessionType,
+                    message: detail
+                )
+            }
+
+            let handoff = await runFastRuntimeReportHandoff(
+                propertyID: candidate.context.propertyID,
+                sessionType: candidate.context.sessionType
+            )
+            guard handoff.success else {
+                let detail = handoff.errorMessage ?? "Report handoff retry failed."
+                markFastRuntimeCompletionFailed(context: candidate.context, message: detail)
+                refreshLightweightPropertyRowCloudStatusCache()
+                refreshPropertyRowStatusChipCache()
+                refreshPropertyRowCloudGlyphCache()
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: handoff.sessionID ?? candidate.context.sessionID,
+                    sessionType: candidate.context.sessionType,
+                    message: detail
+                )
+            }
+
+            let didRelease = await markFastRuntimeCompletionHandoffAccepted(
+                context: candidate.context,
+                snapshotID: handoff.snapshotID,
+                snapshotPath: handoff.snapshotPath
+            )
+            refreshLightweightPropertyRowCloudStatusCache()
+            refreshPropertyRowStatusChipCache()
+            refreshPropertyRowCloudGlyphCache()
+            return FastRuntimePendingExportRecoveryResult(
+                success: didRelease,
+                sessionID: handoff.sessionID ?? candidate.context.sessionID,
+                sessionType: candidate.context.sessionType,
+                message: didRelease
+                    ? nil
+                    : "Export retry completed, but the property did not release."
+            )
+        }
+
+        return FastRuntimePendingExportRecoveryResult(
+            success: false,
+            sessionID: nil,
+            sessionType: nil,
+            message: "\(source): no eligible local fast-lane completion found."
+        )
+    }
+
+    @MainActor
+    private func retryFailedFastRuntimeCompletionUploadsAfterReconnect() async {
+        guard !automaticFastRuntimeCompletionRecoveryInFlight else { return }
+        let propertyIDs = Array(Set(fastRuntimeCompletionCloudStatusByPropertyID.values.compactMap { status in
+            status.state == .failed ? status.propertyID : nil
+        }))
+        guard !propertyIDs.isEmpty else { return }
+
+        automaticFastRuntimeCompletionRecoveryInFlight = true
+        defer { automaticFastRuntimeCompletionRecoveryInFlight = false }
+
+        for propertyID in propertyIDs {
+            guard isNetworkAvailable else { break }
+            _ = await recoverFastRuntimeCompleteUploadAndReportHandoff(
+                propertyID: propertyID,
+                source: "network_reconnect"
+            )
+        }
+    }
+
+    @MainActor
+    func markFastRuntimeCompletionUploading(context: ActiveCaptureContext) {
+        applyFastRuntimeCompletionCloudStatus(
+            context: context,
+            state: .uploading,
+            reason: "fast_lane_complete_uploading"
+        )
+    }
+
+    @MainActor
+    func markFastRuntimeCompletionHandoffAccepted(
+        context: ActiveCaptureContext,
+        snapshotID: UUID?,
+        snapshotPath: String?
+    ) async -> Bool {
+        let didMarkExported = await performPropertyStatusShadowWrite(
+            transition: .exported,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            deviceID: currentDeviceIdentifier(),
+            reason: "fast_lane_report_handoff_accepted"
+        )
+        if !didMarkExported {
+            print(
+                "[FastRuntimeReportHandoff] accepted_but_exported_status_write_not_confirmed " +
+                "propertyID=\(context.propertyID.uuidString) " +
+                "sessionID=\(context.sessionID.uuidString)"
+            )
+        }
+
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            status: .exported,
+            reason: "fast_lane_report_handoff_accepted_local"
+        )
+        if let status = applyFastRuntimeCompletionCloudStatus(
+            context: context,
+            state: .uploaded,
+            snapshotID: snapshotID,
+            reason: "fast_lane_report_handoff_accepted"
+        ) {
+            persistFastRuntimeCompletionCloudStatus(status, storagePath: snapshotPath)
+        }
+        if let orgID = context.orgID ??
+            propertyStatusByPropertyID[context.propertyID]?.orgID ??
+            properties.first(where: { $0.id == context.propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == context.propertyID })?.orgId ??
+            activeOrganizationID {
+            let property = properties.first(where: { $0.id == context.propertyID }) ??
+                allProperties.first(where: { $0.id == context.propertyID })
+            var payload = fastRuntimeSessionLifecycleAuditPayload(
+                context: context,
+                property: property,
+                photoCount: 0,
+                status: .completed
+            )
+            payload["snapshot_id"] = snapshotID?.uuidString.lowercased() ?? ""
+            payload["snapshot_path"] = normalizedSupabaseText(snapshotPath) ?? ""
+            emitCachedAuditEvent(
+                orgID: orgID,
+                eventType: "session.exported",
+                sessionID: context.sessionID,
+                propertyID: context.propertyID,
+                payload: payload
+            )
+        }
+        return true
+    }
+
+    @MainActor
+    func markFastRuntimeCompletionFailed(context: ActiveCaptureContext, message: String?) {
+        applyFastRuntimeCompletionCloudStatus(
+            context: context,
+            state: .failed,
+            reason: Self.diagnosticsPreviewText(message ?? "fast_lane_complete_failed", maxLength: 160)
+        )
+    }
+
+    @MainActor
+    private func applyFastRuntimeCompletionCloudStatus(
+        context: ActiveCaptureContext,
+        state: SessionSnapshotCloudState,
+        snapshotID: UUID? = nil,
+        reason: String?
+    ) -> SessionSnapshotCloudStatus? {
+        let now = Date()
+        let orgID = context.orgID ??
+            propertyStatusByPropertyID[context.propertyID]?.orgID ??
+            properties.first(where: { $0.id == context.propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == context.propertyID })?.orgId ??
+            activeOrganizationID
+        guard let orgID else { return nil }
+
+        let existing = fastRuntimeCompletionCloudStatusByPropertyID[context.propertyID] ??
+            propertyRowSnapshotCloudStatusByPropertyID[context.propertyID]
+        let status = SessionSnapshotCloudStatus(
+            state: state,
+            snapshotID: snapshotID ?? existing?.snapshotID ?? UUID(),
+            organizationID: orgID,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            triggerSource: "fast_lane_complete",
+            reason: reason,
+            generatedAt: existing?.generatedAt ?? now,
+            updatedAt: now
+        )
+
+        fastRuntimeCompletionCloudStatusByPropertyID[context.propertyID] = status
+
+        var nextSessionCloud = sessionSnapshotCloudStatusBySessionID
+        nextSessionCloud[context.sessionID] = status
+        if sessionSnapshotCloudStatusBySessionID != nextSessionCloud {
+            sessionSnapshotCloudStatusBySessionID = nextSessionCloud
+        }
+
+        var nextRowCloud = propertyRowSnapshotCloudStatusByPropertyID
+        nextRowCloud[context.propertyID] = status
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRowCloud {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRowCloud
+        }
+        return status
+    }
+
+    private func persistFastRuntimeCompletionCloudStatus(
+        _ status: SessionSnapshotCloudStatus,
+        storagePath: String?
+    ) {
+        let resolvedStoragePath = normalizedSupabaseText(storagePath) ??
+            Self.sessionSnapshotStoragePath(
+                orgID: status.organizationID,
+                propertyID: status.propertyID,
+                sessionID: status.sessionID,
+                snapshotKind: .completed,
+                snapshotID: status.snapshotID
+            )
+        let record = LocalStore.SessionSnapshotUploadStatusRecord(
+            snapshotID: status.snapshotID,
+            organizationID: status.organizationID,
+            propertyID: status.propertyID,
+            sessionID: status.sessionID,
+            snapshotKind: SessionSnapshotKind.completed.rawValue,
+            trigger: "fast_lane_report_handoff",
+            triggerSource: status.triggerSource,
+            idempotencyKey: "fast_lane_report_handoff:\(status.organizationID.uuidString.lowercased()):\(status.propertyID.uuidString.lowercased()):\(status.sessionID.uuidString.lowercased())",
+            storagePath: resolvedStoragePath,
+            generatedAt: status.generatedAt,
+            status: Self.statusRecordStatus(for: status.state),
+            reason: status.reason,
+            updatedAt: status.updatedAt
+        )
+        suppressedPersistentDataChangeNotificationCount += 1
+        do {
+            _ = try localStore.upsertSessionSnapshotUploadStatusRecord(record)
+            logSessionSnapshotCloudStatusPersistence(record)
+        } catch {
+            suppressedPersistentDataChangeNotificationCount = max(0, suppressedPersistentDataChangeNotificationCount - 1)
+            recordDiagnosticsError(error)
+        }
+    }
+
+    @MainActor
+    private func repairFastRuntimePendingExportShotWorkflowMetadataIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        sessionType: SessionType,
+        orgID contextOrgID: UUID?
+    ) async {
+        guard let property = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }) else {
+            return
+        }
+        guard var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return
+        }
+        let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: propertyID)
+        guard !localObservationByIssueID.isEmpty else { return }
+        let resolvedOrgID = contextOrgID ?? property.orgId ?? metadata.orgID
+        guard let orgID = resolvedOrgID,
+              canAccessOrganization(orgID) else {
+            return
+        }
+
+        var repairedShots: [ShotMetadata] = []
+        for index in metadata.shots.indices {
+            guard let issueID = metadata.shots[index].issueID,
+                  let observation = localObservationByIssueID[issueID] else {
+                continue
+            }
+            var shot = metadata.shots[index]
+            let before = shot
+            shot.issueStatus = observation.status.issueStatusValue
+            shot.priority = observation.priority ?? shot.priority
+            if let reason = Observation.inferredCurrentReason(
+                note: observation.currentReason ?? observation.note,
+                statement: observation.statement
+            ) {
+                shot.noteText = reason
+            }
+            shot.captureKind = fastRuntimeProductionCaptureKind(
+                sessionType: sessionType,
+                metadataContext: AppState.FastRuntimeCaptureMetadataContext(
+                    captureProfile: metadata.captureProfile,
+                    locationMode: nil,
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    trade: shot.trade,
+                    detailNote: shot.noteText,
+                    priority: shot.priority,
+                    angleIndex: shot.angleIndex,
+                    shotKey: shot.shotKey,
+                    isGuided: shot.isGuided,
+                    isFlagged: shot.isFlagged,
+                    issueID: shot.issueID,
+                    issueStatus: shot.issueStatus,
+                    captureIntentSource: nil
+                ),
+                localObservation: observation,
+                fallbackCaptureKind: shot.captureKind
+            )
+            shot.isFlagged = true
+            if shot.firstCaptureKind == nil {
+                shot.firstCaptureKind = "captured"
+            }
+            shot.updatedAt = Date()
+            if shot != before {
+                metadata.shots[index] = shot
+                repairedShots.append(shot)
+            }
+        }
+
+        guard !repairedShots.isEmpty else { return }
+        do {
+            try localStore.saveSessionMetadataAtomically(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata
+            )
+            for shot in repairedShots {
+                try await persistShotRichMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    metadata: metadata,
+                    shot: shot,
+                    allowInsert: true
+                )
+            }
+            print(
+                "[FastLanePendingExportRepair] result=success " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "shotCount=\(repairedShots.count)"
+            )
+        } catch {
+            print(
+                "[FastLanePendingExportRepair] result=failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    @MainActor
+    func runFastRuntimeReportPackageDryRun(
+        context: ActiveCaptureContext
+    ) async -> FastRuntimeReportPackageDryRunResult {
+        await runFastRuntimeReportPackageDryRun(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            sessionType: context.sessionType,
+            orgID: context.orgID,
+            ownerUserID: context.ownerUserID,
+            ownerEmail: context.ownerEmail,
+            source: "active_capture_context"
+        )
+    }
+
+    @MainActor
+    func runFastRuntimeReportPackageDryRun(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) async -> FastRuntimeReportPackageDryRunResult {
+        let startedAt = Date()
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: nil,
+                sessionType: sessionType,
+                reason: "missing_supabase_client"
+            )
+        }
+
+        do {
+            let statuses: [PropertyStatusRecord] = try await client
+                .from("property_status")
+                .select(
+                    """
+                    property_id,
+                    org_id,
+                    status,
+                    active_session_id,
+                    draft_session_id,
+                    pending_export_session_id,
+                    last_exported_session_id,
+                    owner_user_id,
+                    owner_device_id,
+                    heartbeat_at,
+                    updated_at,
+                    updated_by,
+                    status_reason,
+                    revision
+                    """
+                )
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+            guard let status = statuses.first,
+                  let sessionID = status.pendingExportSessionID else {
+                return makeFastRuntimeReportPackageDryRunBlockedResult(
+                    startedAt: startedAt,
+                    propertyID: propertyID,
+                    sessionID: nil,
+                    sessionType: sessionType,
+                    orgID: statuses.first?.orgID,
+                    propertyStatus: statuses.first?.status.rawValue,
+                    reason: "property_status_missing_pending_export_session"
+                )
+            }
+            await repairFastRuntimePendingExportShotWorkflowMetadataIfNeeded(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: status.orgID
+            )
+            return await runFastRuntimeReportPackageDryRun(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: status.orgID,
+                ownerUserID: status.updatedBy,
+                ownerEmail: authenticatedSupabaseUser?.email,
+                source: "property_status_pending_export"
+            )
+        } catch {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: nil,
+                sessionType: sessionType,
+                reason: "property_status_read_failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    @MainActor
+    func runFastRuntimeReportHandoff(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) async -> FastRuntimeReportHandoffResult {
+        let startedAt = Date()
+        let dryRun = await runFastRuntimeReportPackageDryRun(
+            propertyID: propertyID,
+            sessionType: sessionType
+        )
+        guard dryRun.isValid else {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "dry_run_invalid",
+                errorMessage: (dryRun.errors + dryRun.missingFields).joined(separator: "\n")
+            )
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "missing_supabase_client",
+                errorMessage: "Supabase client is not available."
+            )
+        }
+        guard let orgID = dryRun.orgID,
+              let sessionID = dryRun.sessionID else {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "missing_required_ids",
+                errorMessage: "Dry run did not return orgID/sessionID."
+            )
+        }
+
+        let payload = FastRuntimeReportHandoffPayload(
+            orgID: orgID.uuidString.lowercased(),
+            propertyID: dryRun.propertyID.uuidString.lowercased(),
+            sessionID: sessionID.uuidString.lowercased(),
+            sessionType: dryRun.sessionType.rawValue,
+            reportMode: dryRun.reportMode
+        )
+
+        do {
+            let response: FastRuntimeReportHandoffFunctionResponse = try await client.functions.invoke(
+                "fast-lane-report-handoff",
+                options: .init(body: payload)
+            )
+            guard response.ok == true else {
+                return makeFastRuntimeReportHandoffFailure(
+                    dryRun: dryRun,
+                    startedAt: startedAt,
+                    functionStatus: "function_returned_not_ok",
+                    errorMessage: response.error ?? "fast-lane-report-handoff returned ok=false."
+                )
+            }
+            return FastRuntimeReportHandoffResult(
+                success: true,
+                dryRun: dryRun,
+                snapshotID: response.snapshotID,
+                snapshotPath: response.snapshotPath,
+                snapshotBucket: response.snapshotBucket,
+                snapshotPayloadSHA256: response.snapshotPayloadSHA256,
+                rawSessionJSONSHA256: response.rawSessionJSONSHA256,
+                sessionID: response.sessionID ?? sessionID,
+                sessionType: sessionType,
+                reportMode: response.reportMode ?? dryRun.reportMode,
+                shotCount: response.shotCount,
+                idempotencyKey: response.idempotencyKey,
+                dispatchExpected: response.dispatchExpected,
+                dispatchStatus: response.dispatchStatus,
+                reused: response.reused,
+                functionStatus: "success",
+                errorMessage: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        } catch let error as FunctionsError {
+            let details = Self.decodeFastRuntimeReportHandoffError(error)
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: details.status,
+                errorMessage: details.message
+            )
+        } catch {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "invoke_failed",
+                errorMessage: error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
+    func retryPropertyUploadAndExport(
+        propertyID: UUID
+    ) async -> PropertyUploadRetryResult {
+        guard isNetworkAvailable else {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: "No network connection. Turn Wi-Fi or cellular back on, then retry export."
+            )
+        }
+
+        let completionRecovery = await recoverFastRuntimeCompleteUploadAndReportHandoff(
+            propertyID: propertyID,
+            source: "manual_property_context_retry"
+        )
+        if completionRecovery.success {
+            return PropertyUploadRetryResult(
+                success: true,
+                message: "Upload and export retry completed."
+            )
+        }
+        if completionRecovery.sessionID != nil {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: completionRecovery.message ?? "Fast-lane upload retry failed. Try again in a bit."
+            )
+        }
+
+        let uploadSummary = await performSessionSnapshotUploadRetry(
+            source: "manual_property_context_retry",
+            propertyID: propertyID,
+            ignoreBackoff: true
+        )
+        let exportRecovery = await recoverFastRuntimePendingExportReportHandoff(propertyID: propertyID)
+        refreshLightweightPropertyRowCloudStatusCache()
+        refreshPropertyRowStatusChipCache()
+        refreshPropertyRowCloudGlyphCache()
+
+        let didUpload = uploadSummary.succeededCount > 0
+        if didUpload || exportRecovery.success {
+            let uploadText = didUpload ? "Upload retry completed." : nil
+            let exportText = exportRecovery.success ? "Export retry completed." : nil
+            return PropertyUploadRetryResult(
+                success: true,
+                message: [uploadText, exportText].compactMap { $0 }.joined(separator: " ")
+            )
+        }
+
+        if uploadSummary.attemptedCount > 0 {
+            let failedCount = uploadSummary.failedCount + uploadSummary.terminalFailedCount
+            let detail = exportRecovery.message.map { Self.diagnosticsPreviewText($0, maxLength: 160) ?? $0 }
+            return PropertyUploadRetryResult(
+                success: false,
+                message: detail ?? "Upload retry attempted, but \(failedCount) item\(failedCount == 1 ? "" : "s") still need attention."
+            )
+        }
+
+        if uploadSummary.skippedBackoffCount > 0 {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: "Upload retry is already scheduled. Try again in a bit if it does not clear."
+            )
+        }
+
+        return PropertyUploadRetryResult(
+            success: false,
+            message: exportRecovery.message ?? "No upload or pending export was ready to retry."
+        )
+    }
+
+    @MainActor
+    func recoverFastRuntimePendingExportReportHandoff(
+        propertyID: UUID
+    ) async -> FastRuntimePendingExportRecoveryResult {
+        var blockedMessages: [String] = []
+        let candidates = fastRuntimePendingExportRecoveryCandidates(propertyID: propertyID)
+        for candidate in candidates {
+            let sessionType = candidate.session.sessionType
+            guard await ensureFastRuntimePendingExportStatusForRecovery(
+                propertyID: propertyID,
+                sessionID: candidate.session.id,
+                source: candidate.source
+            ) else {
+                blockedMessages.append("\(sessionType.rawValue): unable_to_repair_pending_export_status")
+                continue
+            }
+
+            let dryRun = await runFastRuntimeReportPackageDryRun(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            guard dryRun.isValid else {
+                let message = (dryRun.errors + dryRun.missingFields).joined(separator: ", ")
+                blockedMessages.append("\(sessionType.rawValue): \(message.isEmpty ? "not applicable" : message)")
+                continue
+            }
+
+            let handoff = await runFastRuntimeReportHandoff(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            guard handoff.success,
+                  let sessionID = handoff.sessionID ?? dryRun.sessionID else {
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: handoff.sessionID ?? dryRun.sessionID,
+                    sessionType: sessionType,
+                    message: handoff.errorMessage ?? "Report handoff retry failed."
+                )
+            }
+
+            let context = ActiveCaptureContext(
+                sessionID: sessionID,
+                propertyID: propertyID,
+                orgID: dryRun.orgID,
+                sessionType: sessionType,
+                ownerUserID: authenticatedSupabaseUser?.id,
+                ownerEmail: authenticatedSupabaseUser?.email,
+                ownerDeviceID: currentDeviceIdentifier(),
+                createdAt: Date(),
+                status: .completed,
+                statusReason: "pending_export_handoff_recovery"
+            )
+            let didRelease = await markFastRuntimeCompletionHandoffAccepted(
+                context: context,
+                snapshotID: handoff.snapshotID,
+                snapshotPath: handoff.snapshotPath
+            )
+            return FastRuntimePendingExportRecoveryResult(
+                success: didRelease,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                message: didRelease
+                    ? nil
+                    : "Report handoff succeeded, but server pending export did not clear."
+            )
+        }
+
+        return FastRuntimePendingExportRecoveryResult(
+            success: false,
+            sessionID: nil,
+            sessionType: nil,
+            message: blockedMessages.isEmpty
+                ? "No pending export was ready to retry."
+                : blockedMessages.joined(separator: "\n")
+        )
+    }
+
+    private func fastRuntimePendingExportRecoveryCandidates(
+        propertyID: UUID
+    ) -> [(session: Session, source: String)] {
+        var candidates: [(session: Session, source: String)] = []
+        var seenSessionIDs: Set<UUID> = []
+
+        func append(_ session: Session?, source: String) {
+            guard let session,
+                  session.propertyID == propertyID,
+                  session.deletedAt == nil,
+                  session.status == .completed,
+                  session.isSealed,
+                  session.firstDeliveredAt == nil,
+                  sessionHasCaptures(session),
+                  seenSessionIDs.insert(session.id).inserted else {
+                return
+            }
+            candidates.append((session: session, source: source))
+        }
+
+        if let sessionID = propertyStatusByPropertyID[propertyID]?.pendingExportSessionID {
+            append(try? localSessionForSnapshotUpload(propertyID: propertyID, sessionID: sessionID), source: "property_status")
+        }
+        append(latestPendingExportSession(for: propertyID), source: "local_pending_export_index")
+
+        let localSessions = sessions(for: propertyID)
+            .filter {
+                $0.deletedAt == nil &&
+                $0.status == .completed &&
+                $0.isSealed &&
+                $0.firstDeliveredAt == nil &&
+                sessionHasCaptures($0)
+            }
+            .sorted { $0.startedAt > $1.startedAt }
+        for session in localSessions {
+            append(session, source: "local_completed_pending_delivery")
+        }
+
+        return candidates
+    }
+
+    @MainActor
+    private func ensureFastRuntimePendingExportStatusForRecovery(
+        propertyID: UUID,
+        sessionID: UUID,
+        source: String
+    ) async -> Bool {
+        if propertyStatusByPropertyID[propertyID]?.status == .pendingExport,
+           propertyStatusByPropertyID[propertyID]?.pendingExportSessionID == sessionID {
+            return true
+        }
+
+        let didRepair = await performPropertyStatusShadowWrite(
+            transition: .pendingExport,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            deviceID: currentDeviceIdentifier(),
+            reason: "manual_retry_pending_export_repair_\(source)"
+        )
+        guard didRepair else { return false }
+
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: .pendingExport,
+            reason: "manual_retry_pending_export_repair_\(source)"
+        )
+        if let sessions = sessionIndexByProperty[propertyID] ?? allSessionIndexByProperty[propertyID] {
+            _ = updatePropertyRowSecondaryDetails(propertyID: propertyID, sessions: sessions)
+        }
+        return true
+    }
+
+    private func makeFastRuntimeReportHandoffFailure(
+        dryRun: FastRuntimeReportPackageDryRunResult,
+        startedAt: Date,
+        functionStatus: String,
+        errorMessage: String
+    ) -> FastRuntimeReportHandoffResult {
+        FastRuntimeReportHandoffResult(
+            success: false,
+            dryRun: dryRun,
+            snapshotID: nil,
+            snapshotPath: nil,
+            snapshotBucket: nil,
+            snapshotPayloadSHA256: nil,
+            rawSessionJSONSHA256: nil,
+            sessionID: dryRun.sessionID,
+            sessionType: dryRun.sessionType,
+            reportMode: dryRun.reportMode,
+            shotCount: dryRun.shotCount,
+            idempotencyKey: dryRun.reportPackageIdempotencyKey,
+            dispatchExpected: nil,
+            dispatchStatus: nil,
+            reused: nil,
+            functionStatus: functionStatus,
+            errorMessage: errorMessage,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    @MainActor
+    func runFastRuntimeDebugMarkPendingExportDelivered(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) async -> FastRuntimePendingExportCleanupResult {
+        let startedAt = Date()
+        let dryRun = await runFastRuntimeReportPackageDryRun(
+            propertyID: propertyID,
+            sessionType: sessionType
+        )
+        guard dryRun.isValid,
+              let sessionID = dryRun.sessionID else {
+            let dryRunErrorMessage = (dryRun.errors + dryRun.missingFields).joined(separator: "\n")
+            return FastRuntimePendingExportCleanupResult(
+                success: false,
+                dryRun: dryRun,
+                sessionID: dryRun.sessionID,
+                propertyStatus: dryRun.propertyStatus,
+                errorMessage: dryRunErrorMessage.isEmpty
+                    ? "Fast-lane report dry run must be valid before cleanup."
+                    : dryRunErrorMessage,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let reportSideEffectCount =
+            (dryRun.sideEffectCounts["session_snapshots"] ?? 0) +
+            (dryRun.sideEffectCounts["report_packages"] ?? 0) +
+            (dryRun.sideEffectCounts["report_package_files"] ?? 0)
+        guard reportSideEffectCount > 0 else {
+            return FastRuntimePendingExportCleanupResult(
+                success: false,
+                dryRun: dryRun,
+                sessionID: sessionID,
+                propertyStatus: dryRun.propertyStatus,
+                errorMessage: "No report/package side effects were readable for this session. Run report handoff first or inspect in Debug Tools.",
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let didMarkExported = await performPropertyStatusShadowWrite(
+            transition: .exported,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            deviceID: currentDeviceIdentifier(),
+            reason: "debug_fast_lane_test_cleanup_mark_delivered"
+        )
+        let status = propertyStatusByPropertyID[propertyID]?.status.rawValue
+        return FastRuntimePendingExportCleanupResult(
+            success: didMarkExported,
+            dryRun: dryRun,
+            sessionID: sessionID,
+            propertyStatus: status ?? dryRun.propertyStatus,
+            errorMessage: didMarkExported ? nil : "set_property_status_exported did not update local property status.",
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    private static func decodeFastRuntimeReportHandoffError(
+        _ error: FunctionsError
+    ) -> (status: String, message: String) {
+        switch error {
+        case .relayError:
+            return ("relay_error", error.localizedDescription)
+        case let .httpError(code, data):
+            let status = "http_\(code)"
+            if let response = try? JSONDecoder().decode(FastRuntimeReportHandoffFunctionResponse.self, from: data),
+               let message = response.error,
+               !message.isEmpty {
+                return (status, message)
+            }
+            if let body = String(data: data, encoding: .utf8),
+               !body.isEmpty {
+                return (status, body)
+            }
+            return (status, error.localizedDescription)
+        }
+    }
+
+    private func runFastRuntimeReportPackageDryRun(
+        propertyID: UUID,
+        sessionID: UUID,
+        sessionType: SessionType,
+        orgID contextOrgID: UUID?,
+        ownerUserID: UUID?,
+        ownerEmail: String?,
+        source: String
+    ) async -> FastRuntimeReportPackageDryRunResult {
+        let startedAt = Date()
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: contextOrgID,
+                reason: "missing_supabase_client"
+            )
+        }
+
+        var missingFields: [String] = []
+        var errors: [String] = []
+        var warnings: [String] = ["source=\(source)", "session_type_source=fast_lane_context_or_debug_selection"]
+        var sideEffectCounts: [String: Int] = [:]
+        var storageObjectCount = 0
+        var shotResults: [FastRuntimeReportPackageDryRunShot] = []
+
+        do {
+            let sessions: [FastRuntimeReportRemoteSessionRecord] = try await client
+                .from("sessions")
+                .select("id, org_id, property_id, title, status, started_at, completed_at, exported_at, is_sealed, first_delivered_at, capture_profile, updated_by, deleted_at")
+                .eq("id", value: sessionID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+            let statusRows: [PropertyStatusRecord] = try await client
+                .from("property_status")
+                .select(
+                    """
+                    property_id,
+                    org_id,
+                    status,
+                    active_session_id,
+                    draft_session_id,
+                    pending_export_session_id,
+                    last_exported_session_id,
+                    owner_user_id,
+                    owner_device_id,
+                    heartbeat_at,
+                    updated_at,
+                    updated_by,
+                    status_reason,
+                    revision
+                    """
+                )
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+            var shots = try await fetchFastRuntimeReportPackageShots(
+                client: client,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+            if let session = sessions.first {
+                let didRepairCaptureKinds = try await repairFastRuntimeReportRemoteShotCaptureKindsIfNeeded(
+                    client: client,
+                    session: session,
+                    shots: shots,
+                    sessionType: sessionType,
+                    actorUserID: ownerUserID,
+                    actorEmail: ownerEmail
+                )
+                if didRepairCaptureKinds {
+                    warnings.append("shot_capture_kind_repaired")
+                    shots = try await fetchFastRuntimeReportPackageShots(
+                        client: client,
+                        propertyID: propertyID,
+                        sessionID: sessionID
+                    )
+                }
+            }
+            do {
+                let snapshotRows: [SessionIDOnlyRecord] = try await client
+                    .from("session_snapshots")
+                    .select("id")
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .execute()
+                    .value
+                sideEffectCounts["session_snapshots"] = snapshotRows.count
+            } catch {
+                warnings.append("session_snapshots=server_owned_not_read_by_mobile")
+            }
+            do {
+                let packageRows: [SessionIDOnlyRecord] = try await client
+                    .from("report_packages")
+                    .select("id")
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .execute()
+                    .value
+                sideEffectCounts["report_packages"] = packageRows.count
+            } catch {
+                warnings.append("report_packages=server_owned_not_read_by_mobile")
+            }
+            do {
+                let packageFileRows: [SessionIDOnlyRecord] = try await client
+                    .from("report_package_files")
+                    .select("id")
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .execute()
+                    .value
+                sideEffectCounts["report_package_files"] = packageFileRows.count
+            } catch {
+                warnings.append("report_package_files=server_owned_not_read_by_mobile")
+            }
+            warnings.append("report_package_email_notifications=server_owned_not_read_by_mobile")
+
+            guard let session = sessions.first else {
+                return makeFastRuntimeReportPackageDryRunBlockedResult(
+                    startedAt: startedAt,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    sessionType: sessionType,
+                    orgID: contextOrgID,
+                    reason: "session_row_missing"
+                )
+            }
+            let propertyStatus = statusRows.first
+            let resolvedOrgID = session.orgID
+            if contextOrgID != nil, contextOrgID != resolvedOrgID {
+                warnings.append("context_org_id_mismatch")
+            }
+            if session.propertyID != propertyID { missingFields.append("session.propertyID") }
+            if normalizedSupabaseText(session.status)?.lowercased() != Session.Status.completed.rawValue {
+                missingFields.append("session.status.completed")
+            }
+            if session.isSealed != true { missingFields.append("session.isSealed") }
+            if session.completedAt == nil { missingFields.append("session.completedAt") }
+            if session.deletedAt != nil { missingFields.append("session.deletedAt.nil") }
+            if propertyStatus == nil {
+                missingFields.append("property_status")
+            } else {
+                if propertyStatus?.status != .pendingExport { missingFields.append("property_status.pending_export") }
+                if propertyStatus?.pendingExportSessionID != sessionID { missingFields.append("property_status.pending_export_session_id") }
+                if propertyStatus?.ownerUserID != nil || normalizedSupabaseText(propertyStatus?.ownerDeviceID) != nil {
+                    warnings.append("property_status_owner_fields_present")
+                }
+            }
+            if shots.isEmpty {
+                missingFields.append("shots")
+            }
+            for shot in shots.sorted(by: fastRuntimeReportShotSort) {
+                var storageObjectExists = false
+                var storageByteSize: Int?
+                let bucket = normalizedSupabaseText(shot.storageBucket)
+                let path = normalizedSupabaseText(shot.storagePath)
+                if bucket == nil { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].storageBucket") }
+                if path == nil { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].storagePath") }
+                let allowedCaptureKinds = fastRuntimeReportAllowedCaptureKinds(
+                    sessionType: sessionType,
+                    shot: shot
+                )
+                let expectedCaptureKind = fastRuntimeReportPreferredCaptureKind(
+                    sessionType: sessionType,
+                    shot: shot
+                )
+                if !allowedCaptureKinds.contains(normalizedSupabaseText(shot.captureKind)?.lowercased() ?? "") {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].captureKind.expected_\(expectedCaptureKind)")
+                }
+                if normalizedSupabaseText(shot.uploadState)?.lowercased() != "uploaded" {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].uploadState")
+                }
+                if normalizedSupabaseText(shot.checksumSHA256) == nil {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].checksum")
+                }
+                if shot.byteSize == nil || (shot.byteSize ?? 0) <= 0 {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].byteSize")
+                }
+                if let bucket, let path {
+                    do {
+                        let data = try await client.storage.from(bucket).download(path: path)
+                        storageObjectExists = true
+                        storageByteSize = data.count
+                        storageObjectCount += 1
+                        if let shotByteSize = shot.byteSize, shotByteSize != data.count {
+                            warnings.append("shot[\(shot.id.uuidString.prefix(8))].storage_byte_size_mismatch")
+                        }
+                        if let checksum = normalizedSupabaseText(shot.checksumSHA256),
+                           sha256Hex(for: data).lowercased() != checksum.lowercased() {
+                            warnings.append("shot[\(shot.id.uuidString.prefix(8))].storage_checksum_mismatch")
+                        }
+                    } catch {
+                        missingFields.append("shot[\(shot.id.uuidString.prefix(8))].storageObject")
+                        errors.append("storage_read_failed[\(shot.id.uuidString.prefix(8))]: \(error.localizedDescription)")
+                    }
+                }
+                shotResults.append(FastRuntimeReportPackageDryRunShot(
+                    id: shot.id,
+                    captureKind: shot.captureKind,
+                    storageBucket: shot.storageBucket,
+                    storagePath: shot.storagePath,
+                    storageObjectExists: storageObjectExists,
+                    shotByteSize: shot.byteSize,
+                    storageByteSize: storageByteSize,
+                    checksumSHA256: shot.checksumSHA256,
+                    uploadState: shot.uploadState
+                ))
+            }
+
+            let metadata = makeFastRuntimeReportPackageSessionMetadata(
+                session: session,
+                shots: shots,
+                sessionType: sessionType,
+                ownerUserID: ownerUserID,
+                ownerEmail: ownerEmail
+            )
+            let buildResult = try makeFastRuntimeRemoteSessionSnapshotBuildResult(
+                metadata: metadata,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                generatedAt: Date(),
+                trigger: "fast_lane_report_package_dry_run"
+            )
+            guard let snapshotOrgID = buildResult.envelope.orgID else {
+                missingFields.append("snapshot.orgID")
+                return makeFastRuntimeReportPackageDryRunBlockedResult(
+                    startedAt: startedAt,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    sessionType: sessionType,
+                    orgID: nil,
+                    sessionStatus: session.status,
+                    propertyStatus: propertyStatus?.status.rawValue,
+                    reason: "snapshot_org_id_missing"
+                )
+            }
+            let snapshotID = UUID()
+            let packageID = UUID()
+            let snapshotStoragePath = Self.sessionSnapshotStoragePath(
+                orgID: snapshotOrgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotKind: .completed,
+                snapshotID: snapshotID
+            )
+            let snapshotRow = makeSessionSnapshotUploadRow(
+                snapshotID: snapshotID,
+                kind: .completed,
+                orgID: snapshotOrgID,
+                envelope: buildResult.envelope,
+                storagePath: snapshotStoragePath
+            )
+            if snapshotRow.sessionStatus != Session.Status.completed.rawValue {
+                missingFields.append("snapshot.sessionStatus")
+            }
+            if snapshotRow.isSealed != true {
+                missingFields.append("snapshot.isSealed")
+            }
+            if buildResult.envelope.sessionType != sessionType {
+                missingFields.append("snapshot.sessionType")
+            }
+            let reportMode = sessionType == .punchlistVisit ? "punchlist" : "all"
+            let reportTypes = sessionType == .punchlistVisit
+                ? ["flagged_observations", "flagged_comparison"]
+                : ["property_report", "flagged_observations", "flagged_comparison"]
+            let fileCandidates = reportTypes.map { reportType in
+                FastRuntimeReportPackageFileCandidate(
+                    reportType: reportType,
+                    storageBucket: "scoutcapture-deliverables",
+                    storagePath: fastRuntimeReportPackagePDFPath(
+                        orgID: snapshotOrgID,
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        packageID: packageID,
+                        reportType: reportType
+                    ),
+                    filename: "\(reportType).pdf"
+                )
+            }
+            let packageIdempotencyKey = "pdf-package:\(snapshotID.uuidString.lowercased()):phase2c-shadow-reportlab-refinement-1"
+            let emailWordingType = sessionType == .punchlistVisit ? "punchlist update" : "report"
+            let wouldCreate = [
+                "session_snapshots row id=\(snapshotID.uuidString)",
+                "session snapshot payload object \(sessionSnapshotStorageBucket)/\(snapshotStoragePath)",
+                "report_packages row id=\(packageID.uuidString)",
+                "report package manifest sessionType=\(sessionType.rawValue)",
+                "report worker input report=\(reportMode)",
+                "report_package_files candidates=\(fileCandidates.count)",
+                "email wording=\(emailWordingType)",
+                "report_package_email_notifications server_owned_not_read_by_mobile"
+            ]
+            if (sideEffectCounts["session_snapshots"] ?? 0) > 0 {
+                warnings.append("existing_session_snapshots=\(sideEffectCounts["session_snapshots"] ?? 0)")
+            }
+            if (sideEffectCounts["report_packages"] ?? 0) > 0 {
+                warnings.append("existing_report_packages=\(sideEffectCounts["report_packages"] ?? 0)")
+            }
+            if (sideEffectCounts["report_package_files"] ?? 0) > 0 {
+                warnings.append("existing_report_package_files=\(sideEffectCounts["report_package_files"] ?? 0)")
+            }
+
+            let uniqueMissing = Array(Set(missingFields)).sorted()
+            let uniqueErrors = Array(Set(errors)).sorted()
+            let uniqueWarnings = Array(Set(warnings)).sorted()
+            let isValid = uniqueMissing.isEmpty &&
+                uniqueErrors.isEmpty &&
+                shots.count > 0 &&
+                storageObjectCount == shots.count &&
+                snapshotRow.shotCount == shots.count &&
+                buildResult.envelope.sessionType == sessionType
+
+            return FastRuntimeReportPackageDryRunResult(
+                isValid: isValid,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: snapshotOrgID,
+                sessionStatus: session.status,
+                propertyStatus: propertyStatus?.status.rawValue,
+                propertyStatusPendingExportSessionID: propertyStatus?.pendingExportSessionID,
+                snapshotID: snapshotID,
+                snapshotStorageBucket: sessionSnapshotStorageBucket,
+                snapshotStoragePath: snapshotStoragePath,
+                snapshotPayloadBytes: buildResult.payloadData.count,
+                rawSessionJSONSHA256: buildResult.envelope.rawSessionJSONSHA256,
+                snapshotPayloadSHA256: buildResult.envelope.snapshotPayloadSHA256,
+                reportPackageID: packageID,
+                reportPackageIdempotencyKey: packageIdempotencyKey,
+                reportMode: reportMode,
+                emailWordingType: emailWordingType,
+                shotCount: shots.count,
+                storageObjectCount: storageObjectCount,
+                missingFields: uniqueMissing,
+                errors: uniqueErrors,
+                warnings: uniqueWarnings,
+                wouldCreate: wouldCreate,
+                fileCandidates: fileCandidates,
+                shots: shotResults,
+                sideEffectCounts: sideEffectCounts,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        } catch {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: contextOrgID,
+                reason: "remote_read_or_payload_build_failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func makeFastRuntimeReportPackageDryRunBlockedResult(
+        startedAt: Date,
+        propertyID: UUID,
+        sessionID: UUID?,
+        sessionType: SessionType,
+        orgID: UUID? = nil,
+        sessionStatus: String? = nil,
+        propertyStatus: String? = nil,
+        reason: String
+    ) -> FastRuntimeReportPackageDryRunResult {
+        FastRuntimeReportPackageDryRunResult(
+            isValid: false,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            sessionType: sessionType,
+            orgID: orgID,
+            sessionStatus: sessionStatus,
+            propertyStatus: propertyStatus,
+            propertyStatusPendingExportSessionID: nil,
+            snapshotID: nil,
+            snapshotStorageBucket: nil,
+            snapshotStoragePath: nil,
+            snapshotPayloadBytes: nil,
+            rawSessionJSONSHA256: nil,
+            snapshotPayloadSHA256: nil,
+            reportPackageID: nil,
+            reportPackageIdempotencyKey: nil,
+            reportMode: sessionType == .punchlistVisit ? "punchlist" : "all",
+            emailWordingType: sessionType == .punchlistVisit ? "punchlist update" : "report",
+            shotCount: 0,
+            storageObjectCount: 0,
+            missingFields: [reason],
+            errors: [reason],
+            warnings: [],
+            wouldCreate: [],
+            fileCandidates: [],
+            shots: [],
+            sideEffectCounts: [:],
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    private func makeFastRuntimeRemoteSessionSnapshotBuildResult(
+        metadata rawMetadata: SessionMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        generatedAt: Date,
+        trigger: String
+    ) throws -> SessionSnapshotBuildResult {
+        let actor = sessionSnapshotActorIdentity(for: rawMetadata)
+        let metadata = Self.sessionSnapshotMetadata(rawMetadata, stampedWith: actor)
+        let rawData = try Self.encodeSessionSnapshotRawSessionJSON(metadata)
+        let rawSessionJSON = String(data: rawData, encoding: .utf8) ?? rawData.base64EncodedString()
+        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: rawData)
+        let manifest = metadata.shots.map { shot in
+            SessionSnapshotMediaManifestItem(
+                id: shot.shotID,
+                originalFilenamePreview: normalizedSupabaseText(shot.originalFilename),
+                originalRelativePathPresent: normalizedSupabaseText(shot.originalRelativePath) != nil,
+                originalByteSize: shot.originalByteSize ?? shot.byteSize,
+                localOriginalExists: false,
+                storageBucketPresent: normalizedSupabaseText(shot.storageBucket) != nil,
+                storagePathPresent: normalizedSupabaseText(shot.storagePath) != nil,
+                checksumPresent: normalizedSupabaseText(shot.checksumSHA256) != nil,
+                storageByteSize: shot.byteSize,
+                capturedByUserID: shot.capturedByUserID,
+                capturedByEmail: shot.capturedByEmail,
+                uploadedByUserID: shot.uploadedByUserID,
+                uploadedByEmail: shot.uploadedByEmail
+            )
+        }
+        let payload = SessionSnapshotPayloadForChecksum(
+            snapshotSchemaVersion: 1,
+            sessionMetadataSchemaVersion: metadata.schemaVersion,
+            trigger: trigger,
+            generatedAt: generatedAt,
+            appVersion: Self.trimmedNonEmpty(metadata.appVersion),
+            sourceDeviceID: currentDeviceIdentifier(),
+            orgID: metadata.orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            sessionType: metadata.sessionType,
+            status: metadata.status,
+            isSealed: metadata.isSealed,
+            exportedAt: metadata.exportedAt,
+            firstDeliveredAt: metadata.firstDeliveredAt,
+            reExportExpiresAt: metadata.reExportExpiresAt,
+            actor: actor,
+            capturedBy: actor,
+            uploadedBy: actor,
+            shotCount: metadata.shots.count,
+            issueCount: metadata.issues.count,
+            guidedCount: metadata.guidedShots.count,
+            mediaManifestCount: manifest.count,
+            missingLocalOriginalsCount: 0,
+            supabaseStorageMetadataCount: manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            rawSessionJSONByteCount: rawData.count,
+            mediaManifest: manifest
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let payloadData = try encoder.encode(payload)
+        let envelope = SessionSnapshotEnvelope(
+            id: sessionID,
+            snapshotSchemaVersion: payload.snapshotSchemaVersion,
+            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
+            trigger: payload.trigger,
+            generatedAt: payload.generatedAt,
+            appVersion: payload.appVersion,
+            sourceDeviceID: payload.sourceDeviceID,
+            orgID: payload.orgID,
+            propertyID: payload.propertyID,
+            sessionID: payload.sessionID,
+            sessionType: payload.sessionType,
+            status: payload.status,
+            isSealed: payload.isSealed,
+            exportedAt: payload.exportedAt,
+            firstDeliveredAt: payload.firstDeliveredAt,
+            reExportExpiresAt: payload.reExportExpiresAt,
+            actor: payload.actor,
+            capturedBy: payload.capturedBy,
+            uploadedBy: payload.uploadedBy,
+            shotCount: payload.shotCount,
+            issueCount: payload.issueCount,
+            guidedCount: payload.guidedCount,
+            mediaManifestCount: payload.mediaManifestCount,
+            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
+            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
+            rawSessionJSONByteCount: rawData.count,
+            snapshotPayloadByteCount: payloadData.count,
+            mediaManifest: manifest
+        )
+        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private func makeFastRuntimeReportPackageSessionMetadata(
+        session: FastRuntimeReportRemoteSessionRecord,
+        shots: [SupabaseShotStorageRecord],
+        sessionType: SessionType,
+        ownerUserID: UUID?,
+        ownerEmail: String?
+    ) -> SessionMetadata {
+        let startedAt = session.startedAt ?? Date()
+        let completedAt = session.completedAt ?? startedAt
+        let actorUserID = session.updatedBy ?? ownerUserID ?? authenticatedSupabaseUser?.id
+        let actorEmail = authenticatedSupabaseUser?.email ?? ownerEmail
+        return SessionMetadata(
+            schemaVersion: 12,
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            sessionType: sessionType,
+            orgID: session.orgID,
+            propertyNameAtCapture: session.title,
+            propertyNameAtExport: session.title,
+            captureProfile: session.captureProfile,
+            capturedByUserID: ownerUserID ?? actorUserID,
+            capturedByEmail: ownerEmail ?? actorEmail,
+            uploadedByUserID: actorUserID,
+            uploadedByEmail: actorEmail,
+            actorUserID: actorUserID,
+            actorEmail: actorEmail,
+            startedAt: startedAt,
+            sessionStartedAtLocal: startedAt.formatted(date: .numeric, time: .standard),
+            endedAt: completedAt,
+            sessionEndedAtLocal: completedAt.formatted(date: .numeric, time: .standard),
+            status: .completed,
+            isBaselineSession: false,
+            exportedAt: session.exportedAt,
+            isSealed: session.isSealed ?? false,
+            firstDeliveredAt: session.firstDeliveredAt,
+            appVersion: "fast-lane-report-package-dry-run",
+            deviceModel: "fast-lane",
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            shots: shots.sorted(by: fastRuntimeReportShotSort).enumerated().map { index, shot in
+                makeFastRuntimeReportPackageShotMetadata(
+                    session: session,
+                    shot: shot,
+                    sessionType: sessionType,
+                    position: index,
+                    actorUserID: actorUserID,
+                    actorEmail: actorEmail
+                )
+            },
+            issues: [],
+            guidedShots: []
+        )
+    }
+
+    private func makeFastRuntimeReportPackageShotMetadata(
+        session: FastRuntimeReportRemoteSessionRecord,
+        shot: SupabaseShotStorageRecord,
+        sessionType: SessionType,
+        position: Int,
+        actorUserID: UUID?,
+        actorEmail: String?
+    ) -> ShotMetadata {
+        let capturedAt = shot.createdAt ?? session.completedAt ?? session.startedAt ?? Date()
+        let storagePath = normalizedSupabaseText(shot.storagePath)
+        let detailType = shot.detailType ?? (sessionType == .punchlistVisit ? "Punchlist Capture" : "Fast Lane Capture")
+        let angleIndex = shot.angleIndex ?? (position + 1)
+        let building = shot.building ?? ""
+        let elevation = shot.elevation ?? ""
+        let shotKey = shot.shotKey ?? ShotMetadata.makeShotKey(
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: angleIndex
+        )
+        let originalFilename = storagePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "\(shot.id.uuidString).jpg"
+        let originalRelativePath = storagePath ?? ""
+        let updatedAt = shot.updatedAt ?? capturedAt
+        let uploadedByUserID = shot.updatedBy ?? actorUserID
+        let metadata = ShotMetadata(
+            shotID: shot.id,
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            createdAt: capturedAt,
+            capturedAtLocal: capturedAt.formatted(date: .numeric, time: .standard),
+            updatedAt: updatedAt,
+            capturedByUserID: actorUserID,
+            capturedByEmail: actorEmail,
+            uploadedByUserID: uploadedByUserID,
+            uploadedByEmail: actorEmail,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: angleIndex,
+            trade: shot.trade,
+            priority: shot.priority,
+            shotKey: shotKey,
+            isGuided: shot.isGuided ?? false,
+            isFlagged: shot.isFlagged ?? false,
+            issueID: shot.issueID,
+            issueStatus: shot.issueStatus,
+            captureKind: shot.captureKind,
+            firstCaptureKind: shot.firstCaptureKind,
+            noteText: shot.reason,
+            noteCategory: nil,
+            originalFilename: originalFilename,
+            originalRelativePath: originalRelativePath,
+            originalByteSize: shot.byteSize,
+            storageBucket: shot.storageBucket,
+            storagePath: shot.storagePath,
+            checksumSHA256: shot.checksumSHA256,
+            byteSize: shot.byteSize,
+            uploadState: shot.uploadState,
+            uploadAttempts: shot.uploadAttempts,
+            lastUploadError: shot.lastUploadError,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            exifOrientation: nil,
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            imageWidth: shot.imageWidth,
+            imageHeight: shot.imageHeight
+        )
+        return metadata
+    }
+
+    private func fetchFastRuntimeReportPackageShots(
+        client: SupabaseClient,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async throws -> [SupabaseShotStorageRecord] {
+        try await client
+            .from("shots")
+            .select(
+                """
+                id,
+                org_id,
+                property_id,
+                session_id,
+                created_at,
+                updated_at,
+                updated_by,
+                revision,
+                deleted_at,
+                building,
+                elevation,
+                detail_type,
+                angle_index,
+                shot_key,
+                logical_shot_identity,
+                capture_kind,
+                first_capture_kind,
+                is_guided,
+                is_flagged,
+                issue_id,
+                issue_status,
+                trade,
+                reason,
+                priority,
+                capture_mode,
+                lens,
+                latitude,
+                longitude,
+                accuracy_meters,
+                image_width,
+                image_height,
+                lifecycle_state,
+                retired_at,
+                retired_reason,
+                retired_by,
+                superseded_by_shot_id,
+                supersedes_shot_id,
+                replacement_reason,
+                hidden_from_reports,
+                hidden_from_gallery,
+                lifecycle_updated_at,
+                storage_bucket,
+                storage_path,
+                checksum_sha256,
+                byte_size,
+                upload_state,
+                upload_attempts,
+                last_upload_error
+                """
+            )
+            .eq("session_id", value: sessionID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .execute()
+            .value
+    }
+
+    private func repairFastRuntimeReportRemoteShotCaptureKindsIfNeeded(
+        client: SupabaseClient,
+        session: FastRuntimeReportRemoteSessionRecord,
+        shots: [SupabaseShotStorageRecord],
+        sessionType: SessionType,
+        actorUserID: UUID?,
+        actorEmail: String?
+    ) async throws -> Bool {
+        var repairedShotIDs: [UUID] = []
+        let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: session.propertyID)
+        for (index, shot) in shots.sorted(by: fastRuntimeReportShotSort).enumerated() {
+            guard shot.orgID == session.orgID,
+                  shot.propertyID == session.propertyID,
+                  shot.sessionID == session.id,
+                  shot.deletedAt == nil else {
+                continue
+            }
+            let localObservation = shot.issueID.flatMap { localObservationByIssueID[$0] }
+            let currentCaptureKind = normalizedSupabaseText(shot.captureKind)?.lowercased()
+            let expectedCaptureKind = fastRuntimeProductionCaptureKind(
+                sessionType: sessionType,
+                metadataContext: FastRuntimeCaptureMetadataContext(
+                    captureProfile: session.captureProfile,
+                    locationMode: nil,
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    trade: shot.trade,
+                    detailNote: shot.reason,
+                    priority: shot.priority,
+                    angleIndex: shot.angleIndex ?? max(1, index + 1),
+                    shotKey: shot.shotKey,
+                    isGuided: shot.isGuided,
+                    isFlagged: shot.isFlagged,
+                    issueID: shot.issueID,
+                    issueStatus: shot.issueStatus,
+                    captureIntentSource: nil
+                ),
+                localObservation: localObservation,
+                fallbackCaptureKind: shot.captureKind
+            )
+            let expectedIssueStatus = localObservation?.status.issueStatusValue
+            let expectedReason = localObservation.flatMap {
+                Observation.inferredCurrentReason(note: $0.currentReason ?? $0.note, statement: $0.statement)
+            }
+            let expectedPriority = localObservation?.priority
+            let expectedTrade = localObservation?.trade
+            let captureKindNeedsRepair = currentCaptureKind != expectedCaptureKind &&
+                fastRuntimeReportCaptureKindCanNormalize(currentCaptureKind)
+            let issueWorkflowNeedsRepair: Bool = {
+                guard localObservation != nil else { return false }
+                if normalizedSupabaseText(shot.issueStatus)?.lowercased() != expectedIssueStatus?.lowercased() {
+                    return true
+                }
+                if normalizedSupabaseText(shot.reason) != normalizedSupabaseText(expectedReason) {
+                    return true
+                }
+                if normalizedSupabaseText(shot.priority) != normalizedSupabaseText(expectedPriority) {
+                    return true
+                }
+                if normalizedSupabaseText(shot.trade) != normalizedSupabaseText(expectedTrade) {
+                    return true
+                }
+                if shot.isFlagged != true {
+                    return true
+                }
+                return false
+            }()
+            guard captureKindNeedsRepair || issueWorkflowNeedsRepair else {
+                continue
+            }
+            var metadata = makeFastRuntimeReportPackageShotMetadata(
+                session: session,
+                shot: shot,
+                sessionType: sessionType,
+                position: index,
+                actorUserID: actorUserID,
+                actorEmail: actorEmail
+            )
+            metadata.captureKind = expectedCaptureKind
+            if let localObservation {
+                metadata.isFlagged = true
+                metadata.issueID = localObservation.id
+                metadata.issueStatus = expectedIssueStatus
+                metadata.noteText = expectedReason ?? metadata.noteText
+                metadata.priority = expectedPriority ?? metadata.priority
+                metadata.trade = expectedTrade ?? metadata.trade
+            }
+            if metadata.firstCaptureKind == nil {
+                metadata.firstCaptureKind = "captured"
+            }
+            try await updateShotRichMetadataRow(
+                client: client,
+                orgID: session.orgID,
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                shot: metadata
+            )
+            repairFastRuntimeLocalSessionShotWorkflowMetadata(
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                shotID: shot.id,
+                captureKind: expectedCaptureKind,
+                observation: localObservation
+            )
+            repairedShotIDs.append(shot.id)
+        }
+        if !repairedShotIDs.isEmpty {
+            print(
+                "[FastLanePendingExportRepair] result=remote_capture_kind_normalized " +
+                "sessionID=\(session.id.uuidString) " +
+                "shotIDs=\(repairedShotIDs.map { $0.uuidString }.joined(separator: ","))"
+            )
+        }
+        return !repairedShotIDs.isEmpty
+    }
+
+    private func fastRuntimeReportCaptureKindCanNormalize(_ value: String?) -> Bool {
+        guard let value else { return true }
+        return [
+            "captured",
+            "follow_up_capture",
+            "resolved_capture",
+            "retake"
+        ].contains(value)
+    }
+
+    private func fastRuntimeReportAllowedCaptureKinds(
+        sessionType: SessionType,
+        shot: SupabaseShotStorageRecord
+    ) -> Set<String> {
+        let defaultKind = sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
+        let issueStatus = normalizedSupabaseText(shot.issueStatus)?.lowercased()
+        let isIssueShot = shot.isFlagged == true || shot.issueID != nil || issueStatus != nil
+        var allowed = Set([defaultKind])
+        guard isIssueShot else { return allowed }
+        allowed.insert("follow_up_capture")
+        allowed.insert("retake")
+        if issueStatus == Observation.Status.pendingReview.issueStatusValue ||
+            issueStatus == Observation.Status.resolved.issueStatusValue {
+            allowed.insert("resolved_capture")
+        }
+        return allowed
+    }
+
+    private func fastRuntimeReportPreferredCaptureKind(
+        sessionType: SessionType,
+        shot: SupabaseShotStorageRecord
+    ) -> String {
+        let issueStatus = normalizedSupabaseText(shot.issueStatus)?.lowercased()
+        if issueStatus == Observation.Status.pendingReview.issueStatusValue ||
+            issueStatus == Observation.Status.resolved.issueStatusValue {
+            return "resolved_capture"
+        }
+        if shot.isFlagged == true || shot.issueID != nil || issueStatus != nil {
+            return "follow_up_capture"
+        }
+        return sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
+    }
+
+    private func repairFastRuntimeLocalSessionShotCaptureKind(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        captureKind: String
+    ) {
+        guard var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+              let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
+            return
+        }
+        guard metadata.shots[index].captureKind != captureKind else { return }
+        metadata.shots[index].captureKind = captureKind
+        if metadata.shots[index].firstCaptureKind == nil {
+            metadata.shots[index].firstCaptureKind = "captured"
+        }
+        metadata.shots[index].updatedAt = Date()
+        try? localStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata
+        )
+    }
+
+    private func repairFastRuntimeLocalSessionShotWorkflowMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        captureKind: String,
+        observation: Observation?
+    ) {
+        guard var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+              let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
+            return
+        }
+        let before = metadata.shots[index]
+        metadata.shots[index].captureKind = captureKind
+        if metadata.shots[index].firstCaptureKind == nil {
+            metadata.shots[index].firstCaptureKind = "captured"
+        }
+        if let observation {
+            metadata.shots[index].isFlagged = true
+            metadata.shots[index].issueID = observation.id
+            metadata.shots[index].issueStatus = observation.status.issueStatusValue
+            if let reason = Observation.inferredCurrentReason(
+                note: observation.currentReason ?? observation.note,
+                statement: observation.statement
+            ) {
+                metadata.shots[index].noteText = reason
+            }
+            metadata.shots[index].priority = observation.priority ?? metadata.shots[index].priority
+            metadata.shots[index].trade = observation.trade ?? metadata.shots[index].trade
+        }
+        metadata.shots[index].updatedAt = Date()
+        guard metadata.shots[index] != before else { return }
+        try? localStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata
+        )
+    }
+
+    private func fastRuntimeReportShotSort(
+        _ lhs: SupabaseShotStorageRecord,
+        _ rhs: SupabaseShotStorageRecord
+    ) -> Bool {
+        let lhsPosition = lhs.angleIndex ?? lhs.revision.flatMap { Int($0) } ?? 0
+        let rhsPosition = rhs.angleIndex ?? rhs.revision.flatMap { Int($0) } ?? 0
+        if lhsPosition != rhsPosition { return lhsPosition < rhsPosition }
+        if lhs.createdAt != rhs.createdAt { return (lhs.createdAt ?? .distantPast) < (rhs.createdAt ?? .distantPast) }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private func fastRuntimeReportPackagePDFPath(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        packageID: UUID,
+        reportType: String
+    ) -> String {
+        [
+            "orgs/\(orgID.uuidString.lowercased())",
+            "properties/\(propertyID.uuidString.lowercased())",
+            "sessions/\(sessionID.uuidString.lowercased())",
+            "packages/\(packageID.uuidString.lowercased())",
+            "pdfs/\(reportType).pdf"
+        ].joined(separator: "/")
+    }
+
+    private func fastRuntimeLocalObservationByIssueID(propertyID: UUID) -> [UUID: Observation] {
+        guard canAccessProperty(propertyID),
+              let observations = try? localStore.fetchObservations(propertyID: propertyID) else {
+            return [:]
+        }
+        var mapped: [UUID: Observation] = [:]
+        for observation in observations {
+            mapped[observation.id] = observation
+        }
+        return mapped
+    }
+
+    private func fastRuntimeProductionCaptureKind(
+        sessionType: SessionType,
+        metadataContext: FastRuntimeCaptureMetadataContext,
+        localObservation: Observation?,
+        fallbackCaptureKind: String?
+    ) -> String {
+        let fallback = normalizedSupabaseText(fallbackCaptureKind)
+            ?? (sessionType == .punchlistVisit ? "follow_up_capture" : "captured")
+        let issueStatus = (localObservation?.status.issueStatusValue ?? metadataContext.issueStatus)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let intentSource = metadataContext.captureIntentSource?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if issueStatus == Observation.Status.pendingReview.issueStatusValue ||
+            issueStatus == Observation.Status.resolved.issueStatusValue {
+            return "resolved_capture"
+        }
+        if intentSource == "retake" || fallback.lowercased() == "retake" {
+            return "retake"
+        }
+        if metadataContext.issueID != nil || metadataContext.isFlagged == true {
+            if intentSource == "flagged" || intentSource == "resolution" {
+                return "follow_up_capture"
+            }
+            if sessionType == .punchlistVisit {
+                return "follow_up_capture"
+            }
+        }
+        return fallback
+    }
+
+    private func makeFastRuntimeCompleteSessionMetadata(
+        context: ActiveCaptureContext,
+        dryRun: FastRuntimeCompleteDryRunResult,
+        property: Property?,
+        completedAt: Date,
+        localObservationByIssueID: [UUID: Observation]? = nil
+    ) -> SessionMetadata {
+        let offsetSeconds = TimeZone.current.secondsFromGMT(for: context.createdAt)
+        let offsetMinutes = offsetSeconds / 60
+        let sign = offsetSeconds >= 0 ? "+" : "-"
+        let absoluteMinutes = abs(offsetMinutes)
+        let offsetString = String(format: "%@%02d:%02d", sign, absoluteMinutes / 60, absoluteMinutes % 60)
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        let versionString = [appVersion, buildNumber].compactMap { normalizedSupabaseText($0) }.joined(separator: " (")
+        let displayVersion = versionString.isEmpty ? "fast-lane-experimental" : versionString + (buildNumber == nil ? "" : ")")
+        let shots = dryRun.shots.map {
+            makeFastRuntimeCompleteShotMetadata(
+                context: context,
+                dryRunShot: $0,
+                position: dryRun.shots.firstIndex(of: $0) ?? 0,
+                originalFilename: URL(fileURLWithPath: $0.resolvedLocalFilePath ?? $0.originalRelativePath).lastPathComponent,
+                byteSize: $0.byteSize.flatMap { Int(exactly: $0) },
+                checksumSHA256: nil,
+                storagePath: nil,
+                localObservationByIssueID: localObservationByIssueID
+            )
+        }
+        let issues = fastRuntimeCompleteIssueMetadata(
+            from: shots,
+            localObservationByIssueID: localObservationByIssueID,
+            fallbackDate: completedAt
+        )
+        return SessionMetadata(
+            schemaVersion: 12,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            sessionType: context.sessionType,
+            orgID: context.orgID,
+            propertyNameAtCapture: property?.name,
+            propertyNameAtExport: property?.name,
+            primaryContactNameAtCapture: property?.clientName,
+            primaryContactEmailAtCapture: property?.clientEmail,
+            propertyAddressAtCapture: property?.address,
+            propertyStreetAtCapture: property?.street,
+            propertyCityAtCapture: property?.city,
+            propertyStateAtCapture: property?.state,
+            propertyZipAtCapture: property?.zip,
+            propertyPhoneAtCapture: property?.clientPhone,
+            timeZoneIdentifierAtCapture: TimeZone.current.identifier,
+            timeZoneOffsetAtCapture: offsetString,
+            timeZoneOffsetMinutesAtCapture: offsetMinutes,
+            captureProfile: property?.captureProfile?.rawValue,
+            capturedByUserID: context.ownerUserID,
+            capturedByEmail: context.ownerEmail,
+            uploadedByUserID: authenticatedSupabaseUser?.id,
+            uploadedByEmail: authenticatedSupabaseUser?.email,
+            actorUserID: authenticatedSupabaseUser?.id ?? context.ownerUserID,
+            actorEmail: authenticatedSupabaseUser?.email ?? context.ownerEmail,
+            startedAt: context.createdAt,
+            sessionStartedAtLocal: context.createdAt.formatted(date: .numeric, time: .standard),
+            endedAt: completedAt,
+            sessionEndedAtLocal: completedAt.formatted(date: .numeric, time: .standard),
+            status: .completed,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: true,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil,
+            appVersion: displayVersion,
+            deviceModel: "fast-lane",
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            shots: shots,
+            issues: issues,
+            guidedShots: []
+        )
+    }
+
+    private func fastRuntimeCompleteIssueMetadata(
+        from shots: [ShotMetadata],
+        localObservationByIssueID: [UUID: Observation]?,
+        fallbackDate: Date
+    ) -> [IssueMetadata] {
+        guard let localObservationByIssueID, !localObservationByIssueID.isEmpty else { return [] }
+        var seen = Set<UUID>()
+        var issues: [IssueMetadata] = []
+
+        for shot in shots {
+            guard let issueID = shot.issueID,
+                  seen.insert(issueID).inserted,
+                  let observation = localObservationByIssueID[issueID] else {
+                continue
+            }
+            let reason = Observation.inferredCurrentReason(
+                note: observation.currentReason ?? observation.note,
+                statement: observation.statement
+            )
+            let status = observation.status.issueStatusValue
+            let isTerminalReviewState = observation.status == .pendingReview || observation.status == .resolved
+            issues.append(IssueMetadata(
+                issueID: issueID,
+                issueStatus: status,
+                currentReason: reason,
+                previousReason: normalizedSupabaseText(observation.previousReason),
+                firstSeenAt: observation.createdAt,
+                firstSeenAtLocal: nil,
+                lastSeenAt: observation.updatedAt,
+                lastSeenAtLocal: nil,
+                resolvedAt: isTerminalReviewState ? observation.updatedAt : nil,
+                resolvedAtLocal: nil,
+                lastCaptureSessionId: observation.resolvedInSessionID ?? observation.updatedInSessionID ?? shot.sessionID,
+                detailNote: reason,
+                shotKey: shot.shotKey,
+                historyEvents: []
+            ))
+        }
+
+        return issues.sorted {
+            ($0.lastSeenAt ?? fallbackDate) == ($1.lastSeenAt ?? fallbackDate)
+                ? $0.issueID.uuidString < $1.issueID.uuidString
+                : ($0.lastSeenAt ?? fallbackDate) < ($1.lastSeenAt ?? fallbackDate)
+        }
+    }
+
+    private func makeFastRuntimeCompleteShotMetadata(
+        context: ActiveCaptureContext,
+        dryRunShot: FastRuntimeCompleteDryRunShotSummary,
+        position: Int,
+        originalFilename: String,
+        byteSize: Int?,
+        checksumSHA256: String?,
+        storagePath: String?,
+        localObservationByIssueID: [UUID: Observation]? = nil
+    ) -> ShotMetadata {
+        let metadataContext = Self.normalizedFastRuntimeMetadataContext(
+            dryRunShot.metadataContext,
+            fallbackLocationMode: dryRunShot.captureLocationMode,
+            fallbackPosition: position + 1
+        )
+        let localObservation = metadataContext.issueID.flatMap { localObservationByIssueID?[$0] }
+        let observationReason = localObservation.flatMap {
+            Observation.inferredCurrentReason(note: $0.currentReason ?? $0.note, statement: $0.statement)
+        }
+        let issueStatus = localObservation?.status.issueStatusValue
+            ?? metadataContext.issueStatus
+            ?? (metadataContext.detailNote == nil ? nil : "active")
+        let issuePriority = localObservation?.priority ?? metadataContext.priority
+        let issueReason = observationReason ?? metadataContext.detailNote
+        let isFlagged = localObservation.map { _ in true }
+            ?? (metadataContext.isFlagged ?? (metadataContext.detailNote != nil))
+        let captureKind = fastRuntimeProductionCaptureKind(
+            sessionType: context.sessionType,
+            metadataContext: metadataContext,
+            localObservation: localObservation,
+            fallbackCaptureKind: dryRunShot.captureKind
+        )
+        return ShotMetadata(
+            shotID: dryRunShot.id,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            createdAt: dryRunShot.capturedAt,
+            capturedAtLocal: dryRunShot.capturedAt.formatted(date: .numeric, time: .standard),
+            updatedAt: Date(),
+            capturedByUserID: context.ownerUserID,
+            capturedByEmail: context.ownerEmail,
+            uploadedByUserID: authenticatedSupabaseUser?.id,
+            uploadedByEmail: authenticatedSupabaseUser?.email,
+            building: metadataContext.building,
+            elevation: metadataContext.elevation,
+            detailType: metadataContext.detailType,
+            angleIndex: metadataContext.angleIndex,
+            trade: metadataContext.trade,
+            priority: issuePriority,
+            shotKey: metadataContext.shotKey,
+            isGuided: metadataContext.isGuided ?? false,
+            isFlagged: isFlagged,
+            issueID: metadataContext.issueID,
+            issueStatus: issueStatus,
+            captureKind: captureKind,
+            firstCaptureKind: "captured",
+            noteText: issueReason,
+            noteCategory: nil,
+            originalFilename: originalFilename,
+            originalRelativePath: dryRunShot.originalRelativePath,
+            originalByteSize: byteSize,
+            storageBucket: storagePath == nil ? nil : supabaseOperationalMediaBucket,
+            storagePath: storagePath,
+            checksumSHA256: checksumSHA256,
+            byteSize: byteSize,
+            uploadState: storagePath == nil ? "pending" : "uploaded",
+            uploadAttempts: storagePath == nil ? 0 : 1,
+            lastUploadError: nil,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+    }
+
+    private func prototypeStatusIsCurrentUserOccupiedByThisClient(
+        _ status: LightweightPropertyEntryStatus
+    ) -> Bool {
+        guard status.entryState == .lockedByCurrentUser,
+              normalizedSupabaseText(status.reason) == "current_user_occupied" else {
+            return false
+        }
+        let userMatches = status.lockedByUserID != nil && status.lockedByUserID == authenticatedSupabaseUser?.id
+        let deviceMatches = normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier()
+        return userMatches || deviceMatches
+    }
+
+    private func prototypeStatusIsCurrentUserOccupiedByThisDevice(
+        _ status: LightweightPropertyEntryStatus
+    ) -> Bool {
+        guard status.entryState == .lockedByCurrentUser,
+              normalizedSupabaseText(status.reason) == "current_user_occupied",
+              normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier() else {
+            return false
+        }
+        if let lockedByUserID = status.lockedByUserID {
+            return lockedByUserID == authenticatedSupabaseUser?.id
+        }
+        return true
+    }
+
+    private func fastRuntimeDraftBadgeSummary(
+        for propertyID: UUID,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> FastRuntimeDraftSummary? {
+        guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
+              summary.photoCount > 0 else {
+            return nil
+        }
+        if let ownerDeviceID = normalizedSupabaseText(summary.ownerDeviceID),
+           ownerDeviceID == currentDeviceID {
+            return summary
+        }
+        if let ownerUserID = summary.ownerUserID,
+           ownerUserID == currentUserID {
+            return summary
+        }
+        return nil
+    }
+
+    func fastRuntimeDraftResumeState(for propertyID: UUID) -> FastRuntimeDraftResumeState? {
+        let property = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let propertyName = property?.name ?? propertyID.uuidString
+        guard let draftSummary = fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: authenticatedSupabaseUser?.id,
+            currentDeviceID: currentDeviceIdentifier()
+        ) else {
+            return nil
+        }
+
+        let resolvedDraft = Self.resolvedFastRuntimeDraftStorage(for: draftSummary)
+        let summary = resolvedDraft.summary
+        if resolvedDraft.didRelocate {
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts[propertyID] = summary
+            if (try? Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))) != nil {
+                fastRuntimeDraftsByPropertyID = nextDrafts
+            }
+        }
+
+        let storageRoot = resolvedDraft.storageRoot
+        let metadataURL = resolvedDraft.metadataURL
+        guard FileManager.default.fileExists(atPath: storageRoot.path) else {
+            return FastRuntimeDraftResumeState(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                summary: summary,
+                context: nil,
+                storageRoot: nil,
+                errorMessage: "Fast-lane draft folder is missing."
+            )
+        }
+        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
+            return FastRuntimeDraftResumeState(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                summary: summary,
+                context: nil,
+                storageRoot: storageRoot,
+                errorMessage: "Fast-lane draft metadata is missing."
+            )
+        }
+
+        return FastRuntimeDraftResumeState(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            summary: summary,
+            context: ActiveCaptureContext(
+                sessionID: summary.sessionID,
+                propertyID: summary.propertyID,
+                orgID: summary.orgID,
+                sessionType: summary.sessionType,
+                ownerUserID: summary.ownerUserID,
+                ownerEmail: summary.ownerEmail,
+                ownerDeviceID: summary.ownerDeviceID,
+                createdAt: summary.createdAt,
+                status: .draft,
+                statusReason: "fast_runtime_draft_resume"
+            ),
+            storageRoot: storageRoot,
+            errorMessage: nil
+        )
+    }
+
+    func clearFastRuntimePrototypeState() async -> FastRuntimePrototypeCleanupResult {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let indexedSummaries = Array(fastRuntimeDraftsByPropertyID.values)
+        let indexedContexts = indexedSummaries.compactMap { summary -> ActiveCaptureContext? in
+            guard fastRuntimeContextIsOwnedByCurrentActor(
+                ownerUserID: summary.ownerUserID,
+                ownerDeviceID: summary.ownerDeviceID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            ) else {
+                return nil
+            }
+            return ActiveCaptureContext(
+                sessionID: summary.sessionID,
+                propertyID: summary.propertyID,
+                orgID: summary.orgID,
+                sessionType: summary.sessionType,
+                ownerUserID: summary.ownerUserID,
+                ownerEmail: summary.ownerEmail,
+                ownerDeviceID: summary.ownerDeviceID,
+                createdAt: summary.createdAt,
+                status: .draft,
+                statusReason: "fast_runtime_cleanup_index"
+            )
+        }
+        let tempContexts = Self.loadFastRuntimePrototypeTempContexts()
+            .filter {
+                fastRuntimeContextIsOwnedByCurrentActor(
+                    ownerUserID: $0.ownerUserID,
+                    ownerDeviceID: $0.ownerDeviceID,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
+            }
+        let releaseContexts = Dictionary(
+            grouping: indexedContexts + tempContexts,
+            by: { "\($0.propertyID.uuidString):\($0.sessionID.uuidString)" }
+        )
+        .compactMap { $0.value.first }
+
+        var releaseMessages: [String] = []
+        var releaseSuccessCount = 0
+        for context in releaseContexts {
+            let release = await releaseFastRuntimePrototypeClaim(context: context)
+            if release.didRelease {
+                releaseSuccessCount += 1
+            }
+            releaseMessages.append(
+                "\(context.propertyID.uuidString.prefix(8))/\(context.sessionID.uuidString.prefix(8)):\(release.didRelease ? "released" : "not_released")"
+            )
+        }
+
+        let deleteResult = Self.deleteFastRuntimePrototypeStorageRoots()
+        fastRuntimeDraftsByPropertyID = [:]
+
+        return FastRuntimePrototypeCleanupResult(
+            indexDeleted: deleteResult.indexDeleted,
+            draftFolderDeleted: deleteResult.draftFolderDeleted,
+            tempFoldersDeletedCount: deleteResult.tempFoldersDeletedCount,
+            claimReleaseAttemptCount: releaseContexts.count,
+            claimReleaseSuccessCount: releaseSuccessCount,
+            claimReleaseMessages: releaseMessages
+        )
+    }
+
+    private func fastRuntimeContextIsOwnedByCurrentActor(
+        ownerUserID: UUID?,
+        ownerDeviceID: String?,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> Bool {
+        if let ownerDeviceID = normalizedSupabaseText(ownerDeviceID),
+           ownerDeviceID == currentDeviceID {
+            return true
+        }
+        if let ownerUserID,
+           ownerUserID == currentUserID {
+            return true
+        }
+        return false
+    }
+
+    nonisolated private static func normalizedFastRuntimeLocationMode(_ value: String?) -> String {
+        let normalized = (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalized {
+        case "interior":
+            return "Interior"
+        case "exterior":
+            return "Exterior"
+        default:
+            return "Exterior"
+        }
+    }
+
+    nonisolated fileprivate static func normalizedFastRuntimeMetadataText(_ value: String?, fallback: String) -> String {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    nonisolated private static func makeFastRuntimeMetadataShotKey(
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int
+    ) -> String {
+        func normalize(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+        return "\(normalize(building))|\(normalize(normalizedElevation))|\(normalize(detailType))|\(max(1, angleIndex))"
+    }
+
+    nonisolated static func normalizedFastRuntimeMetadataContext(
+        _ value: FastRuntimeCaptureMetadataContext?,
+        fallbackLocationMode: String? = nil,
+        fallbackPosition: Int = 1
+    ) -> FastRuntimeCaptureMetadataContext {
+        FastRuntimeCaptureMetadataContext(
+            captureProfile: value?.captureProfile,
+            locationMode: value?.locationMode ?? fallbackLocationMode,
+            building: value?.building,
+            elevation: value?.elevation,
+            detailType: value?.detailType,
+            trade: value?.trade,
+            detailNote: value?.detailNote,
+            priority: value?.priority,
+            angleIndex: value?.angleIndex ?? fallbackPosition,
+            shotKey: value?.shotKey,
+            isGuided: value?.isGuided,
+            isFlagged: value?.isFlagged,
+            issueID: value?.issueID,
+            issueStatus: value?.issueStatus,
+            captureIntentSource: value?.captureIntentSource
+        )
+    }
+
+    nonisolated static func normalizedFastRuntimePriority(_ value: String?) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch trimmed.lowercased() {
+        case "low":
+            return "Low"
+        case "medium":
+            return "Medium"
+        case "high":
+            return "High"
+        case "critical":
+            return "Critical"
+        default:
+            return ""
+        }
+    }
+
+    nonisolated private static func fastRuntimeMetadataContextForCapture(
+        _ value: FastRuntimeCaptureMetadataContext?,
+        existingShots: [FastRuntimePrototypeShotRecord]
+    ) -> FastRuntimeCaptureMetadataContext {
+        let normalized = normalizedFastRuntimeMetadataContext(value)
+        if let source = normalized.captureIntentSource?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           source != "free" {
+            return normalized
+        }
+        let maxExistingAngle = existingShots.compactMap { shot -> Int? in
+            let shotContext = normalizedFastRuntimeMetadataContext(
+                shot.metadataContext,
+                fallbackLocationMode: shot.captureLocationMode
+            )
+            guard shotContext.building.caseInsensitiveCompare(normalized.building) == .orderedSame,
+                  shotContext.elevation.caseInsensitiveCompare(normalized.elevation) == .orderedSame,
+                  shotContext.detailType.caseInsensitiveCompare(normalized.detailType) == .orderedSame else {
+                return nil
+            }
+            return max(1, shotContext.angleIndex)
+        }.max() ?? 0
+        return normalized.withAngleIndex(max(maxExistingAngle + 1, normalized.angleIndex))
+    }
+
+    private func prepareFastRuntimePrototypeTempStorage(context: ActiveCaptureContext) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
+            .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+        try prepareFastRuntimePrototypeStorage(at: root, context: context)
+        return root
+    }
+
+    private func prepareFastRuntimePrototypeStorage(at root: URL, context: ActiveCaptureContext) throws {
+        let fileManager = FileManager.default
+        let originals = root.appendingPathComponent("Originals", isDirectory: true)
+        let stamped = root.appendingPathComponent("Stamped", isDirectory: true)
+        let metadata = root.appendingPathComponent("Metadata", isDirectory: true)
+
+        try fileManager.createDirectory(at: originals, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: stamped, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: metadata, withIntermediateDirectories: true)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(context)
+        try data.write(
+            to: metadata.appendingPathComponent("active-capture-context.json", isDirectory: false),
+            options: .atomic
+        )
+    }
+
+    private static func loadFastRuntimeDraftIndexFromDisk() -> [UUID: FastRuntimeDraftSummary] {
+        do {
+            let indexURL = try fastRuntimeDraftIndexURL()
+            guard FileManager.default.fileExists(atPath: indexURL.path) else { return [:] }
+            let data = try Data(contentsOf: indexURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let summaries = try decoder.decode([FastRuntimeDraftSummary].self, from: data)
+            return Dictionary(uniqueKeysWithValues: summaries.map { ($0.propertyID, $0) })
+        } catch {
+            return [:]
+        }
+    }
+
+    private static func loadFastRuntimePrototypeTempContexts() -> [ActiveCaptureContext] {
+        let root = fastRuntimePrototypeTempRootURL()
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var contexts: [ActiveCaptureContext] = []
+        for case let url as URL in enumerator where url.lastPathComponent == "active-capture-context.json" {
+            guard let data = try? Data(contentsOf: url),
+                  let context = try? decoder.decode(ActiveCaptureContext.self, from: data) else {
+                continue
+            }
+            contexts.append(context)
+        }
+        return contexts
+    }
+
+    private static func deleteFastRuntimePrototypeStorageRoots() -> (
+        indexDeleted: Bool,
+        draftFolderDeleted: Bool,
+        tempFoldersDeletedCount: Int
+    ) {
+        let fileManager = FileManager.default
+        var indexDeleted = false
+        var draftFolderDeleted = false
+        var tempFoldersDeletedCount = 0
+
+        if let indexURL = try? fastRuntimeDraftIndexURL(),
+           fileManager.fileExists(atPath: indexURL.path) {
+            indexDeleted = (try? fileManager.removeItem(at: indexURL)) != nil
+        }
+
+        if let draftsRoot = try? fastRuntimeDraftsRootURL(),
+           fileManager.fileExists(atPath: draftsRoot.path) {
+            draftFolderDeleted = (try? fileManager.removeItem(at: draftsRoot)) != nil
+        }
+
+        let tempRoot = fastRuntimePrototypeTempRootURL()
+        if fileManager.fileExists(atPath: tempRoot.path) {
+            tempFoldersDeletedCount = countFastRuntimePrototypeTempFolders(at: tempRoot)
+            try? fileManager.removeItem(at: tempRoot)
+        }
+
+        return (indexDeleted, draftFolderDeleted, tempFoldersDeletedCount)
+    }
+
+    private static func countFastRuntimePrototypeTempFolders(at root: URL) -> Int {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        var count = 0
+        for case let url as URL in enumerator where url.lastPathComponent == "active-capture-context.json" {
+            count += 1
+        }
+        return count
+    }
+
+    private static func persistFastRuntimeDraftStorage(
+        context: ActiveCaptureContext,
+        tempStorageRoot: URL?,
+        photoCount: Int,
+        lastMetadataContext: FastRuntimeCaptureMetadataContext? = nil
+    ) async throws -> FastRuntimeDraftSummary {
+        let stableRoot = try stableFastRuntimeDraftRoot(context: context)
+        return try await Task.detached(priority: .userInitiated) {
+            let fileManager = FileManager.default
+            let parent = stableRoot.deletingLastPathComponent()
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+
+            if fileManager.fileExists(atPath: stableRoot.path) {
+                let tempPath = tempStorageRoot?.standardizedFileURL.path
+                let stablePath = stableRoot.standardizedFileURL.path
+                if tempPath != stablePath {
+                    try fileManager.removeItem(at: stableRoot)
+                }
+            }
+
+            if let tempStorageRoot,
+               fileManager.fileExists(atPath: tempStorageRoot.path),
+               tempStorageRoot.standardizedFileURL.path != stableRoot.standardizedFileURL.path {
+                do {
+                    try fileManager.moveItem(at: tempStorageRoot, to: stableRoot)
+                } catch {
+                    try fileManager.copyItem(at: tempStorageRoot, to: stableRoot)
+                    try? fileManager.removeItem(at: tempStorageRoot)
+                }
+            } else {
+                try fileManager.createDirectory(at: stableRoot, withIntermediateDirectories: true)
+                try fileManager.createDirectory(
+                    at: stableRoot.appendingPathComponent("Originals", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+                try fileManager.createDirectory(
+                    at: stableRoot.appendingPathComponent("Metadata", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
+
+            let metadataPath = stableRoot
+                .appendingPathComponent("Metadata", isDirectory: true)
+                .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+                .path
+            return FastRuntimeDraftSummary(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                orgID: context.orgID,
+                sessionType: context.sessionType,
+                ownerUserID: context.ownerUserID,
+                ownerEmail: context.ownerEmail,
+                ownerDeviceID: context.ownerDeviceID,
+                createdAt: context.createdAt,
+                updatedAt: Date(),
+                photoCount: photoCount,
+                lastLocationMode: Self.normalizedFastRuntimeMetadataContext(lastMetadataContext).locationMode,
+                lastMetadataContext: Self.normalizedFastRuntimeMetadataContext(lastMetadataContext),
+                draftRootPath: stableRoot.path,
+                metadataPath: metadataPath
+            )
+        }.value
+    }
+
+    private static func resolvedFastRuntimeDraftStorage(
+        for summary: FastRuntimeDraftSummary
+    ) -> (
+        summary: FastRuntimeDraftSummary,
+        storageRoot: URL,
+        metadataURL: URL,
+        didRelocate: Bool
+    ) {
+        let indexedRoot = URL(fileURLWithPath: summary.draftRootPath, isDirectory: true)
+        let indexedMetadataURL = URL(fileURLWithPath: summary.metadataPath, isDirectory: false)
+        if FileManager.default.fileExists(atPath: indexedRoot.path) {
+            return (summary, indexedRoot, indexedMetadataURL, false)
+        }
+
+        guard let stableRoot = try? stableFastRuntimeDraftRoot(
+            propertyID: summary.propertyID,
+            sessionID: summary.sessionID
+        ) else {
+            return (summary, indexedRoot, indexedMetadataURL, false)
+        }
+        let stableMetadataURL = fastRuntimeDraftMetadataURL(root: stableRoot)
+        guard FileManager.default.fileExists(atPath: stableRoot.path) else {
+            return (summary, indexedRoot, indexedMetadataURL, false)
+        }
+
+        let relocatedSummary = FastRuntimeDraftSummary(
+            propertyID: summary.propertyID,
+            sessionID: summary.sessionID,
+            orgID: summary.orgID,
+            sessionType: summary.sessionType,
+            ownerUserID: summary.ownerUserID,
+            ownerEmail: summary.ownerEmail,
+            ownerDeviceID: summary.ownerDeviceID,
+            createdAt: summary.createdAt,
+            updatedAt: summary.updatedAt,
+            photoCount: summary.photoCount,
+            lastLocationMode: summary.lastLocationMode,
+            lastMetadataContext: summary.lastMetadataContext,
+            draftRootPath: stableRoot.path,
+            metadataPath: stableMetadataURL.path
+        )
+        return (relocatedSummary, stableRoot, stableMetadataURL, true)
+    }
+
+    private static func removeFastRuntimePrototypeStorage(at root: URL) throws {
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        try FileManager.default.removeItem(at: root)
+    }
+
+    private static func removeFastRuntimeCompletionStorageRoots(
+        storageRoot: URL?,
+        summary: FastRuntimeDraftSummary?,
+        context: ActiveCaptureContext
+    ) -> Int {
+        let candidates = [
+            storageRoot,
+            summary.map { URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) }
+        ]
+        var removed = 0
+        var seenPaths: Set<String> = []
+        for candidate in candidates.compactMap({ $0 }) {
+            let standardized = candidate.standardizedFileURL
+            guard seenPaths.insert(standardized.path).inserted,
+                  isOwnedFastRuntimeStorageRoot(
+                    standardized,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID
+                  ),
+                  FileManager.default.fileExists(atPath: standardized.path) else {
+                continue
+            }
+            if (try? FileManager.default.removeItem(at: standardized)) != nil {
+                removed += 1
+            }
+        }
+        return removed
+    }
+
+    private static func isOwnedFastRuntimeStorageRoot(
+        _ url: URL,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        let path = url.standardizedFileURL.path
+        let property = propertyID.uuidString
+        let session = sessionID.uuidString
+
+        if let draftsRoot = try? fastRuntimeDraftsRootURL().standardizedFileURL.path {
+            let expectedDraft = "\(draftsRoot)/Drafts/\(property)/\(session)"
+            if path == expectedDraft {
+                return true
+            }
+        }
+
+        let tempRoot = fastRuntimePrototypeTempRootURL().standardizedFileURL.path
+        let expectedTemp = "\(tempRoot)/\(property)/\(session)"
+        return path == expectedTemp
+    }
+
+    private static func pruneStaleFastRuntimePrototypeTempStorage(
+        now: Date,
+        excludingSessionID: UUID?,
+        olderThan: TimeInterval
+    ) -> Int {
+        let fileManager = FileManager.default
+        let root = fastRuntimePrototypeTempRootURL()
+        guard let propertyFolders = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        var removed = 0
+        for propertyFolder in propertyFolders {
+            guard (try? propertyFolder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  let sessionFolders = try? fileManager.contentsOfDirectory(
+                    at: propertyFolder,
+                    includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey],
+                    options: [.skipsHiddenFiles]
+                  ) else {
+                continue
+            }
+
+            for sessionFolder in sessionFolders {
+                guard (try? sessionFolder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                    continue
+                }
+                if sessionFolder.lastPathComponent.caseInsensitiveCompare(excludingSessionID?.uuidString ?? "") == .orderedSame {
+                    continue
+                }
+                let values = try? sessionFolder.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+                let ageDate = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
+                guard now.timeIntervalSince(ageDate) >= olderThan else {
+                    continue
+                }
+                if (try? fileManager.removeItem(at: sessionFolder)) != nil {
+                    removed += 1
+                }
+            }
+
+            if let remaining = try? fileManager.contentsOfDirectory(
+                at: propertyFolder,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ), remaining.isEmpty {
+                try? fileManager.removeItem(at: propertyFolder)
+            }
+        }
+        return removed
+    }
+
+    private static func writeFastRuntimeDraftIndexToDisk(_ summaries: [FastRuntimeDraftSummary]) throws {
+        let indexURL = try fastRuntimeDraftIndexURL()
+        try FileManager.default.createDirectory(
+            at: indexURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let sortedSummaries = summaries.sorted {
+            if $0.updatedAt == $1.updatedAt {
+                return $0.propertyID.uuidString < $1.propertyID.uuidString
+            }
+            return $0.updatedAt > $1.updatedAt
+        }
+        let data = try encoder.encode(sortedSummaries)
+        try data.write(to: indexURL, options: .atomic)
+    }
+
+    private static func stableFastRuntimeDraftRoot(context: ActiveCaptureContext) throws -> URL {
+        try stableFastRuntimeDraftRoot(propertyID: context.propertyID, sessionID: context.sessionID)
+    }
+
+    private static func stableFastRuntimeDraftRoot(propertyID: UUID, sessionID: UUID) throws -> URL {
+        try fastRuntimeDraftsRootURL()
+            .appendingPathComponent("Drafts", isDirectory: true)
+            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+    }
+
+    private static func fastRuntimeDraftMetadataURL(root: URL) -> URL {
+        root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+    }
+
+    private static func fastRuntimeDraftIndexURL() throws -> URL {
+        try fastRuntimeDraftsRootURL()
+            .appendingPathComponent("fast-lane-draft-index.json", isDirectory: false)
+    }
+
+    private static func fastRuntimeDraftsRootURL() throws -> URL {
+        try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        .appendingPathComponent("ScoutCaptureFastRuntimeDrafts", isDirectory: true)
+    }
+
+    private static func fastRuntimePrototypeTempRootURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
+    }
+
     func sessionEntryBlock(for status: LightweightPropertyEntryStatus) -> SessionEntryCoordinationBlock? {
         let ownerDescription: String = {
             if let email = normalizedSupabaseText(status.lockedByEmail) {
@@ -41718,7 +48221,12 @@ final class AppState: ObservableObject {
             let context = (status.reason ?? "").contains("draft") ? "draft" : "occupied"
             return SessionEntryCoordinationBlock(
                 ownerDescription: ownerDescription,
-                lockedAt: status.lockedAt,
+                lockedAt: lockPresentationTimestamp(
+                    propertyID: status.propertyID,
+                    sessionID: status.lockSessionID,
+                    context: context,
+                    fallback: status.lockedAt
+                ),
                 blockContext: context
             )
         case .staleClaimable:
@@ -41733,9 +48241,137 @@ final class AppState: ObservableObject {
                 lockedAt: status.lockedAt ?? status.updatedAt,
                 blockContext: "pending_export"
             )
-        case .unlockedAndClaimed, .lockedByCurrentUser, .unknownRequiresFallback:
+        case .lockedByCurrentUser:
+            guard normalizedSupabaseText(status.lockedByDeviceID) != currentDeviceIdentifier() else {
+                return nil
+            }
+            let context = (status.reason ?? "").contains("draft") ? "draft" : "occupied"
+            return SessionEntryCoordinationBlock(
+                ownerDescription: ownerDescription,
+                lockedAt: lockPresentationTimestamp(
+                    propertyID: status.propertyID,
+                    sessionID: status.lockSessionID,
+                    context: context,
+                    fallback: status.lockedAt
+                ),
+                blockContext: context
+            )
+        case .unlockedAndClaimed, .unknownRequiresFallback:
             return nil
         }
+    }
+
+    private func lockPresentationTimestamp(
+        propertyID: UUID,
+        sessionID: UUID?,
+        context: String,
+        fallback: Date?
+    ) -> Date? {
+        guard context == "draft" else {
+            return fallback
+        }
+        if let sessionID,
+           let session = sessions(for: propertyID).first(where: { $0.id == sessionID }) {
+            return session.startedAt
+        }
+        return canonicalDraftSession(for: propertyID, requireCaptures: false)?.startedAt ?? fallback
+    }
+
+    private func cacheLockPresentation(from status: LightweightPropertyEntryStatus, reason: String) {
+        guard let block = sessionEntryBlock(for: status) else { return }
+        var nextLocked = locallyLockedPropertyIDs
+        nextLocked.insert(status.propertyID)
+        locallyLockedPropertyIDs = nextLocked
+
+        guard let orgID = properties.first(where: { $0.id == status.propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == status.propertyID })?.orgId ??
+            activeOrganizationID else {
+            return
+        }
+
+        let recordStatus: PropertyStatusValue
+        switch block.blockContext {
+        case "draft":
+            recordStatus = .draft
+        case "pending_export":
+            recordStatus = .pendingExport
+        default:
+            recordStatus = .occupied
+        }
+
+        let existing = propertyStatusByPropertyID[status.propertyID]
+        let record = PropertyStatusRecord(
+            propertyID: status.propertyID,
+            orgID: orgID,
+            status: recordStatus,
+            activeSessionID: recordStatus == .occupied ? status.lockSessionID : nil,
+            draftSessionID: recordStatus == .draft ? status.lockSessionID : nil,
+            pendingExportSessionID: recordStatus == .pendingExport ? status.lockSessionID : nil,
+            lastExportedSessionID: existing?.lastExportedSessionID,
+            ownerUserID: status.lockedByUserID,
+            ownerDeviceID: normalizedSupabaseText(status.lockedByDeviceID),
+            heartbeatAt: status.lockedAt,
+            updatedAt: status.updatedAt ?? status.lockedAt ?? Date(),
+            updatedBy: status.lockedByUserID,
+            statusReason: reason,
+            revision: existing?.revision ?? 0
+        )
+        var nextStatus = propertyStatusByPropertyID
+        nextStatus[status.propertyID] = record
+        propertyStatusByPropertyID = nextStatus
+        lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
+    }
+
+    func canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+        _ status: LightweightPropertyEntryStatus,
+        propertyID: UUID
+    ) -> Bool {
+        guard status.entryState == .lockedByCurrentUser,
+              status.propertyID == propertyID,
+              status.requiresFallback == false,
+              status.lockSessionID != nil,
+              normalizedSupabaseText(status.reason) == "current_user_occupied" else {
+            return false
+        }
+
+        let userMatches = status.lockedByUserID != nil && status.lockedByUserID == authenticatedSupabaseUser?.id
+        let deviceMatches = normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier()
+        return userMatches || deviceMatches
+    }
+
+    @discardableResult
+    func rebuildLightweightCurrentUserSessionShell(
+        propertyID: UUID,
+        sessionID: UUID,
+        sessionType: SessionType
+    ) -> Session? {
+        guard canAccessProperty(propertyID) else { return nil }
+        let inheritedCaptureProfile = properties.first(where: { $0.id == propertyID })?.captureProfile ??
+            allProperties.first(where: { $0.id == propertyID })?.captureProfile
+        let session = Session(
+            id: sessionID,
+            propertyID: propertyID,
+            sessionType: sessionType,
+            startedAt: Date(),
+            status: .draft,
+            endedAt: nil,
+            exportedAt: nil,
+            captureProfile: inheritedCaptureProfile
+        )
+        selectedPropertyID = propertyID
+        currentSession = session
+        recordDraftSessionReuseDecision(
+            propertyID: propertyID,
+            session: session,
+            decision: "rebuilt_lightweight_current_user_shell",
+            candidateCount: 0,
+            blockedReason: nil,
+            foregroundRefreshReconciliation: "rpc_current_user_occupied_shell_rebuilt_without_availability_scan"
+        )
+        logActiveSession(session)
+        cloudBackupManager?.setCaptureModeActive(true)
+        return session
     }
 
     @MainActor
@@ -41744,18 +48380,66 @@ final class AppState: ObservableObject {
         context: String
     ) async -> PropertyStatusEntryPreflightEvaluation {
         guard let cachedRecord = propertyStatusByPropertyID[propertyID] else {
-            let decision = missingPropertyStatusEntryPreflightDecision()
-            logPropertyStatusEntryPreflight(
-                propertyID: propertyID,
-                decision: decision,
-                context: context
-            )
-            return PropertyStatusEntryPreflightEvaluation(
-                decision: decision,
-                skipCachedPropertyStatusPreflight: false,
-                source: "property_status_missing",
-                reason: "missing_property_status_row"
-            )
+            do {
+                guard let freshRecord = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
+                    let decision = missingPropertyStatusEntryPreflightDecision(
+                        reason: "fresh_read_missing_row"
+                    )
+                    logPropertyStatusEntryPreflight(
+                        propertyID: propertyID,
+                        decision: decision,
+                        context: "\(context)_fresh_missing_cache"
+                    )
+                    return PropertyStatusEntryPreflightEvaluation(
+                        decision: decision,
+                        skipCachedPropertyStatusPreflight: false,
+                        source: "property_status_missing",
+                        reason: "fresh_read_missing_row"
+                    )
+                }
+
+                var nextCache = propertyStatusByPropertyID
+                nextCache[propertyID] = freshRecord
+                propertyStatusByPropertyID = nextCache
+                lastPropertyStatusRefreshAt = Date()
+                reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_fresh_missing_cache")
+
+                let freshDecision = makePropertyStatusEntryPreflightDecision(
+                    propertyID: propertyID,
+                    record: freshRecord
+                )
+                let resolvedFreshDecision = await resolvedPropertyStatusEntryPreflightDecisionOwner(
+                    freshDecision,
+                    record: freshRecord
+                )
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: resolvedFreshDecision,
+                    context: "\(context)_fresh_missing_cache"
+                )
+                return PropertyStatusEntryPreflightEvaluation(
+                    decision: resolvedFreshDecision,
+                    skipCachedPropertyStatusPreflight: false,
+                    source: "property_status_fresh",
+                    reason: "fresh_read_status_\(freshRecord.status.rawValue)"
+                )
+            } catch {
+                let decision = missingPropertyStatusEntryPreflightDecision(
+                    source: "property_status_unverified",
+                    reason: "fresh_read_failed"
+                )
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: decision,
+                    context: "\(context)_fresh_missing_cache_failed"
+                )
+                return PropertyStatusEntryPreflightEvaluation(
+                    decision: decision,
+                    skipCachedPropertyStatusPreflight: false,
+                    source: "property_status_unverified",
+                    reason: "fresh_read_failed"
+                )
+            }
         }
 
         let cachedDecision = makePropertyStatusEntryPreflightDecision(
@@ -41900,12 +48584,18 @@ final class AppState: ObservableObject {
             currentDeviceID: currentDeviceID
         )
         let ownerDescription = propertyStatusEntryOwnerDescription(record: record)
-        let lockedAt = record.heartbeatAt ?? record.updatedAt
+        let occupiedLockedAt = record.heartbeatAt ?? record.updatedAt
+        let draftLockedAt = lockPresentationTimestamp(
+            propertyID: propertyID,
+            sessionID: record.draftSessionID,
+            context: "draft",
+            fallback: record.heartbeatAt ?? record.updatedAt
+        )
         let pendingExportLockedAt = record.updatedAt
 
         let draftHasNoMaterialLocalSession = record.status == .draft &&
             propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
-        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor ||
+        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor &&
             propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
 
         if draftHasNoMaterialLocalSession,
@@ -41962,13 +48652,13 @@ final class AppState: ObservableObject {
             return PropertyStatusEntryPreflightDecision(
                 source: "property_status",
                 decision: "block",
-                reason: "occupied_owned_by_other_actor",
-                block: SessionEntryCoordinationBlock(
-                    ownerDescription: ownerDescription,
-                    lockedAt: lockedAt,
-                    blockContext: "occupied"
+                    reason: "occupied_owned_by_other_actor",
+                    block: SessionEntryCoordinationBlock(
+                        ownerDescription: ownerDescription,
+                        lockedAt: occupiedLockedAt,
+                        blockContext: "occupied"
+                    )
                 )
-            )
         case .draft:
             guard !ownedByCurrentActor else {
                 return PropertyStatusEntryPreflightDecision(
@@ -41984,7 +48674,7 @@ final class AppState: ObservableObject {
                 reason: "draft_owned_by_other_actor",
                 block: SessionEntryCoordinationBlock(
                     ownerDescription: ownerDescription,
-                    lockedAt: lockedAt,
+                    lockedAt: draftLockedAt,
                     blockContext: "draft"
                 )
             )
@@ -42131,16 +48821,16 @@ final class AppState: ObservableObject {
         context: String
     ) {
         if let decision {
-            print(
-                "[PropertyStatusEntry] " +
-                "context=\(context) " +
-                "propertyID=\(propertyID.uuidString) " +
-                "entry_source=\(decision.source) " +
-                "property_status_entry_decision=\(decision.decision) " +
-                "property_status_entry_reason=\(decision.reason) " +
-                "property_status_block_context=\(decision.block?.blockContext ?? "none") " +
+            print([
+                "[PropertyStatusEntry] ",
+                "context=\(context) ",
+                "propertyID=\(propertyID.uuidString) ",
+                "entry_source=\(decision.source) ",
+                "property_status_entry_decision=\(decision.decision) ",
+                "property_status_entry_reason=\(decision.reason) ",
+                "property_status_block_context=\(decision.block?.blockContext ?? "none") ",
                 "legacy_entry_decision_compare=skipped_property_status_present"
-            )
+            ].joined())
         } else {
             print(
                 "[PropertyStatusEntry] " +
@@ -42274,7 +48964,7 @@ final class AppState: ObservableObject {
                     let returnedRecord = try await (try client.rpc(transition.rpcName, params: params))
                         .execute()
                         .value as PropertyStatusRecord
-                    updateLocalPropertyStatusCacheAfterExport(
+                    localCacheApplied = updateLocalPropertyStatusCacheAfterExport(
                         returnedRecord,
                         propertyID: propertyID,
                         sessionID: sessionID,
@@ -42580,12 +49270,13 @@ final class AppState: ObservableObject {
         return true
     }
 
+    @discardableResult
     private func updateLocalPropertyStatusCacheAfterExport(
         _ record: PropertyStatusRecord,
         propertyID: UUID,
         sessionID: UUID,
         reason: String
-    ) {
+    ) -> Bool {
         guard record.propertyID == propertyID,
               record.status == .exported,
               record.lastExportedSessionID == sessionID else {
@@ -42600,7 +49291,7 @@ final class AppState: ObservableObject {
                 "reason=returned_row_not_exported_match " +
                 "statusReason=\(reason)"
             )
-            return
+            return false
         }
         let hadPendingExport = propertyStatusByPropertyID[propertyID]?.status == .pendingExport
         var nextCache = propertyStatusByPropertyID
@@ -42617,6 +49308,7 @@ final class AppState: ObservableObject {
             "had_pending_export_before_update=\(hadPendingExport) " +
             "reason=\(reason)"
         )
+        return true
     }
 
     func fetchPropertyStatusRecord(propertyID: UUID) async throws -> PropertyStatusRecord? {
@@ -43193,7 +49885,7 @@ final class AppState: ObservableObject {
         )
         let draftHasNoMaterialLocalSession = record.status == .draft &&
             propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
-        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor ||
+        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor &&
             propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
 
         if draftHasNoMaterialLocalSession,
@@ -43204,6 +49896,16 @@ final class AppState: ObservableObject {
                 pendingExportCountIncluded: false,
                 entryBlocked: false,
                 deleteEligible: true
+            )
+        }
+        if locallyLockedPropertyIDs.contains(propertyID),
+           record.status == .draft || record.status == .occupied {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .locked,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: true,
+                deleteEligible: false
             )
         }
         if record.status == .pendingExport,
@@ -43394,13 +50096,13 @@ final class AppState: ObservableObject {
         currentUserID: UUID?,
         currentDeviceID: String
     ) -> Bool {
-        if let ownerUserID = record.ownerUserID,
-           ownerUserID == currentUserID {
-            return true
-        }
         if let ownerDeviceID = record.ownerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !ownerDeviceID.isEmpty {
             return ownerDeviceID == currentDeviceID
+        }
+        if let ownerUserID = record.ownerUserID,
+           ownerUserID == currentUserID {
+            return true
         }
         return false
     }
@@ -43477,17 +50179,17 @@ final class AppState: ObservableObject {
                 return nil
             }
             if userDefaults.bool(forKey: "draft_badge_verbose_logging") {
-                print(
-                    "[DraftBadge] propertyID=\(propertyID.uuidString) " +
-                    "sessionID=\(statusDraft.id.uuidString) " +
-                    "visible=true " +
-                    "badge_source=property_status " +
-                    "draft_owner_user=\(propertyStatus.ownerUserID?.uuidString ?? "nil") " +
-                    "draft_owner_device=\(normalizedSupabaseText(propertyStatus.ownerDeviceID) ?? "nil") " +
-                    "current_user=\(currentUserID?.uuidString ?? "nil") " +
-                    "current_device=\(currentDeviceID) " +
+                print([
+                    "[DraftBadge] propertyID=\(propertyID.uuidString) ",
+                    "sessionID=\(statusDraft.id.uuidString) ",
+                    "visible=true ",
+                    "badge_source=property_status ",
+                    "draft_owner_user=\(propertyStatus.ownerUserID?.uuidString ?? "nil") ",
+                    "draft_owner_device=\(normalizedSupabaseText(propertyStatus.ownerDeviceID) ?? "nil") ",
+                    "current_user=\(currentUserID?.uuidString ?? "nil") ",
+                    "current_device=\(currentDeviceID) ",
                     "badge_visibility_reason=property_status_owner_draft"
-                )
+                ].joined())
             }
             return statusDraft
         }
@@ -44089,6 +50791,8 @@ final class AppState: ObservableObject {
     private func performForegroundRemotePropertyRefresh(
         activeSessionCheckpointTrigger: String? = nil
     ) async -> Bool {
+        defer { lastForegroundRemotePropertyRefreshCompletedAt = Date() }
+
         guard let requestedOrganizationID = activeOrganizationID else {
             performLocalPropertyRefreshFallback(
                 orgID: nil,
@@ -44182,6 +50886,12 @@ final class AppState: ObservableObject {
                 propertyIDs: visiblePropertyIDs,
                 reason: "foreground_refresh"
             )
+            Task { @MainActor [weak self] in
+                await self?.refreshLightweightPropertyEntryLocks(
+                    propertyIDs: visiblePropertyIDs,
+                    reason: "foreground_refresh"
+                )
+            }
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
                 outcome: "foreground_success",
@@ -44423,12 +51133,21 @@ final class AppState: ObservableObject {
         ) else {
             return
         }
+        let payloadToApply: PropertyRefreshPayload
+        if let replacingOrganizationID {
+            payloadToApply = mergedBackingRefreshPayload(
+                replacingOrganizationID: replacingOrganizationID,
+                with: payload
+            )
+        } else {
+            payloadToApply = payload
+        }
         applyHubCachePayload(
-            properties: payload.properties,
-            organizations: payload.organizations,
-            caches: payload.caches
+            properties: payloadToApply.properties,
+            organizations: payloadToApply.organizations,
+            caches: payloadToApply.caches
         )
-        lastLiveSyncFingerprint = payload.fingerprint
+        lastLiveSyncFingerprint = payloadToApply.fingerprint
     }
 
     private func wouldApplyRefreshPayloadChangeBackingState(_ payload: PropertyRefreshPayload) -> Bool {
@@ -44522,12 +51241,68 @@ final class AppState: ObservableObject {
         replacingOrganizationID organizationID: UUID,
         with remoteProperties: [Property]
     ) -> [Property] {
-        let remoteIDs = Set(remoteProperties.map(\.id))
+        let localByID = Dictionary(uniqueKeysWithValues: allProperties.map { ($0.id, $0) })
+        let pendingArchiveStateByPropertyID = pendingPropertyArchiveStateByPropertyID(
+            replacingOrganizationID: organizationID
+        )
+        let now = Date()
+        let adjustedRemoteProperties = remoteProperties.map { remote in
+            if let pendingArchiveState = pendingArchiveStateByPropertyID[remote.id] {
+                var preserved = remote
+                preserved.isArchived = pendingArchiveState
+                if let local = localByID[remote.id] {
+                    preserved.updatedAt = max(local.updatedAt, remote.updatedAt)
+                }
+                return preserved
+            }
+
+            guard let local = localByID[remote.id],
+                  local.orgId == organizationID,
+                  local.deletedAt == nil,
+                  remote.deletedAt == nil,
+                  local.isArchived != remote.isArchived,
+                  local.updatedAt > remote.updatedAt,
+                  now.timeIntervalSince(local.updatedAt) <= propertyArchiveLocalPreservationInterval else {
+                return remote
+            }
+
+            var preserved = remote
+            preserved.isArchived = local.isArchived
+            preserved.updatedAt = local.updatedAt
+            return preserved
+        }
+        let remoteIDs = Set(adjustedRemoteProperties.map(\.id))
         let preserved = allProperties.filter { property in
             property.orgId != organizationID ||
-            (property.deletedAt != nil && !remoteIDs.contains(property.id))
+            ((property.deletedAt != nil || property.isArchived) && !remoteIDs.contains(property.id))
         }
-        return (preserved + remoteProperties).sorted(by: Self.propertyIsOrderedBefore)
+        return (preserved + adjustedRemoteProperties).sorted(by: Self.propertyIsOrderedBefore)
+    }
+
+    private func pendingPropertyArchiveStateByPropertyID(
+        replacingOrganizationID organizationID: UUID
+    ) -> [UUID: Bool] {
+        let queued = (try? localStore.fetchQueuedMutations()) ?? []
+        var result: [UUID: (state: Bool, updatedAt: Date)] = [:]
+        for item in queued {
+            guard item.organizationID == organizationID,
+                  item.operation == "upsert_property",
+                  item.acknowledgedAt == nil,
+                  item.status == .pending || item.status == .failed || item.status == .inFlight,
+                  let payload = try? JSONDecoder().decode(
+                    QueuedPropertyMutationPayload.self,
+                    from: item.payloadData
+                  ) else {
+                continue
+            }
+            let propertyID = item.entityID
+            let pendingUpdatedAt = item.updatedAt
+            if let current = result[propertyID], current.updatedAt > pendingUpdatedAt {
+                continue
+            }
+            result[propertyID] = (payload.property.isArchived, pendingUpdatedAt)
+        }
+        return result.mapValues(\.state)
     }
 
     private func mergedBackingOrganizations(
@@ -44670,23 +51445,23 @@ final class AppState: ObservableObject {
                     property: property,
                     metadata: nil
                 )
-                print(
-                    "[PropertyRemoteCreateDiag] event=remote_create_attempt " +
-                    "propertyID=\(property.id.uuidString) " +
-                    "selectedOrganizationID=\(organizationID.uuidString) " +
-                    "payloadOrgID=\(payload.orgID.uuidString) " +
-                    "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
-                    "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
-                    "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
-                    "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
-                    "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
-                    "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
-                    "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
-                    "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
-                    "supabaseClientExists=\(supabaseClient != nil) " +
-                    "organizationContextReady=\(isOrganizationContextReady) " +
+                print([
+                    "[PropertyRemoteCreateDiag] event=remote_create_attempt ",
+                    "propertyID=\(property.id.uuidString) ",
+                    "selectedOrganizationID=\(organizationID.uuidString) ",
+                    "payloadOrgID=\(payload.orgID.uuidString) ",
+                    "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") ",
+                    "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") ",
+                    "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") ",
+                    "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") ",
+                    "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) ",
+                    "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) ",
+                    "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) ",
+                    "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) ",
+                    "supabaseClientExists=\(supabaseClient != nil) ",
+                    "organizationContextReady=\(isOrganizationContextReady) ",
                     "upsertConflictTarget=id"
-                )
+                ].joined())
 
                 let bootstrappedPropertyStatus: PropertyStatusRecord
                 do {
@@ -44835,11 +51610,112 @@ final class AppState: ObservableObject {
     func selectProperty(id: UUID) {
         selectedPropertyID = id
         markPropertyActivated(id: id)
-        beginPropertyOpenFreshnessCheck(propertyID: id)
+        beginPropertyOpenHeaderStatusRefresh(propertyID: id)
     }
 
     func propertyOpenFreshness(for propertyID: UUID) -> PropertyOpenFreshnessSnapshot? {
         propertyOpenFreshnessByPropertyID[propertyID]
+    }
+
+    private func beginPropertyOpenHeaderStatusRefresh(propertyID: UUID) {
+        guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }) else {
+            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                propertyID: propertyID,
+                status: .unknown,
+                checkedAt: Date(),
+                localUpdatedAt: nil,
+                remoteUpdatedAt: nil,
+                remoteRevision: nil,
+                hasUnsyncedLocalPropertyWork: false,
+                reason: "local_property_missing"
+            )
+            return
+        }
+
+        guard isRemotePropertyRefreshEnabled,
+              let activeOrganizationID else {
+            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                propertyID: propertyID,
+                status: .usingLocalCache,
+                checkedAt: Date(),
+                localUpdatedAt: localProperty.updatedAt,
+                remoteUpdatedAt: nil,
+                remoteRevision: nil,
+                hasUnsyncedLocalPropertyWork: false,
+                reason: "remote_scope_unavailable"
+            )
+            return
+        }
+
+        guard !propertyOpenHeaderStatusCheckInFlightPropertyIDs.contains(propertyID) else { return }
+        propertyOpenHeaderStatusCheckInFlightPropertyIDs.insert(propertyID)
+        propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyID: propertyID,
+            status: .checkingCloudStatus,
+            checkedAt: Date(),
+            localUpdatedAt: localProperty.updatedAt,
+            remoteUpdatedAt: nil,
+            remoteRevision: nil,
+            hasUnsyncedLocalPropertyWork: false,
+            reason: "checking_header_status"
+        )
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor in
+                    self.propertyOpenHeaderStatusCheckInFlightPropertyIDs.remove(propertyID)
+                }
+            }
+
+            let hasUnsyncedLocalPropertyWork = Self.hasUnsyncedLocalPropertyWork(
+                propertyID: propertyID,
+                queuedMutations: (try? localStore.fetchQueuedMutations()) ?? []
+            )
+
+            do {
+                let remote = try await fetchRemotePropertyFreshness(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID
+                )
+                let evaluation = Self.evaluatePropertyOpenFreshness(
+                    localPropertyID: localProperty.id,
+                    localOrgID: localProperty.orgId,
+                    localUpdatedAt: localProperty.updatedAt,
+                    localIsArchived: localProperty.isArchived,
+                    activeOrganizationID: activeOrganizationID,
+                    remote: remote,
+                    hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork
+                )
+                await MainActor.run {
+                    self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                        propertyID: propertyID,
+                        status: evaluation.status,
+                        checkedAt: Date(),
+                        localUpdatedAt: localProperty.updatedAt,
+                        remoteUpdatedAt: remote?.updatedAt,
+                        remoteRevision: remote?.revision,
+                        hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+                        reason: "header_status_\(evaluation.reason)"
+                    )
+                }
+            } catch {
+                let status = Self.propertyOpenFreshnessStatusForRemoteFailure(error)
+                await MainActor.run {
+                    self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                        propertyID: propertyID,
+                        status: status,
+                        checkedAt: Date(),
+                        localUpdatedAt: localProperty.updatedAt,
+                        remoteUpdatedAt: nil,
+                        remoteRevision: nil,
+                        hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+                        reason: "header_status_\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                    )
+                }
+            }
+        }
     }
 
     static func shouldRecheckPropertyOpenFreshnessAfterOperationalMediaHydration(
@@ -45715,11 +52591,58 @@ final class AppState: ObservableObject {
             )
         }
 
+        for shot in remoteShots.sorted(by: {
+            if ($0.updatedAt ?? .distantPast) != ($1.updatedAt ?? .distantPast) {
+                return ($0.updatedAt ?? .distantPast) < ($1.updatedAt ?? .distantPast)
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }) {
+            guard (shot.propertyID == nil || shot.propertyID == propertyID),
+                  shot.deletedAt == nil,
+                  let issueID = shot.issueID,
+                  normalizedReplayText(shot.issueStatus) != nil else {
+                continue
+            }
+            let current = overlaysByIssueID[issueID]
+            let shotStatus = Observation.Status.status(from: shot.issueStatus)
+            let shotUpdatedAt = shot.updatedAt ?? shot.createdAt
+            let statusFromShot: Observation.Status
+            let updatedAtFromShot: Date?
+            if let currentStatus = current?.status,
+               (currentStatus == .pendingReview || currentStatus == .resolved),
+               shotStatus == .active {
+                statusFromShot = currentStatus
+                updatedAtFromShot = current?.updatedAt ?? shotUpdatedAt
+            } else if let currentStatus = current?.status,
+                      currentStatus == .active,
+                      (shotStatus == .pendingReview || shotStatus == .resolved),
+                      (current?.updatedAt ?? .distantPast) > (shotUpdatedAt ?? .distantPast) {
+                statusFromShot = currentStatus
+                updatedAtFromShot = current?.updatedAt ?? shotUpdatedAt
+            } else {
+                statusFromShot = shotStatus
+                updatedAtFromShot = shotUpdatedAt ?? current?.updatedAt
+            }
+            overlaysByIssueID[issueID] = PortalPunchlistOperationalOverlay(
+                issueID: issueID,
+                propertyID: propertyID,
+                status: statusFromShot,
+                priority: normalizedReplayText(shot.priority) ?? current?.priority,
+                trade: normalizedReplayText(shot.trade) ?? current?.trade,
+                updatedAt: updatedAtFromShot,
+                shotID: shot.id,
+                building: shot.building ?? current?.building,
+                targetElevation: shot.elevation ?? current?.targetElevation,
+                detailType: shot.detailType ?? current?.detailType,
+                angleIndex: shot.angleIndex ?? current?.angleIndex,
+                shotKey: shot.shotKey ?? current?.shotKey
+            )
+        }
+
         for update in updates.sorted(by: portalPunchlistUpdateSortAscending) {
             guard update.deletedAt == nil,
                   update.propertyID == nil || update.propertyID == propertyID,
-                  let observationID = update.observationID,
-                  candidateObservationIDs.contains(observationID) else {
+                  let observationID = update.observationID else {
                 continue
             }
             let current = overlaysByIssueID[observationID]
@@ -45727,13 +52650,24 @@ final class AppState: ObservableObject {
                 current?.shotID.flatMap { remoteShotsByID[$0] } ??
                 remoteShots.first(where: { $0.issueID == observationID })
             let updateStatus = update.status.map { portalPunchlistOperationalStatus(from: $0) }
+            let statusFromUpdate: Observation.Status
+            let updatedAtFromUpdate: Date?
+            if let currentStatus = current?.status,
+               (currentStatus == .pendingReview || currentStatus == .resolved),
+               updateStatus == .active {
+                statusFromUpdate = currentStatus
+                updatedAtFromUpdate = current?.updatedAt ?? update.updatedAt
+            } else {
+                statusFromUpdate = updateStatus ?? current?.status ?? .active
+                updatedAtFromUpdate = update.updatedAt ?? current?.updatedAt
+            }
             overlaysByIssueID[observationID] = PortalPunchlistOperationalOverlay(
                 issueID: observationID,
                 propertyID: propertyID,
-                status: updateStatus ?? current?.status ?? .active,
+                status: statusFromUpdate,
                 priority: normalizedReplayText(update.priority) ?? current?.priority,
                 trade: normalizedReplayText(update.trade) ?? current?.trade,
-                updatedAt: update.updatedAt ?? current?.updatedAt,
+                updatedAt: updatedAtFromUpdate,
                 shotID: update.shotID ?? current?.shotID,
                 building: shot?.building ?? current?.building,
                 targetElevation: shot?.elevation ?? current?.targetElevation,
@@ -45745,13 +52679,19 @@ final class AppState: ObservableObject {
 
         for activity in activities.sorted(by: portalPunchlistActivitySortAscending) {
             guard activity.deletedAt == nil,
-                  activity.propertyID == nil || activity.propertyID == propertyID,
-                  let observationID = activity.observationID,
-                  candidateObservationIDs.contains(observationID) else {
+                  activity.propertyID == nil || activity.propertyID == propertyID else {
+                continue
+            }
+            let shot = activity.shotID.flatMap { remoteShotsByID[$0] } ??
+                activity.observationID.flatMap { overlaysByIssueID[$0]?.shotID }.flatMap { remoteShotsByID[$0] } ??
+                activity.observationID.flatMap { observationID in
+                    remoteShots.first(where: { $0.issueID == observationID })
+                }
+            guard let observationID = activity.observationID ?? shot?.issueID else {
                 continue
             }
             let current = overlaysByIssueID[observationID]
-            let shot = activity.shotID.flatMap { remoteShotsByID[$0] } ??
+            let resolvedShot = shot ??
                 current?.shotID.flatMap { remoteShotsByID[$0] } ??
                 remoteShots.first(where: { $0.issueID == observationID })
             let nextPriority: String?
@@ -45775,7 +52715,7 @@ final class AppState: ObservableObject {
                 nextStatus = (current?.status == .resolved && statusChange == .resolutionRequired)
                     ? .resolved
                     : statusChange
-                reopensResolved = statusChange == .active
+                reopensResolved = false
             case "completion_rejected":
                 nextPriority = current?.priority
                 nextTrade = current?.trade
@@ -45791,19 +52731,40 @@ final class AppState: ObservableObject {
             default:
                 continue
             }
+            let activityUpdatedAt = activity.createdAt
+            let resolvedStatus = nextStatus ?? current?.status ?? .active
+            let suppressesStaleActivityStatus: Bool
+            if let currentUpdatedAt = current?.updatedAt,
+               let activityUpdatedAt,
+               currentUpdatedAt > activityUpdatedAt,
+               resolvedStatus != current?.status {
+                suppressesStaleActivityStatus = true
+            } else {
+                suppressesStaleActivityStatus = false
+            }
+            let statusFromActivity: Observation.Status
+            let updatedAtFromActivity: Date?
+            if suppressesStaleActivityStatus {
+                statusFromActivity = current?.status ?? resolvedStatus
+                updatedAtFromActivity = current?.updatedAt ?? activityUpdatedAt
+                reopensResolved = false
+            } else {
+                statusFromActivity = resolvedStatus
+                updatedAtFromActivity = activityUpdatedAt ?? current?.updatedAt
+            }
             overlaysByIssueID[observationID] = PortalPunchlistOperationalOverlay(
                 issueID: observationID,
                 propertyID: propertyID,
-                status: nextStatus ?? current?.status ?? .active,
+                status: statusFromActivity,
                 priority: nextPriority,
                 trade: nextTrade,
-                updatedAt: activity.createdAt ?? current?.updatedAt,
+                updatedAt: updatedAtFromActivity,
                 shotID: activity.shotID ?? current?.shotID,
-                building: shot?.building ?? current?.building,
-                targetElevation: shot?.elevation ?? current?.targetElevation,
-                detailType: shot?.detailType ?? current?.detailType,
-                angleIndex: shot?.angleIndex ?? current?.angleIndex,
-                shotKey: shot?.shotKey ?? current?.shotKey,
+                building: resolvedShot?.building ?? current?.building,
+                targetElevation: resolvedShot?.elevation ?? current?.targetElevation,
+                detailType: resolvedShot?.detailType ?? current?.detailType,
+                angleIndex: resolvedShot?.angleIndex ?? current?.angleIndex,
+                shotKey: resolvedShot?.shotKey ?? current?.shotKey,
                 reopensResolved: reopensResolved
             )
         }
@@ -46523,6 +53484,37 @@ final class AppState: ObservableObject {
             )
             return false
         }
+    }
+
+    func fastRuntimeCaptureProfileShouldLock(propertyID: UUID) -> Bool {
+        guard canAccessProperty(propertyID) || selectedPropertyID == propertyID else { return false }
+
+        if properties.first(where: { $0.id == propertyID })?.captureProfile != nil ||
+            allProperties.first(where: { $0.id == propertyID })?.captureProfile != nil ||
+            (selectedProperty?.id == propertyID && selectedProperty?.captureProfile != nil) {
+            return true
+        }
+
+        if let draft = fastRuntimeDraftsByPropertyID[propertyID],
+           draft.photoCount > 0 {
+            return true
+        }
+
+        if let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID),
+           guidedShots.contains(where: { $0.shot != nil }) {
+            return true
+        }
+
+        if let observations = try? localStore.fetchObservations(propertyID: propertyID),
+           observations.contains(where: { observation in
+               observation.linkedShotID != nil ||
+                   !observation.shots.isEmpty ||
+                   observation.guidedShots.contains(where: { $0.shot != nil })
+           }) {
+            return true
+        }
+
+        return false
     }
 
     @discardableResult
@@ -47594,10 +54586,25 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func setPropertyArchived(id: UUID, archived: Bool) -> Bool {
-        guard canAccessProperty(id) else { return false }
-        guard let property = properties.first(where: { $0.id == id }) else { return false }
+        guard let property = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id }) else { return false }
+        let canArchiveOrRestore = canAccessProperty(id) ||
+            (!archived && property.isArchived && scopedArchivedProperties(from: allProperties).contains { $0.id == id })
+        guard canArchiveOrRestore else { return false }
         var updated = property
         updated.isArchived = archived
+        if !archived,
+           requiresAuthentication,
+           let activeOrganizationID,
+           !canAccessOrganization(updated.orgId) {
+            do {
+                try ensureLocalOrganizationExists(for: activeOrganizationID)
+                updated.orgId = activeOrganizationID
+            } catch {
+                hubTransientStatusMessage = "Unable to restore property."
+                return false
+            }
+        }
         do {
             let persisted = try localStore.updateProperty(updated)
             if let idx = allProperties.firstIndex(where: { $0.id == id }) {
@@ -47609,10 +54616,74 @@ final class AppState: ObservableObject {
             }
             let caches = makeHubCaches(for: allProperties)
             applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
-            schedulePhaseBPropertyShadowWrite(for: persisted)
+            schedulePropertyArchiveRemoteWrite(for: persisted)
+            emitPropertyAuditEvent(
+                property: persisted,
+                eventType: archived ? "property.archived" : "property.restored"
+            )
+            hubTransientStatusMessage = archived ? "Property archived." : "Property restored."
             return true
         } catch {
+            hubTransientStatusMessage = archived ? "Unable to archive property." : "Unable to restore property."
             return false
+        }
+    }
+
+    private func schedulePropertyArchiveRemoteWrite(for property: Property) {
+        guard let orgID = property.orgId else {
+            schedulePhaseBPropertyShadowWrite(for: property)
+            return
+        }
+        Task(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            let mutation: LocalStore.QueuedMutation
+            do {
+                guard let builtMutation = try self.makeQueuedPropertyMutation(for: property) else {
+                    print("[PropertyArchive] remote_write_skipped propertyID=\(property.id.uuidString) reason=payload_build_failed")
+                    return
+                }
+                mutation = builtMutation
+                self.enqueueOfflineMutation(mutation, reason: "property_archive_changed")
+                let payload = try JSONDecoder().decode(
+                    QueuedPropertyMutationPayload.self,
+                    from: mutation.payloadData
+                )
+                let canAttemptRemoteWrite =
+                    self.propertyShadowWriteOverride != nil ||
+                    self.remoteMutationPathAvailable(for: orgID)
+                guard canAttemptRemoteWrite else {
+                    print(
+                        "[PropertyArchive] remote_write_deferred " +
+                        "propertyID=\(property.id.uuidString) " +
+                        "orgID=\(orgID.uuidString) " +
+                        "isArchived=\(property.isArchived) " +
+                        "reason=remote_unavailable"
+                    )
+                    return
+                }
+                try await self.performQueuedPropertyRemoteWrite(
+                    property: property,
+                    payload: payload.property
+                )
+                self.removeQueuedMutationIfPresent(
+                    idempotencyKey: mutation.idempotencyKey,
+                    reason: "archive_property_success"
+                )
+                print(
+                    "[PropertyArchive] remote_write_success " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "isArchived=\(property.isArchived)"
+                )
+            } catch {
+                print(
+                    "[PropertyArchive] remote_write_failed " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "isArchived=\(property.isArchived) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -47683,23 +54754,625 @@ final class AppState: ObservableObject {
         return PropertyDataCounts(sessions: sessions, guided: guided, observations: observations)
     }
 
+    func fastRuntimePreviewSideControlCounts(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) -> FastRuntimePreviewSideControlCounts {
+        guard canAccessProperty(propertyID) else {
+            return .empty
+        }
+
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let activeIssueCount = observations.filter { $0.status == .active || $0.status == .resolutionRequired }.count
+
+        let guidedRemainingCount: Int
+        if sessionType == .punchlistVisit {
+            guidedRemainingCount = 0
+        } else {
+            let guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            guidedRemainingCount = guidedRows.filter {
+                !$0.isRetired &&
+                    $0.status != .retired &&
+                    !$0.isCompleted &&
+                    $0.skipReason == nil
+            }.count
+        }
+
+        return FastRuntimePreviewSideControlCounts(
+            resolutionRequiredCount: 0,
+            activeIssueCount: activeIssueCount,
+            guidedRemainingCount: guidedRemainingCount,
+            checklistCount: 0
+        )
+    }
+
+    func fastRuntimePreviewIssueSideControlPayload(propertyID: UUID) -> FastRuntimePreviewSideControlPayload {
+        guard canAccessProperty(propertyID) else {
+            return .empty
+        }
+
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let sortedObservations = observations
+            .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
+            .sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        return FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: [],
+            activeObservations: sortedObservations.filter { $0.status == .active || $0.status == .pendingReview || $0.status == .resolutionRequired },
+            guidedShots: [],
+            retiredGuidedShots: []
+        )
+    }
+
+    func fastRuntimePreviewSideControlPayload(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) -> FastRuntimePreviewSideControlPayload {
+        guard canAccessProperty(propertyID) else {
+            return .empty
+        }
+
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let sortedObservations = observations
+            .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
+            .sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        let active = sortedObservations.filter { $0.status == .active || $0.status == .pendingReview || $0.status == .resolutionRequired }
+
+        guard sessionType != .punchlistVisit else {
+            return FastRuntimePreviewSideControlPayload(
+                resolutionRequiredObservations: [],
+                activeObservations: active,
+                guidedShots: [],
+                retiredGuidedShots: []
+            )
+        }
+
+        let guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let sortedGuidedRows = guidedRows.sorted { lhs, rhs in
+            let lhsTitle = lhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rhsTitle = rhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if lhsTitle != rhsTitle {
+                return lhsTitle.localizedCaseInsensitiveCompare(rhsTitle) == .orderedAscending
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        let activeGuided = sortedGuidedRows.filter { !$0.isRetired && $0.status != .retired }
+        let retiredGuided = sortedGuidedRows.filter { $0.isRetired || $0.status == .retired }
+
+        return FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: [],
+            activeObservations: active,
+            guidedShots: activeGuided,
+            retiredGuidedShots: retiredGuided
+        )
+    }
+
+    private struct FastRuntimeIssueResolvedReference {
+        let shot: ShotMetadata
+        let sessionID: UUID
+        let resolvedPath: String?
+    }
+
+    private func fastRuntimeResolvedIssueReferencesByObservationID(
+        propertyID: UUID
+    ) -> [UUID: FastRuntimeIssueResolvedReference] {
+        let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
+        let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
+        let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
+        var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
+        for sessionID in sessionIDs {
+            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+                continue
+            }
+            for shot in metadata.shots {
+                guard let observationID = shot.issueID else { continue }
+                let issueStatus = (shot.issueStatus ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let captureKind = (shot.captureKind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let isResolvedEvidence = issueStatus == Observation.Status.pendingReview.issueStatusValue ||
+                    issueStatus == Observation.Status.resolved.issueStatusValue ||
+                    captureKind == "resolved_capture"
+                guard isResolvedEvidence else { continue }
+
+                let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedPath: String?
+                if !relativePath.isEmpty,
+                   let url = localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    relativePath: relativePath
+                   ) {
+                    resolvedPath = url.path
+                } else if !relativePath.isEmpty {
+                    resolvedPath = localStore
+                        .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                        .appendingPathComponent(relativePath, isDirectory: false)
+                        .path
+                } else {
+                    resolvedPath = nil
+                }
+
+                let reference = FastRuntimeIssueResolvedReference(
+                    shot: shot,
+                    sessionID: sessionID,
+                    resolvedPath: resolvedPath
+                )
+                if let existing = referencesByObservationID[observationID] {
+                    if fastRuntimeResolvedReference(reference, isNewerThan: existing) {
+                        referencesByObservationID[observationID] = reference
+                    }
+                } else {
+                    referencesByObservationID[observationID] = reference
+                }
+            }
+        }
+        return referencesByObservationID
+    }
+
+    private func fastRuntimeResolvedReference(
+        _ lhs: FastRuntimeIssueResolvedReference,
+        isNewerThan rhs: FastRuntimeIssueResolvedReference
+    ) -> Bool {
+        if lhs.shot.updatedAt != rhs.shot.updatedAt {
+            return lhs.shot.updatedAt > rhs.shot.updatedAt
+        }
+        return lhs.shot.createdAt > rhs.shot.createdAt
+    }
+
+    private func fastRuntimeObservationWithResolvedReferenceIfAvailable(
+        _ observation: Observation,
+        resolvedReferences: [UUID: FastRuntimeIssueResolvedReference]
+    ) -> Observation {
+        guard let reference = resolvedReferences[observation.id] else { return observation }
+
+        var updated = observation
+        if reference.resolvedPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            updated.resolutionPhotoRef = reference.resolvedPath
+        }
+        if !updated.shots.contains(where: { $0.id == reference.shot.shotID }) {
+            updated.shots.append(
+                Shot(
+                    id: reference.shot.shotID,
+                    capturedAt: reference.shot.createdAt,
+                    imageLocalIdentifier: reference.resolvedPath,
+                    note: reference.shot.noteText
+                )
+            )
+        }
+        return updated
+    }
+
+    func fastRuntimeGuidedPanelMediaHydrationRequests(
+        propertyID: UUID,
+        guidedShots: [GuidedShot]
+    ) -> [OperationalMediaHydrationRequest] {
+        guard canAccessProperty(propertyID), !guidedShots.isEmpty else { return [] }
+        let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .sorted { $0.startedAt > $1.startedAt }
+        guard !sessions.isEmpty else { return [] }
+
+        var requests = Set<OperationalMediaHydrationRequest>()
+        for guidedShot in guidedShots {
+            if let shot = guidedShot.shot,
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: shot.id,
+                explicitSessionIDs: [],
+                pathCandidates: [
+                    shot.imageLocalIdentifier,
+                    guidedShot.referenceImagePath,
+                    guidedShot.referenceImageLocalIdentifier
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+
+            let building = fastRuntimeComparable(guidedShot.building)
+            let elevation = fastRuntimeComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation)
+            let detail = fastRuntimeComparable(guidedShot.detailType)
+            let angle = max(1, guidedShot.angleIndex ?? 1)
+            guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { continue }
+
+            for session in sessions {
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                    continue
+                }
+                guard let shot = metadata.shots
+                    .filter({
+                        $0.isGuided &&
+                            !$0.isFlagged &&
+                            fastRuntimeComparable($0.building) == building &&
+                            fastRuntimeComparable(CanonicalElevation.normalize($0.elevation) ?? $0.elevation) == elevation &&
+                            fastRuntimeComparable($0.detailType) == detail &&
+                            max(1, $0.angleIndex) == angle
+                    })
+                    .sorted(by: { lhs, rhs in
+                        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                        return lhs.createdAt > rhs.createdAt
+                    })
+                    .first else {
+                    continue
+                }
+
+                let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !relativePath.isEmpty else { continue }
+                if localStore.resolveSessionRelativeFileURL(propertyID: propertyID, sessionID: session.id, relativePath: relativePath) != nil {
+                    break
+                }
+                requests.insert(OperationalMediaHydrationRequest(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    shotID: shot.shotID,
+                    relativePathOverride: relativePath
+                ))
+                break
+            }
+        }
+        return Array(requests)
+    }
+
+    func fastRuntimeIssuePanelMediaHydrationRequests(
+        propertyID: UUID,
+        observations: [Observation]
+    ) -> [OperationalMediaHydrationRequest] {
+        guard canAccessProperty(propertyID), !observations.isEmpty else { return [] }
+        let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .sorted { $0.startedAt > $1.startedAt }
+        let hasSessionMetadata = !(((try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []).isEmpty)
+        guard !sessions.isEmpty || hasSessionMetadata else { return [] }
+
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        var requests = Set<OperationalMediaHydrationRequest>()
+        for observation in observations {
+            let explicitSessionIDs = [
+                observation.sessionID,
+                observation.updatedInSessionID,
+                observation.resolvedInSessionID
+            ]
+            if let resolvedReference = resolvedReferences[observation.id] {
+                let relativePath = resolvedReference.shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedPathExists = fastRuntimePathExists(resolvedReference.resolvedPath)
+                let resolvedRelativePathExists: Bool
+                if !relativePath.isEmpty,
+                   localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: resolvedReference.sessionID,
+                    relativePath: relativePath
+                   ) != nil {
+                    resolvedRelativePathExists = true
+                } else {
+                    resolvedRelativePathExists = false
+                }
+                if !resolvedPathExists && !resolvedRelativePathExists {
+                    requests.insert(OperationalMediaHydrationRequest(
+                        propertyID: propertyID,
+                        sessionID: resolvedReference.sessionID,
+                        shotID: resolvedReference.shot.shotID,
+                        relativePathOverride: relativePath.isEmpty ? nil : relativePath
+                    ))
+                    continue
+                }
+            }
+            if let resolutionPhotoRef = observation.resolutionPhotoRef?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !resolutionPhotoRef.isEmpty,
+               let resolutionShot = observation.shots.first(where: {
+                   ($0.imageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == resolutionPhotoRef
+               }),
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: resolutionShot.id,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    observation.resolutionPhotoRef,
+                    resolutionShot.imageLocalIdentifier
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+            if let linkedShotID = observation.linkedShotID,
+               let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: linkedShotID,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    linkedShot.imageLocalIdentifier,
+                    observation.resolutionPhotoRef
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+            if let shot = observation.shots
+                .sorted(by: { lhs, rhs in
+                    if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                })
+                .first,
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: shot.id,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    shot.imageLocalIdentifier,
+                    observation.resolutionPhotoRef
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+            if let guidedShot = observation.guidedShots
+                .sorted(by: { lhs, rhs in
+                    if (lhs.shot?.capturedAt ?? .distantPast) != (rhs.shot?.capturedAt ?? .distantPast) {
+                        return (lhs.shot?.capturedAt ?? .distantPast) > (rhs.shot?.capturedAt ?? .distantPast)
+                    }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                })
+                .first,
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: guidedShot.shot?.id ?? guidedShot.id,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    guidedShot.shot?.imageLocalIdentifier,
+                    guidedShot.referenceImagePath,
+                    guidedShot.referenceImageLocalIdentifier,
+                    observation.resolutionPhotoRef
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+
+            for session in sessions {
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                    continue
+                }
+                let candidates = metadata.shots
+                    .filter { shot in
+                        if let issueID = shot.issueID, issueID == observation.id {
+                            return true
+                        }
+                        if let linkedShotID = observation.linkedShotID, shot.shotID == linkedShotID {
+                            return true
+                        }
+                        return false
+                    }
+                    .sorted { lhs, rhs in
+                        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                        return lhs.createdAt > rhs.createdAt
+                    }
+                guard let shot = candidates.first else { continue }
+
+                let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !relativePath.isEmpty else { continue }
+                if localStore.resolveSessionRelativeFileURL(propertyID: propertyID, sessionID: session.id, relativePath: relativePath) != nil {
+                    break
+                }
+                requests.insert(OperationalMediaHydrationRequest(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    shotID: shot.shotID,
+                    relativePathOverride: relativePath
+                ))
+                break
+            }
+        }
+        return Array(requests)
+    }
+
+    private func fastRuntimePanelMediaHydrationRequest(
+        propertyID: UUID,
+        shotID: UUID,
+        explicitSessionIDs: [UUID?],
+        pathCandidates: [String?]
+    ) -> OperationalMediaHydrationRequest? {
+        if pathCandidates.contains(where: fastRuntimePathExists) {
+            return nil
+        }
+
+        var sessionIDs: [UUID] = []
+        for explicit in explicitSessionIDs.compactMap({ $0 }) {
+            if !sessionIDs.contains(explicit) {
+                sessionIDs.append(explicit)
+            }
+        }
+        for candidate in pathCandidates {
+            if let sessionID = fastRuntimeSessionID(fromStoredPath: candidate),
+               !sessionIDs.contains(sessionID) {
+                sessionIDs.append(sessionID)
+            }
+        }
+        if sessionIDs.isEmpty,
+           let session = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .sorted(by: { $0.startedAt > $1.startedAt })
+            .first {
+            sessionIDs.append(session.id)
+        }
+        guard let sessionID = sessionIDs.first else { return nil }
+
+        return OperationalMediaHydrationRequest(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            relativePathOverride: fastRuntimeRelativePath(fromStoredPaths: pathCandidates)
+        )
+    }
+
+    private func fastRuntimePathExists(_ candidate: String?) -> Bool {
+        guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: trimmed)
+    }
+
+    private func fastRuntimeSessionID(fromStoredPath candidate: String?) -> UUID? {
+        guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let components = URL(fileURLWithPath: trimmed).pathComponents
+        for (index, component) in components.enumerated() where component == "Sessions" {
+            let nextIndex = components.index(after: index)
+            guard components.indices.contains(nextIndex),
+                  let sessionID = UUID(uuidString: components[nextIndex]) else {
+                continue
+            }
+            return sessionID
+        }
+        return nil
+    }
+
+    private func fastRuntimeRelativePath(fromStoredPaths candidates: [String?]) -> String? {
+        for candidate in candidates {
+            guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                continue
+            }
+            if !trimmed.hasPrefix("/") {
+                return trimmed
+            }
+            let components = URL(fileURLWithPath: trimmed).pathComponents
+            if let originalsIndex = components.firstIndex(of: "Originals") {
+                let relativeComponents = components[originalsIndex...]
+                let relative = relativeComponents.joined(separator: "/")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if !relative.isEmpty {
+                    return relative
+                }
+            }
+        }
+        return nil
+    }
+
+    func fastRuntimeGalleryMediaHydrationRequests(
+        propertyID: UUID,
+        sessionID: UUID,
+        shots: [FastRuntimePrototypeShotRecord]
+    ) -> [OperationalMediaHydrationRequest] {
+        guard canAccessProperty(propertyID), !shots.isEmpty else { return [] }
+
+        var requests = Set<OperationalMediaHydrationRequest>()
+        for shot in shots where shot.propertyID == propertyID && shot.sessionID == sessionID {
+            let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !relativePath.isEmpty else { continue }
+            if let resolved = fastRuntimeResolvedLocalPath(for: shot),
+               FileManager.default.fileExists(atPath: resolved) {
+                continue
+            }
+            requests.insert(OperationalMediaHydrationRequest(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shot.id,
+                relativePathOverride: relativePath
+            ))
+        }
+        return Array(requests)
+    }
+
+    func fastRuntimePropertyAngleReservations(propertyID: UUID) -> [FastRuntimeAngleReservation] {
+        guard canAccessProperty(propertyID) else { return [] }
+        var reservations: [FastRuntimeAngleReservation] = []
+
+        func appendReservation(
+            building rawBuilding: String?,
+            elevation rawElevation: String?,
+            detailType rawDetailType: String?,
+            angleIndex rawAngleIndex: Int?
+        ) {
+            let building = (rawBuilding ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let elevation = (CanonicalElevation.normalize(rawElevation ?? "") ?? (rawElevation ?? ""))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = (rawDetailType ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { return }
+            reservations.append(FastRuntimeAngleReservation(
+                building: building,
+                elevation: elevation,
+                detailType: detail,
+                angleIndex: max(1, rawAngleIndex ?? 1)
+            ))
+        }
+
+        if let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID) {
+            for guidedShot in guidedShots {
+                appendReservation(
+                    building: guidedShot.building,
+                    elevation: guidedShot.targetElevation,
+                    detailType: guidedShot.detailType,
+                    angleIndex: guidedShot.angleIndex
+                )
+            }
+        }
+
+        if let observations = try? localStore.fetchObservations(propertyID: propertyID) {
+            for observation in observations {
+                for guidedShot in observation.guidedShots {
+                    appendReservation(
+                        building: guidedShot.building ?? observation.building,
+                        elevation: guidedShot.targetElevation ?? observation.targetElevation,
+                        detailType: guidedShot.detailType ?? observation.detailType,
+                        angleIndex: guidedShot.angleIndex
+                    )
+                }
+            }
+        }
+
+        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+        for session in sessions {
+            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                continue
+            }
+            for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+                appendReservation(
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    angleIndex: shot.angleIndex
+                )
+            }
+        }
+        return reservations
+    }
+
+    private func fastRuntimeComparable(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+    }
+
     func recentlyDeletedProperties() -> [Property] {
         scopedRecentlyDeletedProperties(from: allProperties)
             .sorted(by: Self.propertyIsOrderedBefore)
     }
 
     func activeProperties() -> [Property] {
-        properties.filter { $0.deletedAt == nil && !$0.isArchived }
+        scopedProperties(from: allProperties).filter { !$0.isArchived }
     }
 
     func archivedProperties() -> [Property] {
-        properties.filter { $0.deletedAt == nil && $0.isArchived }
+        scopedArchivedProperties(from: allProperties)
     }
 
     @discardableResult
     func remoteSoftDeleteProperty(id: UUID) async -> Bool {
         do {
             try await performRemoteSoftDeleteProperty(id: id)
+            hubTransientStatusMessage = "Property moved to Recently Deleted."
             return true
         } catch {
             let message = softDeleteErrorMessage(for: error)
@@ -47741,6 +55414,7 @@ final class AppState: ObservableObject {
 
         try await callSoftDeletePropertyRPC(propertyID: id)
         applyRemoteSoftDeletedPropertyLocally(existing, deletedAt: Date())
+        emitPropertyAuditEvent(property: existing, eventType: "property.deleted")
 
 #if DEBUG
         if let propertySoftDeleteRefreshOverride {
@@ -47771,12 +55445,27 @@ final class AppState: ObservableObject {
             occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
         )
         if propertySessionOccupancyIsActive(occupancy) {
-            return PropertyDeletePreflightSnapshot(
-                occupancyCount: 1,
-                lockCount: 0,
-                isBlocked: true,
-                blockedReason: "occupancy"
+            let didReleaseOwnedOccupancy = await releasePropertySessionOccupancyIfOwned(
+                propertyID: propertyID,
+                ownershipState: PropertySessionOccupancyState(
+                    occupiedByUserID: occupancy?.occupiedByUserID,
+                    occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
+                    occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                )
             )
+            if didReleaseOwnedOccupancy {
+                print(
+                    "[PropertySoftDelete] event=released_owned_occupancy_before_delete " +
+                    "propertyID=\(propertyID.uuidString)"
+                )
+            } else {
+                return PropertyDeletePreflightSnapshot(
+                    occupancyCount: 1,
+                    lockCount: 0,
+                    isBlocked: true,
+                    blockedReason: "occupancy"
+                )
+            }
         } else if occupancy != nil {
             setPropertySessionOccupancyState(
                 propertyID: propertyID,
@@ -47934,6 +55623,14 @@ final class AppState: ObservableObject {
 
         try await callSoftDeleteSessionRPC(sessionID: sessionID)
         applyRemoteSoftDeletedSessionLocally(existing, deletedAt: preflight.deletedAt ?? Date())
+        let propertyForAudit = allProperties.first(where: { $0.id == propertyID }) ??
+            properties.first(where: { $0.id == propertyID })
+        emitSessionDeletedAuditEvent(
+            property: propertyForAudit,
+            session: existing,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
 
 #if DEBUG
         if let sessionSoftDeleteRefreshOverride {
@@ -47973,13 +55670,30 @@ final class AppState: ObservableObject {
             occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
         )
         if propertySessionOccupancyIsActive(occupancy) {
-            return SessionDeletePreflightSnapshot(
-                deletedAt: sessionRecord.deletedAt,
-                occupancyCount: 1,
-                lockCount: sessionDeletePreflightLockFieldsPresent(sessionRecord) ? 1 : 0,
-                isBlocked: true,
-                blockedReason: "property_occupancy"
+            let didReleaseOwnedOccupancy = await releasePropertySessionOccupancyIfOwned(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                ownershipState: PropertySessionOccupancyState(
+                    occupiedByUserID: occupancy?.occupiedByUserID,
+                    occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
+                    occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                )
             )
+            if didReleaseOwnedOccupancy {
+                print(
+                    "[SessionSoftDelete] event=released_owned_occupancy_before_delete " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString)"
+                )
+            } else {
+                return SessionDeletePreflightSnapshot(
+                    deletedAt: sessionRecord.deletedAt,
+                    occupancyCount: 1,
+                    lockCount: sessionDeletePreflightLockFieldsPresent(sessionRecord) ? 1 : 0,
+                    isBlocked: true,
+                    blockedReason: "property_occupancy"
+                )
+            }
         } else if occupancy != nil {
             setPropertySessionOccupancyState(
                 propertyID: propertyID,
@@ -48211,6 +55925,7 @@ final class AppState: ObservableObject {
 #endif
 
         applyRemoteRestoredSessionLocally(deletedSession)
+        emitSessionRestoredAuditEvent(deletedSession)
 
 #if DEBUG
         if let sessionRestoreRefreshOverride {
@@ -48276,8 +55991,17 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func remoteRestoreProperty(id: UUID) async -> Bool {
+        let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id })
+        let recentlyDeletedPropertyForAudit = (try? await fetchRecentlyDeletedPropertiesRemote())?
+            .first(where: { $0.id == id })
         do {
             try await performRemoteRestoreProperty(id: id)
+            emitPropertyRestoredAuditEvent(
+                property: propertyForAudit,
+                recentlyDeletedProperty: recentlyDeletedPropertyForAudit,
+                propertyID: id
+            )
             return true
         } catch {
             let message = "The property could not be restored. \(error.localizedDescription)"
@@ -48323,6 +56047,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func deletePropertyIfEmpty(id: UUID) -> Bool {
         guard canAccessProperty(id) else { return false }
+        let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id })
         let counts = propertyDataCounts(for: id)
         guard counts.isEmpty else { return false }
         do {
@@ -48335,9 +56061,15 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+            if let propertyForAudit {
+                emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+            }
             return true
         } catch {
             if handleDeletePropertyNotFound(id: id, error: error) {
+                if let propertyForAudit {
+                    emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+                }
                 return true
             }
             return false
@@ -48347,6 +56079,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func deleteProperty(id: UUID) -> Bool {
         guard canAccessProperty(id) else { return false }
+        let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
+            properties.first(where: { $0.id == id })
         refreshProperties()
         do {
             try localStore.deleteProperty(id: id)
@@ -48358,13 +56092,120 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+            if let propertyForAudit {
+                emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+            }
             return true
         } catch {
             if handleDeletePropertyNotFound(id: id, error: error) {
+                if let propertyForAudit {
+                    emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
+                }
                 return true
             }
             return false
         }
+    }
+
+    private func emitPropertyAuditEvent(property: Property, eventType: String) {
+        guard let orgID = property.orgId else { return }
+        let payload = propertyAuditPayload(property: property)
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: eventType,
+            propertyID: property.id,
+            payload: payload
+        )
+    }
+
+    private func emitPropertyRestoredAuditEvent(
+        property: Property?,
+        recentlyDeletedProperty: RecentlyDeletedProperty?,
+        propertyID: UUID
+    ) {
+        guard let orgID = property?.orgId ?? recentlyDeletedProperty?.orgID ?? activeOrganizationID else { return }
+        let payload: [String: Any]
+        if let property {
+            payload = propertyAuditPayload(property: property)
+        } else if let recentlyDeletedProperty {
+            payload = recentlyDeletedPropertyAuditPayload(property: recentlyDeletedProperty)
+        } else {
+            payload = [
+                "property_id": propertyID.uuidString.lowercased(),
+                "property_name": "Property \(propertyID.uuidString.prefix(8))"
+            ]
+        }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "property.restored",
+            propertyID: propertyID,
+            payload: payload
+        )
+    }
+
+    private func propertyAuditPayload(property: Property) -> [String: Any] {
+        [
+            "property_id": property.id.uuidString.lowercased(),
+            "property_name": property.name,
+            "address": property.address ?? ""
+        ]
+    }
+
+    private func sessionLifecycleAuditPayload(property: Property, session: Session) -> [String: Any] {
+        var payload = propertyAuditPayload(property: property)
+        payload["session_id"] = session.id.uuidString.lowercased()
+        payload["session_title"] = "Session \(session.id.uuidString.prefix(8))"
+        payload["session_status"] = session.status.rawValue
+        payload["photo_count"] = sessionMaterialContentCount(session)
+        return payload
+    }
+
+    private func fastRuntimeSessionLifecycleAuditPayload(
+        context: ActiveCaptureContext,
+        property: Property?,
+        photoCount: Int,
+        status: Session.Status
+    ) -> [String: Any] {
+        var payload: [String: Any]
+        if let property {
+            payload = propertyAuditPayload(property: property)
+        } else {
+            payload = [
+                "property_id": context.propertyID.uuidString.lowercased(),
+                "property_name": "Property \(context.propertyID.uuidString.prefix(8))"
+            ]
+        }
+        payload["session_id"] = context.sessionID.uuidString.lowercased()
+        payload["session_title"] = "Session \(context.sessionID.uuidString.prefix(8))"
+        payload["session_status"] = status.rawValue
+        payload["session_type"] = context.sessionType.rawValue
+        payload["photo_count"] = photoCount
+        payload["session_source"] = "fast_lane"
+        return payload
+    }
+
+    private func recentlyDeletedPropertyAuditPayload(property: RecentlyDeletedProperty) -> [String: Any] {
+        [
+            "property_id": property.id.uuidString.lowercased(),
+            "property_name": property.name,
+            "address": formattedRecentlyDeletedPropertyAddress(property)
+        ]
+    }
+
+    private func formattedRecentlyDeletedPropertyAddress(_ property: RecentlyDeletedProperty) -> String {
+        [
+            property.addressLine1,
+            property.addressLine2,
+            property.city,
+            property.state,
+            property.postalCode
+        ]
+            .compactMap { value -> String? in
+                guard let value else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .joined(separator: ", ")
     }
 
     private func handleDeletePropertyNotFound(id: UUID, error: Error) -> Bool {
@@ -48688,6 +56529,28 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func applyCurrentSessionTypeForFastEntry(_ sessionType: SessionType) -> Session? {
+        guard var session = currentSession else { return nil }
+        session.sessionType = sessionType
+        currentSession = session
+        initialSessionTypeSelectedSessionIDs.insert(session.id)
+        return session
+    }
+
+    func persistCurrentSessionTypeAfterFastEntry(_ sessionType: SessionType, delayNanoseconds: UInt64 = 1_200_000_000) {
+        guard let sessionID = currentSession?.id else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard let self,
+                  self.currentSession?.id == sessionID,
+                  self.currentSession?.sessionType == sessionType else {
+                return
+            }
+            _ = self.persistCurrentSessionType(sessionType)
+        }
+    }
+
     func isPunchlistVisitSession(_ session: Session?) -> Bool {
         session?.sessionType == .punchlistVisit
     }
@@ -48917,6 +56780,7 @@ final class AppState: ObservableObject {
                 sessionID: persisted.id,
                 reason: "save_draft_with_captures"
             )
+            emitSessionDraftSavedAuditEvent(for: persisted)
         }
         return persisted
     }
@@ -49361,20 +57225,7 @@ final class AppState: ObservableObject {
     }
 
     func draftPropertyCount() -> Int {
-        let currentUserID = authenticatedSupabaseUser?.id
-        let currentDeviceID = currentDeviceIdentifier()
-        return properties.reduce(0) { count, property in
-            guard let record = propertyStatusByPropertyID[property.id] else {
-                return count
-            }
-            let answer = makePropertyStatusCompareAnswer(
-                record: record,
-                propertyID: property.id,
-                currentUserID: currentUserID,
-                currentDeviceID: currentDeviceID
-            )
-            return count + (answer.draftCountIncluded ? 1 : 0)
-        }
+        propertyRowDraftCount
     }
 
     func draftCountSource() -> String {
@@ -49433,15 +57284,13 @@ final class AppState: ObservableObject {
         triggerBackupForLifecycleEvent()
         if let property = properties.first(where: { $0.id == persisted.propertyID }) ?? allProperties.first(where: { $0.id == persisted.propertyID }),
            let orgID = property.orgId {
-            Task {
-                await emitAuditEvent(
-                    orgID: orgID,
-                    eventType: "session.exported",
-                    sessionID: persisted.id,
-                    propertyID: persisted.propertyID,
-                    payload: [:]
-                )
-            }
+            emitCachedAuditEvent(
+                orgID: orgID,
+                eventType: "session.exported",
+                sessionID: persisted.id,
+                propertyID: persisted.propertyID,
+                payload: sessionLifecycleAuditPayload(property: property, session: persisted)
+            )
         }
     }
 
@@ -49615,15 +57464,27 @@ final class AppState: ObservableObject {
               let orgID = property.orgId else {
             return
         }
-        Task {
-            await emitAuditEvent(
-                orgID: orgID,
-                eventType: "session.completed",
-                sessionID: session.id,
-                propertyID: session.propertyID,
-                payload: [:]
-            )
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.completed",
+            sessionID: session.id,
+            propertyID: session.propertyID,
+            payload: sessionLifecycleAuditPayload(property: property, session: session)
+        )
+    }
+
+    private func emitSessionDraftSavedAuditEvent(for session: Session) {
+        guard let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
+              let orgID = property.orgId else {
+            return
         }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.draft_saved",
+            sessionID: session.id,
+            propertyID: session.propertyID,
+            payload: sessionLifecycleAuditPayload(property: property, session: session)
+        )
     }
 
     @discardableResult
@@ -49669,15 +57530,13 @@ final class AppState: ObservableObject {
             triggerBackupForLifecycleEvent()
             if let property = properties.first(where: { $0.id == persisted.propertyID }) ?? allProperties.first(where: { $0.id == persisted.propertyID }),
                let orgID = property.orgId {
-                Task {
-                    await emitAuditEvent(
-                        orgID: orgID,
-                        eventType: "session.exported",
-                        sessionID: persisted.id,
-                        propertyID: persisted.propertyID,
-                        payload: [:]
-                    )
-                }
+                emitCachedAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.exported",
+                    sessionID: persisted.id,
+                    propertyID: persisted.propertyID,
+                    payload: sessionLifecycleAuditPayload(property: property, session: persisted)
+                )
             }
             return true
         } catch {
@@ -49692,6 +57551,9 @@ final class AppState: ObservableObject {
         triggerSafetyPause: Bool = true
     ) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
+        let propertyForAudit = allProperties.first(where: { $0.id == propertyID }) ??
+            properties.first(where: { $0.id == propertyID })
+        let sessionForAudit = sessions(for: propertyID).first(where: { $0.id == sessionID })
         do {
             try localStore.deleteSessionCascade(id: sessionID, propertyID: propertyID)
             if currentSession?.id == sessionID {
@@ -49699,6 +57561,12 @@ final class AppState: ObservableObject {
             }
             reloadSessionCache(for: propertyID)
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+            emitSessionDeletedAuditEvent(
+                property: propertyForAudit,
+                session: sessionForAudit,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
             return true
         } catch {
             if case LocalStore.StoreError.sessionNotFound = error {
@@ -49712,10 +57580,65 @@ final class AppState: ObservableObject {
                 }
                 reloadSessionCache(for: propertyID)
                 cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+                emitSessionDeletedAuditEvent(
+                    property: propertyForAudit,
+                    session: sessionForAudit,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
                 return true
             }
             return false
         }
+    }
+
+    private func emitSessionDeletedAuditEvent(
+        property: Property?,
+        session: Session?,
+        propertyID: UUID,
+        sessionID: UUID
+    ) {
+        guard let orgID = property?.orgId else { return }
+        var payload: [String: Any] = [
+            "property_id": propertyID.uuidString.lowercased(),
+            "property_name": property?.name ?? "Property \(propertyID.uuidString.prefix(8))"
+        ]
+        if let session {
+            payload["session_type"] = session.sessionType.rawValue
+            payload["session_status"] = session.status.rawValue
+            payload["started_at"] = session.startedAt.ISO8601Format()
+        }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.deleted",
+            sessionID: sessionID,
+            propertyID: propertyID,
+            payload: payload
+        )
+    }
+
+    private func emitSessionRestoredAuditEvent(_ deletedSession: RecentlyDeletedSession) {
+        guard let orgID = activeOrganizationID ?? allProperties.first(where: { $0.id == deletedSession.propertyID })?.orgId else {
+            return
+        }
+        let property = allProperties.first(where: { $0.id == deletedSession.propertyID }) ??
+            properties.first(where: { $0.id == deletedSession.propertyID })
+        var payload: [String: Any] = [
+            "property_id": deletedSession.propertyID.uuidString.lowercased(),
+            "property_name": property?.name ?? "Property \(deletedSession.propertyID.uuidString.prefix(8))",
+            "session_status": deletedSession.status,
+            "started_at": deletedSession.startedAt.ISO8601Format()
+        ]
+        if let captureProfile = normalizedSupabaseText(deletedSession.captureProfile) {
+            payload["session_type"] = captureProfile
+        }
+        emitCachedAuditEvent(
+            orgID: orgID,
+            eventType: "session.restored",
+            sessionID: deletedSession.id,
+            propertyID: deletedSession.propertyID,
+            payload: payload
+        )
     }
 
     func resetLocalSessionUIIndex() {
@@ -49830,12 +57753,61 @@ final class AppState: ObservableObject {
         }
     }
 
-    func triggerBackupForLifecycleEvent() {
-        cloudBackupManager?.setCaptureModeActive(false)
-        cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+    func clearLegacyCloudStorage(completion: @escaping (Result<StorageRoot.LegacyCloudStorageCleanupResult, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let result = try StorageRoot.clearLegacyCloudStorage()
+                DispatchQueue.main.async { [weak self] in
+                    self?.cloudBackupManager?.refreshStatus()
+                    completion(.success(result))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func loadLocalStorageBreakdown(completion: @escaping (Result<StorageRoot.LocalStorageBreakdownResult, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try StorageRoot.localStorageBreakdown()
+                DispatchQueue.main.async {
+                    completion(.success(result))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func triggerBackupForLifecycleEvent(after delay: TimeInterval = 0) {
+        guard delay > 0 else {
+            deferredLifecycleBackupWorkItem?.cancel()
+            deferredLifecycleBackupWorkItem = nil
+            cloudBackupManager?.setCaptureModeActive(false)
+            cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+            return
+        }
+
+        deferredLifecycleBackupWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredLifecycleBackupWorkItem = nil
+            guard self.currentSession?.status != .draft else { return }
+            self.cloudBackupManager?.setCaptureModeActive(false)
+            self.cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+        }
+        deferredLifecycleBackupWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     func handleSceneDidEnterBackground() {
+        deferredLifecycleBackupWorkItem?.cancel()
+        deferredLifecycleBackupWorkItem = nil
         deferredForegroundBackupStatusWorkItem?.cancel()
         deferredForegroundBackupStatusWorkItem = nil
         cloudBackupManager?.scheduleAutomaticBackup(after: 0)
@@ -52322,14 +60294,21 @@ final class AppState: ObservableObject {
         let now = Date()
         var scanned = 0
         var offloadedFiles = 0
+        var prunedUploadedFiles = 0
+        var prunedUploadedBytes: Int64 = 0
         var skippedCooldown = 0
         var skippedRecentActivation = 0
+        let prunedFastRuntimeTempFolders = Self.pruneStaleFastRuntimePrototypeTempStorage(
+            now: now,
+            excludingSessionID: excludingSessionID,
+            olderThan: 24 * 60 * 60
+        )
 
         let allProperties = (try? localStore.fetchProperties()) ?? []
         for property in allProperties {
-            if isPropertyWithinActivationRetentionWindow(property.id, now: now) {
+            let recentlyActivated = isPropertyWithinActivationRetentionWindow(property.id, now: now)
+            if recentlyActivated {
                 skippedRecentActivation += 1
-                continue
             }
             let propertySessions = (try? localStore.fetchSessions(propertyID: property.id)) ?? []
             for session in propertySessions {
@@ -52344,18 +60323,29 @@ final class AppState: ObservableObject {
                     skippedCooldown += 1
                     continue
                 }
-                offloadedFiles += localStore.offloadSessionMediaAssets(
+                if !recentlyActivated {
+                    offloadedFiles += localStore.offloadSessionMediaAssets(
+                        propertyID: session.propertyID,
+                        sessionID: session.id
+                    )
+                }
+                let pruneResult = localStore.pruneUploadedSessionMediaAssets(
                     propertyID: session.propertyID,
                     sessionID: session.id
                 )
+                prunedUploadedFiles += pruneResult.removedFiles
+                prunedUploadedBytes += pruneResult.removedBytes
             }
         }
 
         logSessionOffload(
             scanned: scanned,
             offloadedFiles: offloadedFiles,
+            prunedUploadedFiles: prunedUploadedFiles,
+            prunedUploadedBytes: prunedUploadedBytes,
             skippedCooldown: skippedCooldown,
-            skippedRecentActivation: skippedRecentActivation
+            skippedRecentActivation: skippedRecentActivation,
+            prunedFastRuntimeTempFolders: prunedFastRuntimeTempFolders
         )
     }
 
@@ -52423,12 +60413,15 @@ final class AppState: ObservableObject {
     private func logSessionOffload(
         scanned: Int,
         offloadedFiles: Int,
+        prunedUploadedFiles: Int,
+        prunedUploadedBytes: Int64,
         skippedCooldown: Int,
-        skippedRecentActivation: Int
+        skippedRecentActivation: Int,
+        prunedFastRuntimeTempFolders: Int
     ) {
         let activationRetentionDays = Int(activatedPropertyRetentionWindow / 86_400)
         let cooldownSeconds = Int(sessionMediaOffloadCooldown)
-        let signature = "\(scanned)|\(offloadedFiles)|\(skippedCooldown)|\(skippedRecentActivation)|\(activationRetentionDays)|\(cooldownSeconds)"
+        let signature = "\(scanned)|\(offloadedFiles)|\(prunedUploadedFiles)|\(prunedUploadedBytes)|\(skippedCooldown)|\(skippedRecentActivation)|\(prunedFastRuntimeTempFolders)|\(activationRetentionDays)|\(cooldownSeconds)"
         let shouldLog = logThrottleQueue.sync { () -> Bool in
             let now = Date()
             let minInterval: TimeInterval = 30
@@ -52445,6 +60438,9 @@ final class AppState: ObservableObject {
         print(
             "[SessionOffload] scanned=\(scanned) " +
             "offloadedFiles=\(offloadedFiles) " +
+            "prunedUploadedFiles=\(prunedUploadedFiles) " +
+            "prunedUploadedBytes=\(prunedUploadedBytes) " +
+            "prunedFastRuntimeTempFolders=\(prunedFastRuntimeTempFolders) " +
             "skippedCooldown=\(skippedCooldown) " +
             "skippedRecentActivation=\(skippedRecentActivation) " +
             "activationRetentionDays=\(activationRetentionDays) " +

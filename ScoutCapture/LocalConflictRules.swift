@@ -508,6 +508,10 @@ enum LocalConflictRules {
                 event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
                 event.afterValue == Observation.Status.active.issueStatusValue
         }
+        let incomingExplicitlyRequestsPendingReview = incoming.historyEvents.contains { event in
+            event.kind == .pendingReview &&
+                event.afterValue == Observation.Status.pendingReview.issueStatusValue
+        }
         let currentExplicitlyRejectedPendingReview = current.historyEvents.contains { event in
             event.kind == .reopened &&
                 event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
@@ -528,7 +532,8 @@ enum LocalConflictRules {
             merged.shots = current.shots
         } else if current.status == .active,
                   incoming.status == .pendingReview,
-                  currentExplicitlyRejectedPendingReview {
+                  currentExplicitlyRejectedPendingReview,
+                  !incomingExplicitlyRequestsPendingReview {
             merged.status = .active
             merged.resolvedInSessionID = nil
             merged.resolutionPhotoRef = nil
