@@ -13988,7 +13988,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
     @State private var fastLaneCaptureIntent: FastLaneCaptureIntent = .free
     @State private var fastLaneGuidedThumbnailPathByID: [UUID: String] = [:]
+    @State private var fastLaneGuidedReferencePathByID: [UUID: String] = [:]
+    @State private var fastLaneGuidedReferencePathByKey: [String: String] = [:]
     @State private var fastLaneIssueThumbnailPathByID: [UUID: String] = [:]
+    @State private var fastLaneIssueReferencePathByID: [UUID: String] = [:]
     @State private var fastLaneMediaHydrationAttemptedKeys: Set<String> = []
     @State private var fastLaneReferenceViewerState: FastLaneReferenceViewerState?
     @State private var fastLaneArmedReferenceThumbnail: UIImage?
@@ -14274,7 +14277,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 currentSessionID: context.sessionID,
                 sessionShotIDs: fastLaneCurrentSessionShotIDs(),
                 resolvedThumbnailPathByID: fastLaneIssueThumbnailPathByID,
-                referencePathByID: fastLaneIssueThumbnailPathByID,
+                referencePathByID: fastLaneIssueReferencePathByID,
                 angleIndexByIssueID: fastLaneIssueAngleIndexByID(
                     for: fastLaneSideControlPayload.activeObservations
                 ),
@@ -14320,7 +14323,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 guidedShots: fastLaneSideControlPayload.guidedShots,
                 retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
                 resolvedThumbnailPathByID: fastLaneGuidedThumbnailPathByID,
-                referencePathByID: fastLaneGuidedThumbnailPathByID,
+                referencePathByID: fastLaneGuidedReferencePathByID,
                 currentSessionID: context.sessionID,
                 currentSessionStartedAt: context.createdAt,
                 currentSessionEndedAt: nil,
@@ -16746,15 +16749,36 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func refreshFastLaneSideControlMediaMaps(for payload: AppState.FastRuntimePreviewSideControlPayload) {
         let guidedRows = payload.guidedShots + payload.retiredGuidedShots
+        let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
+        let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
         fastLaneGuidedThumbnailPathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
             if let path = fastLaneGuidedDisplayImagePath(for: guidedShot) {
                 partial[guidedShot.id] = path
             }
         }
+        var nextGuidedReferencePathByKey: [String: String] = [:]
+        fastLaneGuidedReferencePathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
+            let key = fastLaneGuidedComparisonKey(guidedShot)
+            let candidate = fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
+                ?? previousGuidedReferencePathByID[guidedShot.id]
+                ?? previousGuidedReferencePathByKey[key]
+            if let path = candidate,
+               fastLaneExistingLocalPath(path) != nil,
+               !fastLanePathBelongsToCurrentSession(path) {
+                partial[guidedShot.id] = path
+                nextGuidedReferencePathByKey[key] = path
+            }
+        }
+        fastLaneGuidedReferencePathByKey = nextGuidedReferencePathByKey
 
         let issueRows = payload.activeObservations
         fastLaneIssueThumbnailPathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
             if let path = fastLaneIssueDisplayImagePath(for: observation) {
+                partial[observation.id] = path
+            }
+        }
+        fastLaneIssueReferencePathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
+            if let path = fastLaneObservationReferenceDisplayImagePath(for: observation) {
                 partial[observation.id] = path
             }
         }
@@ -17001,7 +17025,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if let guidedShot = fastLaneArmedGuidedShot() {
             let raw = isCaptured
                 ? guidedShot.shot?.imageLocalIdentifier
-                : (fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot))
+                : (fastLaneGuidedReferencePathByID[guidedShot.id] ?? fastLaneGuidedReferenceDisplayImagePath(for: guidedShot))
             return fastLaneExistingLocalPath(raw)
         }
 
@@ -17017,8 +17041,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     .compactMap { fastLaneExistingLocalPath($0.imageLocalIdentifier) }
                     .first
             }
-            return fastLaneIssueThumbnailPathByID[observation.id] ??
-                fastLaneIssueDisplayImagePath(for: observation)
+            return fastLaneIssueReferencePathByID[observation.id] ??
+                fastLaneObservationReferenceDisplayImagePath(for: observation)
         }()
         return fastLaneExistingLocalPath(raw)
     }
@@ -17776,9 +17800,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             sessionID: session.id
         )
 
+        let issueStatusByID = metadata.issues.reduce(into: [UUID: Observation.Status]()) { partial, issue in
+            partial[issue.issueID] = Observation.Status.status(from: issue.issueStatus)
+        }
+
         let assets = metadata.shots
             .filter { $0.shouldAppearInDefaultGallery }
             .filter { $0.sessionID == session.id }
+            .filter {
+                fastLanePreviousGalleryShotIsRelevant(
+                    $0,
+                    issueStatusByID: issueStatusByID,
+                    observationByIssueID: observationByIssueID
+                )
+            }
             .sorted {
                 if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
                 return $0.shotID.uuidString < $1.shotID.uuidString
@@ -17848,6 +17883,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             metadata: FastLaneGalleryMetadata
         ) {
             guard let existingPath = fastLaneExistingLocalPath(path) else { return }
+            guard !fastLanePathBelongsToCurrentSession(existingPath) else { return }
             guard assetsByPath[existingPath] == nil else { return }
             let url = URL(fileURLWithPath: existingPath)
             assetsByPath[existingPath] = ReportAsset(
@@ -17871,17 +17907,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 angleIndex: guidedShot.angleIndex,
                 flaggedNote: ""
             )
-            let displayPath = [
-                guidedShot.shot?.imageLocalIdentifier,
-                guidedShot.referenceImagePath,
-                guidedShot.referenceImageLocalIdentifier
-            ]
-            .compactMap { $0 }
-            .first { fastLaneExistingLocalPath($0) != nil }
+            let displayPath = fastLaneGuidedReferencePathByID[guidedShot.id] ??
+                fastLaneGuidedReferencePathByKey[fastLaneGuidedComparisonKey(guidedShot)] ??
+                fastLaneHistoricalGuidedReferenceDisplayImagePath(for: guidedShot) ??
+                fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
             addAsset(path: displayPath, creationDate: date, metadata: metadata)
         }
 
         for observation in observations {
+            guard observation.status == .active else { continue }
             let reason = Observation.inferredCurrentReason(
                 note: observation.currentReason ?? observation.note,
                 statement: observation.statement
@@ -17894,19 +17928,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 angleIndex: observation.guidedShots.first?.angleIndex,
                 flaggedNote: reason
             )
-            if let latestShot = observation.shots.sorted(by: { lhs, rhs in
+            if let referencePath = fastLaneObservationReferenceDisplayImagePath(for: observation) {
+                addAsset(path: referencePath, creationDate: observation.updatedAt, metadata: metadata)
+            } else if let latestShot = observation.shots.sorted(by: { lhs, rhs in
                 if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
                 return lhs.id.uuidString < rhs.id.uuidString
             }).first(where: { fastLaneExistingLocalPath($0.imageLocalIdentifier) != nil }) {
                 addAsset(path: latestShot.imageLocalIdentifier, creationDate: latestShot.capturedAt, metadata: metadata)
-            } else if fastLaneExistingLocalPath(observation.resolutionPhotoRef) != nil {
-                addAsset(path: observation.resolutionPhotoRef, creationDate: observation.updatedAt, metadata: metadata)
-            } else if let guidedShot = observation.guidedShots.first(where: { fastLaneGuidedDisplayImagePath(for: $0) != nil }) {
-                addAsset(
-                    path: fastLaneGuidedDisplayImagePath(for: guidedShot),
-                    creationDate: guidedShot.shot?.capturedAt ?? observation.updatedAt,
-                    metadata: metadata
-                )
             }
         }
 
@@ -17917,6 +17945,127 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return $0.localIdentifier < $1.localIdentifier
         }
         return (assets, metadataByPath, [])
+    }
+
+    private func fastLanePreviousGalleryShotIsRelevant(
+        _ shot: ShotMetadata,
+        issueStatusByID: [UUID: Observation.Status],
+        observationByIssueID: [UUID: Observation]
+    ) -> Bool {
+        if shot.isFlagged || shot.issueID != nil {
+            let shotStatus = Observation.Status.status(from: shot.issueStatus)
+            let issueStatus = shot.issueID.flatMap { issueStatusByID[$0] }
+            let observationStatus = shot.issueID.flatMap { observationByIssueID[$0]?.status }
+            let status = issueStatus ?? observationStatus ?? shotStatus
+            let captureKind = (shot.captureKind ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "-", with: "_")
+                .lowercased()
+            return status == .active && captureKind != "resolved_capture"
+        }
+
+        return shot.isGuided
+    }
+
+    private func fastLanePathBelongsToCurrentSession(_ path: String) -> Bool {
+        let normalizedPath = URL(fileURLWithPath: path, isDirectory: false)
+            .standardizedFileURL
+            .path
+            .lowercased()
+        return normalizedPath.contains(context.sessionID.uuidString.lowercased())
+    }
+
+    private func fastLaneGuidedReferenceDisplayImagePath(for guidedShot: GuidedShot) -> String? {
+        let storedReference = [
+            guidedShot.referenceImagePath,
+            guidedShot.referenceImageLocalIdentifier
+        ]
+        .compactMap { $0 }
+        .compactMap(fastLaneExistingLocalPath)
+        .first { !fastLanePathBelongsToCurrentSession($0) }
+        return storedReference ?? fastLaneHistoricalGuidedReferenceDisplayImagePath(for: guidedShot)
+    }
+
+    private func fastLaneHistoricalGuidedReferenceDisplayImagePath(for guidedShot: GuidedShot) -> String? {
+        let building = normalizedFastLaneComparable(guidedShot.building)
+        let elevation = normalizedFastLaneComparable(
+            CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation
+        )
+        let detail = normalizedFastLaneComparable(guidedShot.detailType)
+        let angle = max(1, guidedShot.angleIndex ?? 1)
+        guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { return nil }
+
+        let sessions = ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+            .filter {
+                $0.id != context.sessionID &&
+                $0.status == .completed &&
+                $0.deletedAt == nil
+            }
+            .sorted { lhs, rhs in
+                let l = lhs.endedAt ?? lhs.startedAt
+                let r = rhs.endedAt ?? rhs.startedAt
+                return l > r
+            }
+
+        for session in sessions {
+            guard let metadata = try? appState.sharedLocalStore.loadSessionMetadata(
+                propertyID: context.propertyID,
+                sessionID: session.id
+            ) else { continue }
+            let sessionRoot = appState.sharedLocalStore.sessionFolderURL(
+                propertyID: context.propertyID,
+                sessionID: session.id
+            )
+            let match = metadata.shots
+                .filter { $0.isGuided && $0.issueID == nil }
+                .filter { shot in
+                    normalizedFastLaneComparable(shot.building) == building &&
+                    normalizedFastLaneComparable(CanonicalElevation.normalize(shot.elevation) ?? shot.elevation) == elevation &&
+                    normalizedFastLaneComparable(shot.detailType) == detail &&
+                    max(1, shot.angleIndex) == angle
+                }
+                .sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                    return $0.shotID.uuidString < $1.shotID.uuidString
+                }
+                .first
+            guard let match else { continue }
+            for relative in fastLaneGalleryRelativePathCandidates(for: match) {
+                if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+                    propertyID: context.propertyID,
+                    sessionID: session.id,
+                    relativePath: relative
+                ) {
+                    return resolved.path
+                }
+                let candidate = sessionRoot.appendingPathComponent(relative, isDirectory: false)
+                if FileManager.default.fileExists(atPath: candidate.path) {
+                    return candidate.path
+                }
+            }
+        }
+        return nil
+    }
+
+    private func fastLaneObservationReferenceDisplayImagePath(for observation: Observation) -> String? {
+        if let latestHistoricalShot = observation.shots
+            .sorted(by: { lhs, rhs in
+                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            })
+            .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
+            .first(where: { !fastLanePathBelongsToCurrentSession($0) }) {
+            return latestHistoricalShot
+        }
+
+        if let resolutionPath = fastLaneExistingLocalPath(observation.resolutionPhotoRef),
+           !fastLanePathBelongsToCurrentSession(resolutionPath) {
+            return resolutionPath
+        }
+
+        return observation.guidedShots
+            .compactMap(fastLaneGuidedReferenceDisplayImagePath(for:))
+            .first
     }
 
     private func fastLaneMergedPreviousGallery(
