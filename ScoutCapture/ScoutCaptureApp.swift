@@ -1268,15 +1268,6 @@ struct SessionHubView: View {
                     }
                 )
             }
-            .alert(item: $propertyEntryLockPrompt) { prompt in
-                Alert(
-                    title: Text("Session Locked"),
-                    message: Text(lockPromptMessage(for: prompt.block)),
-                    dismissButton: .default(Text("Back")) {
-                        propertyEntryLockPrompt = nil
-                    }
-                )
-            }
             .alert("No Network Connection", isPresented: $showOfflinePropertyEntryAlert) {
                 Button("OK", role: .cancel) { }
             } message: {
@@ -1389,6 +1380,11 @@ struct SessionHubView: View {
                     fastLaneOpeningOverlay(for: property)
                 }
             }
+            .overlay {
+                if let prompt = propertyEntryLockPrompt {
+                    propertyEntryLockPromptOverlay(prompt)
+                }
+            }
             .overlay(alignment: .bottom) {
                 if let closeResult = fastLaneCloseResult {
                     fastLaneCloseResultOverlay(closeResult)
@@ -1469,6 +1465,10 @@ struct SessionHubView: View {
         }
         Task {
             await appState.refreshPropertiesAwaitingForegroundRefresh()
+            await appState.refreshLightweightPropertyEntryLocks(
+                propertyIDs: filteredActiveProperties.map(\.id),
+                reason: "manual_home_refresh"
+            )
         }
     }
 
@@ -3915,7 +3915,41 @@ struct SessionHubView: View {
         }
     }
 
-    private func continueAcceptedPropertyTap(_ property: Property, tapToken: Int) {
+    private func continueAcceptedPropertyTap(
+        _ property: Property,
+        tapToken: Int,
+        didFreshEntryPreflight: Bool = false
+    ) {
+        if !didFreshEntryPreflight {
+            Task { @MainActor in
+                let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
+                    propertyID: property.id,
+                    context: "home_property_tap_initial"
+                )
+                guard tapToken == propertyTapToken else { return }
+
+                if let block = decision?.block {
+                    isOpeningProperty = false
+                    propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                        propertyID: property.id,
+                        propertyName: property.name,
+                        block: block
+                    )
+                    if pressedPropertyID == property.id {
+                        pressedPropertyID = nil
+                    }
+                    return
+                }
+
+                continueAcceptedPropertyTap(
+                    property,
+                    tapToken: tapToken,
+                    didFreshEntryPreflight: true
+                )
+            }
+            return
+        }
+
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let fastDraftResumeState = appState.fastRuntimeDraftResumeState(for: property.id)
@@ -3997,32 +4031,11 @@ struct SessionHubView: View {
             return
         }
         if !hasDraft {
-            Task { @MainActor in
-                let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
-                    propertyID: property.id,
-                    context: "home_property_tap_before_session_type"
-                )
+            isOpeningProperty = false
+            initialSessionTypePickerProperty = property
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
-
-                if let block = decision?.block {
-                    isOpeningProperty = false
-                    propertyEntryLockPrompt = PropertyEntryLockPrompt(
-                        propertyID: property.id,
-                        propertyName: property.name,
-                        block: block
-                    )
-                    if pressedPropertyID == property.id {
-                        pressedPropertyID = nil
-                    }
-                    return
-                }
-
-                isOpeningProperty = false
-                initialSessionTypePickerProperty = property
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-                    guard tapToken == propertyTapToken else { return }
-                    if pressedPropertyID == property.id { pressedPropertyID = nil }
-                }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
             }
             return
         }
@@ -4051,6 +4064,7 @@ struct SessionHubView: View {
                 sessionType: summary.sessionType,
                 entryState: .lockedByCurrentUser,
                 lockSessionID: summary.sessionID,
+                entryBlock: nil,
                 isCurrentDeviceOccupiedClaim: true,
                 requiresFallback: false,
                 reason: "fast_runtime_draft_index",
@@ -4111,6 +4125,53 @@ struct SessionHubView: View {
         openProperty(property)
     }
 
+    @ViewBuilder
+    private func propertyEntryLockPromptOverlay(_ prompt: PropertyEntryLockPrompt) -> some View {
+        ZStack {
+            Color.black.opacity(0.48)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+
+            VStack(spacing: 14) {
+                Text("Session Locked")
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text(prompt.propertyName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                Text(lockPromptMessage(for: prompt.block))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white.opacity(0.86))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+
+                customCapsuleToolbarButton(
+                    title: "Back",
+                    isEnabled: true,
+                    fill: Color.white.opacity(0.10),
+                    stroke: Color.white.opacity(0.25),
+                    label: .white
+                ) {
+                    propertyEntryLockPrompt = nil
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 430)
+            .background(Color.black.opacity(0.84))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+        }
+        .animation(.easeInOut(duration: 0.18), value: propertyEntryLockPrompt?.id)
+    }
+
     private func lockPromptMessage(for block: AppState.SessionEntryCoordinationBlock) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -4167,15 +4228,36 @@ struct SessionHubView: View {
             showOfflinePropertyEntryAlert = true
             return
         }
-        initialSessionTypePickerProperty = nil
-        isOpeningProperty = true
-        propertyTapToken += 1
-        if pressedPropertyID == property.id {
-            pressedPropertyID = nil
+        Task { @MainActor in
+            let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
+                propertyID: property.id,
+                context: "home_session_type_picker_entry"
+            )
+            guard initialSessionTypePickerProperty?.id == property.id else { return }
+            if let block = decision?.block {
+                initialSessionTypePickerProperty = nil
+                isOpeningProperty = false
+                propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                    propertyID: property.id,
+                    propertyName: property.name,
+                    block: block
+                )
+                if pressedPropertyID == property.id {
+                    pressedPropertyID = nil
+                }
+                return
+            }
+
+            initialSessionTypePickerProperty = nil
+            isOpeningProperty = true
+            propertyTapToken += 1
+            if pressedPropertyID == property.id {
+                pressedPropertyID = nil
+            }
+            selectionHaptic.impactOccurred()
+            selectionHaptic.prepare()
+            beginFastLaneInitialSessionEntry(for: property, sessionType: sessionType, buttonTappedAt: Date())
         }
-        selectionHaptic.impactOccurred()
-        selectionHaptic.prepare()
-        beginFastLaneInitialSessionEntry(for: property, sessionType: sessionType, buttonTappedAt: Date())
     }
 
     private func beginFastLaneInitialSessionEntry(
@@ -4252,7 +4334,15 @@ struct SessionHubView: View {
                     if pressedPropertyID == property.id {
                         pressedPropertyID = nil
                     }
-                    appState.showHubTransientStatusMessage(blockedMessage ?? fastLaneInitialEntryBlockedMessage(for: result))
+                    if let block = fastLaneInitialEntryLockBlock(for: result) {
+                        propertyEntryLockPrompt = PropertyEntryLockPrompt(
+                            propertyID: property.id,
+                            propertyName: property.name,
+                            block: block
+                        )
+                    } else {
+                        appState.showHubTransientStatusMessage(blockedMessage ?? fastLaneInitialEntryBlockedMessage(for: result))
+                    }
                     return
                 }
 
@@ -4319,6 +4409,36 @@ struct SessionHubView: View {
                 return "Unable to confirm property availability: \(reason)"
             }
             return "Unable to confirm property availability."
+        }
+    }
+
+    private func fastLaneInitialEntryLockBlock(
+        for result: AppState.FastRuntimePrototypeResult
+    ) -> AppState.SessionEntryCoordinationBlock? {
+        if let entryBlock = result.entryBlock {
+            return entryBlock
+        }
+        switch result.entryState {
+        case .lockedByOtherUser?:
+            return AppState.SessionEntryCoordinationBlock(
+                ownerDescription: "another signed-in user",
+                lockedAt: nil,
+                blockContext: "occupied"
+            )
+        case .lockedByCurrentUser?:
+            return AppState.SessionEntryCoordinationBlock(
+                ownerDescription: result.isCurrentDeviceOccupiedClaim ? "this device" : "your account on another device",
+                lockedAt: nil,
+                blockContext: "occupied"
+            )
+        case .pendingExport?:
+            return AppState.SessionEntryCoordinationBlock(
+                ownerDescription: "another signed-in user",
+                lockedAt: nil,
+                blockContext: "pending_export"
+            )
+        case .staleClaimable?, .unlockedAndClaimed?, .unknownRequiresFallback?, nil:
+            return nil
         }
     }
 

@@ -4473,7 +4473,7 @@ final class AppState: ObservableObject {
     typealias PropertyDeletePreflightRefreshOverride = (UUID, UUID) async throws -> PropertyDeletePreflightSnapshot
     typealias PropertySessionOccupancyPersistOverride = (UUID, UUID) async -> Bool
     typealias PropertyStatusFetchOverride = (UUID, [UUID]) async throws -> [PropertyStatusRecord]
-    typealias LightweightPropertyEntryStatusOverride = (UUID, UUID, String) async throws -> LightweightPropertyEntryStatus
+    typealias LightweightPropertyEntryStatusOverride = (UUID, UUID?, String) async throws -> LightweightPropertyEntryStatus
     typealias SessionSoftDeleteRPCOverride = (UUID) async throws -> Void
     typealias SessionSoftDeleteRefreshOverride = () async -> Bool
     typealias SessionDeletePreflightRefreshOverride = (UUID, UUID, UUID) async throws -> SessionDeletePreflightSnapshot
@@ -4637,22 +4637,15 @@ final class AppState: ObservableObject {
         }
         switch block.blockContext {
         case "occupied":
-            return "Property is currently occupied by \(block.ownerDescription)."
+            return "Locked by: \(block.ownerDescription)"
         case "draft":
-            return "A draft is in progress by \(block.ownerDescription)."
+            return "Draft in progress by: \(block.ownerDescription)"
         case "pending_export":
-            var lines = ["Locked by: \(block.ownerDescription)"]
-            if let lockedAt = block.lockedAt, let lockedAtFormatter {
-                lines.append("Pending since: \(lockedAtFormatter(lockedAt))")
-            }
-            return lines.joined(separator: "\n")
+            return "Locked by: \(block.ownerDescription)"
         case "verification_failed":
             return coordinationUnavailableLockMessage
         default:
             break
-        }
-        if let lockedAt = block.lockedAt, let lockedAtFormatter {
-            return "Locked by \(block.ownerDescription) since \(lockedAtFormatter(lockedAt))."
         }
         return "Locked by \(block.ownerDescription)."
     }
@@ -4971,6 +4964,7 @@ final class AppState: ObservableObject {
         let sessionType: SessionType
         let entryState: LightweightPropertyEntryState?
         let lockSessionID: UUID?
+        let entryBlock: SessionEntryCoordinationBlock?
         let isCurrentDeviceOccupiedClaim: Bool
         let requiresFallback: Bool
         let reason: String?
@@ -6348,7 +6342,7 @@ final class AppState: ObservableObject {
     private struct LightweightPropertyEntryStatusRPCPayload: Encodable {
         let targetPropertyID: UUID
         let targetDeviceID: String
-        let targetSessionID: UUID
+        let targetSessionID: UUID?
 
         enum CodingKeys: String, CodingKey {
             case targetPropertyID = "target_property_id"
@@ -36881,8 +36875,10 @@ final class AppState: ObservableObject {
     }
 
     private func combineOwnerAndDeviceDescription(owner: String, device: String?) -> String {
-        guard let device else { return owner }
-        return "\(owner) on \(device)"
+        guard let device = normalizedSupabaseText(device) else {
+            return owner
+        }
+        return "\(owner) • \(device)"
     }
 
     private func setSessionCoordinationState(
@@ -42342,8 +42338,9 @@ final class AppState: ObservableObject {
         let reExportReason = showReExport ? "local_archive_available" : "deferred_local_archive_availability"
 
         if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-            let basePropertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+            let basePropertyStatusAnswer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
+                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -42463,8 +42460,9 @@ final class AppState: ObservableObject {
             )
 
             if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-                let basePropertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+                let basePropertyStatusAnswer = makePropertyStatusCompareAnswer(
                     record: propertyStatus,
+                    propertyID: propertyID,
                     currentUserID: currentUserID,
                     currentDeviceID: currentDeviceID
                 )
@@ -42479,8 +42477,9 @@ final class AppState: ObservableObject {
                         entryBlocked: false,
                         deleteEligible: false
                     )
-                    : Self.makePropertyStatusCompareAnswer(
+                    : makePropertyStatusCompareAnswer(
                         record: propertyStatus,
+                        propertyID: propertyID,
                         currentUserID: currentUserID,
                         currentDeviceID: currentDeviceID
                     )
@@ -42509,8 +42508,9 @@ final class AppState: ObservableObject {
         var next: [UUID: Bool] = [:]
 
         for (propertyID, propertyStatus) in propertyStatusByPropertyID {
-            let answer = Self.makePropertyStatusCompareAnswer(
+            let answer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
+                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -42544,7 +42544,9 @@ final class AppState: ObservableObject {
                     partial[entry.key] = .warning
                 }
             case .idle, .draft, .occupied:
-                break
+                if entry.value.lastExportedSessionID != nil {
+                    partial[entry.key] = .current
+                }
             }
         }
         let localPendingIssuePropertyIDs = Set(pendingExportSessionByProperty.keys)
@@ -43321,6 +43323,12 @@ final class AppState: ObservableObject {
                     decision: nil,
                     context: "\(context)_fresh_missing"
                 )
+                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                    propertyID: propertyID,
+                    context: "\(context)_property_status_missing"
+                ) {
+                    return lightweightDecision
+                }
                 return nil
             }
 
@@ -43343,6 +43351,15 @@ final class AppState: ObservableObject {
                 decision: resolvedDecision,
                 context: "\(context)_fresh"
             )
+            if resolvedDecision.isBlocked {
+                return resolvedDecision
+            }
+            if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                propertyID: propertyID,
+                context: "\(context)_property_status_allowed"
+            ) {
+                return lightweightDecision
+            }
             return resolvedDecision
         } catch {
             if let cachedRecord = propertyStatusByPropertyID[propertyID] {
@@ -43359,7 +43376,16 @@ final class AppState: ObservableObject {
                     decision: resolvedCachedDecision,
                     context: "\(context)_fresh_failed_cached"
                 )
-                return resolvedCachedDecision.isBlocked ? resolvedCachedDecision : nil
+                if resolvedCachedDecision.isBlocked {
+                    return resolvedCachedDecision
+                }
+                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                    propertyID: propertyID,
+                    context: "\(context)_fresh_failed_cached_allowed"
+                ) {
+                    return lightweightDecision
+                }
+                return nil
             }
             print(
                 "[PropertyStatusEntry] " +
@@ -43371,6 +43397,56 @@ final class AppState: ObservableObject {
                 "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
             )
             return nil
+        }
+    }
+
+    private func evaluateLightweightPropertyEntryBlockProbe(
+        propertyID: UUID,
+        context: String
+    ) async -> PropertyStatusEntryPreflightDecision? {
+        guard let status = await evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: nil
+        ) else {
+            return nil
+        }
+        guard let block = sessionEntryBlock(for: status) else {
+            return nil
+        }
+        cacheLockPresentation(from: status, reason: "\(context)_lightweight_probe")
+        let decision = PropertyStatusEntryPreflightDecision(
+            source: "lightweight_property_entry_status",
+            decision: "block",
+            reason: status.reason ?? status.entryState.rawValue,
+            block: block
+        )
+        logPropertyStatusEntryPreflight(
+            propertyID: propertyID,
+            decision: decision,
+            context: context
+        )
+        return decision
+    }
+
+    @MainActor
+    func refreshLightweightPropertyEntryLocks(
+        propertyIDs: [UUID],
+        reason: String
+    ) async {
+        let uniquePropertyIDs = Array(Set(propertyIDs))
+        guard !uniquePropertyIDs.isEmpty else { return }
+
+        for propertyID in uniquePropertyIDs {
+            guard canAccessProperty(propertyID),
+                  let status = await evaluateLightweightPropertyEntryStatus(
+                    propertyID: propertyID,
+                    targetSessionID: nil
+                  ) else {
+                continue
+            }
+            if sessionEntryBlock(for: status) != nil {
+                cacheLockPresentation(from: status, reason: "\(reason)_lightweight_probe")
+            }
         }
     }
 
@@ -43389,7 +43465,7 @@ final class AppState: ObservableObject {
 
     func evaluateLightweightPropertyEntryStatus(
         propertyID: UUID,
-        targetSessionID: UUID
+        targetSessionID: UUID?
     ) async -> LightweightPropertyEntryStatus? {
         let deviceID = currentDeviceIdentifier()
         guard backendFeatureFlags.sessionCoordinationEnabled,
@@ -43537,6 +43613,7 @@ final class AppState: ObservableObject {
             sessionType: sessionType,
             entryState: status?.entryState,
             lockSessionID: status?.lockSessionID,
+            entryBlock: status.flatMap { sessionEntryBlock(for: $0) },
             isCurrentDeviceOccupiedClaim: status.map(prototypeStatusIsCurrentUserOccupiedByThisDevice) ?? false,
             requiresFallback: status?.requiresFallback ?? true,
             reason: reason.isEmpty ? nil : reason,
@@ -48144,7 +48221,12 @@ final class AppState: ObservableObject {
             let context = (status.reason ?? "").contains("draft") ? "draft" : "occupied"
             return SessionEntryCoordinationBlock(
                 ownerDescription: ownerDescription,
-                lockedAt: status.lockedAt,
+                lockedAt: lockPresentationTimestamp(
+                    propertyID: status.propertyID,
+                    sessionID: status.lockSessionID,
+                    context: context,
+                    fallback: status.lockedAt
+                ),
                 blockContext: context
             )
         case .staleClaimable:
@@ -48159,9 +48241,86 @@ final class AppState: ObservableObject {
                 lockedAt: status.lockedAt ?? status.updatedAt,
                 blockContext: "pending_export"
             )
-        case .unlockedAndClaimed, .lockedByCurrentUser, .unknownRequiresFallback:
+        case .lockedByCurrentUser:
+            guard normalizedSupabaseText(status.lockedByDeviceID) != currentDeviceIdentifier() else {
+                return nil
+            }
+            let context = (status.reason ?? "").contains("draft") ? "draft" : "occupied"
+            return SessionEntryCoordinationBlock(
+                ownerDescription: ownerDescription,
+                lockedAt: lockPresentationTimestamp(
+                    propertyID: status.propertyID,
+                    sessionID: status.lockSessionID,
+                    context: context,
+                    fallback: status.lockedAt
+                ),
+                blockContext: context
+            )
+        case .unlockedAndClaimed, .unknownRequiresFallback:
             return nil
         }
+    }
+
+    private func lockPresentationTimestamp(
+        propertyID: UUID,
+        sessionID: UUID?,
+        context: String,
+        fallback: Date?
+    ) -> Date? {
+        guard context == "draft" else {
+            return fallback
+        }
+        if let sessionID,
+           let session = sessions(for: propertyID).first(where: { $0.id == sessionID }) {
+            return session.startedAt
+        }
+        return canonicalDraftSession(for: propertyID, requireCaptures: false)?.startedAt ?? fallback
+    }
+
+    private func cacheLockPresentation(from status: LightweightPropertyEntryStatus, reason: String) {
+        guard let block = sessionEntryBlock(for: status) else { return }
+        var nextLocked = locallyLockedPropertyIDs
+        nextLocked.insert(status.propertyID)
+        locallyLockedPropertyIDs = nextLocked
+
+        guard let orgID = properties.first(where: { $0.id == status.propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == status.propertyID })?.orgId ??
+            activeOrganizationID else {
+            return
+        }
+
+        let recordStatus: PropertyStatusValue
+        switch block.blockContext {
+        case "draft":
+            recordStatus = .draft
+        case "pending_export":
+            recordStatus = .pendingExport
+        default:
+            recordStatus = .occupied
+        }
+
+        let existing = propertyStatusByPropertyID[status.propertyID]
+        let record = PropertyStatusRecord(
+            propertyID: status.propertyID,
+            orgID: orgID,
+            status: recordStatus,
+            activeSessionID: recordStatus == .occupied ? status.lockSessionID : nil,
+            draftSessionID: recordStatus == .draft ? status.lockSessionID : nil,
+            pendingExportSessionID: recordStatus == .pendingExport ? status.lockSessionID : nil,
+            lastExportedSessionID: existing?.lastExportedSessionID,
+            ownerUserID: status.lockedByUserID,
+            ownerDeviceID: normalizedSupabaseText(status.lockedByDeviceID),
+            heartbeatAt: status.lockedAt,
+            updatedAt: status.updatedAt ?? status.lockedAt ?? Date(),
+            updatedBy: status.lockedByUserID,
+            statusReason: reason,
+            revision: existing?.revision ?? 0
+        )
+        var nextStatus = propertyStatusByPropertyID
+        nextStatus[status.propertyID] = record
+        propertyStatusByPropertyID = nextStatus
+        lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
     }
 
     func canRebuildMissingLocalShellFromLightweightCurrentUserLock(
@@ -48221,18 +48380,66 @@ final class AppState: ObservableObject {
         context: String
     ) async -> PropertyStatusEntryPreflightEvaluation {
         guard let cachedRecord = propertyStatusByPropertyID[propertyID] else {
-            let decision = missingPropertyStatusEntryPreflightDecision()
-            logPropertyStatusEntryPreflight(
-                propertyID: propertyID,
-                decision: decision,
-                context: context
-            )
-            return PropertyStatusEntryPreflightEvaluation(
-                decision: decision,
-                skipCachedPropertyStatusPreflight: false,
-                source: "property_status_missing",
-                reason: "missing_property_status_row"
-            )
+            do {
+                guard let freshRecord = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
+                    let decision = missingPropertyStatusEntryPreflightDecision(
+                        reason: "fresh_read_missing_row"
+                    )
+                    logPropertyStatusEntryPreflight(
+                        propertyID: propertyID,
+                        decision: decision,
+                        context: "\(context)_fresh_missing_cache"
+                    )
+                    return PropertyStatusEntryPreflightEvaluation(
+                        decision: decision,
+                        skipCachedPropertyStatusPreflight: false,
+                        source: "property_status_missing",
+                        reason: "fresh_read_missing_row"
+                    )
+                }
+
+                var nextCache = propertyStatusByPropertyID
+                nextCache[propertyID] = freshRecord
+                propertyStatusByPropertyID = nextCache
+                lastPropertyStatusRefreshAt = Date()
+                reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_fresh_missing_cache")
+
+                let freshDecision = makePropertyStatusEntryPreflightDecision(
+                    propertyID: propertyID,
+                    record: freshRecord
+                )
+                let resolvedFreshDecision = await resolvedPropertyStatusEntryPreflightDecisionOwner(
+                    freshDecision,
+                    record: freshRecord
+                )
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: resolvedFreshDecision,
+                    context: "\(context)_fresh_missing_cache"
+                )
+                return PropertyStatusEntryPreflightEvaluation(
+                    decision: resolvedFreshDecision,
+                    skipCachedPropertyStatusPreflight: false,
+                    source: "property_status_fresh",
+                    reason: "fresh_read_status_\(freshRecord.status.rawValue)"
+                )
+            } catch {
+                let decision = missingPropertyStatusEntryPreflightDecision(
+                    source: "property_status_unverified",
+                    reason: "fresh_read_failed"
+                )
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: decision,
+                    context: "\(context)_fresh_missing_cache_failed"
+                )
+                return PropertyStatusEntryPreflightEvaluation(
+                    decision: decision,
+                    skipCachedPropertyStatusPreflight: false,
+                    source: "property_status_unverified",
+                    reason: "fresh_read_failed"
+                )
+            }
         }
 
         let cachedDecision = makePropertyStatusEntryPreflightDecision(
@@ -48377,12 +48584,18 @@ final class AppState: ObservableObject {
             currentDeviceID: currentDeviceID
         )
         let ownerDescription = propertyStatusEntryOwnerDescription(record: record)
-        let lockedAt = record.heartbeatAt ?? record.updatedAt
+        let occupiedLockedAt = record.heartbeatAt ?? record.updatedAt
+        let draftLockedAt = lockPresentationTimestamp(
+            propertyID: propertyID,
+            sessionID: record.draftSessionID,
+            context: "draft",
+            fallback: record.heartbeatAt ?? record.updatedAt
+        )
         let pendingExportLockedAt = record.updatedAt
 
         let draftHasNoMaterialLocalSession = record.status == .draft &&
             propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
-        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor ||
+        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor &&
             propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
 
         if draftHasNoMaterialLocalSession,
@@ -48439,13 +48652,13 @@ final class AppState: ObservableObject {
             return PropertyStatusEntryPreflightDecision(
                 source: "property_status",
                 decision: "block",
-                reason: "occupied_owned_by_other_actor",
-                block: SessionEntryCoordinationBlock(
-                    ownerDescription: ownerDescription,
-                    lockedAt: lockedAt,
-                    blockContext: "occupied"
+                    reason: "occupied_owned_by_other_actor",
+                    block: SessionEntryCoordinationBlock(
+                        ownerDescription: ownerDescription,
+                        lockedAt: occupiedLockedAt,
+                        blockContext: "occupied"
+                    )
                 )
-            )
         case .draft:
             guard !ownedByCurrentActor else {
                 return PropertyStatusEntryPreflightDecision(
@@ -48461,7 +48674,7 @@ final class AppState: ObservableObject {
                 reason: "draft_owned_by_other_actor",
                 block: SessionEntryCoordinationBlock(
                     ownerDescription: ownerDescription,
-                    lockedAt: lockedAt,
+                    lockedAt: draftLockedAt,
                     blockContext: "draft"
                 )
             )
@@ -49672,7 +49885,7 @@ final class AppState: ObservableObject {
         )
         let draftHasNoMaterialLocalSession = record.status == .draft &&
             propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
-        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor ||
+        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor &&
             propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
 
         if draftHasNoMaterialLocalSession,
@@ -49683,6 +49896,16 @@ final class AppState: ObservableObject {
                 pendingExportCountIncluded: false,
                 entryBlocked: false,
                 deleteEligible: true
+            )
+        }
+        if locallyLockedPropertyIDs.contains(propertyID),
+           record.status == .draft || record.status == .occupied {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .locked,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: true,
+                deleteEligible: false
             )
         }
         if record.status == .pendingExport,
@@ -49873,13 +50096,13 @@ final class AppState: ObservableObject {
         currentUserID: UUID?,
         currentDeviceID: String
     ) -> Bool {
-        if let ownerUserID = record.ownerUserID,
-           ownerUserID == currentUserID {
-            return true
-        }
         if let ownerDeviceID = record.ownerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !ownerDeviceID.isEmpty {
             return ownerDeviceID == currentDeviceID
+        }
+        if let ownerUserID = record.ownerUserID,
+           ownerUserID == currentUserID {
+            return true
         }
         return false
     }
@@ -50663,6 +50886,12 @@ final class AppState: ObservableObject {
                 propertyIDs: visiblePropertyIDs,
                 reason: "foreground_refresh"
             )
+            Task { @MainActor [weak self] in
+                await self?.refreshLightweightPropertyEntryLocks(
+                    propertyIDs: visiblePropertyIDs,
+                    reason: "foreground_refresh"
+                )
+            }
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
                 outcome: "foreground_success",
