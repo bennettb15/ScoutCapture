@@ -2256,15 +2256,7 @@ struct SessionHubView: View {
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
         @Environment(\.colorScheme) private var colorScheme
-        @State private var inviteEmail: String = ""
-        @State private var inviteRole: String = "viewer"
-        @State private var collaborationStatusMessage: String?
-        @State private var collaborationErrorMessage: String?
-        @State private var isCollaborationActionInFlight: Bool = false
-        @State private var memberForPropertyAccessManagement: PropertyAccessManagementPresentation?
-        @State private var pendingMembershipRevoke: PendingMembershipRevoke?
         private let showDeveloperSection: Bool = false
-        private let inviteRoleOptions = ["viewer", "field", "manager", "owner"]
 
         private var buttonFill: Color {
             colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -2276,10 +2268,6 @@ struct SessionHubView: View {
 
         private var buttonLabel: Color {
             colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
-
-        private var shouldShowCollaborationSection: Bool {
-            appState.requiresAuthentication && appState.isOwnerOfActiveOrganization
         }
 
         var body: some View {
@@ -2386,124 +2374,6 @@ struct SessionHubView: View {
                                 }
                             }
 
-                            if appState.requiresAuthentication && !appState.pendingOrganizationInvitations.isEmpty {
-                                Section("Pending Invites") {
-                                    ForEach(appState.pendingOrganizationInvitations) { invitation in
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(invitation.orgName)
-                                                    .font(.system(size: 15, weight: .semibold))
-                                                Text("\(invitation.role.capitalized) access")
-                                                    .font(.system(size: 13, weight: .medium))
-                                                    .foregroundStyle(.secondary)
-                                            }
-
-                                            Button(isCollaborationActionInFlight ? "Accepting..." : "Accept") {
-                                                accept(invitation: invitation)
-                                            }
-                                            .disabled(isCollaborationActionInFlight)
-                                        }
-                                        .padding(.vertical, 4)
-                                    }
-                                }
-                            }
-
-                            if shouldShowCollaborationSection,
-                               let activeOrganization = appState.activeOrganization {
-                                Section("Collaboration") {
-                                    Text("Manage access for \(activeOrganization.name)")
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(.secondary)
-
-                                    TextField("Invite by email", text: $inviteEmail)
-                                        .textInputAutocapitalization(.never)
-                                        .autocorrectionDisabled()
-                                        .keyboardType(.emailAddress)
-
-                                    Picker("Invite Role", selection: $inviteRole) {
-                                        ForEach(inviteRoleOptions, id: \.self) { role in
-                                            Text(role.capitalized).tag(role)
-                                        }
-                                    }
-
-                                    Button(isCollaborationActionInFlight ? "Inviting..." : "Send Invite") {
-                                        sendInvite()
-                                    }
-                                    .disabled(
-                                        isCollaborationActionInFlight ||
-                                        inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                                        appState.activeOrganizationID == nil
-                                    )
-
-                                    if let collaborationStatusMessage, !collaborationStatusMessage.isEmpty {
-                                        Text(collaborationStatusMessage)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(.secondary)
-                                    }
-
-                                    if let collaborationErrorMessage, !collaborationErrorMessage.isEmpty {
-                                        Text(collaborationErrorMessage)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(.red)
-                                    }
-
-                                    if appState.activeOrganizationMembers.isEmpty {
-                                        Text("No members found.")
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        ForEach(appState.activeOrganizationMembers) { member in
-                                            HStack(alignment: .center, spacing: 12) {
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text(member.displayName)
-                                                        .font(.system(size: 15, weight: .semibold))
-                                                    if let email = member.email, !email.isEmpty, email != member.displayName {
-                                                        Text(email)
-                                                            .font(.system(size: 13, weight: .medium))
-                                                            .foregroundStyle(.secondary)
-                                                    }
-                                                    Text(member.role.capitalized)
-                                                        .font(.system(size: 12, weight: .medium))
-                                                        .foregroundStyle(.secondary)
-                                                }
-
-                                                Spacer(minLength: 0)
-
-                                                if member.role != "owner" {
-                                                    HStack(spacing: 10) {
-                                                        Button("Manage") {
-                                                            memberForPropertyAccessManagement = PropertyAccessManagementPresentation(member: member)
-                                                        }
-                                                        .disabled(isCollaborationActionInFlight)
-                                                        .buttonStyle(.borderless)
-                                                        .font(.system(size: 13, weight: .semibold))
-                                                        .foregroundStyle(.white)
-                                                        .padding(.horizontal, 14)
-                                                        .frame(height: 32)
-                                                        .background(Color.blue)
-                                                        .clipShape(Capsule())
-
-                                                        Button {
-                                                            pendingMembershipRevoke = PendingMembershipRevoke(member: member)
-                                                        } label: {
-                                                            ZStack {
-                                                                Circle()
-                                                                    .fill(Color.red)
-                                                                    .frame(width: 32, height: 32)
-                                                                Text("X")
-                                                                    .font(.system(size: 13, weight: .bold))
-                                                                    .foregroundStyle(.white)
-                                                            }
-                                                        }
-                                                        .disabled(isCollaborationActionInFlight)
-                                                        .buttonStyle(.borderless)
-                                                    }
-                                                }
-                                            }
-                                            .padding(.vertical, 4)
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         if showDeveloperSection, let onOpenDebugTools {
@@ -2522,110 +2392,6 @@ struct SessionHubView: View {
                     .listSectionSpacing(18)
                 }
             }
-            .task {
-                await refreshCollaborationState()
-            }
-            .sheet(
-                item: $memberForPropertyAccessManagement,
-                onDismiss: {
-                    memberForPropertyAccessManagement = nil
-                }
-            ) { presentation in
-                if let activeOrganizationID = appState.activeOrganizationID,
-                   let activeOrganization = appState.activeOrganization {
-                    PropertyAccessManagementSheet(
-                        member: presentation.member,
-                        organizationID: activeOrganizationID,
-                        organizationName: activeOrganization.name,
-                        onClose: {
-                            memberForPropertyAccessManagement = nil
-                        }
-                    )
-                    .environmentObject(appState)
-                }
-            }
-            .alert(item: $pendingMembershipRevoke) { pendingRevoke in
-                Alert(
-                    title: Text("Revoke Access?"),
-                    message: Text(revokeConfirmationMessage(for: pendingRevoke.member)),
-                    primaryButton: .destructive(Text("Revoke Access")) {
-                        revoke(member: pendingRevoke.member)
-                    },
-                    secondaryButton: .cancel(Text("Cancel"))
-                )
-            }
-        }
-
-        private func refreshCollaborationState() async {
-            await appState.refreshPendingOrganizationInvitations()
-            await appState.refreshActiveOrganizationMembers()
-        }
-
-        private func sendInvite() {
-            guard let activeOrganizationID = appState.activeOrganizationID else { return }
-            let trimmedEmail = inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedEmail.isEmpty else { return }
-
-            collaborationErrorMessage = nil
-            collaborationStatusMessage = nil
-            isCollaborationActionInFlight = true
-
-            Task {
-                defer { isCollaborationActionInFlight = false }
-                do {
-                    try await appState.inviteUserToOrganization(
-                        email: trimmedEmail,
-                        role: inviteRole,
-                        orgID: activeOrganizationID
-                    )
-                    inviteEmail = ""
-                    collaborationStatusMessage = "Invite sent."
-                } catch {
-                    collaborationErrorMessage = error.localizedDescription
-                }
-            }
-        }
-
-        private func accept(invitation: PendingOrganizationInvitation) {
-            collaborationErrorMessage = nil
-            collaborationStatusMessage = nil
-            isCollaborationActionInFlight = true
-
-            Task {
-                defer { isCollaborationActionInFlight = false }
-                do {
-                    try await appState.acceptOrganizationInvitation(invitationID: invitation.id)
-                    collaborationStatusMessage = "Access accepted."
-                } catch {
-                    collaborationErrorMessage = error.localizedDescription
-                }
-            }
-        }
-
-        private func revoke(member: OrganizationAccessMember) {
-            guard let activeOrganizationID = appState.activeOrganizationID else { return }
-
-            collaborationErrorMessage = nil
-            collaborationStatusMessage = nil
-            isCollaborationActionInFlight = true
-
-            Task {
-                defer { isCollaborationActionInFlight = false }
-                do {
-                    try await appState.revokeOrganizationMembership(
-                        userID: member.id,
-                        orgID: activeOrganizationID
-                    )
-                    collaborationStatusMessage = "Access revoked."
-                } catch {
-                    collaborationErrorMessage = error.localizedDescription
-                }
-            }
-        }
-
-        private func revokeConfirmationMessage(for member: OrganizationAccessMember) -> String {
-            let memberIdentifier = member.email ?? member.displayName
-            return "\(memberIdentifier) will lose access to this organization and its associated data."
         }
     }
 
