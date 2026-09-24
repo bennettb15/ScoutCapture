@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import CryptoKit
 import Functions
+import Network
 import Supabase
 #if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
@@ -7689,6 +7690,7 @@ final class AppState: ObservableObject {
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
     @Published private(set) var isAuthenticationReady: Bool = false
     @Published private(set) var isAuthenticating: Bool = false
+    @Published private(set) var isNetworkAvailable: Bool = true
     @Published private(set) var isLoadingPropertiesForOrgSwitch: Bool = false
     @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser? {
         didSet {
@@ -8345,6 +8347,8 @@ final class AppState: ObservableObject {
     private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
     private let offlineReplayStateQueue = DispatchQueue(label: "ScoutCapture.AppState.offlineReplay")
     private let sessionSnapshotUploadRetryStateQueue = DispatchQueue(label: "ScoutCapture.AppState.sessionSnapshotUploadRetry")
+    private let networkMonitor = NWPathMonitor()
+    private let networkMonitorQueue = DispatchQueue(label: "ScoutCapture.AppState.networkMonitor")
     private let launchOfflineReplaySettlingDelay: TimeInterval = 20
     private let automaticLaunchOfflineReplayAttemptLimit = 5
     private var cloudBackupLogRunOpen: Bool = false
@@ -8813,12 +8817,24 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
 
         print("[AppStateDiag] init")
+        startNetworkMonitoring()
         logCutoverConfiguration()
         prepareCollaborativeBackendBootstrap()
     }
 
     deinit {
         print("[AppStateDiag] deinit_enter")
+        networkMonitor.cancel()
+    }
+
+    private func startNetworkMonitoring() {
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isNetworkAvailable = path.status == .satisfied
+            }
+        }
+        networkMonitor.start(queue: networkMonitorQueue)
     }
 
     static func loadSupabaseConfiguration(
@@ -11373,6 +11389,36 @@ final class AppState: ObservableObject {
                 self.authenticationErrorMessage = error.localizedDescription
             }
             throw error
+        }
+    }
+
+    @MainActor
+    func restoreAuthenticatedStartupAfterNetworkReconnect() async -> Bool {
+        guard requiresAuthentication else {
+            isAuthenticationReady = true
+            isOrganizationContextReady = true
+            return true
+        }
+        guard let client = supabaseClient else {
+            isAuthenticationReady = true
+            return false
+        }
+
+        do {
+            let session = try await client.auth.session
+            let user = AuthenticatedSupabaseUser(
+                id: session.user.id,
+                email: session.user.email
+            )
+            applyAuthenticationStateNow(user: user, ready: true)
+            await runPostAuthenticationRebuild(for: session.user.id)
+            return isAuthenticated && isOrganizationContextReady
+        } catch {
+            print("[SupabaseAuth] reconnect_session_restore_failed error=\(error.localizedDescription)")
+            if !isAuthenticationReady {
+                isAuthenticationReady = true
+            }
+            return false
         }
     }
 
@@ -45680,6 +45726,13 @@ final class AppState: ObservableObject {
     func retryPropertyUploadAndExport(
         propertyID: UUID
     ) async -> PropertyUploadRetryResult {
+        guard isNetworkAvailable else {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: "No network connection. Turn Wi-Fi or cellular back on, then retry export."
+            )
+        }
+
         let uploadSummary = await performSessionSnapshotUploadRetry(
             source: "manual_property_context_retry",
             propertyID: propertyID,
@@ -45727,8 +45780,18 @@ final class AppState: ObservableObject {
         propertyID: UUID
     ) async -> FastRuntimePendingExportRecoveryResult {
         var blockedMessages: [String] = []
-        let sessionTypes = fastRuntimePendingExportRecoverySessionTypes(propertyID: propertyID)
-        for sessionType in sessionTypes {
+        let candidates = fastRuntimePendingExportRecoveryCandidates(propertyID: propertyID)
+        for candidate in candidates {
+            let sessionType = candidate.session.sessionType
+            guard await ensureFastRuntimePendingExportStatusForRecovery(
+                propertyID: propertyID,
+                sessionID: candidate.session.id,
+                source: candidate.source
+            ) else {
+                blockedMessages.append("\(sessionType.rawValue): unable_to_repair_pending_export_status")
+                continue
+            }
+
             let dryRun = await runFastRuntimeReportPackageDryRun(
                 propertyID: propertyID,
                 sessionType: sessionType
@@ -45790,14 +45853,77 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func fastRuntimePendingExportRecoverySessionTypes(propertyID: UUID) -> [SessionType] {
-        guard let sessionID = propertyStatusByPropertyID[propertyID]?.pendingExportSessionID else {
-            return [.fullDocumentation, .punchlistVisit]
+    private func fastRuntimePendingExportRecoveryCandidates(
+        propertyID: UUID
+    ) -> [(session: Session, source: String)] {
+        var candidates: [(session: Session, source: String)] = []
+        var seenSessionIDs: Set<UUID> = []
+
+        func append(_ session: Session?, source: String) {
+            guard let session,
+                  session.propertyID == propertyID,
+                  session.deletedAt == nil,
+                  session.status == .completed,
+                  session.isSealed,
+                  session.firstDeliveredAt == nil,
+                  sessionHasCaptures(session),
+                  seenSessionIDs.insert(session.id).inserted else {
+                return
+            }
+            candidates.append((session: session, source: source))
         }
-        if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) {
-            return [metadata.sessionType]
+
+        if let sessionID = propertyStatusByPropertyID[propertyID]?.pendingExportSessionID {
+            append(try? localSessionForSnapshotUpload(propertyID: propertyID, sessionID: sessionID), source: "property_status")
         }
-        return [.fullDocumentation, .punchlistVisit]
+        append(latestPendingExportSession(for: propertyID), source: "local_pending_export_index")
+
+        let localSessions = sessions(for: propertyID)
+            .filter {
+                $0.deletedAt == nil &&
+                $0.status == .completed &&
+                $0.isSealed &&
+                $0.firstDeliveredAt == nil &&
+                sessionHasCaptures($0)
+            }
+            .sorted { $0.startedAt > $1.startedAt }
+        for session in localSessions {
+            append(session, source: "local_completed_pending_delivery")
+        }
+
+        return candidates
+    }
+
+    @MainActor
+    private func ensureFastRuntimePendingExportStatusForRecovery(
+        propertyID: UUID,
+        sessionID: UUID,
+        source: String
+    ) async -> Bool {
+        if propertyStatusByPropertyID[propertyID]?.status == .pendingExport,
+           propertyStatusByPropertyID[propertyID]?.pendingExportSessionID == sessionID {
+            return true
+        }
+
+        let didRepair = await performPropertyStatusShadowWrite(
+            transition: .pendingExport,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            deviceID: currentDeviceIdentifier(),
+            reason: "manual_retry_pending_export_repair_\(source)"
+        )
+        guard didRepair else { return false }
+
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: .pendingExport,
+            reason: "manual_retry_pending_export_repair_\(source)"
+        )
+        if let sessions = sessionIndexByProperty[propertyID] ?? allSessionIndexByProperty[propertyID] {
+            _ = updatePropertyRowSecondaryDetails(propertyID: propertyID, sessions: sessions)
+        }
+        return true
     }
 
     private func makeFastRuntimeReportHandoffFailure(

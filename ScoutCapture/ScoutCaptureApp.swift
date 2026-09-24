@@ -475,6 +475,10 @@ private struct AppRootView: View {
     @State private var homePropertyListReady: Bool = false
     @State private var didStartHomePropertyListReadiness: Bool = false
     @State private var homePropertyListReadinessTimedOut: Bool = false
+    @State private var startupNetworkGateActive: Bool = false
+    @State private var startupNetworkRetryToken: Int = 0
+    @State private var startupAuthGraceActive: Bool = false
+    @State private var startupAuthGraceToken: Int = 0
     // Keep first property-row badge/cloud hydration behind splash when possible.
     private let warmLaunchTimeoutSeconds: TimeInterval = 15.0
 
@@ -498,6 +502,47 @@ private struct AppRootView: View {
         initialPropertyListTimedOut && appState.isInitialPropertyListUpdateStillActive
     }
 
+    private var isStartupWaitingForNetwork: Bool {
+        appState.properties.isEmpty && (!appState.isNetworkAvailable || startupNetworkGateActive)
+    }
+
+    private var startupLoadingMessage: String {
+        if isStartupWaitingForNetwork && !appState.isNetworkAvailable {
+            return "No network connection"
+        }
+        return "Loading properties..."
+    }
+
+    private var startupLoadingDetailMessage: String? {
+        if isStartupWaitingForNetwork {
+            if appState.isNetworkAvailable {
+                return "Connection restored. Loading properties."
+            }
+            return "Connect to Wi-Fi or cellular to load properties."
+        }
+        return startupLoadingDetail
+    }
+
+    private var startupShowsSpinner: Bool {
+        appState.isNetworkAvailable
+    }
+
+    private var startupOfflineMessage: String {
+        "No network connection"
+    }
+
+    private var startupOfflineDetail: String {
+        "Connect to Wi-Fi or cellular to load properties."
+    }
+
+    private var shouldHoldStartupForAuthResolution: Bool {
+        startupAuthGraceActive &&
+            appState.requiresAuthentication &&
+            appState.isAuthenticationReady &&
+            !appState.isAuthenticated &&
+            appState.isNetworkAvailable
+    }
+
     var body: some View {
         Group {
             if !isAppReady {
@@ -505,15 +550,36 @@ private struct AppRootView: View {
                     progress: launchProgress,
                     showsProgressBar: showsProgressBar,
                     showsLogo: true,
-                    message: "Loading properties...",
-                    detailMessage: startupLoadingDetail,
-                    showsSpinner: true
+                    message: startupLoadingMessage,
+                    detailMessage: startupLoadingDetailMessage,
+                    showsSpinner: startupShowsSpinner
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
                 LoadingView(
                     progress: 0,
                     showsProgressBar: false,
-                    showsLogo: true
+                    showsLogo: true,
+                    message: appState.isNetworkAvailable ? "Checking sign-in..." : startupOfflineMessage,
+                    detailMessage: appState.isNetworkAvailable ? "Restoring your saved session." : startupOfflineDetail,
+                    showsSpinner: appState.isNetworkAvailable
+                )
+            } else if appState.requiresAuthentication && !appState.isAuthenticated && !appState.isNetworkAvailable {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: startupOfflineMessage,
+                    detailMessage: startupOfflineDetail,
+                    showsSpinner: false
+                )
+            } else if shouldHoldStartupForAuthResolution {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: "Checking sign-in...",
+                    detailMessage: "Restoring your saved session.",
+                    showsSpinner: true
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticated {
                 AuthView()
@@ -521,25 +587,35 @@ private struct AppRootView: View {
                 LoadingView(
                     progress: 0,
                     showsProgressBar: false,
-                    showsLogo: true
+                    showsLogo: true,
+                    message: appState.isNetworkAvailable ? "Loading organization..." : startupOfflineMessage,
+                    detailMessage: appState.isNetworkAvailable ? "Preparing your workspace." : startupOfflineDetail,
+                    showsSpinner: appState.isNetworkAvailable
                 )
             } else if !homePropertyListReady {
                 LoadingView(
                     progress: launchProgress,
                     showsProgressBar: true,
                     showsLogo: true,
-                    message: "Preparing property list...",
-                    detailMessage: startupLoadingDetail,
-                    showsSpinner: true
+                    message: isStartupWaitingForNetwork && !appState.isNetworkAvailable ? "No network connection" : "Preparing property list...",
+                    detailMessage: startupLoadingDetailMessage,
+                    showsSpinner: startupShowsSpinner
                 )
             } else {
                 SessionHubView(initialPropertyListTimedOut: shouldShowInitialPropertyListUpdatingBanner)
             }
         }
         .onChange(of: appState.isAuthenticationReady) { _, _ in
+            startStartupAuthGraceIfNeeded()
             startHomePropertyListReadinessIfNeeded()
         }
         .onChange(of: appState.isAuthenticated) { _, _ in
+            if appState.isAuthenticated {
+                startupAuthGraceActive = false
+                startupAuthGraceToken += 1
+            } else {
+                startStartupAuthGraceIfNeeded()
+            }
             startHomePropertyListReadinessIfNeeded()
         }
         .onChange(of: appState.isOrganizationContextReady) { _, _ in
@@ -551,9 +627,24 @@ private struct AppRootView: View {
         .onChange(of: minimumLaunchDelayMet) { _, _ in
             startHomePropertyListReadinessIfNeeded()
         }
+        .onChange(of: appState.isNetworkAvailable) { _, isAvailable in
+            handleNetworkAvailabilityChange(isAvailable)
+            if isAvailable {
+                startStartupAuthGraceIfNeeded()
+            }
+        }
+        .onChange(of: appState.properties.count) { _, newCount in
+            if newCount > 0 {
+                startupNetworkGateActive = false
+                startupNetworkRetryToken += 1
+            }
+        }
         .task {
             guard !didStartWarmup else { return }
             didStartWarmup = true
+            if !appState.isNetworkAvailable && appState.properties.isEmpty {
+                startupNetworkGateActive = true
+            }
 
             if skipStartupLoading {
                 sessionHubReady = true
@@ -649,6 +740,15 @@ private struct AppRootView: View {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
             guard !homePropertyListReady else { return }
+            if startupNetworkGateActive && appState.properties.isEmpty {
+                homePropertyListReadinessTimedOut = true
+                didStartHomePropertyListReadiness = false
+                startupLoadingDetail = appState.isNetworkAvailable
+                    ? "Connection restored. Loading properties."
+                    : "Connect to Wi-Fi or cellular to load properties."
+                scheduleStartupNetworkRetryIfNeeded()
+                return
+            }
             homePropertyListReadinessTimedOut = true
             advanceLaunchProgress(to: 1.0)
             homePropertyListReady = true
@@ -665,6 +765,99 @@ private struct AppRootView: View {
             homePropertyListReadinessTimedOut = false
             advanceLaunchProgress(to: 1.0)
             homePropertyListReady = true
+        }
+    }
+
+    private func handleNetworkAvailabilityChange(_ isAvailable: Bool) {
+        guard !homePropertyListReady else { return }
+        if isAvailable {
+            startStartupAuthGraceIfNeeded()
+            if appState.properties.isEmpty {
+                startupNetworkGateActive = true
+            }
+            startupLoadingDetail = "Connection restored. Loading properties."
+            attemptStartupNetworkRecovery()
+        } else {
+            startupNetworkGateActive = appState.properties.isEmpty
+            startupNetworkRetryToken += 1
+            startupLoadingDetail = "Connect to Wi-Fi or cellular to load properties."
+        }
+    }
+
+    private func startStartupAuthGraceIfNeeded() {
+        guard !homePropertyListReady,
+              appState.requiresAuthentication,
+              appState.isNetworkAvailable,
+              appState.isAuthenticationReady,
+              !appState.isAuthenticated,
+              appState.properties.isEmpty else { return }
+        startupAuthGraceActive = true
+        startupAuthGraceToken += 1
+        let token = startupAuthGraceToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+            guard token == startupAuthGraceToken else { return }
+            startupAuthGraceActive = false
+        }
+    }
+
+    private func attemptStartupNetworkRecovery() {
+        guard startupNetworkGateActive,
+              appState.isNetworkAvailable,
+              appState.properties.isEmpty,
+              !homePropertyListReady else { return }
+        Task { @MainActor in
+            let restored = await appState.restoreAuthenticatedStartupAfterNetworkReconnect()
+            guard startupNetworkGateActive,
+                  appState.isNetworkAvailable,
+                  appState.properties.isEmpty,
+                  !homePropertyListReady else {
+                if !appState.properties.isEmpty {
+                    startupNetworkGateActive = false
+                    startupNetworkRetryToken += 1
+                    didStartHomePropertyListReadiness = false
+                    startHomePropertyListReadinessIfNeeded()
+                }
+                return
+            }
+
+            guard restored || canPrepareHomePropertyList else {
+                startupLoadingDetail = "Connection restored. Checking your saved sign-in."
+                scheduleStartupNetworkRetryIfNeeded()
+                return
+            }
+
+            await appState.refreshPropertiesAwaitingForegroundRefresh()
+            guard startupNetworkGateActive,
+                  appState.isNetworkAvailable,
+                  !homePropertyListReady else { return }
+
+            if appState.properties.isEmpty {
+                scheduleStartupNetworkRetryIfNeeded()
+                return
+            }
+            startupNetworkGateActive = false
+            startupNetworkRetryToken += 1
+            homePropertyListReadinessTimedOut = false
+            didStartHomePropertyListReadiness = false
+            startHomePropertyListReadinessIfNeeded()
+        }
+    }
+
+    private func scheduleStartupNetworkRetryIfNeeded() {
+        guard startupNetworkGateActive,
+              appState.isNetworkAvailable,
+              appState.properties.isEmpty,
+              !homePropertyListReady else { return }
+        startupNetworkRetryToken += 1
+        let token = startupNetworkRetryToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            guard token == startupNetworkRetryToken,
+                  startupNetworkGateActive,
+                  appState.isNetworkAvailable,
+                  appState.properties.isEmpty,
+                  !homePropertyListReady else { return }
+            startupLoadingDetail = "Still waiting for property data. Checking connection again."
+            attemptStartupNetworkRecovery()
         }
     }
 }
@@ -690,6 +883,7 @@ struct SessionHubView: View {
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
     @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
     @State private var propertyEntryLockPrompt: PropertyEntryLockPrompt? = nil
+    @State private var showOfflinePropertyEntryAlert: Bool = false
     @State private var isPreparingPendingExport: Bool = false
     @State private var pendingExportFile: PendingExportFile? = nil
     @State private var pendingExportChecklist = ExportChecklistState()
@@ -1082,6 +1276,11 @@ struct SessionHubView: View {
                         propertyEntryLockPrompt = nil
                     }
                 )
+            }
+            .alert("No Network Connection", isPresented: $showOfflinePropertyEntryAlert) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Connect to Wi-Fi or cellular before opening a property. If a session is already open, capture can continue if the network drops.")
             }
             .onAppear {
                 isOpeningProperty = false
@@ -2002,6 +2201,10 @@ struct SessionHubView: View {
             if !isSearchExpanded {
                 propertiesSearchRow
             }
+
+            if !appState.isNetworkAvailable {
+                networkUnavailableBanner
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, isCompactSearchMode ? 4 : 6)
@@ -2009,6 +2212,28 @@ struct SessionHubView: View {
         .background(Color(uiColor: .systemBackground))
         .animation(.easeInOut(duration: 0.18), value: isSearchExpanded)
         .animation(.easeInOut(duration: 0.18), value: isCompactSearchMode)
+    }
+
+    private var networkUnavailableBanner: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 13, weight: .semibold))
+            Text("No network connection. Connect to open a property. Already-open sessions can keep capturing offline.")
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .foregroundColor(.orange)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.14))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityLabel("No network connection. Connect to open a property. Already-open sessions can keep capturing offline.")
     }
 
     private var propertiesSearchRow: some View {
@@ -3679,6 +3904,13 @@ struct SessionHubView: View {
 
     private func handlePropertyTap(_ property: Property) {
         guard !isOpeningProperty else { return }
+        guard appState.isNetworkAvailable else {
+            showOfflinePropertyEntryAlert = true
+            if pressedPropertyID == property.id {
+                pressedPropertyID = nil
+            }
+            return
+        }
         isOpeningProperty = true
         propertyTapToken += 1
         let tapToken = propertyTapToken
@@ -3938,6 +4170,10 @@ struct SessionHubView: View {
 
     private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
+        guard appState.isNetworkAvailable else {
+            showOfflinePropertyEntryAlert = true
+            return
+        }
         initialSessionTypePickerProperty = nil
         isOpeningProperty = true
         propertyTapToken += 1

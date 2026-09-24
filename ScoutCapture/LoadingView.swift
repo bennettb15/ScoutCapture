@@ -59,7 +59,7 @@ struct LoadingView: View {
                 .accessibilityValue("In progress")
 
                 if message != nil || detailMessage != nil || showsSpinner {
-                    VStack(spacing: 12) {
+                    VStack(spacing: 14) {
                         if let message {
                             Text(message)
                                 .font(.system(size: 16, weight: .bold))
@@ -71,7 +71,7 @@ struct LoadingView: View {
                                 .font(.system(size: 13, weight: .medium))
                                 .multilineTextAlignment(.center)
                                 .foregroundColor(fillColor.opacity(0.66))
-                                .lineLimit(2)
+                                .lineLimit(3)
                                 .frame(maxWidth: min(proxy.size.width * 0.72, 360))
                         }
 
@@ -80,10 +80,10 @@ struct LoadingView: View {
                                 .progressViewStyle(.circular)
                                 .tint(fillColor)
                                 .scaleEffect(1.12)
-                                .padding(.top, 4)
+                                .padding(.top, 2)
                         }
                     }
-                    .offset(y: progressOffsetY + (showsProgressBar ? 84 : 32))
+                    .offset(y: progressOffsetY + (showsProgressBar ? 100 : 44))
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(message ?? "Loading")
                 }
