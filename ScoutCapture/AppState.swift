@@ -864,6 +864,13 @@ final class AppState: ObservableObject {
         let message: String?
     }
 
+    private struct FastRuntimeCompletionRecoveryCandidate {
+        let context: ActiveCaptureContext
+        let storageRoot: URL
+        let photoCount: Int
+        let metadataModifiedAt: Date?
+    }
+
     struct PropertyUploadRetryResult: Equatable {
         let success: Bool
         let message: String
@@ -8351,6 +8358,7 @@ final class AppState: ObservableObject {
     private let networkMonitorQueue = DispatchQueue(label: "ScoutCapture.AppState.networkMonitor")
     private let launchOfflineReplaySettlingDelay: TimeInterval = 20
     private let automaticLaunchOfflineReplayAttemptLimit = 5
+    private var automaticFastRuntimeCompletionRecoveryInFlight = false
     private var cloudBackupLogRunOpen: Bool = false
     private var cloudBackupLogHasPrintedStart: Bool = false
     private var cloudBackupLogHasPrintedTerminal: Bool = false
@@ -8831,10 +8839,23 @@ final class AppState: ObservableObject {
         networkMonitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.isNetworkAvailable = path.status == .satisfied
+                let wasAvailable = self.isNetworkAvailable
+                let isAvailable = path.status == .satisfied
+                self.isNetworkAvailable = isAvailable
+                if isAvailable && !wasAvailable {
+                    self.scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect()
+                }
             }
         }
         networkMonitor.start(queue: networkMonitorQueue)
+    }
+
+    @MainActor
+    private func scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await self?.retryFailedFastRuntimeCompletionUploadsAfterReconnect()
+        }
     }
 
     static func loadSupabaseConfiguration(
@@ -45266,6 +45287,195 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func fastRuntimeCompletionRecoveryCandidates(
+        propertyID: UUID
+    ) -> [FastRuntimeCompletionRecoveryCandidate] {
+        let fileManager = FileManager.default
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var candidates: [FastRuntimeCompletionRecoveryCandidate] = []
+        var seenKeys: Set<String> = []
+
+        func appendCandidate(context: ActiveCaptureContext, storageRoot: URL) {
+            let standardizedRoot = storageRoot.standardizedFileURL
+            let key = "\(context.sessionID.uuidString.lowercased())|\(standardizedRoot.path)"
+            guard context.propertyID == propertyID,
+                  seenKeys.insert(key).inserted,
+                  fileManager.fileExists(atPath: standardizedRoot.path) else {
+                return
+            }
+
+            let metadataURL = Self.fastRuntimeDraftMetadataURL(root: standardizedRoot)
+            guard let data = try? Data(contentsOf: metadataURL),
+                  let shots = try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: data) else {
+                return
+            }
+            let scopedShots = shots.filter {
+                $0.propertyID == propertyID && $0.sessionID == context.sessionID
+            }
+            guard !scopedShots.isEmpty else { return }
+            let metadataModifiedAt = (try? metadataURL.resourceValues(forKeys: [.contentModificationDateKey]))
+                .flatMap(\.contentModificationDate)
+            candidates.append(FastRuntimeCompletionRecoveryCandidate(
+                context: ActiveCaptureContext(
+                    sessionID: context.sessionID,
+                    propertyID: context.propertyID,
+                    orgID: context.orgID,
+                    sessionType: context.sessionType,
+                    ownerUserID: context.ownerUserID,
+                    ownerEmail: context.ownerEmail,
+                    ownerDeviceID: context.ownerDeviceID,
+                    createdAt: context.createdAt,
+                    status: .completed,
+                    statusReason: "fast_lane_complete_retry_recovery"
+                ),
+                storageRoot: standardizedRoot,
+                photoCount: scopedShots.count,
+                metadataModifiedAt: metadataModifiedAt
+            ))
+        }
+
+        let tempRoot = Self.fastRuntimePrototypeTempRootURL()
+        for context in Self.loadFastRuntimePrototypeTempContexts() where context.propertyID == propertyID {
+            appendCandidate(
+                context: context,
+                storageRoot: tempRoot
+                    .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+                    .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+            )
+        }
+
+        if let summary = fastRuntimeDraftsByPropertyID[propertyID] {
+            let resolved = Self.resolvedFastRuntimeDraftStorage(for: summary)
+            let context = ActiveCaptureContext(
+                sessionID: summary.sessionID,
+                propertyID: summary.propertyID,
+                orgID: summary.orgID,
+                sessionType: summary.sessionType,
+                ownerUserID: summary.ownerUserID,
+                ownerEmail: summary.ownerEmail,
+                ownerDeviceID: summary.ownerDeviceID,
+                createdAt: summary.createdAt,
+                status: .completed,
+                statusReason: "fast_lane_draft_complete_retry_recovery"
+            )
+            appendCandidate(context: context, storageRoot: resolved.storageRoot)
+        }
+
+        return candidates.sorted { lhs, rhs in
+            let lhsDate = lhs.metadataModifiedAt ?? lhs.context.createdAt
+            let rhsDate = rhs.metadataModifiedAt ?? rhs.context.createdAt
+            if lhsDate == rhsDate {
+                return lhs.context.sessionID.uuidString < rhs.context.sessionID.uuidString
+            }
+            return lhsDate > rhsDate
+        }
+    }
+
+    @MainActor
+    private func recoverFastRuntimeCompleteUploadAndReportHandoff(
+        propertyID: UUID,
+        source: String
+    ) async -> FastRuntimePendingExportRecoveryResult {
+        let candidates = fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID)
+        guard !candidates.isEmpty else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: nil,
+                sessionType: nil,
+                message: "No local completed fast-lane upload was ready to retry."
+            )
+        }
+
+        for candidate in candidates {
+            markFastRuntimeCompletionUploading(context: candidate.context)
+            let upload = await runFastRuntimeCompleteUpload(
+                context: candidate.context,
+                storageRoot: candidate.storageRoot,
+                capturedPhotoCount: candidate.photoCount
+            )
+            guard upload.success else {
+                let detail = upload.errorMessage ??
+                    upload.dryRun.corruptMetadataMessage ??
+                    upload.dryRun.missingFields.first ??
+                    upload.diagnostics.last ??
+                    "Fast-lane upload retry failed."
+                markFastRuntimeCompletionFailed(context: candidate.context, message: detail)
+                refreshLightweightPropertyRowCloudStatusCache()
+                refreshPropertyRowStatusChipCache()
+                refreshPropertyRowCloudGlyphCache()
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: candidate.context.sessionID,
+                    sessionType: candidate.context.sessionType,
+                    message: detail
+                )
+            }
+
+            let handoff = await runFastRuntimeReportHandoff(
+                propertyID: candidate.context.propertyID,
+                sessionType: candidate.context.sessionType
+            )
+            guard handoff.success else {
+                let detail = handoff.errorMessage ?? "Report handoff retry failed."
+                markFastRuntimeCompletionFailed(context: candidate.context, message: detail)
+                refreshLightweightPropertyRowCloudStatusCache()
+                refreshPropertyRowStatusChipCache()
+                refreshPropertyRowCloudGlyphCache()
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: handoff.sessionID ?? candidate.context.sessionID,
+                    sessionType: candidate.context.sessionType,
+                    message: detail
+                )
+            }
+
+            let didRelease = await markFastRuntimeCompletionHandoffAccepted(
+                context: candidate.context,
+                snapshotID: handoff.snapshotID,
+                snapshotPath: handoff.snapshotPath
+            )
+            refreshLightweightPropertyRowCloudStatusCache()
+            refreshPropertyRowStatusChipCache()
+            refreshPropertyRowCloudGlyphCache()
+            return FastRuntimePendingExportRecoveryResult(
+                success: didRelease,
+                sessionID: handoff.sessionID ?? candidate.context.sessionID,
+                sessionType: candidate.context.sessionType,
+                message: didRelease
+                    ? nil
+                    : "Export retry completed, but the property did not release."
+            )
+        }
+
+        return FastRuntimePendingExportRecoveryResult(
+            success: false,
+            sessionID: nil,
+            sessionType: nil,
+            message: "\(source): no eligible local fast-lane completion found."
+        )
+    }
+
+    @MainActor
+    private func retryFailedFastRuntimeCompletionUploadsAfterReconnect() async {
+        guard !automaticFastRuntimeCompletionRecoveryInFlight else { return }
+        let propertyIDs = Array(Set(fastRuntimeCompletionCloudStatusByPropertyID.values.compactMap { status in
+            status.state == .failed ? status.propertyID : nil
+        }))
+        guard !propertyIDs.isEmpty else { return }
+
+        automaticFastRuntimeCompletionRecoveryInFlight = true
+        defer { automaticFastRuntimeCompletionRecoveryInFlight = false }
+
+        for propertyID in propertyIDs {
+            guard isNetworkAvailable else { break }
+            _ = await recoverFastRuntimeCompleteUploadAndReportHandoff(
+                propertyID: propertyID,
+                source: "network_reconnect"
+            )
+        }
+    }
+
     @MainActor
     func markFastRuntimeCompletionUploading(context: ActiveCaptureContext) {
         applyFastRuntimeCompletionCloudStatus(
@@ -45730,6 +45940,23 @@ final class AppState: ObservableObject {
             return PropertyUploadRetryResult(
                 success: false,
                 message: "No network connection. Turn Wi-Fi or cellular back on, then retry export."
+            )
+        }
+
+        let completionRecovery = await recoverFastRuntimeCompleteUploadAndReportHandoff(
+            propertyID: propertyID,
+            source: "manual_property_context_retry"
+        )
+        if completionRecovery.success {
+            return PropertyUploadRetryResult(
+                success: true,
+                message: "Upload and export retry completed."
+            )
+        }
+        if completionRecovery.sessionID != nil {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: completionRecovery.message ?? "Fast-lane upload retry failed. Try again in a bit."
             )
         }
 
