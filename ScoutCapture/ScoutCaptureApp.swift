@@ -3628,7 +3628,7 @@ struct SessionHubView: View {
                 VStack(spacing: 10) {
                     initialSessionChoiceButton(
                         title: "Full Documentation",
-                        subtitle: "Guided photos + flags + resolution required",
+                        subtitle: "Complete property walkthrough with guided photos and flags",
                         systemImage: "camera.metering.matrix",
                         isEnabled: true,
                         disabledCaption: nil
@@ -3637,7 +3637,7 @@ struct SessionHubView: View {
                     }
                     initialSessionChoiceButton(
                         title: "Punchlist Visit",
-                        subtitle: "Active/RR items only, no guided requirements",
+                        subtitle: "Flag follow-up visit without guided photos",
                         systemImage: "checklist",
                         isEnabled: true,
                         disabledCaption: nil
@@ -24777,13 +24777,13 @@ struct PropertySessionView: View {
                 VStack(spacing: 10) {
                     choiceButton(
                         title: "Full Documentation",
-                        subtitle: "Guided photos + flags + resolution required",
+                        subtitle: "Complete property walkthrough with guided photos and flags",
                         systemImage: "camera.metering.matrix",
                         sessionType: .fullDocumentation
                     )
                     choiceButton(
                         title: "Punchlist Visit",
-                        subtitle: "Active/RR items only, no guided requirements",
+                        subtitle: "Flag follow-up visit without guided photos",
                         systemImage: "checklist",
                         sessionType: .punchlistVisit
                     )
