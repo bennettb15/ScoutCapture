@@ -14743,9 +14743,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 camera.manualHDEnabled.toggle()
             },
             onShutterTapped: {
+                guard canUseFastShutter else { return }
                 shutterHaptic.impactOccurred()
                 shutterHaptic.prepare()
                 beginFastLaneShutter()
+            },
+            onDisabledShutterTapped: {
+                guard context.sessionType == .punchlistVisit, !isPunchlistCaptureArmed else { return }
+                showFastLaneSideControlToast("Select a flagged item or create a new flag to take a photo.", duration: 4.0)
             },
             onThumbnailTapped: {
                 shutterHaptic.impactOccurred(intensity: 0.45)
@@ -15558,7 +15563,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             !isSavingFastCapture &&
             !isFastLaneExiting &&
             !didCompleteUpload &&
-            !productionCompleteState.isRunning
+            !productionCompleteState.isRunning &&
+            (context.sessionType != .punchlistVisit || isPunchlistCaptureArmed)
+    }
+
+    private var isPunchlistCaptureArmed: Bool {
+        switch fastLaneCaptureIntent {
+        case .flagged, .resolution:
+            return true
+        case .free:
+            return fastLaneTrimmedNonEmpty(fastMetadataContext.detailNote) != nil
+        case .guided, .retake:
+            return false
+        }
     }
 
     private var productionCompletePanel: some View {
@@ -17546,11 +17563,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         showFastLaneSideControlToast(didResolve ? "Issue submitted for review" : "Could not resolve issue")
     }
 
-    private func showFastLaneSideControlToast(_ text: String) {
+    private func showFastLaneSideControlToast(_ text: String, duration: TimeInterval = 1.8) {
         fastLaneSideControlToastToken += 1
         let token = fastLaneSideControlToastToken
         fastLaneSideControlToastText = text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             guard token == fastLaneSideControlToastToken else { return }
             fastLaneSideControlToastText = nil
         }

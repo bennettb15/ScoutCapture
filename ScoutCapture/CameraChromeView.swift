@@ -93,6 +93,7 @@ struct CameraChromeActions {
     var onZoomTapped: (ZoomStep) -> Void = { _ in }
     var onHDTapped: () -> Void = {}
     var onShutterTapped: () -> Void = {}
+    var onDisabledShutterTapped: () -> Void = {}
     var onThumbnailTapped: () -> Void = {}
     var onDetailNoteTapped: () -> Void = {}
     var onLocationModeChanged: (CameraChromeLocationMode) -> Void = { _ in }
@@ -623,7 +624,13 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                 HStack {
                     Spacer(minLength: 0)
 
-                    Button(action: actions.onShutterTapped) {
+                    Button {
+                        if display.isShutterEnabled {
+                            actions.onShutterTapped()
+                        } else {
+                            actions.onDisabledShutterTapped()
+                        }
+                    } label: {
                         ZStack {
                             Circle()
                                 .fill(Color.white)
@@ -642,7 +649,7 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                 .frame(width: 74, height: 74)
                         }
                     }
-                    .disabled(!display.isShutterEnabled)
+                    .disabled(!display.isShutterEnabled && !display.showsPunchlistBadge)
                     .buttonStyle(.plain)
                     .offset(y: -13)
                     .overlay(alignment: .center) {
