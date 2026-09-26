@@ -2890,7 +2890,7 @@ final class LocalStore {
     func fetchGuidedShots(propertyID: UUID) throws -> [GuidedShot] {
         try ensurePropertyExists(propertyID)
         let guidedShots = try readGuidedShots(propertyID: propertyID)
-        let recovered = guidedShotsRecoveringPostPromotionOrdinaryCaptures(
+        let recovered = guidedShotsRecoveringMissingOrdinaryCaptures(
             LocalConflictRules.normalizeGuidedCompletionStates(guidedShots),
             propertyID: propertyID
         )
@@ -3226,7 +3226,7 @@ final class LocalStore {
         }
     }
 
-    private func guidedShotsRecoveringPostPromotionOrdinaryCaptures(
+    private func guidedShotsRecoveringMissingOrdinaryCaptures(
         _ guidedRows: [GuidedShot],
         propertyID: UUID
     ) -> [GuidedShot] {
@@ -3236,8 +3236,6 @@ final class LocalStore {
             observations: observations,
             issueLinkedGuidedShots: promotedShots
         )
-        guard !promotionEvidence.isEmpty else { return guidedRows }
-
         let sessions = ((try? readSessions(propertyID: propertyID)) ?? [])
             .filter { session in
                 session.deletedAt == nil &&
@@ -3265,6 +3263,16 @@ final class LocalStore {
             guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
                 continue
             }
+            // Earlier Fast Lane snapshots contain the ordinary guided photos but
+            // serialize no guided panel rows. Their original path is the remote
+            // storage path; deviceModel is rewritten when the snapshot is saved.
+            let hasMissingServerGuidedRows = metadata.guidedShots.isEmpty &&
+                metadata.shots.contains { shot in
+                    guard let storagePath = trimmedNonEmpty(shot.storagePath) else { return false }
+                    return LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot) &&
+                        shot.originalRelativePath == storagePath
+                }
+            guard hasMissingServerGuidedRows || !promotionEvidence.isEmpty else { continue }
             let guidedByShotID = metadata.guidedShots.reduce(into: [UUID: GuidedShot]()) { partial, guided in
                 if let shotID = guided.shot?.id, partial[shotID] == nil {
                     partial[shotID] = guided
@@ -3278,11 +3286,14 @@ final class LocalStore {
                         building: shot.building,
                         elevation: shot.elevation,
                         detailType: shot.detailType
-                      ),
-                      let cutoff = promotionEvidence.guidedBaseKeyCutoffs[baseKey],
-                      shot.createdAt > cutoff else {
+                      ) else {
                     continue
                 }
+                let isPostPromotion = promotionEvidence.guidedBaseKeyCutoffs[baseKey]
+                    .map { shot.createdAt > $0 } ?? false
+                let isMissingServerGuidedRow = hasMissingServerGuidedRows &&
+                    trimmedNonEmpty(shot.storagePath) == shot.originalRelativePath
+                guard isMissingServerGuidedRow || isPostPromotion else { continue }
 
                 let sourceGuided = guidedByShotID[shot.shotID]
                 if sourceGuided.map(guidedShotHasManualSkipEvidence) == true {
@@ -3304,6 +3315,7 @@ final class LocalStore {
                 }
 
                 if let existingIndex = indexByShotID[shot.shotID] {
+                    if isMissingServerGuidedRow { continue }
                     guard recovered[existingIndex].status == .retired || recovered[existingIndex].isRetired,
                           !guidedShotHasManualSkipEvidence(recovered[existingIndex]) else {
                         continue
@@ -3319,6 +3331,7 @@ final class LocalStore {
 
                 if let key = LocalConflictRules.guidedShotIdentityKey(candidate),
                    let existingIndex = indexByIdentityKey[key] {
+                    if isMissingServerGuidedRow { continue }
                     guard recovered[existingIndex].status == .retired || recovered[existingIndex].isRetired,
                           !guidedShotHasManualSkipEvidence(recovered[existingIndex]) else {
                         continue
@@ -5284,6 +5297,55 @@ final class LocalStore {
             }
             try writeObservations(observations, propertyID: propertyID)
         }
+    }
+
+    struct RemoteFlaggedShotReference {
+        let issueID: UUID?
+        let shot: Shot
+        let guidedShot: GuidedShot?
+    }
+
+    @discardableResult
+    func mergeRemoteFlaggedShotReferences(
+        propertyID: UUID,
+        references: [RemoteFlaggedShotReference]
+    ) throws -> Int {
+        try ensurePropertyExists(propertyID)
+        guard !references.isEmpty else { return 0 }
+
+        var observations = try readObservations(propertyID: propertyID)
+        var applied = 0
+        for index in observations.indices {
+            for reference in references {
+                guard reference.issueID == observations[index].id ||
+                        observations[index].linkedShotID == reference.shot.id else {
+                    continue
+                }
+                var didMutate = false
+                if let shotIndex = observations[index].shots.firstIndex(where: { $0.id == reference.shot.id }) {
+                    let existingPath = observations[index].shots[shotIndex].imageLocalIdentifier
+                    if existingPath.flatMap({ FileManager.default.fileExists(atPath: $0) ? $0 : nil }) == nil,
+                       existingPath != reference.shot.imageLocalIdentifier {
+                        observations[index].shots[shotIndex].imageLocalIdentifier = reference.shot.imageLocalIdentifier
+                        didMutate = true
+                    }
+                } else {
+                    observations[index].shots.append(reference.shot)
+                    didMutate = true
+                }
+                if let guidedShot = reference.guidedShot,
+                   !observations[index].guidedShots.contains(where: { $0.id == guidedShot.id || $0.shot?.id == reference.shot.id }) {
+                    observations[index].guidedShots.append(guidedShot)
+                    didMutate = true
+                }
+                if didMutate { applied += 1 }
+            }
+        }
+
+        guard applied > 0 else { return 0 }
+        try writeObservations(observations, propertyID: propertyID)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+        return applied
     }
 
     func wipeAllLocalData() throws {

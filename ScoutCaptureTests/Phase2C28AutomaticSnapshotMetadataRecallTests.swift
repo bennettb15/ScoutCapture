@@ -512,6 +512,310 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(relaunchRefresh.first?.shot?.imageLocalIdentifier, firstRefresh.first?.shot?.imageLocalIdentifier)
     }
 
+    func testCompletedServerSnapshotRecoversGuidedPanelItemAndPhotoRequest() throws {
+        let fixture = try makeFixture()
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+        try saveMetadata(
+            store: fixture.deviceBStore,
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            shotID: fixture.shotID,
+            issueID: fixture.issueID,
+            guidedID: fixture.guidedID,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "flagged shot",
+            guidedTitle: "Flagged reference"
+        )
+
+        let guidedShotID = UUID()
+        let remotePath = "orgs/test/sessions/\(fixture.session.id.uuidString)/guided.jpg"
+        let ordinaryGuided = ShotMetadata(
+            shotID: guidedShotID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 125),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            building: "A",
+            elevation: "South",
+            detailType: "Overview",
+            angleIndex: 1,
+            shotKey: "a-south-overview-1",
+            isGuided: true,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: "guided shot",
+            noteCategory: nil,
+            originalFilename: "guided.jpg",
+            originalRelativePath: remotePath,
+            originalByteSize: 123,
+            storageBucket: "media",
+            storagePath: remotePath,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        metadata.guidedShots = []
+        metadata.shots.append(ordinaryGuided)
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.compactMap { $0.shot?.id }, [guidedShotID])
+        XCTAssertEqual(rows.first?.isCompleted, true)
+        XCTAssertEqual(rows.first?.shot?.imageLocalIdentifier,
+                       fixture.deviceBStore.sessionFolderURL(
+                        propertyID: fixture.property.id,
+                        sessionID: fixture.session.id
+                       ).appendingPathComponent(remotePath).path)
+
+        let panel = fixture.appState.fastRuntimePreviewSideControlPayload(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation
+        )
+        XCTAssertEqual(panel.guidedShots.map(\.id), rows.map(\.id))
+        let requests = fixture.appState.fastRuntimeGuidedPanelMediaHydrationRequests(
+            propertyID: fixture.property.id,
+            guidedShots: panel.guidedShots
+        )
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.sessionID, fixture.session.id)
+        XCTAssertEqual(requests.first?.shotID, guidedShotID)
+        XCTAssertEqual(try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).count, 1)
+
+        var retired = rows[0]
+        retired.status = .retired
+        retired.isRetired = true
+        try fixture.deviceBStore.saveGuidedShots([retired], propertyID: fixture.property.id)
+        let afterRetirement = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(afterRetirement.count, 1)
+        XCTAssertTrue(afterRetirement[0].isRetired)
+    }
+
+    func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
+        let fixture = try makeFixture()
+        let guidedShotID = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remoteShots = try decoder.decode([RemoteShotMetadataRecord].self, from: Data(
+            """
+            [
+              {
+                "id": "\(fixture.shotID.uuidString)",
+                "org_id": "\(fixture.orgID.uuidString)",
+                "property_id": "\(fixture.property.id.uuidString)",
+                "session_id": "\(fixture.session.id.uuidString)",
+                "created_at": "2026-09-25T12:00:00Z",
+                "building": "A",
+                "elevation": "South",
+                "detail_type": "Overview",
+                "angle_index": 2,
+                "is_guided": true,
+                "is_flagged": true,
+                "issue_id": "\(fixture.issueID.uuidString)",
+                "issue_status": "active",
+                "storage_bucket": "media",
+                "storage_path": "orgs/test/flagged.jpg"
+              },
+              {
+                "id": "\(guidedShotID.uuidString)",
+                "org_id": "\(fixture.orgID.uuidString)",
+                "property_id": "\(fixture.property.id.uuidString)",
+                "session_id": "\(fixture.session.id.uuidString)",
+                "created_at": "2026-09-25T12:01:00Z",
+                "building": "A",
+                "elevation": "South",
+                "detail_type": "Overview",
+                "angle_index": 1,
+                "is_guided": true,
+                "is_flagged": false,
+                "storage_bucket": "media",
+                "storage_path": "orgs/test/guided.jpg"
+              }
+            ]
+            """.utf8
+        ))
+
+        _ = try fixture.deviceBStore.createObservation(Observation(
+            id: fixture.issueID,
+            propertyID: fixture.property.id,
+            sessionID: nil,
+            createdAt: Date(timeIntervalSince1970: 1_000),
+            updatedAt: Date(timeIntervalSince1970: 1_000),
+            statement: "Flagged issue",
+            status: .active,
+            linkedShotID: fixture.shotID
+        ))
+        XCTAssertTrue(try fixture.deviceBStore.fetchSessions(propertyID: fixture.property.id).isEmpty)
+        XCTAssertEqual(
+            fixture.appState.mergeRemoteFlaggedShotReferences(
+                remoteShots,
+                propertyID: fixture.property.id,
+                activeOrganizationID: fixture.orgID
+            ),
+            1
+        )
+        let flagged = try XCTUnwrap(fixture.deviceBStore.fetchObservations(
+            propertyID: fixture.property.id
+        ).first)
+        XCTAssertEqual(flagged.status, .active)
+        XCTAssertEqual(flagged.linkedShotID, fixture.shotID)
+        XCTAssertEqual(flagged.shots.map(\.id), [fixture.shotID])
+        XCTAssertEqual(flagged.guidedShots.map(\.angleIndex), [2])
+        XCTAssertEqual(flagged.guidedShots.first?.shot?.id, fixture.shotID)
+        XCTAssertEqual(flagged.shots.first?.imageLocalIdentifier,
+                       fixture.deviceBStore.sessionFolderURL(
+                        propertyID: fixture.property.id,
+                        sessionID: fixture.session.id
+                       ).appendingPathComponent("Originals/flagged.jpg").path)
+        let flaggedRequests = fixture.appState.fastRuntimeIssuePanelMediaHydrationRequests(
+            propertyID: fixture.property.id,
+            observations: [flagged]
+        )
+        XCTAssertEqual(flaggedRequests.count, 1)
+        XCTAssertEqual(flaggedRequests.first?.sessionID, fixture.session.id)
+        XCTAssertEqual(flaggedRequests.first?.shotID, fixture.shotID)
+        XCTAssertEqual(flaggedRequests.first?.relativePathOverride, "Originals/flagged.jpg")
+        XCTAssertEqual(
+            fixture.appState.mergeRemoteFlaggedShotReferences(
+                remoteShots,
+                propertyID: fixture.property.id,
+                activeOrganizationID: fixture.orgID
+            ),
+            0
+        )
+        XCTAssertEqual(
+            fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+                remoteShots,
+                propertyID: fixture.property.id,
+                activeOrganizationID: fixture.orgID
+            ),
+            1
+        )
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.compactMap { $0.shot?.id }, [guidedShotID])
+        let southAngles = fixture.appState.fastRuntimePropertyAngleReservations(
+            propertyID: fixture.property.id
+        ).filter { $0.building == "A" && $0.elevation == "South" && $0.detailType == "Overview" }
+        XCTAssertEqual(Set(southAngles.map(\.angleIndex)), Set([1, 2]))
+        XCTAssertEqual(rows.first?.referenceImagePath,
+                       fixture.deviceBStore.sessionFolderURL(
+                        propertyID: fixture.property.id,
+                        sessionID: fixture.session.id
+                       ).appendingPathComponent("Originals/guided.jpg").path)
+
+        let panel = fixture.appState.fastRuntimePreviewSideControlPayload(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation
+        )
+        XCTAssertEqual(panel.guidedShots.map(\.id), [guidedShotID])
+        let requests = fixture.appState.fastRuntimeGuidedPanelMediaHydrationRequests(
+            propertyID: fixture.property.id,
+            guidedShots: panel.guidedShots
+        )
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.sessionID, fixture.session.id)
+        XCTAssertEqual(requests.first?.shotID, guidedShotID)
+        XCTAssertEqual(requests.first?.relativePathOverride, "Originals/guided.jpg")
+        XCTAssertEqual(
+            fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+                remoteShots,
+                propertyID: fixture.property.id,
+                activeOrganizationID: fixture.orgID
+            ),
+            0
+        )
+        XCTAssertEqual(try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).count, 1)
+    }
+
+    func testFlaggedPanelHydratesNewestPunchlistShotWithoutLocalSessions() throws {
+        let fixture = try makeFixture()
+        let newerSessionID = UUID()
+        let newerShotID = UUID()
+        _ = try fixture.deviceBStore.createObservation(Observation(
+            id: fixture.issueID,
+            propertyID: fixture.property.id,
+            sessionID: nil,
+            createdAt: Date(timeIntervalSince1970: 1_000),
+            updatedAt: Date(timeIntervalSince1970: 1_000),
+            statement: "Flagged issue",
+            status: .active,
+            linkedShotID: fixture.shotID
+        ))
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remoteShots = try decoder.decode([RemoteShotMetadataRecord].self, from: Data(
+            """
+            [
+              {
+                "id": "\(fixture.shotID.uuidString)",
+                "org_id": "\(fixture.orgID.uuidString)",
+                "property_id": "\(fixture.property.id.uuidString)",
+                "session_id": "\(fixture.session.id.uuidString)",
+                "created_at": "2026-09-23T12:00:00Z",
+                "is_flagged": true,
+                "issue_id": "\(fixture.issueID.uuidString)",
+                "storage_bucket": "media",
+                "storage_path": "orgs/test/original-flagged.jpg"
+              },
+              {
+                "id": "\(newerShotID.uuidString)",
+                "org_id": "\(fixture.orgID.uuidString)",
+                "property_id": "\(fixture.property.id.uuidString)",
+                "session_id": "\(newerSessionID.uuidString)",
+                "created_at": "2026-09-25T12:00:00Z",
+                "is_flagged": true,
+                "issue_id": "\(fixture.issueID.uuidString)",
+                "storage_bucket": "media",
+                "storage_path": "orgs/test/newer-punchlist.jpg"
+              }
+            ]
+            """.utf8
+        ))
+
+        XCTAssertTrue(try fixture.deviceBStore.fetchSessions(propertyID: fixture.property.id).isEmpty)
+        XCTAssertEqual(
+            fixture.appState.mergeRemoteFlaggedShotReferences(
+                remoteShots,
+                propertyID: fixture.property.id,
+                activeOrganizationID: fixture.orgID
+            ),
+            2
+        )
+        let observation = try XCTUnwrap(fixture.deviceBStore.fetchObservations(
+            propertyID: fixture.property.id
+        ).first)
+        XCTAssertEqual(observation.status, .active)
+        XCTAssertEqual(observation.linkedShotID, fixture.shotID)
+        XCTAssertEqual(Set(observation.shots.map(\.id)), Set([fixture.shotID, newerShotID]))
+        let requests = fixture.appState.fastRuntimeIssuePanelMediaHydrationRequests(
+            propertyID: fixture.property.id,
+            observations: [observation]
+        )
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.sessionID, newerSessionID)
+        XCTAssertEqual(requests.first?.shotID, newerShotID)
+        XCTAssertEqual(requests.first?.relativePathOverride, "Originals/newer-punchlist.jpg")
+    }
+
     func testMissingSnapshotDoesNotCorruptLocalProperty() async throws {
         let fixture = try makeFixture(rows: { _ in [] })
 

@@ -19400,12 +19400,14 @@ final class AppState: ObservableObject {
         let suppressionEvidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
             issueLinkedGuidedShots: snapshotShots + propertyIssueLinkedGuidedShots
         )
+        // Reading property rows also recovers ordinary guided shots from older
+        // server snapshots whose guidedShots array was empty.
+        var existing = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
         guard !snapshotGuided.isEmpty || !suppressionEvidence.isEmpty else { return }
         let filteredSnapshotGuided = Self.guidedRowsAfterActiveFlaggedSuppression(
             snapshotGuided,
             evidence: suppressionEvidence
         )
-        var existing = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
         let filteredExisting = Self.guidedRowsAfterActiveFlaggedSuppression(
             existing,
             evidence: suppressionEvidence
@@ -34692,9 +34694,11 @@ final class AppState: ObservableObject {
             storagePath ?? ""
         ]
         for candidate in filenameCandidates {
-            let filename = URL(fileURLWithPath: candidate).lastPathComponent
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let filename = URL(fileURLWithPath: trimmed).lastPathComponent
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !filename.isEmpty {
+            if !filename.isEmpty && filename != "/" && filename != "." {
                 return "Originals/\(filename)"
             }
         }
@@ -52377,23 +52381,205 @@ final class AppState: ObservableObject {
             activeOrganizationID: activeOrganizationID,
             remoteShots: remoteShots
         )
-        if let result,
-           result.appliedCount > 0 {
+        let recoveredGuidedCount = mergeRemoteOrdinaryGuidedReferences(
+            remoteShots,
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+        let recoveredFlaggedCount = mergeRemoteFlaggedShotReferences(
+            remoteShots,
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+        if (result?.appliedCount ?? 0) > 0 || recoveredGuidedCount > 0 || recoveredFlaggedCount > 0 {
             await MainActor.run {
                 self.reloadSessionCache(for: propertyID)
-                self.schedulePersistentDataCacheRefresh(reason: "portal_punchlist_overlay_applied")
+                self.schedulePersistentDataCacheRefresh(reason: "portal_reference_rows_applied")
             }
         }
         print(
             "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
             "trigger=property_open remoteShotCount=\(remoteShots.count) " +
             "applied=\(result?.appliedCount ?? 0) " +
+            "guidedRecovered=\(recoveredGuidedCount) " +
+            "flaggedRecovered=\(recoveredFlaggedCount) " +
             "noMatch=\(result?.skippedNoMatchCount ?? 0) " +
             "ambiguous=\(result?.skippedAmbiguousCount ?? 0) " +
             "resolvedSkipped=\(result?.skippedResolvedCount ?? 0) " +
             "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
         return result
+    }
+
+    @discardableResult
+    func mergeRemoteFlaggedShotReferences(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) -> Int {
+        guard canAccessProperty(propertyID),
+              canAccessOrganization(activeOrganizationID) else {
+            return 0
+        }
+
+        let references = remoteShots.compactMap { row -> LocalStore.RemoteFlaggedShotReference? in
+            guard row.deletedAt == nil,
+                  row.propertyID == propertyID,
+                  row.orgID == activeOrganizationID,
+                  let sessionID = row.sessionID,
+                  row.lifecycleState.isActiveForDefaultWorkflows,
+                  row.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                  row.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                return nil
+            }
+            let relativePath = fastRuntimeHydrationRelativePath(
+                relativePathOverride: nil,
+                storagePath: row.storagePath,
+                shotID: row.id
+            )
+            let path = localStore
+                .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(relativePath, isDirectory: false)
+                .path
+            let shot = Shot(
+                id: row.id,
+                capturedAt: row.createdAt ?? row.updatedAt ?? .distantPast,
+                imageLocalIdentifier: path,
+                note: row.reason
+            )
+            let titleParts = [row.building, CanonicalElevation.normalize(row.elevation), row.detailType]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let guidedShot: GuidedShot?
+            if let angleIndex = row.angleIndex,
+               angleIndex > 0,
+               titleParts.count == 3 {
+                guidedShot = GuidedShot(
+                    id: row.id,
+                    title: titleParts.joined(separator: " "),
+                    building: row.building,
+                    targetElevation: row.elevation,
+                    detailType: row.detailType,
+                    angleIndex: angleIndex,
+                    referenceImageLocalIdentifier: path,
+                    referenceImagePath: path,
+                    shot: shot,
+                    isCompleted: true
+                )
+            } else {
+                guidedShot = nil
+            }
+            return LocalStore.RemoteFlaggedShotReference(
+                issueID: row.issueID,
+                shot: shot,
+                guidedShot: guidedShot
+            )
+        }
+
+        do {
+            return try localStore.mergeRemoteFlaggedShotReferences(
+                propertyID: propertyID,
+                references: references
+            )
+        } catch {
+            recordDiagnosticsError(error)
+            return 0
+        }
+    }
+
+    @discardableResult
+    func mergeRemoteOrdinaryGuidedReferences(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) -> Int {
+        guard canAccessProperty(propertyID),
+              canAccessOrganization(activeOrganizationID) else {
+            return 0
+        }
+
+        var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        var representedShotIDs = Set(guidedRows.compactMap { $0.shot?.id })
+        representedShotIDs.formUnion(guidedRows.map(\.id))
+        var representedKeys = Set(guidedRows.compactMap(LocalConflictRules.guidedShotIdentityKey))
+        var added = 0
+
+        for row in remoteShots.sorted(by: { lhs, rhs in
+            if (lhs.createdAt ?? .distantPast) != (rhs.createdAt ?? .distantPast) {
+                return (lhs.createdAt ?? .distantPast) > (rhs.createdAt ?? .distantPast)
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }) {
+            guard row.deletedAt == nil,
+                  row.propertyID == propertyID,
+                  row.orgID == activeOrganizationID,
+                  let sessionID = row.sessionID,
+                  row.lifecycleState.isActiveForDefaultWorkflows else {
+                continue
+            }
+
+            let shotMetadata = makeLocalShotMetadataShell(
+                from: row,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+            guard LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shotMetadata),
+                  !representedShotIDs.contains(row.id) else {
+                continue
+            }
+            let identityKey = LocalConflictRules.guidedShotIdentityKey(
+                building: row.building,
+                elevation: row.elevation,
+                detailType: row.detailType,
+                angleIndex: row.angleIndex
+            )
+            if let identityKey, representedKeys.contains(identityKey) {
+                continue
+            }
+
+            let relativePath = fastRuntimeHydrationRelativePath(
+                relativePathOverride: nil,
+                storagePath: row.storagePath,
+                shotID: row.id
+            )
+            let localIdentifier = localStore
+                .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(relativePath, isDirectory: false)
+                .path
+            let titleParts = [row.building, CanonicalElevation.normalize(row.elevation), row.detailType]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let capturedAt = row.createdAt ?? row.updatedAt ?? .distantPast
+            guidedRows.append(GuidedShot(
+                id: row.id,
+                title: titleParts.isEmpty ? "Guided Shot" : titleParts.joined(separator: " "),
+                building: row.building,
+                targetElevation: row.elevation,
+                detailType: row.detailType,
+                angleIndex: max(1, row.angleIndex ?? 1),
+                referenceImageLocalIdentifier: localIdentifier,
+                referenceImagePath: localIdentifier,
+                shot: Shot(
+                    id: row.id,
+                    capturedAt: capturedAt,
+                    imageLocalIdentifier: localIdentifier,
+                    note: row.reason
+                ),
+                isCompleted: true
+            ))
+            representedShotIDs.insert(row.id)
+            if let identityKey { representedKeys.insert(identityKey) }
+            added += 1
+        }
+
+        guard added > 0 else { return 0 }
+        do {
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            return added
+        } catch {
+            recordDiagnosticsError(error)
+            return 0
+        }
     }
 
     func fetchPortalPunchlistNotesByIssueID(
@@ -54959,7 +55145,6 @@ final class AppState: ObservableObject {
         guard canAccessProperty(propertyID), !guidedShots.isEmpty else { return [] }
         let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
             .sorted { $0.startedAt > $1.startedAt }
-        guard !sessions.isEmpty else { return [] }
 
         var requests = Set<OperationalMediaHydrationRequest>()
         for guidedShot in guidedShots {
@@ -55029,9 +55214,6 @@ final class AppState: ObservableObject {
         guard canAccessProperty(propertyID), !observations.isEmpty else { return [] }
         let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
             .sorted { $0.startedAt > $1.startedAt }
-        let hasSessionMetadata = !(((try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []).isEmpty)
-        guard !sessions.isEmpty || hasSessionMetadata else { return [] }
-
         let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
         var requests = Set<OperationalMediaHydrationRequest>()
         for observation in observations {
@@ -55082,6 +55264,28 @@ final class AppState: ObservableObject {
                 requests.insert(request)
                 continue
             }
+            if let latestShot = observation.shots
+                .sorted(by: { lhs, rhs in
+                    if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                })
+                .first {
+                if fastRuntimePathExists(latestShot.imageLocalIdentifier) {
+                    continue
+                }
+                if let request = fastRuntimePanelMediaHydrationRequest(
+                    propertyID: propertyID,
+                    shotID: latestShot.id,
+                    explicitSessionIDs: explicitSessionIDs,
+                    pathCandidates: [
+                        latestShot.imageLocalIdentifier,
+                        observation.resolutionPhotoRef
+                    ]
+                ) {
+                    requests.insert(request)
+                    continue
+                }
+            }
             if let linkedShotID = observation.linkedShotID,
                let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
                let request = fastRuntimePanelMediaHydrationRequest(
@@ -55090,24 +55294,6 @@ final class AppState: ObservableObject {
                 explicitSessionIDs: explicitSessionIDs,
                 pathCandidates: [
                     linkedShot.imageLocalIdentifier,
-                    observation.resolutionPhotoRef
-                ]
-               ) {
-                requests.insert(request)
-                continue
-            }
-            if let shot = observation.shots
-                .sorted(by: { lhs, rhs in
-                    if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
-                    return lhs.id.uuidString < rhs.id.uuidString
-                })
-                .first,
-               let request = fastRuntimePanelMediaHydrationRequest(
-                propertyID: propertyID,
-                shotID: shot.id,
-                explicitSessionIDs: explicitSessionIDs,
-                pathCandidates: [
-                    shot.imageLocalIdentifier,
                     observation.resolutionPhotoRef
                 ]
                ) {
@@ -58526,16 +58712,14 @@ final class AppState: ObservableObject {
         }
 
         return makeActivityFeedItem(
-            record: SupabaseSessionEventRecord(
-                id: event.id,
-                orgID: event.orgID,
-                sessionID: event.sessionID,
-                propertyID: propertyID,
-                actorUserID: event.actorUserID,
-                eventType: event.eventType,
-                payload: event.payload,
-                createdAt: supabaseTimestampString(event.createdAt)
-            ),
+            id: event.id,
+            orgID: event.orgID,
+            sessionID: event.sessionID,
+            propertyID: propertyID,
+            actorUserID: event.actorUserID,
+            eventType: event.eventType,
+            payload: event.payload,
+            createdAt: event.createdAt,
             sessionLookup: propertyID.flatMap { propertyID in
                 guard let sessionID = event.sessionID else { return nil }
                 return SupabaseActivitySessionLookupRecord(

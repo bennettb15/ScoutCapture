@@ -13834,6 +13834,10 @@ private struct FastLaneSharedActionMenuOverlay: View {
     }
 }
 
+private struct FastLaneUnarmedTradeSnapshot {
+    let trade: String?
+}
+
 private enum FastLaneCaptureIntent: Equatable {
     case free
     case guided(UUID)
@@ -14107,6 +14111,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isLoadingFastLaneSideControlSheet: Bool = false
     @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
     @State private var fastLaneCaptureIntent: FastLaneCaptureIntent = .free
+    @State private var fastLaneUnarmedTradeSnapshot: FastLaneUnarmedTradeSnapshot?
     @State private var fastLaneGuidedThumbnailPathByID: [UUID: String] = [:]
     @State private var fastLaneGuidedReferencePathByID: [UUID: String] = [:]
     @State private var fastLaneGuidedReferencePathByKey: [String: String] = [:]
@@ -15701,6 +15706,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         (
                             metadata: fastLaneMetadataContextForNextCapture(),
                             intent: fastLaneCaptureIntent,
+                            normalTrade: fastLaneRestoredUnarmedTrade(fallback: fastMetadataContext.trade),
                             retakeGuidedID: fastLaneRetakeGuidedID,
                             retakeIssueID: fastLaneRetakeIssueID
                         )
@@ -15768,7 +15774,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                     building: savedContext.building,
                                     elevation: savedContext.elevation,
                                     detailType: savedContext.detailType,
-                                    trade: savedContext.trade,
+                                    trade: capturePreparation.normalTrade,
                                     detailNote: nil,
                                     priority: nil,
                                     angleIndex: max(1, savedContext.angleIndex)
@@ -15781,13 +15787,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                     building: fastMetadataContext.building,
                                     elevation: fastMetadataContext.elevation,
                                     detailType: fastMetadataContext.detailType,
-                                    trade: fastMetadataContext.trade,
+                                    trade: capturePreparation.normalTrade,
                                     detailNote: nil,
                                     priority: nil,
                                     angleIndex: max(1, fastMetadataContext.angleIndex)
                                 )
                             }
                             captureErrorMessage = nil
+                            fastLaneUnarmedTradeSnapshot = nil
                             fastLaneCaptureIntent = .free
                             clearFastLaneArmedReferenceState()
                             fastMetadataContext = nextBaseContext.withAngleIndex(
@@ -16672,6 +16679,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func armFastLaneGuidedShotUnchecked(_ guidedShot: GuidedShot) {
+        rememberFastLaneUnarmedTradeIfNeeded()
         clearFastLaneArmedReferenceState()
         fastLaneCaptureIntent = .guided(guidedShot.id)
         let building = fastLaneTrimmedNonEmpty(guidedShot.building) ?? fastMetadataContext.building
@@ -16684,11 +16692,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             building: building,
             elevation: elevation,
             detailType: detailType,
-            trade: fastMetadataContext.trade,
-            detailNote: fastMetadataContext.detailNote,
-            priority: fastMetadataContext.priority,
+            trade: nil,
+            detailNote: nil,
+            priority: nil,
             angleIndex: max(1, guidedShot.angleIndex ?? 1),
             isGuided: true,
+            isFlagged: false,
             captureIntentSource: fastLaneRetakeGuidedID == guidedShot.id
                 ? FastLaneCaptureIntent.retake(guidedShot.shot?.id ?? guidedShot.id).source
                 : FastLaneCaptureIntent.guided(guidedShot.id).source
@@ -16729,6 +16738,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         intentSourceOverride: String?
     ) {
         let intent: FastLaneCaptureIntent = .flagged(observation.id)
+        rememberFastLaneUnarmedTradeIfNeeded()
         clearFastLaneArmedReferenceState()
         fastLaneCaptureIntent = intent
 
@@ -16736,13 +16746,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let elevation = fastLaneTrimmedNonEmpty(observation.targetElevation) ?? fastMetadataContext.elevation
         let detailType = fastLaneTrimmedNonEmpty(observation.detailType) ?? fastMetadataContext.detailType
         let nextMode: CameraChromeLocationMode = elevation.caseInsensitiveCompare("Interior") == .orderedSame ? .interior : .exterior
-        let note = fastMetadataContext.detailNote ??
-            Observation.inferredCurrentReason(
-                note: observation.currentReason ?? observation.note,
-                statement: observation.statement
-            ) ??
+        let note = Observation.inferredCurrentReason(
+            note: observation.currentReason ?? observation.note,
+            statement: observation.statement
+        ) ??
             fastLaneTrimmedNonEmpty(observation.resolutionStatement) ??
-            fastLaneTrimmedNonEmpty(observation.previousReason)
+            fastLaneTrimmedNonEmpty(observation.previousReason) ??
+            fastMetadataContext.detailNote
 
         applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
             captureProfile: fastLaneCaptureProfile.rawValue,
@@ -16750,9 +16760,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             building: building,
             elevation: elevation,
             detailType: detailType,
-            trade: fastMetadataContext.trade ?? observation.trade,
+            trade: observation.trade,
             detailNote: note,
-            priority: fastMetadataContext.priority ?? observation.priority,
+            priority: observation.priority,
             angleIndex: fastLaneObservationTargetAngleIndex(observation) ?? max(1, fastMetadataContext.angleIndex),
             isGuided: false,
             isFlagged: true,
@@ -16767,20 +16777,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneObservationTargetAngleIndex(_ observation: Observation) -> Int? {
-        let building = normalizedFastLaneComparable(observation.building)
-        let elevation = normalizedFastLaneComparable(
-            CanonicalElevation.normalize(observation.targetElevation ?? "") ?? observation.targetElevation
-        )
-        let detail = normalizedFastLaneComparable(observation.detailType)
-        return observation.guidedShots
-            .filter { guided in
-                normalizedFastLaneComparable(guided.building ?? observation.building) == building &&
-                    normalizedFastLaneComparable(CanonicalElevation.normalize(guided.targetElevation ?? observation.targetElevation ?? "") ?? (guided.targetElevation ?? observation.targetElevation)) == elevation &&
-                    normalizedFastLaneComparable(guided.detailType ?? observation.detailType) == detail
-            }
-            .map { max(1, $0.angleIndex ?? 1) }
-            .sorted()
-            .first
+        fastLaneObservationDisplayAngleIndex(observation)
     }
 
     private func fastLaneMetadataContextForNextCapture() -> AppState.FastRuntimeCaptureMetadataContext {
@@ -16804,6 +16801,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }()
         let isFlagged: Bool = {
             switch fastLaneCaptureIntent {
+            case .guided:
+                return false
             case .flagged, .resolution:
                 return true
             default:
@@ -16812,13 +16811,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }()
         let issueStatus: String? = {
             switch fastLaneCaptureIntent {
+            case .guided:
+                return nil
             case .flagged:
                 return Observation.Status.active.issueStatusValue
             default:
                 return current.detailNote == nil ? nil : Observation.Status.active.issueStatusValue
             }
         }()
-        let captureIssueID = fastLaneCaptureIntent.issueID ?? (isFlagged ? UUID() : nil)
+        let captureIssueID = fastLaneCaptureIntent.guidedID == nil
+            ? (fastLaneCaptureIntent.issueID ?? (isFlagged ? UUID() : nil))
+            : nil
 
         return AppState.FastRuntimeCaptureMetadataContext(
             captureProfile: current.captureProfile ?? fastLaneCaptureProfile.rawValue,
@@ -16961,7 +16964,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func scheduleFastLaneGuidedPanelMediaHydrationIfNeeded() {
-        let guidedRows = fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots
+        // Current-session presentation clears historical shot IDs. Use the
+        // property rows here so media can be fetched by its original session.
+        let references = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType
+        )
+        let guidedRows = references.guidedShots + references.retiredGuidedShots
         let requests = appState.fastRuntimeGuidedPanelMediaHydrationRequests(
             propertyID: context.propertyID,
             guidedShots: guidedRows
@@ -16973,7 +16982,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let observations: [Observation]
         switch mode {
         case .activeIssues:
-            observations = fastLaneSideControlPayload.activeObservations
+            observations = appState.fastRuntimePreviewIssueSideControlPayload(
+                propertyID: context.propertyID
+            ).activeObservations
         case .guided:
             return
         }
@@ -17245,12 +17256,25 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneReferenceOverlayOpacity = 0.45
     }
 
+    private func rememberFastLaneUnarmedTradeIfNeeded() {
+        guard fastLaneUnarmedTradeSnapshot == nil else { return }
+        fastLaneUnarmedTradeSnapshot = FastLaneUnarmedTradeSnapshot(
+            trade: fastLaneTrimmedNonEmpty(fastMetadataContext.trade)
+        )
+    }
+
+    private func fastLaneRestoredUnarmedTrade(fallback: String?) -> String? {
+        guard let fastLaneUnarmedTradeSnapshot else { return fallback }
+        return fastLaneUnarmedTradeSnapshot.trade
+    }
+
     private func clearFastLaneArmedCapture() {
         fastLaneCaptureIntent = .free
         fastLaneRetakeGuidedID = nil
         fastLaneRetakeIssueID = nil
         clearFastLaneArmedReferenceState()
         let clearedContext = fastLaneFreeMetadataContext(from: fastMetadataContext)
+        fastLaneUnarmedTradeSnapshot = nil
         fastMetadataContext = clearedContext.withAngleIndex(
             fastLaneAngleIndexForNextCapture(clearedContext)
         )
@@ -17278,7 +17302,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             building: context.building,
             elevation: context.elevation,
             detailType: context.detailType,
-            trade: context.trade,
+            trade: fastLaneRestoredUnarmedTrade(fallback: context.trade),
             detailNote: nil,
             priority: nil,
             angleIndex: max(1, context.angleIndex)
@@ -18534,6 +18558,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             : (Self.exteriorElevationOptions.contains(normalized.elevation) ? normalized.elevation : "North")
         let details = fastDetailTypesModel.names(for: mode, profile: profile)
         let detail = details.contains(normalized.detailType) ? normalized.detailType : (details.first ?? "Overview")
+        let isArmingGuided = fastLaneCaptureIntent.guidedID != nil
         let candidate = AppState.FastRuntimeCaptureMetadataContext(
             captureProfile: profile.rawValue,
             locationMode: mode.rawValue,
@@ -18544,10 +18569,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             detailNote: normalized.detailNote,
             priority: normalized.priority,
             angleIndex: normalized.angleIndex,
-            isGuided: normalized.isGuided ?? fastMetadataContext.isGuided,
-            isFlagged: normalized.isFlagged ?? fastMetadataContext.isFlagged,
-            issueID: normalized.issueID ?? fastMetadataContext.issueID,
-            issueStatus: normalized.issueStatus ?? fastMetadataContext.issueStatus,
+            isGuided: isArmingGuided ? true : (normalized.isGuided ?? fastMetadataContext.isGuided),
+            isFlagged: isArmingGuided ? false : (normalized.isFlagged ?? fastMetadataContext.isFlagged),
+            issueID: isArmingGuided ? nil : (normalized.issueID ?? fastMetadataContext.issueID),
+            issueStatus: isArmingGuided ? nil : (normalized.issueStatus ?? fastMetadataContext.issueStatus),
             captureIntentSource: normalized.captureIntentSource ?? fastMetadataContext.captureIntentSource
         )
         if isFastLaneCaptureIntentArmed {
@@ -22094,10 +22119,24 @@ private func fastLaneConciseContextLabel(building: String?, elevation: String?, 
 }
 
 private func fastLaneObservationDisplayAngleIndex(_ observation: Observation) -> Int? {
-    observation.guidedShots
-        .compactMap { $0.angleIndex.map { max(1, $0) } }
-        .sorted()
-        .first
+    let building = normalizedFastLaneComparable(observation.building)
+    let elevation = normalizedFastLaneComparable(
+        CanonicalElevation.normalize(observation.targetElevation ?? "") ?? observation.targetElevation
+    )
+    let detail = normalizedFastLaneComparable(observation.detailType)
+    let matching = observation.guidedShots.filter { guided in
+        normalizedFastLaneComparable(guided.building ?? observation.building) == building &&
+            normalizedFastLaneComparable(CanonicalElevation.normalize(guided.targetElevation ?? observation.targetElevation ?? "") ?? (guided.targetElevation ?? observation.targetElevation)) == elevation &&
+            normalizedFastLaneComparable(guided.detailType ?? observation.detailType) == detail &&
+            guided.angleIndex != nil
+    }
+    let newestFirst = matching.sorted { lhs, rhs in
+        let lhsDate = lhs.shot?.capturedAt ?? .distantPast
+        let rhsDate = rhs.shot?.capturedAt ?? .distantPast
+        if lhsDate != rhsDate { return lhsDate > rhsDate }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+    return newestFirst.first?.angleIndex.map { max(1, $0) }
 }
 
 private func fastLaneFormatPanelTimestamp(_ date: Date) -> String {
