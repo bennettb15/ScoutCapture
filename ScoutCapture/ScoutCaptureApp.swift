@@ -15775,6 +15775,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         shutterHaptic.impactOccurred()
         shutterHaptic.prepare()
         let hapticAt = Date()
+        // Read the live authorization state at the shutter, before any background work.
+        let shutterLocation = locationManager.currentLocationForCapture()
+        let shutterCaptureMode = camera.effectiveHDEnabled ? "hd" : "normal"
+        let shutterLens = camera.selectedZoomId
+        let shutterPropertyAddress = appState.properties.first(where: { $0.id == context.propertyID })?.address
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             captureFlashVisible = false
@@ -15801,7 +15806,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 Task {
                     let capturePreparation = await MainActor.run {
                         (
-                            metadata: fastLaneMetadataContextForNextCapture(),
+                            metadata: fastLaneMetadataContextForNextCapture(
+                                latitude: shutterLocation?.coordinate.latitude,
+                                longitude: shutterLocation?.coordinate.longitude,
+                                accuracyMeters: shutterLocation?.horizontalAccuracy,
+                                propertyAddress: shutterPropertyAddress,
+                                captureMode: shutterCaptureMode,
+                                lens: shutterLens
+                            ),
                             intent: fastLaneCaptureIntent,
                             normalTrade: fastLaneRestoredUnarmedTrade(fallback: fastMetadataContext.trade),
                             retakeGuidedID: fastLaneRetakeGuidedID,
@@ -16877,7 +16889,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneObservationDisplayAngleIndex(observation)
     }
 
-    private func fastLaneMetadataContextForNextCapture() -> AppState.FastRuntimeCaptureMetadataContext {
+    private func fastLaneMetadataContextForNextCapture(
+        latitude: Double?,
+        longitude: Double?,
+        accuracyMeters: Double?,
+        propertyAddress: String?,
+        captureMode: String,
+        lens: String?
+    ) -> AppState.FastRuntimeCaptureMetadataContext {
         let current = AppState.normalizedFastRuntimeMetadataContext(
             fastMetadataContext,
             fallbackPosition: max(1, fastMetadataContext.angleIndex)
@@ -16935,7 +16954,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             isFlagged: isFlagged,
             issueID: captureIssueID,
             issueStatus: issueStatus,
-            captureIntentSource: current.captureIntentSource ?? fastLaneCaptureIntent.source
+            captureIntentSource: current.captureIntentSource ?? fastLaneCaptureIntent.source,
+            propertyName: propertyName,
+            propertyAddress: propertyAddress,
+            latitude: latitude,
+            longitude: longitude,
+            accuracyMeters: accuracyMeters,
+            captureMode: captureMode,
+            lens: lens,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            osVersion: UIDevice.current.systemVersion,
+            deviceModel: UIDevice.current.model
         )
     }
 

@@ -1079,6 +1079,79 @@ final class ReportLibraryModel: ObservableObject {
         return destinationData as Data
     }
 
+    // Fast capture saves the camera JPEG first. Image I/O copies its compressed image data
+    // while adding the same Scout EXIF/IPTC/XMP fields used by the normal capture path.
+    func annotatedFastOriginalJPEGData(
+        from sourceData: Data,
+        captureDate: Date,
+        metadataContext: EmbeddedMetadataContext
+    ) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil),
+              CGImageSourceGetType(source) as String? == UTType.jpeg.identifier else {
+            throw SavePhotoError.missingCGImage
+        }
+        let captureTime = EmbeddedCaptureTime(captureDate: captureDate)
+        let xmp = buildXMPMetadata(from: source, captureTime: captureTime, metadataContext: metadataContext)
+            ?? CGImageMetadataCreateMutable()
+        func set(_ dictionary: CFString, _ key: CFString, _ value: CFTypeRef) {
+            _ = CGImageMetadataSetValueMatchingImageProperty(xmp, dictionary, key, value)
+        }
+        set(kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeOriginal, captureTime.localDateTimeString as CFString)
+        set(kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeDigitized, captureTime.localDateTimeString as CFString)
+        set(kCGImagePropertyExifDictionary, kCGImagePropertyExifSubsecTimeOriginal, captureTime.subsecString as CFString)
+        set(kCGImagePropertyExifDictionary, kCGImagePropertyExifSubsecTimeDigitized, captureTime.subsecString as CFString)
+        set(kCGImagePropertyExifDictionary, kCGImagePropertyExifOffsetTimeOriginal, captureTime.tzOffsetString as CFString)
+        set(kCGImagePropertyExifDictionary, kCGImagePropertyExifOffsetTimeDigitized, captureTime.tzOffsetString as CFString)
+        if let comment = scoutStructuredComment(captureTime: captureTime, metadataContext: metadataContext) {
+            set(kCGImagePropertyExifDictionary, kCGImagePropertyExifUserComment, comment as CFString)
+        }
+        set(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFDateTime, captureTime.localDateTimeString as CFString)
+        let caption = makeHumanReadableDescriptionLines(
+            captureTime: captureTime, metadataContext: metadataContext
+        ).joined(separator: "\n")
+        if !caption.isEmpty {
+            set(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFImageDescription, caption as CFString)
+            set(kCGImagePropertyIPTCDictionary, kCGImagePropertyIPTCCaptionAbstract, caption as CFString)
+            let keywords = makeKeywordList(metadataContext: metadataContext)
+            if !keywords.isEmpty {
+                set(kCGImagePropertyIPTCDictionary, kCGImagePropertyIPTCKeywords, keywords as CFArray)
+            }
+        }
+
+        var options: [CFString: Any] = [
+            kCGImageDestinationMetadata: xmp,
+            kCGImageDestinationMergeMetadata: true
+        ]
+        if let latitude = metadataContext.latitude, let longitude = metadataContext.longitude {
+            set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitude, abs(latitude) as CFNumber)
+            set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitudeRef, (latitude >= 0 ? "N" : "S") as CFString)
+            set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLongitude, abs(longitude) as CFNumber)
+            set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLongitudeRef, (longitude >= 0 ? "E" : "W") as CFString)
+            if let accuracy = metadataContext.accuracyMeters, accuracy >= 0 {
+                set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSHPositioningError, accuracy as CFNumber)
+            }
+            set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSDateStamp, Self.gpsDateFormatter.string(from: captureDate) as CFString)
+            set(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSTimeStamp, Self.gpsTimeFormatter.string(from: captureDate) as CFString)
+        } else {
+            // This strips source EXIF GPS and equivalent XMP GPS tags when permission is absent.
+            options[kCGImageMetadataShouldExcludeGPS] = true
+        }
+
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output, UTType.jpeg.identifier as CFString, 1, nil
+        ) else {
+            throw SavePhotoError.imageDestinationCreateFailed
+        }
+        var copyError: Unmanaged<CFError>?
+        guard CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, &copyError) else {
+            let error = copyError?.takeRetainedValue()
+            throw SavePhotoError.writeFailed(error.map { $0 as Error } ??
+                NSError(domain: "ScoutCapture.Metadata", code: 1, userInfo: [NSLocalizedDescriptionKey: "JPEG metadata copy failed."]))
+        }
+        return output as Data
+    }
+
     private func normalizeToUprightPixels(_ image: CGImage, orientationRaw: UInt32) -> CGImage {
         let orientation = CGImagePropertyOrientation(rawValue: orientationRaw) ?? .up
         let uiOrientation = UIImage.Orientation(from: orientation)

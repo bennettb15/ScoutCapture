@@ -5043,6 +5043,16 @@ final class AppState: ObservableObject {
         let issueID: UUID?
         let issueStatus: String?
         let captureIntentSource: String?
+        let propertyName: String?
+        let propertyAddress: String?
+        let latitude: Double?
+        let longitude: Double?
+        let accuracyMeters: Double?
+        let captureMode: String?
+        let lens: String?
+        let appVersion: String?
+        let osVersion: String?
+        let deviceModel: String?
 
         nonisolated init(
             captureProfile: String? = nil,
@@ -5059,7 +5069,17 @@ final class AppState: ObservableObject {
             isFlagged: Bool? = nil,
             issueID: UUID? = nil,
             issueStatus: String? = nil,
-            captureIntentSource: String? = nil
+            captureIntentSource: String? = nil,
+            propertyName: String? = nil,
+            propertyAddress: String? = nil,
+            latitude: Double? = nil,
+            longitude: Double? = nil,
+            accuracyMeters: Double? = nil,
+            captureMode: String? = nil,
+            lens: String? = nil,
+            appVersion: String? = nil,
+            osVersion: String? = nil,
+            deviceModel: String? = nil
         ) {
             let normalizedLocationMode = AppState.normalizedFastRuntimeLocationMode(locationMode)
             let normalizedBuilding = AppState.normalizedFastRuntimeMetadataText(building, fallback: "B1")
@@ -5110,6 +5130,16 @@ final class AppState: ObservableObject {
                 : AppState.normalizedFastRuntimeMetadataText(issueStatus, fallback: "")
             let normalizedIntent = AppState.normalizedFastRuntimeMetadataText(captureIntentSource, fallback: "")
             self.captureIntentSource = normalizedIntent.isEmpty ? nil : normalizedIntent
+            self.propertyName = propertyName
+            self.propertyAddress = propertyAddress
+            self.latitude = latitude
+            self.longitude = longitude
+            self.accuracyMeters = accuracyMeters
+            self.captureMode = captureMode
+            self.lens = lens
+            self.appVersion = appVersion
+            self.osVersion = osVersion
+            self.deviceModel = deviceModel
         }
 
         nonisolated func withAngleIndex(_ angleIndex: Int) -> FastRuntimeCaptureMetadataContext {
@@ -5128,7 +5158,17 @@ final class AppState: ObservableObject {
                 isFlagged: isFlagged,
                 issueID: issueID,
                 issueStatus: issueStatus,
-                captureIntentSource: captureIntentSource
+                captureIntentSource: captureIntentSource,
+                propertyName: propertyName,
+                propertyAddress: propertyAddress,
+                latitude: latitude,
+                longitude: longitude,
+                accuracyMeters: accuracyMeters,
+                captureMode: captureMode,
+                lens: lens,
+                appVersion: appVersion,
+                osVersion: osVersion,
+                deviceModel: deviceModel
             )
         }
     }
@@ -43896,6 +43936,9 @@ final class AppState: ObservableObject {
             }
 
             let metadataMilliseconds = Date().timeIntervalSince(metadataStartedAt) * 1_000
+            if let savedShot {
+                FastRuntimeOriginalMetadata.schedule(savedShot)
+            }
             return FastRuntimePrototypeCaptureSaveResult(
                 success: true,
                 shot: savedShot,
@@ -43928,6 +43971,11 @@ final class AppState: ObservableObject {
         )
         let localPath = fastRuntimeDurableProjectionPath(for: record) ??
             fastRuntimeResolvedLocalPath(for: record)
+        if let localPath {
+            FastRuntimeOriginalMetadata.scheduleDurableCopy(
+                record, to: URL(fileURLWithPath: localPath)
+            )
+        }
         let projectedShot = Shot(
             id: record.id,
             capturedAt: record.capturedAt,
@@ -44862,7 +44910,7 @@ final class AppState: ObservableObject {
         capturedPhotoCount: Int
     ) async -> FastRuntimeCompleteUploadResult {
         let startedAt = Date()
-        let dryRun = await runFastRuntimeCompleteDryRun(
+        var dryRun = await runFastRuntimeCompleteDryRun(
             context: context,
             storageRoot: storageRoot,
             capturedPhotoCount: capturedPhotoCount
@@ -44882,6 +44930,58 @@ final class AppState: ObservableObject {
                 diagnostics: ["stage=dry_run_validation"],
                 shots: [],
                 totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+        // The queued annotation runs after the raw camera save. Drain it (or resume it after
+        // relaunch) before any database or Storage write can publish an incomplete original.
+        do {
+            let root = storageRoot ?? fastRuntimeDraftsByPropertyID[context.propertyID]
+                .flatMap { $0.sessionID == context.sessionID ? URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) : nil }
+            guard let root else {
+                throw NSError(domain: "ScoutCapture.FastOriginalMetadata", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Saved photo storage is unavailable for metadata preparation."
+                ])
+            }
+            let recordsURL = root.appendingPathComponent("Metadata/fast-lane-shots.json")
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let records = try decoder.decode(
+                [FastRuntimePrototypeShotRecord].self,
+                from: Data(contentsOf: recordsURL)
+            )
+            var durableURLs: [UUID: URL] = [:]
+            for shot in records {
+                durableURLs[shot.id] = localStore.originalsFolderURL(
+                    propertyID: shot.propertyID, sessionID: shot.sessionID
+                ).appendingPathComponent(URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent)
+            }
+            try await FastRuntimeOriginalMetadata.prepareForUpload(
+                records, durableURLsByShotID: durableURLs
+            )
+            // Annotation changes file size. Re-read it before building snapshot and shot rows.
+            dryRun = await runFastRuntimeCompleteDryRun(
+                context: context,
+                storageRoot: storageRoot,
+                capturedPhotoCount: capturedPhotoCount
+            )
+            guard dryRun.isValid else {
+                throw NSError(domain: "ScoutCapture.FastOriginalMetadata", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "A saved photo changed during metadata preparation."
+                ])
+            }
+        } catch {
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_original_metadata_failure",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                diagnostics: ["stage=original_metadata_preflight"],
+                shots: [],
+                message: "Photo metadata could not be saved. The original photos remain on this iPhone. Retry upload. \(error.localizedDescription)"
             )
         }
         // Record the user's completion intent before any network gate. This marker
@@ -45026,9 +45126,9 @@ final class AppState: ObservableObject {
                     ])
                 }
                 let localFileURL = URL(fileURLWithPath: localPath, isDirectory: false)
-                let fileData = try Data(contentsOf: localFileURL, options: [.mappedIfSafe])
-                let checksum = sha256Hex(for: fileData)
-                let byteSize = fileData.count
+                let fingerprint = try FastRuntimeOriginalMetadata.uploadFingerprint(at: localFileURL)
+                let checksum = fingerprint.checksumSHA256
+                let byteSize = fingerprint.byteSize
                 let storagePath = operationalMediaStoragePath(
                     sessionID: context.sessionID,
                     shotID: shotSummary.id,
@@ -47754,6 +47854,9 @@ final class AppState: ObservableObject {
             localObservation: localObservation,
             fallbackCaptureKind: dryRunShot.captureKind
         )
+        let embeddedGPS = FastRuntimeOriginalMetadata.embeddedGPS(
+            at: dryRunShot.resolvedLocalFilePath.map { URL(fileURLWithPath: $0) }
+        )
         return ShotMetadata(
             shotID: dryRunShot.id,
             propertyID: context.propertyID,
@@ -47792,12 +47895,12 @@ final class AppState: ObservableObject {
             lastUploadError: nil,
             stampedFilename: nil,
             stampedRelativePath: nil,
-            captureMode: nil,
-            lens: nil,
+            captureMode: metadataContext.captureMode,
+            lens: metadataContext.lens,
             exifOrientation: nil,
-            latitude: nil,
-            longitude: nil,
-            accuracyMeters: nil,
+            latitude: embeddedGPS?.latitude,
+            longitude: embeddedGPS?.longitude,
+            accuracyMeters: embeddedGPS?.accuracyMeters,
             imageWidth: nil,
             imageHeight: nil
         )
@@ -48050,7 +48153,17 @@ final class AppState: ObservableObject {
             isFlagged: value?.isFlagged,
             issueID: value?.issueID,
             issueStatus: value?.issueStatus,
-            captureIntentSource: value?.captureIntentSource
+            captureIntentSource: value?.captureIntentSource,
+            propertyName: value?.propertyName,
+            propertyAddress: value?.propertyAddress,
+            latitude: value?.latitude,
+            longitude: value?.longitude,
+            accuracyMeters: value?.accuracyMeters,
+            captureMode: value?.captureMode,
+            lens: value?.lens,
+            appVersion: value?.appVersion,
+            osVersion: value?.osVersion,
+            deviceModel: value?.deviceModel
         )
     }
 
