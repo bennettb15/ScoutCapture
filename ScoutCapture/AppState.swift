@@ -641,11 +641,6 @@ struct PendingOrganizationInvitation: Equatable, Identifiable {
     let createdAt: Date
 }
 
-enum AuthenticationFlowResult: Equatable {
-    case signedIn
-    case requiresEmailConfirmation
-}
-
 struct PortalPunchlistNote: Identifiable, Equatable {
     let id: String
     let sourceActivityID: UUID
@@ -8615,7 +8610,7 @@ final class AppState: ObservableObject {
     }
 
     private func synchronizeAuthorizedPropertyAccessState() {
-        let membershipsByID = Dictionary(uniqueKeysWithValues: accessibleOrganizations.map { ($0.id, $0) })
+        let membershipsByID = Dictionary(accessibleOrganizations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         authorizedPropertyIDsByOrganization = authorizedPropertyIDsByOrganization.filter { orgID, _ in
             guard let membership = membershipsByID[orgID] else { return false }
             return Self.normalizedAccessScope(membership.accessScope) == "property"
@@ -9168,7 +9163,7 @@ final class AppState: ObservableObject {
                     } catch {
                         print("[SupabaseAuth] ensure_current_user_profile failed: \(error.localizedDescription)")
                         await MainActor.run {
-                            self.handleOrganizationRefreshFailure()
+                            self.handleOrganizationRefreshFailure(error: error)
                         }
                     }
                 }
@@ -9195,7 +9190,8 @@ final class AppState: ObservableObject {
         if isAuthenticationReady != ready {
             isAuthenticationReady = ready
         }
-        if user == nil {
+        if user == nil,
+           authenticationErrorMessage != Self.accountDeletionPendingMessage {
             authenticationErrorMessage = nil
         }
     }
@@ -9449,14 +9445,26 @@ final class AppState: ObservableObject {
     }
 #endif
 
-    private func handleOrganizationRefreshFailure() {
+    private static func isAccountDeletionInProgressError(_ error: Error) -> Bool {
+        error.localizedDescription.localizedCaseInsensitiveContains("Account deletion is in progress")
+    }
+
+    private static let accountDeletionPendingMessage =
+        "Account deletion is in progress. Organization access has ended. Your login will be removed when deletion completes."
+
+    private func handleOrganizationRefreshFailure(error: Error? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let hasUsableContext = self.isOrganizationContextReady
                 && self.activeOrganizationID != nil
                 && !self.accessibleOrganizations.isEmpty
             guard !hasUsableContext else { return }
-            self.clearOrganizationContext(persistActiveSelection: false)
+            if let error, Self.isAccountDeletionInProgressError(error) {
+                self.authenticationErrorMessage = Self.accountDeletionPendingMessage
+            }
+            // A failed lookup must resolve the startup gate. The no-access
+            // screen offers Sign Out instead of trapping the user on the logo.
+            self.resetOrganizationAccessState(ready: true, persistActiveSelection: false)
         }
     }
 
@@ -9636,7 +9644,7 @@ final class AppState: ObservableObject {
                 ) else {
                     return
                 }
-                self.handleOrganizationRefreshFailure()
+                self.handleOrganizationRefreshFailure(error: error)
             }
         }
     }
@@ -11368,40 +11376,22 @@ final class AppState: ObservableObject {
         }
         defer { setAuthenticating(false) }
 
+        var didAuthenticate = false
         do {
             let session = try await client.auth.signIn(email: trimmedEmail, password: password)
+            didAuthenticate = true
             try await ensureCurrentUserProfileIfNeeded(for: session.user.id, force: true)
         } catch {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.authenticationErrorMessage = error.localizedDescription
+            // Supabase Auth remains valid while a deletion request is being
+            // processed. Discard the local session if profile validation fails.
+            if didAuthenticate {
+                try? await client.auth.signOut(scope: .local)
             }
-            throw error
-        }
-    }
-
-    func signUp(email: String, password: String) async throws -> AuthenticationFlowResult {
-        guard let client = supabaseClient else { return .requiresEmailConfirmation }
-
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        setAuthenticating(true)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.authenticationErrorMessage = nil
-        }
-        defer { setAuthenticating(false) }
-
-        do {
-            let response = try await client.auth.signUp(email: trimmedEmail, password: password)
-            if let session = response.session {
-                try await ensureCurrentUserProfileIfNeeded(for: session.user.id, force: true)
-                return .signedIn
-            }
-            return .requiresEmailConfirmation
-        } catch {
+            let message = Self.isAccountDeletionInProgressError(error)
+                ? Self.accountDeletionPendingMessage
+                : error.localizedDescription
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.authenticationErrorMessage = error.localizedDescription
+                self?.authenticationErrorMessage = message
             }
             throw error
         }
@@ -11483,6 +11473,9 @@ final class AppState: ObservableObject {
 
     func signOut() async {
         guard let client = supabaseClient else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.authenticationErrorMessage = nil
+        }
 
         let orgIDsToClear = Set(accessibleOrganizations.map(\.id)).union(activeOrganizationID.map { [$0] } ?? [])
 
@@ -44891,6 +44884,13 @@ final class AppState: ObservableObject {
                 totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
             )
         }
+        // Record the user's completion intent before any network gate. This marker
+        // distinguishes an upload to retry from a draft with saved photos.
+        let completedAt = fastRuntimeCompletionDate(
+            context: context,
+            storageRoot: storageRoot,
+            shots: dryRun.shots
+        )
         guard backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.shadowWriteEnabled,
               let client = supabaseClient else {
@@ -44910,9 +44910,12 @@ final class AppState: ObservableObject {
         }
         let property = properties.first(where: { $0.id == context.propertyID }) ??
             allProperties.first(where: { $0.id == context.propertyID })
-        let resolvedOrgID = property?.orgId ?? context.orgID
-        guard let orgID = resolvedOrgID,
-              canAccessOrganization(orgID) else {
+        // The claimed capture context is scoped to the remote organization. A local
+        // property copy can carry an older org ID and must not redirect completion.
+        guard let orgID = context.orgID,
+              orgID == activeOrganizationID,
+              canAccessOrganization(orgID),
+              context.ownerUserID == authenticatedSupabaseUser?.id else {
             return makeFastRuntimeCompleteUploadFailure(
                 dryRun: dryRun,
                 startedAt: startedAt,
@@ -44933,13 +44936,12 @@ final class AppState: ObservableObject {
             )
         }
 
-        let completedAt = Date()
         var createdRowsSummary: [String] = []
         var shotResults: [FastRuntimeCompleteUploadShotResult] = []
         var sessionStatus = "not_started"
         var propertyStatus = "unchanged"
         var lockReleased = false
-        var localDraftMarkedUploaded = false
+        let localDraftMarkedUploaded = false
         var diagnostics: [String] = [
             "stage=start",
             "session_write_shape=ensure_insert_then_update",
@@ -44981,22 +44983,30 @@ final class AppState: ObservableObject {
                 metadata: metadata,
                 session: session
             )
-            diagnostics.append("stage=property_upsert")
-            try await upsertPropertyRowToSupabase(
-                makeSupabasePropertyPayload(
-                    propertyID: context.propertyID,
-                    orgID: orgID,
-                    property: property,
-                    metadata: metadata
-                )
-            )
-            createdRowsSummary.append("properties upserted 1")
+            // Field members may complete sessions but cannot edit properties. Verify
+            // that the existing property is visible in the claimed organization.
+            diagnostics.append("stage=property_verify")
+            let propertyRows = try await client
+                .from("properties")
+                .select("id")
+                .eq("id", value: context.propertyID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [SessionIDOnlyRecord]
+            guard !propertyRows.isEmpty else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 21, userInfo: [
+                    NSLocalizedDescriptionKey: "Property is no longer accessible in the selected organization."
+                ])
+            }
+            createdRowsSummary.append("properties verified 1")
             diagnostics.append("stage=session_ensure")
-            try await ensureSupabaseSessionPrerequisites(
+            try await ensureSupabaseSessionRowForShotMetadata(
                 propertyID: context.propertyID,
                 sessionID: context.sessionID,
-                metadata: metadata,
-                orgID: orgID
+                orgID: orgID,
+                property: property,
+                metadata: metadata
             )
             createdRowsSummary.append("sessions ensured 1")
             diagnostics.append("stage=session_update")
@@ -45134,25 +45144,9 @@ final class AppState: ObservableObject {
                 lockReleased = false
             }
 
-            let completedDraftSummary = fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID
-                ? fastRuntimeDraftsByPropertyID[context.propertyID]
-                : nil
-            if completedDraftSummary != nil {
-                diagnostics.append("stage=local_draft_index_hide")
-                var nextDrafts = fastRuntimeDraftsByPropertyID
-                nextDrafts.removeValue(forKey: context.propertyID)
-                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
-                fastRuntimeDraftsByPropertyID = nextDrafts
-                localDraftMarkedUploaded = true
-            }
-            let removedLocalCaptureStores = Self.removeFastRuntimeCompletionStorageRoots(
-                storageRoot: storageRoot,
-                summary: completedDraftSummary,
-                context: context
-            )
-            if removedLocalCaptureStores > 0 {
-                diagnostics.append("local_capture_storage_pruned=\(removedLocalCaptureStores)")
-            }
+            // Keep the completed capture and its draft index until the report
+            // handoff is accepted. A failed handoff must remain retryable.
+            diagnostics.append("local_capture_storage_retained_until_report_handoff")
             emitCachedAuditEvent(
                 orgID: orgID,
                 eventType: "session.completed",
@@ -45368,6 +45362,71 @@ final class AppState: ObservableObject {
         )
     }
 
+    @MainActor
+    func ownedFastRuntimeCaptureRetryCount(propertyID: UUID) -> Int {
+        guard let userID = authenticatedSupabaseUser?.id,
+              let orgID = activeOrganizationID else {
+            return 0
+        }
+        return fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).filter { candidate in
+            candidate.context.ownerUserID == userID && candidate.context.orgID == orgID
+        }.count
+    }
+
+    @MainActor
+    func hasOwnedFastRuntimeCaptureReadyForRetry(propertyID: UUID) -> Bool {
+        ownedFastRuntimeCaptureRetryCount(propertyID: propertyID) > 0
+    }
+
+    @MainActor
+    func prepareFastRuntimeCompletion(
+        context: ActiveCaptureContext,
+        storageRoot: URL?,
+        shots: [FastRuntimeCompleteDryRunShotSummary]
+    ) -> Bool {
+        guard let storageRoot else { return false }
+        _ = fastRuntimeCompletionDate(
+            context: context,
+            storageRoot: storageRoot,
+            shots: shots
+        )
+        let marker = storageRoot
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("complete-requested-at.json", isDirectory: false)
+        return FileManager.default.fileExists(atPath: marker.path)
+    }
+
+    private func fastRuntimeCompletionDate(
+        context: ActiveCaptureContext,
+        storageRoot: URL?,
+        shots: [FastRuntimeCompleteDryRunShotSummary]
+    ) -> Date {
+        let lastPhotoAt = shots.map(\.capturedAt).max() ?? context.createdAt
+        guard let storageRoot else {
+            return max(context.createdAt, lastPhotoAt)
+        }
+        let marker = storageRoot
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("complete-requested-at.json", isDirectory: false)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let data = try? Data(contentsOf: marker),
+           let savedDate = try? decoder.decode(Date.self, from: data) {
+            return max(max(context.createdAt, lastPhotoAt), savedDate)
+        }
+        // Recovery contexts are already completed; their first upload may have run in
+        // an older app version, so a new timestamp would reorder the reports.
+        let completedAt = context.status == .completed
+            ? max(context.createdAt, lastPhotoAt)
+            : max(Date(), lastPhotoAt)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(completedAt) {
+            try? data.write(to: marker, options: .atomic)
+        }
+        return completedAt
+    }
+
     private func fastRuntimeCompletionRecoveryCandidates(
         propertyID: UUID
     ) -> [FastRuntimeCompletionRecoveryCandidate] {
@@ -45383,6 +45442,14 @@ final class AppState: ObservableObject {
             guard context.propertyID == propertyID,
                   seenKeys.insert(key).inserted,
                   fileManager.fileExists(atPath: standardizedRoot.path) else {
+                return
+            }
+
+            let completionMarker = standardizedRoot
+                .appendingPathComponent("Metadata", isDirectory: true)
+                .appendingPathComponent("complete-requested-at.json", isDirectory: false)
+            let uploadFailed = sessionSnapshotCloudStatusBySessionID[context.sessionID]?.state == .failed
+            guard fileManager.fileExists(atPath: completionMarker.path) || uploadFailed else {
                 return
             }
 
@@ -45444,12 +45511,10 @@ final class AppState: ObservableObject {
         }
 
         return candidates.sorted { lhs, rhs in
-            let lhsDate = lhs.metadataModifiedAt ?? lhs.context.createdAt
-            let rhsDate = rhs.metadataModifiedAt ?? rhs.context.createdAt
-            if lhsDate == rhsDate {
+            if lhs.context.createdAt == rhs.context.createdAt {
                 return lhs.context.sessionID.uuidString < rhs.context.sessionID.uuidString
             }
-            return lhsDate > rhsDate
+            return lhs.context.createdAt < rhs.context.createdAt
         }
     }
 
@@ -45458,16 +45523,30 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         source: String
     ) async -> FastRuntimePendingExportRecoveryResult {
-        let candidates = fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID)
+        guard let userID = authenticatedSupabaseUser?.id,
+              let orgID = activeOrganizationID else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: nil,
+                sessionType: nil,
+                message: "Sign in to retry saved captures."
+            )
+        }
+        let candidates = fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).filter {
+            $0.context.ownerUserID == userID && $0.context.orgID == orgID
+        }
         guard !candidates.isEmpty else {
             return FastRuntimePendingExportRecoveryResult(
                 success: false,
                 sessionID: nil,
                 sessionType: nil,
-                message: "No local completed fast-lane upload was ready to retry."
+                message: "\(source): no local completed fast-lane upload was ready to retry."
             )
         }
 
+        var completedCount = 0
+        var lastSessionID: UUID?
+        var lastSessionType: SessionType?
         for candidate in candidates {
             markFastRuntimeCompletionUploading(context: candidate.context)
             let upload = await runFastRuntimeCompleteUpload(
@@ -45485,11 +45564,12 @@ final class AppState: ObservableObject {
                 refreshLightweightPropertyRowCloudStatusCache()
                 refreshPropertyRowStatusChipCache()
                 refreshPropertyRowCloudGlyphCache()
+                let prefix = completedCount > 0 ? "\(completedCount) saved capture(s) uploaded. " : ""
                 return FastRuntimePendingExportRecoveryResult(
                     success: false,
                     sessionID: candidate.context.sessionID,
                     sessionType: candidate.context.sessionType,
-                    message: detail
+                    message: prefix + detail
                 )
             }
 
@@ -45503,11 +45583,12 @@ final class AppState: ObservableObject {
                 refreshLightweightPropertyRowCloudStatusCache()
                 refreshPropertyRowStatusChipCache()
                 refreshPropertyRowCloudGlyphCache()
+                let prefix = completedCount > 0 ? "\(completedCount) saved capture(s) uploaded. " : ""
                 return FastRuntimePendingExportRecoveryResult(
                     success: false,
                     sessionID: handoff.sessionID ?? candidate.context.sessionID,
                     sessionType: candidate.context.sessionType,
-                    message: detail
+                    message: prefix + detail
                 )
             }
 
@@ -45519,21 +45600,24 @@ final class AppState: ObservableObject {
             refreshLightweightPropertyRowCloudStatusCache()
             refreshPropertyRowStatusChipCache()
             refreshPropertyRowCloudGlyphCache()
-            return FastRuntimePendingExportRecoveryResult(
-                success: didRelease,
-                sessionID: handoff.sessionID ?? candidate.context.sessionID,
-                sessionType: candidate.context.sessionType,
-                message: didRelease
-                    ? nil
-                    : "Export retry completed, but the property did not release."
-            )
+            guard didRelease else {
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: handoff.sessionID ?? candidate.context.sessionID,
+                    sessionType: candidate.context.sessionType,
+                    message: "Export retry completed, but the property did not release."
+                )
+            }
+            completedCount += 1
+            lastSessionID = handoff.sessionID ?? candidate.context.sessionID
+            lastSessionType = candidate.context.sessionType
         }
 
         return FastRuntimePendingExportRecoveryResult(
-            success: false,
-            sessionID: nil,
-            sessionType: nil,
-            message: "\(source): no eligible local fast-lane completion found."
+            success: true,
+            sessionID: lastSessionID,
+            sessionType: lastSessionType,
+            message: "\(completedCount) saved capture\(completedCount == 1 ? "" : "s") uploaded and exported."
         )
     }
 
@@ -45579,12 +45663,13 @@ final class AppState: ObservableObject {
             deviceID: currentDeviceIdentifier(),
             reason: "fast_lane_report_handoff_accepted"
         )
-        if !didMarkExported {
+        guard didMarkExported else {
             print(
                 "[FastRuntimeReportHandoff] accepted_but_exported_status_write_not_confirmed " +
                 "propertyID=\(context.propertyID.uuidString) " +
                 "sessionID=\(context.sessionID.uuidString)"
             )
+            return false
         }
 
         updateLocalPropertyStatusPresentationCache(
@@ -45600,6 +45685,30 @@ final class AppState: ObservableObject {
             reason: "fast_lane_report_handoff_accepted"
         ) {
             persistFastRuntimeCompletionCloudStatus(status, storagePath: snapshotPath)
+        }
+        let completedDraftSummary = fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID
+            ? fastRuntimeDraftsByPropertyID[context.propertyID]
+            : nil
+        if completedDraftSummary != nil {
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts.removeValue(forKey: context.propertyID)
+            do {
+                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                fastRuntimeDraftsByPropertyID = nextDrafts
+            } catch {
+                recordDiagnosticsError(error)
+            }
+        }
+        let tempStorageRoot = Self.fastRuntimePrototypeTempRootURL()
+            .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+        let removedLocalCaptureStores = Self.removeFastRuntimeCompletionStorageRoots(
+            storageRoot: tempStorageRoot,
+            summary: completedDraftSummary,
+            context: context
+        )
+        if removedLocalCaptureStores > 0 {
+            print("[FastRuntimeReportHandoff] local_capture_storage_pruned=\(removedLocalCaptureStores)")
         }
         if let orgID = context.orgID ??
             propertyStatusByPropertyID[context.propertyID]?.orgID ??
@@ -46024,15 +46133,31 @@ final class AppState: ObservableObject {
             )
         }
 
+        // Finish the server's current pending report before starting a newer
+        // saved capture for this property. Otherwise pending_export_session_id
+        // could be replaced and reports could be delivered out of order.
+        let serverPendingRecovery = await recoverFastRuntimeRemotePendingExportReportHandoff(propertyID: propertyID)
+        if let pendingSessionID = serverPendingRecovery.sessionID,
+           !serverPendingRecovery.success,
+           !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).contains(where: {
+               $0.context.sessionID == pendingSessionID
+           }) {
+            return PropertyUploadRetryResult(
+                success: false,
+                message: serverPendingRecovery.message ?? "The pending report could not be retried."
+            )
+        }
+
         let completionRecovery = await recoverFastRuntimeCompleteUploadAndReportHandoff(
             propertyID: propertyID,
             source: "manual_property_context_retry"
         )
         if completionRecovery.success {
-            return PropertyUploadRetryResult(
-                success: true,
-                message: "Upload and export retry completed."
-            )
+            let messages = [
+                serverPendingRecovery.success ? serverPendingRecovery.message : nil,
+                completionRecovery.message ?? "Upload and export retry completed."
+            ].compactMap { $0 }
+            return PropertyUploadRetryResult(success: true, message: messages.joined(separator: " "))
         }
         if completionRecovery.sessionID != nil {
             return PropertyUploadRetryResult(
@@ -46052,12 +46177,13 @@ final class AppState: ObservableObject {
         refreshPropertyRowCloudGlyphCache()
 
         let didUpload = uploadSummary.succeededCount > 0
-        if didUpload || exportRecovery.success {
+        if didUpload || exportRecovery.success || serverPendingRecovery.success {
             let uploadText = didUpload ? "Upload retry completed." : nil
             let exportText = exportRecovery.success ? "Export retry completed." : nil
             return PropertyUploadRetryResult(
                 success: true,
-                message: [uploadText, exportText].compactMap { $0 }.joined(separator: " ")
+                message: [serverPendingRecovery.success ? serverPendingRecovery.message : nil,
+                          uploadText, exportText].compactMap { $0 }.joined(separator: " ")
             )
         }
 
@@ -46089,7 +46215,17 @@ final class AppState: ObservableObject {
     ) async -> FastRuntimePendingExportRecoveryResult {
         var blockedMessages: [String] = []
         let candidates = fastRuntimePendingExportRecoveryCandidates(propertyID: propertyID)
-        for candidate in candidates {
+        // Check the server's current pending session before attempting to
+        // repair status from an older local session.
+        let remoteRecovery = await recoverFastRuntimeRemotePendingExportReportHandoff(propertyID: propertyID)
+        if remoteRecovery.success ||
+            (remoteRecovery.sessionID != nil && !candidates.contains(where: { $0.session.id == remoteRecovery.sessionID })) {
+            return remoteRecovery
+        }
+        let eligibleCandidates = remoteRecovery.sessionID.map { pendingID in
+            candidates.filter { $0.session.id == pendingID }
+        } ?? candidates
+        for candidate in eligibleCandidates {
             let sessionType = candidate.session.sessionType
             guard await ensureFastRuntimePendingExportStatusForRecovery(
                 propertyID: propertyID,
@@ -46156,9 +46292,144 @@ final class AppState: ObservableObject {
             sessionID: nil,
             sessionType: nil,
             message: blockedMessages.isEmpty
-                ? "No pending export was ready to retry."
+                ? (remoteRecovery.message ?? "No upload or pending export was ready to retry.")
                 : blockedMessages.joined(separator: "\n")
         )
+    }
+
+    @MainActor
+    private func recoverFastRuntimeRemotePendingExportReportHandoff(
+        propertyID: UUID
+    ) async -> FastRuntimePendingExportRecoveryResult {
+        guard let orgID = activeOrganizationID,
+              canAccessOrganization(orgID),
+              authenticatedSupabaseUser != nil else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: nil,
+                sessionType: nil,
+                message: "Sign in to retry the pending report."
+            )
+        }
+
+        let remoteStatus: PropertyStatusRecord
+        do {
+            guard let status = try await fetchPropertyStatusRecord(propertyID: propertyID),
+                  status.orgID == orgID,
+                  status.status == .pendingExport,
+                  status.pendingExportSessionID != nil else {
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: nil,
+                    sessionType: nil,
+                    message: "No pending export was ready to retry."
+                )
+            }
+            remoteStatus = status
+        } catch {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: nil,
+                sessionType: nil,
+                message: "Could not check the server for the pending report: \(error.localizedDescription)"
+            )
+        }
+
+        guard let sessionID = remoteStatus.pendingExportSessionID else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: nil,
+                sessionType: nil,
+                message: "No pending export was ready to retry."
+            )
+        }
+        guard let sessionType = cachedFastRuntimeCompletedSessionType(
+            sessionID: sessionID,
+            orgID: orgID
+        ) else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: sessionID,
+                sessionType: nil,
+                message: "The photos reached the server, but the saved report type is unavailable. Contact support before retrying this report."
+            )
+        }
+
+        let dryRun = await runFastRuntimeReportPackageDryRun(
+            propertyID: propertyID,
+            sessionType: sessionType
+        )
+        guard dryRun.isValid,
+              dryRun.sessionID == sessionID,
+              dryRun.orgID == orgID else {
+            let detail = (dryRun.errors + dryRun.missingFields).joined(separator: ", ")
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                message: detail.isEmpty ? "The pending report could not be validated." : detail
+            )
+        }
+
+        let handoff = await runFastRuntimeReportHandoff(
+            propertyID: propertyID,
+            sessionType: sessionType
+        )
+        guard handoff.success,
+              handoff.sessionID == sessionID else {
+            return FastRuntimePendingExportRecoveryResult(
+                success: false,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                message: handoff.errorMessage ?? "Report handoff retry failed."
+            )
+        }
+        let context = ActiveCaptureContext(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            orgID: orgID,
+            sessionType: sessionType,
+            ownerUserID: authenticatedSupabaseUser?.id,
+            ownerEmail: authenticatedSupabaseUser?.email,
+            ownerDeviceID: currentDeviceIdentifier(),
+            createdAt: Date(),
+            status: .completed,
+            statusReason: "remote_pending_export_handoff_recovery"
+        )
+        let didRelease = await markFastRuntimeCompletionHandoffAccepted(
+            context: context,
+            snapshotID: handoff.snapshotID,
+            snapshotPath: handoff.snapshotPath
+        )
+        refreshLightweightPropertyRowCloudStatusCache()
+        refreshPropertyRowStatusChipCache()
+        refreshPropertyRowCloudGlyphCache()
+        return FastRuntimePendingExportRecoveryResult(
+            success: didRelease,
+            sessionID: sessionID,
+            sessionType: sessionType,
+            message: didRelease
+                ? "The uploaded photos were already on the server. The report retry completed."
+                : "Report handoff succeeded, but server pending export did not clear."
+        )
+    }
+
+    private func cachedFastRuntimeCompletedSessionType(
+        sessionID: UUID,
+        orgID: UUID
+    ) -> SessionType? {
+        for event in cachedLocalActivityFeedRecords()
+        where event.orgID == orgID &&
+            event.sessionID == sessionID &&
+            event.eventType == "session.completed" {
+            guard let value = event.payload["session_type"],
+                  let rawValue = normalizedActivityPayloadValue(value),
+                  let sessionType = SessionType(rawValue: rawValue) else {
+                continue
+            }
+            return sessionType
+        }
+        return nil
     }
 
     private func fastRuntimePendingExportRecoveryCandidates(
@@ -48125,6 +48396,14 @@ final class AppState: ObservableObject {
                     continue
                 }
                 if sessionFolder.lastPathComponent.caseInsensitiveCompare(excludingSessionID?.uuidString ?? "") == .orderedSame {
+                    continue
+                }
+                // A completion marker means the user asked to upload these
+                // photos. Keep them until report handoff confirms success.
+                let completionMarker = sessionFolder
+                    .appendingPathComponent("Metadata", isDirectory: true)
+                    .appendingPathComponent("complete-requested-at.json", isDirectory: false)
+                if fileManager.fileExists(atPath: completionMarker.path) {
                     continue
                 }
                 let values = try? sessionFolder.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])

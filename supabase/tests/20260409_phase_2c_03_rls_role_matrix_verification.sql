@@ -202,6 +202,11 @@ select public.test_assert((select count(*) from public.users_profile where id = 
 
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000005', true);
 select public.test_assert((select count(*) from public.orgs) = 0, 'outsider should not read orgs');
+select public.test_assert((select count(*) from public.properties) = 0, 'outsider should not read properties');
+select public.test_assert((select count(*) from public.sessions) = 0, 'outsider should not read sessions');
+select public.test_assert((select count(*) from public.shots) = 0, 'outsider should not read shots');
+select public.test_assert((select count(*) from public.observations) = 0, 'outsider should not read observations');
+select public.test_assert((select count(*) from public.session_events) = 0, 'outsider should not read session events');
 select public.test_assert((select count(*) from public.users_profile where id = '00000000-0000-0000-0000-000000000005') = 1, 'outsider should read own profile');
 select public.test_assert((
     select count(*)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 import types
@@ -129,6 +130,19 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
+    def test_actor_email_from_snapshot_is_not_rendered_in_report_plans(self) -> None:
+        payload = validation()
+        payload["inputs"]["session"]["capturedByEmail"] = "former@example.com"
+        payload["inputs"]["session"]["actorEmail"] = "former@example.com"
+        payload["inputs"]["ordered_shots"][0]["capturedByEmail"] = "former@example.com"
+        for builder in (
+            renderer.build_property_plan,
+            renderer.build_priority_plan,
+            renderer.build_comparison_plan,
+        ):
+            plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
+            self.assertNotIn("former@example.com", json.dumps(plan))
+
     def test_pending_review_item_gets_resolved_visual_state(self) -> None:
         self.assertEqual(
             "resolved",

@@ -210,6 +210,37 @@ struct ScoutCaptureApp: App {
     }
 }
 
+private struct NoOrganizationAccessView: View {
+    @EnvironmentObject private var appState: AppState
+
+    private var deletionPending: Bool {
+        appState.authenticationErrorMessage?.localizedCaseInsensitiveContains("Account deletion is in progress") == true
+    }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: deletionPending ? "person.crop.circle.badge.xmark" : "building.2.crop.circle")
+                .font(.system(size: 46))
+                .foregroundStyle(.secondary)
+            Text(deletionPending ? "Account Deletion in Progress" : "No Organization Access")
+                .font(.title2.bold())
+            Text(deletionPending
+                 ? "Organization access has ended. Your login will be removed when account deletion completes."
+                 : "You don’t currently have access to any organizations.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            Button("Sign Out") {
+                Task { await appState.signOut() }
+            }
+            .buttonStyle(.borderedProminent)
+            Link("Manage Account", destination: URL(string: "https://www.scoutclear.com/account")!)
+                .font(.footnote)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct CloudBackupSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -584,14 +615,27 @@ private struct AppRootView: View {
             } else if appState.requiresAuthentication && !appState.isAuthenticated {
                 AuthView()
             } else if appState.requiresAuthentication && !appState.isOrganizationContextReady {
-                LoadingView(
-                    progress: 0,
-                    showsProgressBar: false,
-                    showsLogo: true,
-                    message: appState.isNetworkAvailable ? "Loading organization..." : startupOfflineMessage,
-                    detailMessage: appState.isNetworkAvailable ? "Preparing your workspace." : startupOfflineDetail,
-                    showsSpinner: appState.isNetworkAvailable
-                )
+                ZStack(alignment: .bottom) {
+                    LoadingView(
+                        progress: 0,
+                        showsProgressBar: false,
+                        showsLogo: true,
+                        message: appState.isNetworkAvailable ? "Loading organization..." : startupOfflineMessage,
+                        detailMessage: appState.isNetworkAvailable ? "Preparing your workspace." : startupOfflineDetail,
+                        showsSpinner: appState.isNetworkAvailable
+                    )
+                    Button("Sign Out") {
+                        Task { await appState.signOut() }
+                    }
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(Color.blue, in: Capsule())
+                    .padding(.bottom, 48)
+                }
+            } else if appState.requiresAuthentication && appState.activeOrganizationID == nil {
+                NoOrganizationAccessView()
             } else if !homePropertyListReady {
                 LoadingView(
                     progress: launchProgress,
@@ -1064,7 +1108,17 @@ struct SessionHubView: View {
                     let showArchivedSection = showArchivedProperties
                     let hasNoMatches = filteredActiveProperties.isEmpty && (!showArchivedSection || filteredArchivedProperties.isEmpty)
                     let hasNoPropertiesAtAll = activeProperties.isEmpty && (!showArchivedSection || archivedProperties.isEmpty)
-                    if shouldShowStartupPlaceholders {
+                    if appState.requiresAuthentication && appState.activeOrganizationID == nil {
+                        ContentUnavailableView {
+                            Label("No Organization Access", systemImage: "building.2.crop.circle")
+                        } description: {
+                            Text("You don’t currently have access to any organizations.")
+                        } actions: {
+                            Button("Sign Out") {
+                                Task { await appState.signOut() }
+                            }
+                        }
+                    } else if shouldShowStartupPlaceholders {
                         List {
                             Section {
                                 ForEach(0..<4, id: \.self) { index in
@@ -1077,12 +1131,6 @@ struct SessionHubView: View {
                             }
                         }
                         .listStyle(.plain)
-                    } else if appState.requiresAuthentication && appState.activeOrganizationID == nil {
-                        ContentUnavailableView(
-                            "No Organization Access",
-                            systemImage: "building.2.crop.circle",
-                            description: Text("You don’t currently have access to any organizations.")
-                        )
                     } else if hasNoPropertiesAtAll {
                         ContentUnavailableView {
                             Label("No Properties", systemImage: "house")
@@ -1589,6 +1637,7 @@ struct SessionHubView: View {
         cloudGlyph: AppState.PropertyRowCloudGlyphState?
     ) -> some View {
         let addressLine = propertyAddressLine(property) ?? property.address
+        let pendingUploadCount = appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id)
 
         return Button {
             handlePropertyTap(property)
@@ -1625,6 +1674,9 @@ struct SessionHubView: View {
 
                 if hasDraft {
                     chipLabel("Draft", tint: .orange)
+                }
+                if pendingUploadCount > 0 {
+                    chipLabel("\(pendingUploadCount) to upload", tint: .orange)
                 }
             }
             .padding(.vertical, 8)
@@ -1691,6 +1743,7 @@ struct SessionHubView: View {
     ) -> [PropertyListTableRowModel] {
         properties.map { property in
             let cloudGlyph = rowCloudGlyphs[property.id]
+            let pendingUploadCount = appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id)
             return PropertyListTableRowModel(
                 property: property,
                 title: property.name,
@@ -1700,7 +1753,10 @@ struct SessionHubView: View {
                 isLocked: rowLockBadges[property.id] == true,
                 isArchived: property.isArchived,
                 cloudGlyph: cloudGlyph,
-                canRetryUpload: rowStatusChips[property.id] != nil || cloudGlyph == .warning,
+                pendingUploadCount: pendingUploadCount,
+                canRetryUpload: rowStatusChips[property.id] != nil ||
+                    cloudGlyph == .warning ||
+                    pendingUploadCount > 0,
                 canOpenMaps: mapsAddressQuery(for: property) != nil,
                 canMessage: hasValidPhoneNumber(property),
                 canCall: hasValidPhoneNumber(property)
@@ -1754,8 +1810,9 @@ struct SessionHubView: View {
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
+        let pendingUploadCount = appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id)
         let rawHasDraft = badgeModel.showDraft
-        let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
+        let uploadStatusChip = pendingUploadCount > 0 ? nil : sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let isActivelyUploading = sessionUploadStatus?.state == .uploading &&
             sessionUploadStatus?.isConfigurationBlocked == false
         let hasDraft = rawHasDraft && !isActivelyUploading
@@ -1768,7 +1825,7 @@ struct SessionHubView: View {
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil
+        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil || pendingUploadCount > 0
         let showLock = badgeModel.showLock
         Button {
             handlePropertyTap(property)
@@ -1824,6 +1881,10 @@ struct SessionHubView: View {
 
                                 if hasPendingExport {
                                     chipLabel("Pending Export", tint: .blue)
+                                }
+
+                                if pendingUploadCount > 0 {
+                                    chipLabel("\(pendingUploadCount) to upload", tint: .orange)
                                 }
 
                                 if let uploadStatusChip {
@@ -2582,6 +2643,10 @@ struct SessionHubView: View {
                                         Text("No active organization")
                                             .foregroundStyle(.secondary)
                                     }
+                                }
+
+                                Link(destination: URL(string: "https://www.scoutclear.com/account")!) {
+                                    Label("Manage Account", systemImage: "person.crop.circle")
                                 }
 
                                 Button("Sign Out", role: .destructive) {
@@ -4496,7 +4561,7 @@ struct SessionHubView: View {
             await MainActor.run {
                 retryingPropertyUploadIDs.remove(property.id)
                 propertyUploadRetryAlert = PropertyUploadRetryAlert(
-                    title: result.success ? "Retry Started" : "Retry Not Ready",
+                    title: result.success ? "Upload Complete" : "Retry Not Ready",
                     message: result.message
                 )
             }
@@ -5570,6 +5635,7 @@ private struct PropertyListTableRowModel: Identifiable {
     let isLocked: Bool
     let isArchived: Bool
     let cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    let pendingUploadCount: Int
     let canRetryUpload: Bool
     let canOpenMaps: Bool
     let canMessage: Bool
@@ -5590,6 +5656,7 @@ extension PropertyListTableRowModel: Equatable {
             lhs.isLocked == rhs.isLocked &&
             lhs.isArchived == rhs.isArchived &&
             lhs.cloudGlyph == rhs.cloudGlyph &&
+            lhs.pendingUploadCount == rhs.pendingUploadCount &&
             lhs.canRetryUpload == rhs.canRetryUpload &&
             lhs.canOpenMaps == rhs.canOpenMaps &&
             lhs.canMessage == rhs.canMessage &&
@@ -5866,6 +5933,7 @@ private final class PropertyListTableCell: UITableViewCell {
     private let subtitleLabel = UILabel()
     private let addressLabel = UILabel()
     private let draftLabel = UILabel()
+    private let uploadRetryLabel = UILabel()
     private let lockLabel = UILabel()
     private let archivedLabel = UILabel()
     private let textStack = UIStackView()
@@ -5887,6 +5955,7 @@ private final class PropertyListTableCell: UITableViewCell {
         subtitleLabel.text = nil
         addressLabel.text = nil
         draftLabel.isHidden = true
+        uploadRetryLabel.isHidden = true
         lockLabel.isHidden = true
         archivedLabel.isHidden = true
     }
@@ -5900,6 +5969,8 @@ private final class PropertyListTableCell: UITableViewCell {
         lockLabel.isHidden = !row.isLocked
         archivedLabel.isHidden = !row.isArchived
         draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft
+        uploadRetryLabel.text = "\(row.pendingUploadCount) to upload"
+        uploadRetryLabel.isHidden = row.pendingUploadCount == 0
     }
 
     private func configureViews() {
@@ -5929,6 +6000,16 @@ private final class PropertyListTableCell: UITableViewCell {
         draftLabel.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.35).cgColor
         draftLabel.layer.masksToBounds = true
         draftLabel.isHidden = true
+
+        uploadRetryLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        uploadRetryLabel.textColor = .systemOrange
+        uploadRetryLabel.textAlignment = .center
+        uploadRetryLabel.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.15)
+        uploadRetryLabel.layer.cornerRadius = 14
+        uploadRetryLabel.layer.borderWidth = 1
+        uploadRetryLabel.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.35).cgColor
+        uploadRetryLabel.layer.masksToBounds = true
+        uploadRetryLabel.isHidden = true
 
         lockLabel.text = "Locked"
         lockLabel.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -5966,12 +6047,15 @@ private final class PropertyListTableCell: UITableViewCell {
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         rootStack.addArrangedSubview(textStack)
         rootStack.addArrangedSubview(draftLabel)
+        rootStack.addArrangedSubview(uploadRetryLabel)
         rootStack.addArrangedSubview(lockLabel)
         rootStack.addArrangedSubview(archivedLabel)
 
         contentView.addSubview(rootStack)
         draftLabel.setContentHuggingPriority(.required, for: .horizontal)
         draftLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        uploadRetryLabel.setContentHuggingPriority(.required, for: .horizontal)
+        uploadRetryLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         lockLabel.setContentHuggingPriority(.required, for: .horizontal)
         lockLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         archivedLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -5985,6 +6069,8 @@ private final class PropertyListTableCell: UITableViewCell {
             rootStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -8),
             draftLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
             draftLabel.heightAnchor.constraint(equalToConstant: 28),
+            uploadRetryLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 96),
+            uploadRetryLabel.heightAnchor.constraint(equalToConstant: 28),
             lockLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
             lockLabel.heightAnchor.constraint(equalToConstant: 28),
             archivedLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 88),
@@ -18419,6 +18505,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     "Could not validate saved photos."
                 await MainActor.run {
                     productionCompleteState = .failed(message)
+                }
+                return
+            }
+
+            let completionRoot = fastStorageRoot ?? prototypeResult.tempStorageRoot
+            guard await appState.prepareFastRuntimeCompletion(
+                context: context,
+                storageRoot: completionRoot,
+                shots: dryRun.shots
+            ) else {
+                await MainActor.run {
+                    productionCompleteState = .failed("Could not save the completion state. Your photos are still on this device; try Complete again.")
                 }
                 return
             }

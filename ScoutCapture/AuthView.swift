@@ -77,36 +77,9 @@ final class PasswordRecoveryFormModel: ObservableObject {
 }
 
 struct AuthView: View {
-    private enum Mode: String, CaseIterable, Identifiable {
-        case signIn
-        case signUp
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .signIn:
-                return "Sign In"
-            case .signUp:
-                return "Create Account"
-            }
-        }
-
-        var buttonTitle: String {
-            switch self {
-            case .signIn:
-                return "Sign In"
-            case .signUp:
-                return "Create Account"
-            }
-        }
-    }
-
     @EnvironmentObject private var appState: AppState
-    @State private var mode: Mode = .signIn
     @State private var email: String = ""
     @State private var password: String = ""
-    @State private var infoMessage: String?
     @State private var passwordResetConfirmationMessage: String?
     @State private var isShowingForgotPassword = false
     @StateObject private var passwordRecovery = PasswordRecoveryFormModel()
@@ -161,7 +134,7 @@ struct AuthView: View {
                                 .scaledToFit()
                                 .frame(maxWidth: 220)
 
-                            Text("Supabase authentication is required to access organization-scoped data.")
+                            Text("Access to Scout Capture requires an invitation from an organization administrator.")
                                 .font(.system(size: 15, weight: .medium))
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -169,13 +142,6 @@ struct AuthView: View {
                         }
 
                         VStack(spacing: 16) {
-                            Picker("Authentication Mode", selection: $mode) {
-                                ForEach(Mode.allCases) { mode in
-                                    Text(mode.title).tag(mode)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-
                             VStack(spacing: 12) {
                                 TextField("Email", text: $email)
                                     .textInputAutocapitalization(.never)
@@ -190,18 +156,11 @@ struct AuthView: View {
                                 SecureField("Password", text: $password)
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
-                                    .textContentType(mode == .signIn ? .password : .newPassword)
+                                    .textContentType(.password)
                                     .padding(.horizontal, 14)
                                     .frame(height: 50)
                                     .background(Color(uiColor: .secondarySystemBackground))
                                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            }
-
-                            if let infoMessage, !infoMessage.isEmpty {
-                                Text(infoMessage)
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
                             }
 
                             if let authenticationErrorMessage = appState.authenticationErrorMessage,
@@ -218,7 +177,7 @@ struct AuthView: View {
                                         .tint(.white)
                                         .frame(maxWidth: .infinity, minHeight: 50)
                                 } else {
-                                    Text(mode.buttonTitle)
+                                    Text("Sign In")
                                         .font(.system(size: 17, weight: .semibold))
                                         .frame(maxWidth: .infinity, minHeight: 50)
                                 }
@@ -230,17 +189,14 @@ struct AuthView: View {
                             .disabled(appState.isAuthenticating || emailTrimmed.isEmpty || password.isEmpty)
                             .opacity(appState.isAuthenticating || emailTrimmed.isEmpty || password.isEmpty ? 0.6 : 1.0)
 
-                            if mode == .signIn {
-                                Button(PasswordRecoveryFlow.forgotPasswordButtonTitle) {
-                                    infoMessage = nil
-                                    passwordResetConfirmationMessage = nil
-                                    passwordRecovery.prepare(signInEmail: emailTrimmed)
-                                    isShowingForgotPassword = true
-                                }
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(.blue)
-                                .disabled(appState.isAuthenticating || passwordRecovery.isRequestInFlight)
+                            Button(PasswordRecoveryFlow.forgotPasswordButtonTitle) {
+                                passwordResetConfirmationMessage = nil
+                                passwordRecovery.prepare(signInEmail: emailTrimmed)
+                                isShowingForgotPassword = true
                             }
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.blue)
+                            .disabled(appState.isAuthenticating || passwordRecovery.isRequestInFlight)
                         }
                         .padding(20)
                         .background(Color(uiColor: .systemBackground))
@@ -252,10 +208,6 @@ struct AuthView: View {
                     .padding(.vertical, 24)
                     .padding(.bottom, 145)
                     .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .bottom)
-                    .onChange(of: mode) { _, _ in
-                        infoMessage = nil
-                        passwordResetConfirmationMessage = nil
-                    }
                 }
                 .scrollDismissesKeyboard(.interactively)
             }
@@ -289,21 +241,10 @@ struct AuthView: View {
     }
 
     private func submit() {
-        infoMessage = nil
         passwordResetConfirmationMessage = nil
 
         Task {
-            switch mode {
-            case .signIn:
-                try? await appState.signIn(email: emailTrimmed, password: password)
-            case .signUp:
-                if let result = try? await appState.signUp(email: emailTrimmed, password: password),
-                   result == .requiresEmailConfirmation {
-                    await MainActor.run {
-                        infoMessage = "Account created. If your project requires confirmation, approve the email and then sign in."
-                    }
-                }
-            }
+            try? await appState.signIn(email: emailTrimmed, password: password)
         }
     }
 }
