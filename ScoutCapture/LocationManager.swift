@@ -16,8 +16,33 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var authorizationStatus: CLAuthorizationStatus = .notDetermined
 
     private let manager = CLLocationManager()
+    private let authorizationStatusProvider: (CLLocationManager) -> CLAuthorizationStatus
 
-    override init() {
+    private static func permitsLocation(_ status: CLAuthorizationStatus) -> Bool {
+        status == .authorizedWhenInUse || status == .authorizedAlways
+    }
+
+    static func locationForCapture(_ location: CLLocation?, authorizationStatus: CLAuthorizationStatus) -> CLLocation? {
+        permitsLocation(authorizationStatus) ? location : nil
+    }
+
+    private func clearCachedLocation() {
+        lastLocation = nil
+        headingDegrees = nil
+    }
+
+    func currentLocationForCapture() -> CLLocation? {
+        let status = authorizationStatusProvider(manager)
+        authorizationStatus = status
+        guard Self.permitsLocation(status) else {
+            clearCachedLocation()
+            return nil
+        }
+        return Self.locationForCapture(lastLocation, authorizationStatus: status)
+    }
+
+    init(authorizationStatusProvider: @escaping (CLLocationManager) -> CLAuthorizationStatus = { $0.authorizationStatus }) {
+        self.authorizationStatusProvider = authorizationStatusProvider
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
@@ -26,7 +51,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func requestPermissionIfNeeded() {
-        let status = manager.authorizationStatus
+        let status = authorizationStatusProvider(manager)
         authorizationStatus = status
 
         if status == .notDetermined {
@@ -37,10 +62,11 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     func start() {
         requestPermissionIfNeeded()
 
-        let status = manager.authorizationStatus
+        let status = authorizationStatusProvider(manager)
         authorizationStatus = status
 
-        guard status == .authorizedWhenInUse || status == .authorizedAlways else {
+        guard Self.permitsLocation(status) else {
+            clearCachedLocation()
             return
         }
 
@@ -53,22 +79,31 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     func stop() {
         manager.stopUpdatingLocation()
         manager.stopUpdatingHeading()
+        clearCachedLocation()
     }
 
     // MARK: CLLocationManagerDelegate
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        authorizationStatus = manager.authorizationStatus
+        authorizationStatus = authorizationStatusProvider(manager)
 
-        if authorizationStatus == .authorizedWhenInUse || authorizationStatus == .authorizedAlways {
+        if Self.permitsLocation(authorizationStatus) {
             manager.startUpdatingLocation()
             if CLLocationManager.headingAvailable() {
                 manager.startUpdatingHeading()
             }
+        } else {
+            manager.stopUpdatingLocation()
+            manager.stopUpdatingHeading()
+            clearCachedLocation()
         }
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard Self.permitsLocation(authorizationStatusProvider(manager)) else {
+            clearCachedLocation()
+            return
+        }
         lastLocation = locations.last
     }
 
@@ -77,6 +112,10 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        guard Self.permitsLocation(authorizationStatusProvider(manager)) else {
+            clearCachedLocation()
+            return
+        }
         let trueHeading = newHeading.trueHeading
         let heading = trueHeading >= 0 ? trueHeading : newHeading.magneticHeading
         guard heading >= 0 else { return }

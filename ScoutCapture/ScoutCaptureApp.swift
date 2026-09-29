@@ -233,7 +233,11 @@ private struct NoOrganizationAccessView: View {
                 Task { await appState.signOut() }
             }
             .buttonStyle(.borderedProminent)
-            Link("Manage Account", destination: URL(string: "https://www.scoutclear.com/account")!)
+            if !deletionPending {
+                Link("Manage or Delete Account", destination: ScoutWebLinks.accountDeletion)
+                    .font(.footnote)
+            }
+            Link("Privacy Policy", destination: ScoutWebLinks.privacyPolicy)
                 .font(.footnote)
         }
         .padding(24)
@@ -2645,8 +2649,14 @@ struct SessionHubView: View {
                                     }
                                 }
 
-                                Link(destination: URL(string: "https://www.scoutclear.com/account")!) {
-                                    Label("Manage Account", systemImage: "person.crop.circle")
+                                if appState.authenticationErrorMessage?.localizedCaseInsensitiveContains("Account deletion is in progress") != true {
+                                    Link(destination: ScoutWebLinks.accountDeletion) {
+                                        Label("Manage or Delete Account", systemImage: "person.crop.circle")
+                                    }
+                                }
+
+                                Link(destination: ScoutWebLinks.privacyPolicy) {
+                                    Label("Privacy Policy", systemImage: "doc.text")
                                 }
 
                                 Button("Sign Out", role: .destructive) {
@@ -4869,6 +4879,7 @@ struct SessionHubView: View {
         }
         print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
         var mergedProps = sourceProps
+        mergedProps.removeValue(forKey: kCGImagePropertyGPSDictionary)
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
 

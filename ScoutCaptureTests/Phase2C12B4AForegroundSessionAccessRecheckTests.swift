@@ -82,6 +82,27 @@ final class Phase2C12B4AForegroundSessionAccessRecheckTests: XCTestCase {
         appState._debugRefreshPropertiesLocallyForTests()
     }
 
+    private func seedIdlePropertyStatus(_ appState: AppState, property: Property, orgID: UUID) {
+        appState._debugReplacePropertyStatusCacheForTests([
+            AppState.PropertyStatusRecord(
+                propertyID: property.id,
+                orgID: orgID,
+                status: .idle,
+                activeSessionID: nil,
+                draftSessionID: nil,
+                pendingExportSessionID: nil,
+                lastExportedSessionID: nil,
+                ownerUserID: nil,
+                ownerDeviceID: nil,
+                heartbeatAt: nil,
+                updatedAt: Date(),
+                updatedBy: nil,
+                statusReason: "test:idle",
+                revision: 1
+            )
+        ])
+    }
+
     func testSuccessfulRefreshWithAccessRetainedDoesNotExit() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -92,6 +113,7 @@ final class Phase2C12B4AForegroundSessionAccessRecheckTests: XCTestCase {
         await configureAuthenticatedContext(fixture.appState, orgID: orgID)
 
         fixture.appState.selectProperty(id: property.id)
+        seedIdlePropertyStatus(fixture.appState, property: property, orgID: orgID)
         _ = fixture.appState.startSession()
 
         let didRevoke = await fixture.appState._debugRunForegroundActiveSessionAccessCheckpointForTests(
@@ -115,6 +137,7 @@ final class Phase2C12B4AForegroundSessionAccessRecheckTests: XCTestCase {
         await configureAuthenticatedContext(fixture.appState, orgID: orgID)
 
         fixture.appState.selectProperty(id: property.id)
+        seedIdlePropertyStatus(fixture.appState, property: property, orgID: orgID)
         let sessionID = fixture.appState.startSession()!.id
 
         let didRevoke = await fixture.appState._debugRunForegroundActiveSessionAccessCheckpointForTests(
@@ -158,6 +181,7 @@ final class Phase2C12B4AForegroundSessionAccessRecheckTests: XCTestCase {
         await configureAuthenticatedContext(fixture.appState, orgID: orgID)
 
         fixture.appState.selectProperty(id: property.id)
+        seedIdlePropertyStatus(fixture.appState, property: property, orgID: orgID)
         _ = fixture.appState.startSession()
 
         let didRevoke = await fixture.appState._debugRunForegroundActiveSessionAccessCheckpointForTests(

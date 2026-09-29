@@ -82,6 +82,27 @@ final class Phase2C12B4BHubForegroundAccessRefreshTests: XCTestCase {
         appState._debugRefreshPropertiesLocallyForTests()
     }
 
+    private func seedIdlePropertyStatus(_ appState: AppState, property: Property, orgID: UUID) {
+        appState._debugReplacePropertyStatusCacheForTests([
+            AppState.PropertyStatusRecord(
+                propertyID: property.id,
+                orgID: orgID,
+                status: .idle,
+                activeSessionID: nil,
+                draftSessionID: nil,
+                pendingExportSessionID: nil,
+                lastExportedSessionID: nil,
+                ownerUserID: nil,
+                ownerDeviceID: nil,
+                heartbeatAt: nil,
+                updatedAt: Date(),
+                updatedBy: nil,
+                statusReason: "test:idle",
+                revision: 1
+            )
+        ])
+    }
+
     func testForegroundHubRefreshAppliesPropertyToZero() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -224,6 +245,7 @@ final class Phase2C12B4BHubForegroundAccessRefreshTests: XCTestCase {
             propertyIDs: Set([property.id])
         )
         fixture.appState.selectProperty(id: property.id)
+        seedIdlePropertyStatus(fixture.appState, property: property, orgID: orgID)
         _ = fixture.appState.startSession()
 
         await fixture.appState._debugPerformForegroundAccessRefreshSequenceForTests(
@@ -239,10 +261,7 @@ final class Phase2C12B4BHubForegroundAccessRefreshTests: XCTestCase {
             contextRefreshOverride: { _ in },
             propertyRefreshOverride: { trigger in
                 XCTAssertEqual(trigger, "foreground")
-                fixture.appState._debugSetAuthorizedPropertyIDsForTests(
-                    orgID: orgID,
-                    propertyIDs: Set<UUID>()
-                )
+                // Production checks the newly fetched allowlist before applying tenant scoping.
                 return await fixture.appState._debugRunForegroundActiveSessionAccessCheckpointForTests(
                     refreshSucceeded: true,
                     authorizedPropertyIDs: [],
@@ -329,6 +348,7 @@ final class Phase2C12B4BHubForegroundAccessRefreshTests: XCTestCase {
         let property = try seedProperty(localStore: fixture.localStore, orgID: orgID, name: "Active")
         await configureAuthenticatedContext(fixture.appState, orgID: orgID, accessScope: "org")
         fixture.appState.selectProperty(id: property.id)
+        seedIdlePropertyStatus(fixture.appState, property: property, orgID: orgID)
         _ = fixture.appState.startSession()
 
         var rpcCallCount = 0

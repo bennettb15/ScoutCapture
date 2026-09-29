@@ -353,7 +353,7 @@
 				CODE_SIGN_ENTITLEMENTS = ScoutCapture/ScoutCapture.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = MY5BGG7755;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -361,9 +361,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Scout Capture";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "SCOUT needs camera access to capture time-stamped property photos.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is used to embed GPS metadata into photos.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SCOUT needs permission to save captured photos to your photo library.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "SCOUT uses your Photo Library to save and manage captured photos.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "If you allow location, SCOUT adds GPS coordinates to captured property photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
@@ -404,7 +402,7 @@
 				CODE_SIGN_ENTITLEMENTS = ScoutCapture/ScoutCapture.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = MY5BGG7755;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -412,9 +410,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Scout Capture";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "SCOUT needs camera access to capture time-stamped property photos.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is used to embed GPS metadata into photos.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SCOUT needs permission to save captured photos to your photo library.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "SCOUT uses your Photo Library to save and manage captured photos.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "If you allow location, SCOUT adds GPS coordinates to captured property photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
@@ -452,7 +448,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = MY5BGG7755;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -476,7 +472,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = MY5BGG7755;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;

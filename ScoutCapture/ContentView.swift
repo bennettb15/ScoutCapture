@@ -996,6 +996,7 @@ final class ReportLibraryModel: ObservableObject {
         let image = normalizeToUprightPixels(sourceCGImage, orientationRaw: resolvedOrientationRaw)
         debugLogSaveStage("encode upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
         var mergedProps = sourceProps
+        mergedProps.removeValue(forKey: kCGImagePropertyGPSDictionary)
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
         exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
@@ -10793,7 +10794,7 @@ extension ContentView {
                 detailType: currentDetailType,
                 angleIndex: captureAngleIndex
             )
-            let captureLocation = locationManager.lastLocation
+            let captureLocation = locationManager.currentLocationForCapture()
             let capturedExifOrientationRaw = capturedExifOrientationRawAtShutter
             let captureTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
             let capturePriority = Self.normalizedPriority(selectedPriority)
@@ -11271,7 +11272,7 @@ extension ContentView {
             angleIndex: max(1, angleIndexValue)
         )
         let exifOrientation = capturedExifOrientation ?? Int(ReportLibraryModel.cgOrientationRawFromDevice(lastValidDeviceOrientation))
-        let location = locationManager.lastLocation
+        let location = locationManager.currentLocationForCapture()
         let captureActorUserID = appState.authenticatedSupabaseUser?.id
         let captureActorEmail = (appState.authenticatedSupabaseUser?.email)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -14059,6 +14060,7 @@ extension ContentView {
         }
         print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
         var mergedProps = sourceProps
+        mergedProps.removeValue(forKey: kCGImagePropertyGPSDictionary)
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
 

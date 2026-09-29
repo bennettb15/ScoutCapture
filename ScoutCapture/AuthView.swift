@@ -1,6 +1,11 @@
 import Combine
 import SwiftUI
 
+enum ScoutWebLinks {
+    static let accountDeletion = URL(string: "https://www.scoutclear.com/account")!
+    static let privacyPolicy = URL(string: "https://www.scoutclear.com/privacy")!
+}
+
 enum PasswordRecoveryFlow {
     static let forgotPasswordButtonTitle = "Forgot Password?"
     nonisolated static let resetRedirectURL = URL(string: "https://scoutclear.com/reset-password")!
@@ -136,7 +141,7 @@ struct AuthView: View {
 
                             Text("Access to Scout Capture requires an invitation from an organization administrator.")
                                 .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.white.opacity(0.85))
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 24)
                         }
@@ -197,6 +202,10 @@ struct AuthView: View {
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.blue)
                             .disabled(appState.isAuthenticating || passwordRecovery.isRequestInFlight)
+
+                            Link("Privacy Policy", destination: ScoutWebLinks.privacyPolicy)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.blue)
                         }
                         .padding(20)
                         .background(Color(uiColor: .systemBackground))
