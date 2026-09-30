@@ -44950,13 +44950,24 @@ final class AppState: ObservableObject {
                 from: Data(contentsOf: recordsURL)
             )
             var durableURLs: [UUID: URL] = [:]
+            var sourceURLs: [UUID: URL] = [:]
+            for summary in dryRun.shots {
+                if let path = summary.resolvedLocalFilePath {
+                    sourceURLs[summary.id] = URL(fileURLWithPath: path, isDirectory: false)
+                }
+            }
             for shot in records {
+                guard sourceURLs[shot.id] != nil else {
+                    throw NSError(domain: "ScoutCapture.FastOriginalMetadata", code: 5, userInfo: [
+                        NSLocalizedDescriptionKey: "A saved photo could not be located for metadata preparation."
+                    ])
+                }
                 durableURLs[shot.id] = localStore.originalsFolderURL(
                     propertyID: shot.propertyID, sessionID: shot.sessionID
                 ).appendingPathComponent(URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent)
             }
             try await FastRuntimeOriginalMetadata.prepareForUpload(
-                records, durableURLsByShotID: durableURLs
+                records, durableURLsByShotID: durableURLs, sourceURLsByShotID: sourceURLs
             )
             // Annotation changes file size. Re-read it before building snapshot and shot rows.
             dryRun = await runFastRuntimeCompleteDryRun(

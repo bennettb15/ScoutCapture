@@ -50,15 +50,20 @@ enum FastRuntimeOriginalMetadata {
     static func prepareForUpload(
         _ shots: [AppState.FastRuntimePrototypeShotRecord],
         durableURLsByShotID: [UUID: URL] = [:],
+        sourceURLsByShotID: [UUID: URL] = [:],
         authorizationStatus: CLAuthorizationStatus? = nil
     ) async throws {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
                     for shot in shots {
-                        try annotateIfNeeded(shot, authorizationStatus: authorizationStatus)
+                        let sourceURL = sourceURLsByShotID[shot.id] ??
+                            URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
+                        try annotateIfNeeded(
+                            shot, at: sourceURL, authorizationStatus: authorizationStatus
+                        )
                         if let durableURL = durableURLsByShotID[shot.id] {
-                            try synchronizeDurableCopy(shot, to: durableURL)
+                            try synchronizeDurableCopy(shot, from: sourceURL, to: durableURL)
                         }
                     }
                     continuation.resume()
@@ -73,7 +78,17 @@ enum FastRuntimeOriginalMetadata {
         _ shot: AppState.FastRuntimePrototypeShotRecord,
         to durableURL: URL
     ) throws {
-        let originalURL = URL(fileURLWithPath: shot.localFilePath)
+        try synchronizeDurableCopy(
+            shot, from: URL(fileURLWithPath: shot.localFilePath, isDirectory: false),
+            to: durableURL
+        )
+    }
+
+    private static func synchronizeDurableCopy(
+        _ shot: AppState.FastRuntimePrototypeShotRecord,
+        from originalURL: URL,
+        to durableURL: URL
+    ) throws {
         guard durableURL.standardizedFileURL.path != originalURL.standardizedFileURL.path,
               FileManager.default.fileExists(atPath: durableURL.path) else { return }
         let finishedData = try Data(contentsOf: originalURL, options: [.mappedIfSafe])
@@ -91,7 +106,17 @@ enum FastRuntimeOriginalMetadata {
         _ shot: AppState.FastRuntimePrototypeShotRecord,
         authorizationStatus: CLAuthorizationStatus? = nil
     ) throws {
-        let originalURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
+        try annotateIfNeeded(
+            shot, at: URL(fileURLWithPath: shot.localFilePath, isDirectory: false),
+            authorizationStatus: authorizationStatus
+        )
+    }
+
+    private static func annotateIfNeeded(
+        _ shot: AppState.FastRuntimePrototypeShotRecord,
+        at originalURL: URL,
+        authorizationStatus: CLAuthorizationStatus?
+    ) throws {
         let sourceData = try Data(contentsOf: originalURL, options: [.mappedIfSafe])
         if containsScoutShotID(sourceData, shotID: shot.id) { return }
 

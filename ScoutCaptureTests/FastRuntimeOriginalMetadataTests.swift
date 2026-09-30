@@ -187,6 +187,49 @@ final class FastRuntimeOriginalMetadataTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testUploadPreflightUsesPhotoMovedWithDraftInsteadOfStaleTemporaryPath() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FastMetadata-Moved-\(UUID().uuidString)")
+        let originals = root.appendingPathComponent("Originals", isDirectory: true)
+        let metadata = root.appendingPathComponent("Metadata", isDirectory: true)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: metadata, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let staleURL = root.appendingPathComponent("old-temporary-photo.jpg")
+        let shot = makeShot(at: staleURL)
+        let savedURL = root.appendingPathComponent(shot.originalRelativePath)
+        try makeCameraJPEG().write(to: savedURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleURL.path))
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([shot]).write(
+            to: metadata.appendingPathComponent("fast-lane-shots.json")
+        )
+        let context = ActiveCaptureContext(
+            sessionID: shot.sessionID,
+            propertyID: shot.propertyID,
+            orgID: shot.orgID,
+            sessionType: shot.sessionType,
+            ownerUserID: UUID(),
+            ownerEmail: "test@example.com",
+            ownerDeviceID: "relocated-draft-test",
+            createdAt: shot.capturedAt,
+            status: .draft,
+            statusReason: nil
+        )
+        let appState = AppState(disableCloudBackupForTests: true)
+        let result = await appState.runFastRuntimeCompleteUpload(
+            context: context, storageRoot: root, capturedPhotoCount: 1
+        )
+        XCTAssertEqual(result.packageSummary, "skipped_missing_or_inactive_org")
+        XCTAssertTrue(result.diagnostics.contains("stage=org_resolution"))
+        XCTAssertTrue(FastRuntimeOriginalMetadata.containsScoutShotID(
+            try Data(contentsOf: savedURL), shotID: shot.id
+        ))
+    }
+
     func testUploadPreparationWaitsForMetadataAndFailureKeepsRawOriginal() async throws {
         try await withRawOriginal { url, shot in
             let durable = url.deletingLastPathComponent().appendingPathComponent("gallery-copy.jpg")
