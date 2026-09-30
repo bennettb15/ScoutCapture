@@ -5918,6 +5918,17 @@ struct ContentView: View {
     private var bottomGlyphRotationAngle: Angle {
         .degrees(glyphAngleDegrees)
     }
+
+    // Reference photos must follow the settled physical orientation immediately.
+    // Glyphs animate independently; using their intermediate angle can leave a
+    // landscape reference sideways while the camera view has already switched.
+    private var armedReferenceRotationAngle: Angle {
+        switch lastValidDeviceOrientation {
+        case .landscapeLeft: return .degrees(90)
+        case .landscapeRight: return .degrees(-90)
+        default: return .zero
+        }
+    }
     
     private var isLandscapeUI: Bool {
         return lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
@@ -8523,7 +8534,7 @@ struct ContentView: View {
                                 .resizable()
                                 .scaledToFill()
                                 .frame(width: previewH, height: w)
-                                .rotationEffect(bottomGlyphRotationAngle)
+                                .rotationEffect(armedReferenceRotationAngle)
                                 .frame(width: w, height: previewH)
                                 .clipped()
                         } else {
@@ -9276,7 +9287,6 @@ struct ContentView: View {
                             if isCaptureTargetArmed {
                                 ZStack(alignment: .topTrailing) {
                                     guidedReferenceCard(size: 88)
-                                        .rotationEffect(bottomGlyphRotationAngle)
 
                                     Button {
                                         fireQuickButtonHaptic()
@@ -9294,6 +9304,7 @@ struct ContentView: View {
                                     .buttonStyle(.plain)
                                     .offset(x: 6, y: -6)
                                 }
+                                .rotationEffect(armedReferenceRotationAngle)
                                 .offset(x: 170, y: -12)
                             }
                         }
@@ -9958,6 +9969,7 @@ extension ContentView {
     private func guidedReferenceCard(size: CGFloat = 88) -> some View {
         Button(action: {
             fireQuickButtonHaptic()
+            syncGlyphRotationWithoutAnimation()
             showGuidedAlignmentOverlay.toggle()
         }) {
             Group {
@@ -12191,6 +12203,7 @@ extension ContentView {
         setCaptureIntent(.guided(guidedShot.id))
         showGuidedChecklist = false
         loadGuidedArmedThumbnail(for: guidedShot)
+        syncGlyphRotationWithoutAnimation()
     }
 
     private func armGuidedRetake(_ guidedShot: GuidedShot) {
@@ -12253,6 +12266,7 @@ extension ContentView {
         setCaptureIntent(.retake(existingShot.id))
         showGuidedChecklist = false
         loadGuidedArmedThumbnail(for: guidedShot, forcedPath: retakeReferencePath)
+        syncGlyphRotationWithoutAnimation()
     }
 
     private func loadGuidedArmedThumbnail(for guidedShot: GuidedShot, forcedPath: String? = nil) {
@@ -15033,6 +15047,7 @@ extension ContentView {
             existingOriginalFilename: existingFilename.isEmpty ? nil : existingFilename
         )
         setCaptureIntent(.retake(linkedShotID))
+        syncGlyphRotationWithoutAnimation()
     }
 
     private func selectFlaggedPrimaryResolve() {
@@ -15795,6 +15810,7 @@ extension ContentView {
         }
         armedUpdateObservationID = observation.id
         setCaptureIntent(.flagged(observation.id))
+        syncGlyphRotationWithoutAnimation()
     }
 
     private func armIssueUpdate(_ observation: Observation) {
@@ -15837,6 +15853,7 @@ extension ContentView {
         }
         showGuidedAlignmentOverlay = false
         setCaptureIntent(.resolution(observation.id))
+        syncGlyphRotationWithoutAnimation()
         showResolutionModeToast = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
             showResolutionModeToast = false
