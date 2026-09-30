@@ -305,6 +305,9 @@ final class CameraManager: NSObject, ObservableObject {
     private let sessionQueue = DispatchQueue(label: "ScoutCapture.CameraSession")
     private var isSessionConfigured = false
     private var isPreviewDesired = false
+    private var isApplicationActive = true
+    private var previewRestartAttempt = 0
+    private var previewRestartGeneration: UInt64 = 0
     private var videoDevice: AVCaptureDevice?
     private var defaultFormatByDeviceID: [String: AVCaptureDevice.Format] = [:]
     private let photoOutput = AVCapturePhotoOutput()
@@ -338,6 +341,11 @@ final class CameraManager: NSObject, ObservableObject {
         // Stop/start the session when the app backgrounds/foregrounds.
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(captureSessionDidStartRunning), name: AVCaptureSession.didStartRunningNotification, object: session)
+        NotificationCenter.default.addObserver(self, selector: #selector(captureSessionDidStopRunning), name: AVCaptureSession.didStopRunningNotification, object: session)
+        NotificationCenter.default.addObserver(self, selector: #selector(captureSessionWasInterrupted), name: AVCaptureSession.wasInterruptedNotification, object: session)
+        NotificationCenter.default.addObserver(self, selector: #selector(captureSessionInterruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: session)
+        NotificationCenter.default.addObserver(self, selector: #selector(captureSessionRuntimeError(_:)), name: AVCaptureSession.runtimeErrorNotification, object: session)
 
         // Track device orientation reliably for capture rotation.
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -356,6 +364,9 @@ final class CameraManager: NSObject, ObservableObject {
     @objc private func appWillResignActive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.isApplicationActive = false
+            self.previewRestartGeneration &+= 1
+            self.previewRestartAttempt = 0
             if self.session.isRunning {
                 self.session.stopRunning()
             }
@@ -368,12 +379,72 @@ final class CameraManager: NSObject, ObservableObject {
 
     @objc private func appDidBecomeActive() {
         sessionQueue.async { [weak self] in
-            guard let self, self.isPreviewDesired else { return }
-            self.ensurePreviewRunningAsync()
+            guard let self else { return }
+            self.isApplicationActive = true
+            self.previewRestartAttempt = 0
+            if self.isPreviewDesired {
+                self.ensurePreviewRunningOnSessionQueue()
+            }
         }
     }
-    
+
+    @objc private func captureSessionDidStartRunning() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.isPreviewDesired,
+                  self.isApplicationActive, self.session.isRunning else { return }
+            self.previewRestartAttempt = 0
+            DispatchQueue.main.async {
+                self.isPreviewRunning = true
+                self.isStartingPreview = false
+            }
+        }
+    }
+
+    @objc private func captureSessionDidStopRunning() {
+        sessionQueue.async { [weak self] in
+            guard let self, !self.session.isRunning else { return }
+            DispatchQueue.main.async {
+                self.isPreviewRunning = false
+                self.isStartingPreview = false
+            }
+            self.schedulePreviewRestartIfNeeded()
+        }
+    }
+
+    @objc private func captureSessionWasInterrupted() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isInterrupted else { return }
+            DispatchQueue.main.async {
+                self.isPreviewRunning = false
+                self.isStartingPreview = false
+            }
+        }
+    }
+
+    @objc private func captureSessionInterruptionEnded() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.previewRestartAttempt = 0
+            if self.isPreviewDesired && self.isApplicationActive {
+                self.ensurePreviewRunningOnSessionQueue()
+            }
+        }
+    }
+
+    @objc private func captureSessionRuntimeError(_ notification: Notification) {
+        guard let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError,
+              error.code == .mediaServicesWereReset else { return }
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.previewRestartAttempt = 0
+            if self.isPreviewDesired && self.isApplicationActive {
+                self.ensurePreviewRunningOnSessionQueue()
+            }
+        }
+    }
+
     deinit {
+        NotificationCenter.default.removeObserver(self)
         if let orientationObserver {
             NotificationCenter.default.removeObserver(orientationObserver)
         }
@@ -784,51 +855,88 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.isPreviewDesired = true
+            self.ensurePreviewRunningOnSessionQueue()
+        }
+    }
 
-            if !self.isSessionConfigured {
-                self.configureSession()
-            }
+    private func ensurePreviewRunningOnSessionQueue() {
+        guard isApplicationActive else { return }
 
-            let auth = AVCaptureDevice.authorizationStatus(for: .video)
-            guard auth == .authorized else {
-                DispatchQueue.main.async {
-                    self.isStartingPreview = false
-                    self.isPreviewRunning = false
-                    self.isReadyForPreview = true
-                }
-                return
-            }
+        if !isSessionConfigured {
+            configureSession()
+        }
 
-            let hasAnyDeviceInput = self.session.inputs.contains { $0 is AVCaptureDeviceInput }
-            guard hasAnyDeviceInput else {
-                DispatchQueue.main.async {
-                    self.isStartingPreview = false
-                    self.isPreviewRunning = false
-                    self.isReadyForPreview = true
-                }
-                return
-            }
-
-            if self.session.isRunning {
-                DispatchQueue.main.async {
-                    self.isStartingPreview = false
-                    self.isPreviewRunning = true
-                    self.isReadyForPreview = true
-                }
-                return
-            }
-
+        let auth = AVCaptureDevice.authorizationStatus(for: .video)
+        guard auth == .authorized else {
             DispatchQueue.main.async {
-                self.isStartingPreview = true
+                self.isStartingPreview = false
+                self.isPreviewRunning = false
                 self.isReadyForPreview = true
             }
+            return
+        }
 
-            self.session.startRunning()
-
+        let hasAnyDeviceInput = session.inputs.contains { $0 is AVCaptureDeviceInput }
+        guard hasAnyDeviceInput else {
             DispatchQueue.main.async {
-                self.isPreviewRunning = self.session.isRunning
                 self.isStartingPreview = false
+                self.isPreviewRunning = false
+                self.isReadyForPreview = true
             }
+            return
+        }
+
+        if session.isRunning {
+            previewRestartAttempt = 0
+            DispatchQueue.main.async {
+                self.isStartingPreview = false
+                self.isPreviewRunning = true
+                self.isReadyForPreview = true
+            }
+            return
+        }
+
+        // The screenshot editor can keep the camera interrupted briefly after
+        // the app becomes active. Resume when AVFoundation ends that interruption.
+        guard !session.isInterrupted else {
+            DispatchQueue.main.async {
+                self.isStartingPreview = false
+                self.isPreviewRunning = false
+            }
+            return
+        }
+
+        DispatchQueue.main.async {
+            self.isStartingPreview = true
+            self.isReadyForPreview = true
+        }
+
+        session.startRunning()
+        let running = session.isRunning
+        DispatchQueue.main.async {
+            self.isPreviewRunning = running
+            self.isStartingPreview = false
+        }
+        if running {
+            previewRestartAttempt = 0
+        } else {
+            schedulePreviewRestartIfNeeded()
+        }
+    }
+
+    private func schedulePreviewRestartIfNeeded() {
+        guard isPreviewDesired, isApplicationActive,
+              !session.isRunning, !session.isInterrupted,
+              previewRestartAttempt < 3 else { return }
+        previewRestartAttempt += 1
+        let generation = previewRestartGeneration
+        let delay = Double(previewRestartAttempt) * 0.75
+        sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self,
+                  self.previewRestartGeneration == generation,
+                  self.isPreviewDesired,
+                  self.isApplicationActive else { return }
+            self.ensurePreviewRunningOnSessionQueue()
         }
     }
 
@@ -836,6 +944,8 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.isPreviewDesired = false
+            self.previewRestartGeneration &+= 1
+            self.previewRestartAttempt = 0
 
             if self.session.isRunning {
                 self.session.stopRunning()
