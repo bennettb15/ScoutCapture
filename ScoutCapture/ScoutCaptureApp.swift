@@ -955,8 +955,10 @@ struct SessionHubView: View {
     @State private var showTemporaryMigrationImport: Bool = false
     @State private var showCloudBackupSheet: Bool = false
     @State private var showDebugTools: Bool = false
+    #if DEBUG
     @State private var hiddenDebugTapCount: Int = 0
     @State private var lastHiddenDebugTapAt: Date? = nil
+    #endif
     @State private var propertyTapToken: Int = 0
     @State private var pressedPropertyID: UUID? = nil
     @State private var isOpeningProperty: Bool = false
@@ -966,7 +968,9 @@ struct SessionHubView: View {
     @State private var pendingInvitePromptErrorMessage: String? = nil
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
+    #if DEBUG
     private let hiddenDebugTapWindow: TimeInterval = 1.5
+    #endif
     private let startupPlaceholderHoldSeconds: TimeInterval = 8.0
     private let diagnosticMinimalHomeRows: Bool = true
 
@@ -2212,6 +2216,7 @@ struct SessionHubView: View {
             }
 
             if !isCompactSearchMode {
+                #if DEBUG
                 Image(colorScheme == .light ? "ScoutCaptureLogoBlue" : "ScoutCaptureLogoWhite")
                     .resizable()
                     .scaledToFit()
@@ -2221,6 +2226,13 @@ struct SessionHubView: View {
                     .onTapGesture {
                         handleHiddenDebugTap()
                     }
+                #else
+                Image(colorScheme == .light ? "ScoutCaptureLogoBlue" : "ScoutCaptureLogoWhite")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 58)
+                    .accessibilityHidden(true)
+                #endif
                 
                 Text("Session View")
                     .font(.system(size: 24, weight: .bold))
@@ -4256,6 +4268,7 @@ struct SessionHubView: View {
         }
     }
 
+    #if DEBUG
     private func handleHiddenDebugTap() {
         let now = Date()
         if let lastTapAt = lastHiddenDebugTapAt,
@@ -4273,6 +4286,7 @@ struct SessionHubView: View {
             showDebugTools = true
         }
     }
+    #endif
 
     private func dismissPendingExportPrompt() {
         pendingExportPromptProperty = nil
