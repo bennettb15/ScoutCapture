@@ -7241,6 +7241,9 @@ struct ContentView: View {
                     observations: observations,
                     angleIndexByIssueID: angleIndexByIssueID
                 )
+            },
+            onAddNote: { observation, text in
+                try appState.addAppIssueNote(text, to: observation)
             }
         )
     }
@@ -7294,6 +7297,9 @@ struct ContentView: View {
                     observations: observations,
                     angleIndexByIssueID: angleIndexByIssueID
                 )
+            },
+            onAddNote: { observation, text in
+                try appState.addAppIssueNote(text, to: observation)
             }
         )
     }

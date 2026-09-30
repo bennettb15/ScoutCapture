@@ -1679,6 +1679,7 @@ struct ActiveIssuesSheet: View {
     let onReclassifyIssue: (Observation, String, String, String) -> Void
     var onReopenIssue: ((Observation) -> Void)? = nil
     let loadPortalNotes: ([Observation], [UUID: Int]) async -> [UUID: [PortalPunchlistNote]]
+    let onAddNote: (Observation, String) throws -> PortalPunchlistNote
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
     @State private var reclassifyTargetObservation: Observation? = nil
     @State private var historyTargetObservation: Observation? = nil
@@ -1882,7 +1883,12 @@ struct ActiveIssuesSheet: View {
                         resolvedThumbnailPath: resolvedThumbnailPathByID[target.id],
                         angleIndex: angleIndexByIssueID[target.id],
                         cache: cache,
-                        loadPortalNotes: loadPortalNotes
+                        loadPortalNotes: loadPortalNotes,
+                        onAddNote: onAddNote,
+                        onNotesChanged: {
+                            portalNoteCountByIssueID[target.id, default: 0] += 1
+                            Task { await refreshPortalNoteCounts() }
+                        }
                     )
                 }
                 .alert("Reopen Issue?", isPresented: reopenConfirmationBinding) {
@@ -2254,8 +2260,13 @@ struct ActiveIssuesSheet: View {
         let angleIndex: Int?
         let cache: AssetImageCache
         let loadPortalNotes: ([Observation], [UUID: Int]) async -> [UUID: [PortalPunchlistNote]]
+        let onAddNote: (Observation, String) throws -> PortalPunchlistNote
+        let onNotesChanged: () -> Void
 
         @State private var notes: [PortalPunchlistNote]? = nil
+        @State private var showingNoteComposer = false
+        @State private var draftNote = ""
+        @State private var noteSaveError: String? = nil
 
         private var title: String {
             let composed = ContentView.conciseContextLabel(
@@ -2278,26 +2289,90 @@ struct ActiveIssuesSheet: View {
                         .frame(maxWidth: .infinity)
                         .background(Color.black)
 
-                        notesContent
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        VStack(spacing: 0) {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    showingNoteComposer = true
+                                } label: {
+                                    Label("Add Note", systemImage: "plus")
+                                        .font(.system(size: 14, weight: .semibold))
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            notesContent
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
                     }
                 }
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Done") {
-                            dismiss()
+                        Button("Done") { dismiss() }
+                    }
+                }
+            }
+            .sheet(isPresented: $showingNoteComposer) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 12) {
+                        TextEditor(text: $draftNote)
+                            .frame(minHeight: 150)
+                            .padding(4)
+                            .background(Color(uiColor: .secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        Text("\(draftNote.utf16.count) / 1,000")
+                            .font(.footnote)
+                            .foregroundColor(draftNote.utf16.count > 1_000 ? .red : .secondary)
+                        if let noteSaveError {
+                            Text(noteSaveError)
+                                .font(.footnote)
+                                .foregroundColor(.red)
+                        }
+                        Spacer()
+                    }
+                    .padding()
+                    .navigationTitle("Add Note")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showingNoteComposer = false }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Save") { saveNote() }
+                                .disabled(draftNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                          || draftNote.utf16.count > 1_000)
                         }
                     }
                 }
             }
-            .task(id: observation.id) {
-                let angleMap = angleIndex.map { [observation.id: $0] } ?? [:]
-                let loaded = await loadPortalNotes([observation], angleMap)
-                guard !Task.isCancelled else { return }
-                notes = loaded[observation.id] ?? []
+            .task(id: observation.id) { await reloadNotes() }
+        }
+
+        private func reloadNotes() async {
+            let angleMap = angleIndex.map { [observation.id: $0] } ?? [:]
+            let loaded = await loadPortalNotes([observation], angleMap)
+            guard !Task.isCancelled else { return }
+            notes = loaded[observation.id] ?? []
+        }
+
+        private func saveNote() {
+            do {
+                let saved = try onAddNote(observation, draftNote)
+                notes = ([saved] + (notes ?? [])).sorted {
+                    ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+                }
+                draftNote = ""
+                noteSaveError = nil
+                showingNoteComposer = false
+                onNotesChanged()
+                Task { await reloadNotes() }
+            } catch {
+                noteSaveError = error.localizedDescription
             }
         }
 
@@ -2309,7 +2384,7 @@ struct ActiveIssuesSheet: View {
                         Image(systemName: "note.text")
                             .font(.system(size: 24, weight: .medium))
                             .foregroundColor(.secondary)
-                        Text("No portal notes")
+                        Text("No notes yet")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.secondary)
                     }
@@ -2321,13 +2396,19 @@ struct ActiveIssuesSheet: View {
                                 VStack(alignment: .leading, spacing: 7) {
                                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                                         Label(
-                                            note.isCompletionNote ? "Completion Note" : "Portal Note",
+                                            note.isCompletionNote ? "Completion Note" : (note.isAppNote ? "App Note" : "Portal Note"),
                                             systemImage: note.isCompletionNote ? "checkmark.seal" : "note.text"
                                         )
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundColor(.secondary)
 
                                         Spacer(minLength: 0)
+
+                                        if note.isPendingUpload {
+                                            Text("Pending upload")
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundColor(.orange)
+                                        }
 
                                         if let createdAt = note.createdAt {
                                             Text(ContentView.formatObservationHistoryTimestamp(createdAt))
@@ -2598,12 +2679,10 @@ struct ActiveIssuesSheet: View {
 
                 if mode == .resolutionRequired {
                     VStack(spacing: 6) {
-                        if portalNoteCount > 0 {
-                            portalNotesButton
-                        }
+                        portalNotesButton
                         reopenButton
                     }
-                } else if portalNoteCount > 0 {
+                } else {
                     portalNotesButton
                 }
             }
@@ -2736,21 +2815,23 @@ struct ActiveIssuesSheet: View {
                                 .stroke(Color.white.opacity(0.14), lineWidth: 1)
                         )
 
-                    Text(portalNoteCount > 99 ? "99+" : "\(portalNoteCount)")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
-                        .frame(minWidth: 17, minHeight: 17)
-                        .padding(.horizontal, portalNoteCount > 9 ? 3 : 0)
-                        .background(Color.orange)
-                        .clipShape(Capsule())
-                        .offset(x: 5, y: -5)
+                    if portalNoteCount > 0 {
+                        Text(portalNoteCount > 99 ? "99+" : "\(portalNoteCount)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                            .frame(minWidth: 17, minHeight: 17)
+                            .padding(.horizontal, portalNoteCount > 9 ? 3 : 0)
+                            .background(Color.orange)
+                            .clipShape(Capsule())
+                            .offset(x: 5, y: -5)
+                    }
                 }
                 .frame(width: 46, height: 46)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Portal notes")
+            .accessibilityLabel("Issue notes")
             .accessibilityValue("\(portalNoteCount)")
         }
 

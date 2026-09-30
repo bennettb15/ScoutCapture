@@ -1762,6 +1762,37 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(notes[issueID]?.first?.note, "Please review this window.")
     }
 
+    func testAppAuthoredActivityKeepsItsSourceLabel() {
+        let propertyID = UUID()
+        let issueID = UUID()
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: [
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    fromValue: "scout_capture",
+                    note: "Siding moves at this corner.",
+                    createdAt: older
+                ),
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    note: "Ask the crew to inspect it.",
+                    createdAt: newer
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[issueID]?.count, 2)
+        XCTAssertEqual(notes[issueID]?.first?.isAppNote, false)
+        XCTAssertEqual(notes[issueID]?.last?.isAppNote, true)
+        XCTAssertTrue(notes[issueID]?.allSatisfy { !$0.isPendingUpload } ?? false)
+    }
+
     func testMultiplePortalNotesUseNewestFirstOrder() {
         let propertyID = UUID()
         let issueID = UUID()

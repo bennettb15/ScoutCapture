@@ -650,6 +650,8 @@ struct PortalPunchlistNote: Identifiable, Equatable {
     let note: String
     let createdBy: UUID?
     let createdAt: Date?
+    let isAppNote: Bool
+    let isPendingUpload: Bool
 
     var isCompletionNote: Bool {
         activityType == "completion_submitted"
@@ -12600,6 +12602,9 @@ final class AppState: ObservableObject {
     private func performRemoteConvergenceCycle(source: String) async {
         _ = await performOfflineReplay(source: source)
         _ = await performSessionSnapshotUploadRetry(source: source)
+        if hasPendingAppIssueNotes() {
+            _ = await performOfflineReplay(source: "app_issue_note_after_snapshot")
+        }
         await performSyncDeltaPull(source: source)
         queuePropertyStatusDiagnosticsRefresh(
             trigger: "convergence_\(source)",
@@ -12740,6 +12745,9 @@ final class AppState: ObservableObject {
         let now = Date()
         var skippedBackoffCount = 0
         let replayableCandidates = orgMutations.filter { mutation in
+            if source.hasPrefix("app_issue_note") && mutation.operation != "add_issue_note" {
+                return false
+            }
             if mutation.isAcknowledgedHistoricalDebt {
                 return false
             }
@@ -12872,6 +12880,17 @@ final class AppState: ObservableObject {
                         orgID: property.orgId ?? item.organizationID,
                         localUpdatedAt: localSessionShadowWriteTimestamp(session)
                     )
+                case "add_issue_note":
+                    let payload = try JSONDecoder().decode(QueuedAppIssueNotePayload.self, from: item.payloadData)
+                    guard try await performQueuedAppIssueNoteRemoteWrite(payload) else {
+                        // The issue has not reached the portal yet. Keep the note locally without
+                        // treating this normal capture state as an upload error.
+                        var pendingItem = inFlightItem
+                        pendingItem.status = .pending
+                        pendingItem.updatedAt = Date()
+                        try localStore.updateQueuedMutation(pendingItem)
+                        continue
+                    }
                 default:
                     throw NSError(
                         domain: "ScoutCapture.OfflineReplay",
@@ -12880,7 +12899,17 @@ final class AppState: ObservableObject {
                     )
                 }
 
-                try localStore.removeQueuedMutation(id: item.id)
+                if item.operation == "add_issue_note" {
+                    // Retain the note as an offline cache after upload.
+                    var completedItem = inFlightItem
+                    completedItem.status = .completed
+                    completedItem.updatedAt = Date()
+                    completedItem.lastError = nil
+                    completedItem.nextAttemptAt = nil
+                    try localStore.updateQueuedMutation(completedItem)
+                } else {
+                    try localStore.removeQueuedMutation(id: item.id)
+                }
                 succeededCount += 1
                 let elapsedMs = Int(Date().timeIntervalSince(attemptStartedAt) * 1000)
                 print(
@@ -12893,7 +12922,7 @@ final class AppState: ObservableObject {
                     "elapsedMs=\(elapsedMs)"
                 )
                 print(
-                    "[OfflineQueue] result=removed_after_success " +
+                    "[OfflineQueue] result=\(item.operation == "add_issue_note" ? "cached_after_success" : "removed_after_success") " +
                     "queueItemID=\(item.id.uuidString) " +
                     "entityType=\(item.entityType) " +
                     "entityID=\(item.entityID.uuidString) " +
@@ -52985,6 +53014,202 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func hasPendingAppIssueNotes() -> Bool {
+        guard let organizationID = activeOrganizationID else { return false }
+        return ((try? localStore.fetchQueuedMutations()) ?? []).contains {
+            $0.organizationID == organizationID
+                && $0.operation == "add_issue_note"
+                && $0.status != .completed
+        }
+    }
+
+    private struct QueuedAppIssueNotePayload: Codable {
+        let id: UUID
+        let organizationID: UUID
+        let propertyID: UUID
+        let issueID: UUID
+        let note: String
+        let createdBy: UUID
+        let createdAt: Date
+    }
+
+    @MainActor
+    @discardableResult
+    func addAppIssueNote(_ text: String, to observation: Observation) throws -> PortalPunchlistNote {
+        let note = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty, note.utf16.count <= 1_000 else {
+            throw NSError(domain: "ScoutCapture.AppIssueNote", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Enter a note of 1,000 characters or fewer."])
+        }
+        guard let organizationID = activeOrganizationID,
+              let actorID = authenticatedSupabaseUser?.id,
+              canAccessOrganization(organizationID),
+              canAccessProperty(observation.propertyID) else {
+            throw NSError(domain: "ScoutCapture.AppIssueNote", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Sign in and select a property before adding a note."])
+        }
+
+        let payload = QueuedAppIssueNotePayload(
+            id: UUID(),
+            organizationID: organizationID,
+            propertyID: observation.propertyID,
+            issueID: observation.id,
+            note: note,
+            createdBy: actorID,
+            createdAt: Date()
+        )
+        let queued = LocalStore.QueuedMutation(
+            entityType: "punchlist_activity",
+            entityID: payload.id,
+            organizationID: organizationID,
+            propertyID: observation.propertyID,
+            sessionID: observation.sessionID,
+            operation: "add_issue_note",
+            payloadData: try JSONEncoder().encode(payload),
+            idempotencyKey: "app_issue_note:\(payload.id.uuidString.lowercased())"
+        )
+        try localStore.appendQueuedMutation(queued)
+        refreshOfflineQueueDiagnostics()
+        Task { [weak self] in
+            _ = await self?.performOfflineReplay(source: "app_issue_note_created")
+        }
+        return PortalPunchlistNote(
+            id: payload.id.uuidString,
+            sourceActivityID: payload.id,
+            issueID: payload.issueID,
+            propertyID: payload.propertyID,
+            activityType: "note_added",
+            note: payload.note,
+            createdBy: payload.createdBy,
+            createdAt: payload.createdAt,
+            isAppNote: true,
+            isPendingUpload: true
+        )
+    }
+
+    private func queuedAppIssueNotes(
+        propertyID: UUID,
+        organizationID: UUID,
+        issueIDs: Set<UUID>
+    ) -> [UUID: [PortalPunchlistNote]] {
+        let queued = (try? localStore.fetchQueuedMutations()) ?? []
+        var result: [UUID: [PortalPunchlistNote]] = [:]
+        for item in queued where item.operation == "add_issue_note"
+            && item.organizationID == organizationID && item.propertyID == propertyID {
+            guard let payload = try? JSONDecoder().decode(QueuedAppIssueNotePayload.self, from: item.payloadData),
+                  issueIDs.contains(payload.issueID) else { continue }
+            result[payload.issueID, default: []].append(PortalPunchlistNote(
+                id: payload.id.uuidString,
+                sourceActivityID: payload.id,
+                issueID: payload.issueID,
+                propertyID: payload.propertyID,
+                activityType: "note_added",
+                note: payload.note,
+                createdBy: payload.createdBy,
+                createdAt: payload.createdAt,
+                isAppNote: true,
+                isPendingUpload: item.status != .completed
+            ))
+        }
+        for issueID in result.keys {
+            result[issueID] = result[issueID]?.sorted {
+                ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+            }
+        }
+        return result
+    }
+
+    private func mergeIssueNotes(
+        local: [UUID: [PortalPunchlistNote]],
+        remote: [UUID: [PortalPunchlistNote]]
+    ) -> [UUID: [PortalPunchlistNote]] {
+        // A successful portal read supersedes the uploaded local cache. Keep only
+        // unsent notes locally so portal edits and deletions are reflected here.
+        var merged = local.mapValues { $0.filter(\.isPendingUpload) }
+        for (issueID, notes) in remote {
+            var byActivityID = Dictionary(uniqueKeysWithValues:
+                (merged[issueID] ?? []).map { ($0.sourceActivityID, $0) })
+            for note in notes { byActivityID[note.sourceActivityID] = note }
+            merged[issueID] = byActivityID.values.sorted {
+                ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+            }
+        }
+        return merged
+    }
+
+    private func discardConfirmedLocalIssueNoteCaches(
+        propertyID: UUID,
+        organizationID: UUID,
+        completedBeforeRead: Set<UUID>
+    ) {
+        let queued = (try? localStore.fetchQueuedMutations()) ?? []
+        for item in queued where item.operation == "add_issue_note"
+            && item.status == .completed
+            && completedBeforeRead.contains(item.entityID)
+            && item.organizationID == organizationID
+            && item.propertyID == propertyID {
+            do {
+                try localStore.removeQueuedMutation(id: item.id)
+            } catch {
+                recordDiagnosticsError(error)
+            }
+        }
+    }
+
+    private struct RemoteAppIssueIDRow: Decodable {
+        let id: UUID
+    }
+
+    private func performQueuedAppIssueNoteRemoteWrite(_ payload: QueuedAppIssueNotePayload) async throws -> Bool {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.AppIssueNote", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Notes will upload when the connection returns."])
+        }
+        let existingIssue: [RemoteAppIssueIDRow] = try await client
+            .from("observations")
+            .select("id")
+            .eq("id", value: payload.issueID.uuidString.lowercased())
+            .eq("org_id", value: payload.organizationID.uuidString.lowercased())
+            .eq("property_id", value: payload.propertyID.uuidString.lowercased())
+            .limit(1)
+            .execute().value
+        guard !existingIssue.isEmpty else { return false }
+
+        let row: [String: String] = [
+            "id": payload.id.uuidString.lowercased(),
+            "org_id": payload.organizationID.uuidString.lowercased(),
+            "property_id": payload.propertyID.uuidString.lowercased(),
+            "observation_id": payload.issueID.uuidString.lowercased(),
+            "activity_type": "note_added",
+            "from_value": "scout_capture",
+            "note": payload.note,
+            "created_by": payload.createdBy.uuidString.lowercased(),
+            "created_at": supabaseTimestampString(payload.createdAt)
+        ]
+        do {
+            try await client.from("punchlist_activity")
+                .insert(row, returning: .minimal)
+                .execute()
+            return true
+        } catch {
+            // A lost response can follow a successful insert. The stable ID makes retry safe.
+            let existing: [RemotePortalPunchlistActivityRecord] = (try? await client
+                .from("punchlist_activity")
+                .select("id, org_id, property_id, observation_id, shot_id, activity_type, from_value, to_value, note, created_by, created_at, deleted_at")
+                .eq("id", value: payload.id.uuidString.lowercased())
+                .limit(1)
+                .execute().value) ?? []
+            if let saved = existing.first,
+               saved.observationID == payload.issueID,
+               saved.note == payload.note,
+               saved.fromValue == "scout_capture",
+               saved.deletedAt == nil {
+                return true
+            }
+            throw error
+        }
+    }
+
     func fetchPortalPunchlistNotesByIssueID(
         propertyID: UUID,
         activeOrganizationID: UUID,
@@ -53044,13 +53269,21 @@ final class AppState: ObservableObject {
         localIssues: [PortalPunchlistLocalIssueRecord]
     ) async -> [UUID: [PortalPunchlistNote]] {
         let issueIDs = Set(localIssues.map(\.id))
-        guard backendFeatureFlags.supabaseEnabled,
-              canAccessProperty(propertyID),
+        guard canAccessProperty(propertyID),
               canAccessOrganization(activeOrganizationID),
-              supabaseClient != nil,
-              !localIssues.isEmpty else {
-            return [:]
+              !localIssues.isEmpty else { return [:] }
+        let localNotes = queuedAppIssueNotes(
+            propertyID: propertyID,
+            organizationID: activeOrganizationID,
+            issueIDs: issueIDs
+        )
+        if localNotes.values.contains(where: { $0.contains(where: \.isPendingUpload) }) {
+            Task { [weak self] in
+                _ = await self?.performOfflineReplay(source: "app_issue_note_view")
+            }
         }
+        guard backendFeatureFlags.supabaseEnabled,
+              supabaseClient != nil else { return localNotes }
 
         let startedAt = Date()
 #if DEBUG
@@ -53060,7 +53293,7 @@ final class AppState: ObservableObject {
         )
 #endif
         do {
-            guard let client = supabaseClient else { return [:] }
+            guard let client = supabaseClient else { return localNotes }
             let activityRows: [RemotePortalPunchlistActivityRecord] = try await client
                 .from("punchlist_activity")
                 .select("id, org_id, property_id, observation_id, shot_id, activity_type, from_value, to_value, note, created_by, created_at, deleted_at")
@@ -53116,14 +53349,21 @@ final class AppState: ObservableObject {
                 "remoteShotRows=\(remoteShots.count) notes=\(totalNotes) " +
                 "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
             )
-            return notesByIssueID
+            let completedBeforeRead = Set(localNotes.values.flatMap { $0 }
+                .filter { !$0.isPendingUpload }.map(\.sourceActivityID))
+            discardConfirmedLocalIssueNoteCaches(
+                propertyID: propertyID,
+                organizationID: activeOrganizationID,
+                completedBeforeRead: completedBeforeRead
+            )
+            return mergeIssueNotes(local: localNotes, remote: notesByIssueID)
         } catch {
             recordDiagnosticsError(error)
             print(
                 "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
                 "result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
             )
-            return [:]
+            return localNotes
         }
     }
 
@@ -53505,7 +53745,9 @@ final class AppState: ObservableObject {
                     activityType: type,
                     note: note,
                     createdBy: activity.createdBy,
-                    createdAt: activity.createdAt
+                    createdAt: activity.createdAt,
+                    isAppNote: normalizedReplayText(activity.fromValue)?.lowercased() == "scout_capture",
+                    isPendingUpload: false
                 )
             )
         }
