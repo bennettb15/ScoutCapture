@@ -5919,17 +5919,6 @@ struct ContentView: View {
         .degrees(glyphAngleDegrees)
     }
 
-    // Reference photos must follow the settled physical orientation immediately.
-    // Glyphs animate independently; using their intermediate angle can leave a
-    // landscape reference sideways while the camera view has already switched.
-    private var armedReferenceRotationAngle: Angle {
-        switch lastValidDeviceOrientation {
-        case .landscapeLeft: return .degrees(90)
-        case .landscapeRight: return .degrees(-90)
-        default: return .zero
-        }
-    }
-    
     private var isLandscapeUI: Bool {
         return lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
     }
@@ -8528,26 +8517,14 @@ struct ContentView: View {
 
             if showGuidedAlignmentOverlay && isCaptureTargetArmed {
                 if let reference = guidedReferenceThumbnail {
-                    Group {
-                        if isLandscapeUI {
-                            Image(uiImage: reference)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: previewH, height: w)
-                                .rotationEffect(armedReferenceRotationAngle)
-                                .frame(width: w, height: previewH)
-                                .clipped()
-                        } else {
-                            Image(uiImage: reference)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: w, height: previewH)
-                                .clipped()
-                        }
-                    }
-                    .opacity(referenceOverlayOpacity)
-                    .allowsHitTesting(false)
-                    .zIndex(10)
+                    RotatingReferenceOverlay(image: reference, angleDegrees: glyphAngleDegrees)
+                        // Recreate the UIKit canvas at each settled glyph angle.
+                        // The other camera glyphs already use this same state.
+                        .id(glyphAngleDegrees)
+                        .frame(width: w, height: previewH)
+                        .opacity(referenceOverlayOpacity)
+                        .allowsHitTesting(false)
+                        .zIndex(10)
                 } else {
                     Text("No reference available")
                         .font(.system(size: 14, weight: .medium))
@@ -9304,7 +9281,7 @@ struct ContentView: View {
                                     .buttonStyle(.plain)
                                     .offset(x: 6, y: -6)
                                 }
-                                .rotationEffect(armedReferenceRotationAngle)
+                                .rotationEffect(bottomGlyphRotationAngle)
                                 .offset(x: 170, y: -12)
                             }
                         }
@@ -10775,7 +10752,10 @@ extension ContentView {
             showFlaggedActionToastNow("Priority is required for flagged capture")
             return
         }
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        guard let captureTarget = appState.activeCaptureTarget(ensuringCurrentSessionPersisted: true) else {
+            showFlaggedActionToastNow("Session could not be saved. Capture was not started.")
+            return
+        }
         let propertyID = captureTarget.propertyID
         let sessionID = captureTarget.sessionID
         let captureDeviceOrientationAtShutter = stableDeviceOrientationForCaptureMetadata()
@@ -11025,7 +11005,9 @@ extension ContentView {
                             "isGuided=\(captureIsGuided) " +
                             "isFlagged=\(captureIsFlagged)"
                         )
-                        persistSessionMetadataForCapturedShot(
+                        let metadataPersisted = persistSessionMetadataForCapturedShot(
+                            propertyID: propertyID,
+                            sessionID: sessionID,
                             shot: shot,
                             imageData: data,
                             noteText: noteAtCapture,
@@ -11046,11 +11028,16 @@ extension ContentView {
                                 reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
                             }
                         }
-                        updateImmediatePostCaptureBadges(
-                            shot: shot,
-                            guidedIDAtCapture: armedGuidedIDAtCapture,
-                            captureIsFlagged: captureIsFlagged
-                        )
+                        if metadataPersisted {
+                            updateImmediatePostCaptureBadges(
+                                shot: shot,
+                                guidedIDAtCapture: armedGuidedIDAtCapture,
+                                captureIsFlagged: captureIsFlagged
+                            )
+                        } else {
+                            showFlaggedActionToastNow("Photo saved locally; session metadata needs recovery.")
+                            refreshGuidedShots()
+                        }
                         scheduleHudAngleIndexRefresh()
                         if wasGuidedRetakeCapture {
                             refreshUIAfterRetakeSuccess(
@@ -11195,6 +11182,8 @@ extension ContentView {
     }
 
     private func persistSessionMetadataForCapturedShot(
+        propertyID: UUID,
+        sessionID: UUID,
         shot: Shot,
         imageData: Data,
         noteText: String,
@@ -11209,10 +11198,9 @@ extension ContentView {
         priorityAtCapture: String,
         capturedExifOrientation: Int?,
         reservedAngleIndexAtCapture: Int?
-    ) {
-        guard let captureTarget = appState.activeCaptureTarget(ensuringCurrentSessionPersisted: true) else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
+    ) -> Bool {
+        // Use the shutter's immutable target. The selected session can change
+        // while the camera saves and routes the photo asynchronously.
         syncGuidedShotsToCurrentSessionMetadataIfPersisted(
             propertyID: propertyID,
             sessionID: sessionID
@@ -11463,8 +11451,10 @@ extension ContentView {
                 sessionID: sessionID,
                 shotID: shot.id
             )
+            return true
         } catch {
             print("Recoverable shot metadata persistence failure: \(error)")
+            return false
         }
     }
 
@@ -19742,6 +19732,68 @@ extension ContentView {
         }
     }
     
+    // The reference uses the exact angle driving the other camera glyphs.
+    // UIKit owns the image bounds so a full-screen portrait clip cannot hide
+    // SwiftUI's rotation transform when the phone is held sideways.
+    private struct RotatingReferenceOverlay: UIViewRepresentable {
+        let image: UIImage
+        let angleDegrees: Double
+
+        func makeUIView(context: Context) -> RotatingReferenceCanvas {
+            RotatingReferenceCanvas()
+        }
+
+        func updateUIView(_ view: RotatingReferenceCanvas, context: Context) {
+            view.image = image
+            view.angleRadians = CGFloat(angleDegrees * .pi / 180)
+            view.setNeedsDisplay()
+        }
+    }
+
+    private final class RotatingReferenceCanvas: UIView {
+        var image: UIImage? {
+            didSet { setNeedsDisplay() }
+        }
+        var angleRadians: CGFloat = 0 {
+            didSet { setNeedsDisplay() }
+        }
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isOpaque = false
+            clipsToBounds = true
+            isUserInteractionEnabled = false
+            contentMode = .redraw
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func draw(_ rect: CGRect) {
+            guard let image, let context = UIGraphicsGetCurrentContext(),
+                  bounds.width > 0, bounds.height > 0,
+                  image.size.width > 0, image.size.height > 0 else { return }
+            let landscape = abs(sin(angleRadians)) > 0.5
+            let canvasSize = CGSize(
+                width: landscape ? bounds.height : bounds.width,
+                height: landscape ? bounds.width : bounds.height
+            )
+            let fillScale = max(canvasSize.width / image.size.width, canvasSize.height / image.size.height)
+            let imageSize = CGSize(width: image.size.width * fillScale, height: image.size.height * fillScale)
+            context.saveGState()
+            context.translateBy(x: bounds.midX, y: bounds.midY)
+            context.rotate(by: angleRadians)
+            image.draw(in: CGRect(
+                x: -imageSize.width / 2,
+                y: -imageSize.height / 2,
+                width: imageSize.width,
+                height: imageSize.height
+            ))
+            context.restoreGState()
+        }
+    }
+
     // MARK: - Level / Horizon model (stable in portrait-locked UI)
     
     final class LevelMotionModel: ObservableObject {

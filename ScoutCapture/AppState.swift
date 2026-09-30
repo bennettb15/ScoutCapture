@@ -8057,7 +8057,7 @@ final class AppState: ObservableObject {
         guard let context = selectedCaptureRuntimeContext else { return nil }
         let target = ActiveCaptureTarget(context: context)
         guard ensuringCurrentSessionPersisted else { return target }
-        guard let session = ensureCurrentSessionPersisted() ?? currentSession,
+        guard let session = ensureCurrentSessionPersisted(),
               session.propertyID == target.propertyID,
               session.id == target.sessionID else {
             return nil
@@ -43517,6 +43517,10 @@ final class AppState: ObservableObject {
     }
 
     func preferredPropertyEntrySessionID(for propertyID: UUID) -> UUID {
+        // A capture can leave originals and guided state on disk before the
+        // session index is written. Rebuild and reload that index before the
+        // lightweight entry claim chooses a session ID.
+        reloadSessionCache(for: propertyID)
         if let currentSession,
            currentSession.propertyID == propertyID,
            currentSession.status == .draft,
@@ -43869,7 +43873,7 @@ final class AppState: ObservableObject {
         }
         let storageMilliseconds = Date().timeIntervalSince(storageStartedAt) * 1_000
 
-        return await Task.detached(priority: .userInitiated) {
+        let result = await Task.detached(priority: .userInitiated) {
             let shotID = UUID()
             let filename = "\(shotID.uuidString).jpg"
             let originalRelativePath = "Originals/\(filename)"
@@ -43981,6 +43985,35 @@ final class AppState: ObservableObject {
                 )
             )
         }.value
+        guard result.success, let storageRoot = result.storageRoot else { return result }
+        do {
+            let recordsURL = Self.fastRuntimeDraftMetadataURL(root: storageRoot)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let records = try decoder.decode(
+                [FastRuntimePrototypeShotRecord].self,
+                from: Data(contentsOf: recordsURL)
+            )
+            let summary = try await Self.persistFastRuntimeDraftStorage(
+                context: context,
+                tempStorageRoot: storageRoot,
+                photoCount: records.count,
+                lastMetadataContext: result.shot?.metadataContext
+            )
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts[context.propertyID] = summary
+            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+            fastRuntimeDraftsByPropertyID = nextDrafts
+            return result
+        } catch {
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: false,
+                shot: result.shot,
+                storageRoot: result.storageRoot,
+                errorMessage: "draft_checkpoint_failed: \(error.localizedDescription)",
+                timings: result.timings
+            )
+        }
     }
 
     func projectFastRuntimeCaptureToLocalCameraState(
@@ -44030,6 +44063,84 @@ final class AppState: ObservableObject {
                 metadata: metadata,
                 localPath: localPath
             )
+        }
+        persistFastRuntimeCaptureToSessionMetadata(
+            context: context,
+            record: record,
+            metadata: metadata,
+            localPath: localPath
+        )
+    }
+
+    private func persistFastRuntimeCaptureToSessionMetadata(
+        context: ActiveCaptureContext,
+        record: FastRuntimePrototypeShotRecord,
+        metadata: FastRuntimeCaptureMetadataContext,
+        localPath: String?
+    ) {
+        guard let localPath, FileManager.default.fileExists(atPath: localPath) else { return }
+        do {
+            let property = properties.first(where: { $0.id == context.propertyID }) ??
+                allProperties.first(where: { $0.id == context.propertyID })
+            let session = Session(
+                id: context.sessionID,
+                propertyID: context.propertyID,
+                sessionType: context.sessionType,
+                startedAt: context.createdAt,
+                status: .draft,
+                captureProfile: property?.captureProfile
+            )
+            _ = try localStore.upsertSession(session)
+            let originalURL = URL(fileURLWithPath: localPath, isDirectory: false)
+            let byteSize = (try? FileManager.default.attributesOfItem(atPath: originalURL.path)[.size] as? NSNumber)?.intValue
+            let originalName = URL(fileURLWithPath: record.originalRelativePath).lastPathComponent
+            let shot = ShotMetadata(
+                shotID: record.id,
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                createdAt: record.capturedAt,
+                updatedAt: record.capturedAt,
+                building: metadata.building,
+                elevation: metadata.elevation,
+                detailType: metadata.detailType,
+                angleIndex: metadata.angleIndex,
+                trade: metadata.trade,
+                priority: metadata.priority,
+                shotKey: metadata.shotKey,
+                isGuided: metadata.isGuided == true,
+                isFlagged: metadata.isFlagged == true,
+                issueID: metadata.issueID,
+                issueStatus: metadata.issueStatus,
+                captureKind: record.captureKind,
+                firstCaptureKind: record.firstCaptureKind,
+                noteText: metadata.detailNote,
+                noteCategory: nil,
+                originalFilename: originalName,
+                originalRelativePath: "Originals/\(originalName)",
+                originalByteSize: byteSize,
+                byteSize: byteSize,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: metadata.captureMode,
+                lens: metadata.lens,
+                exifOrientation: nil,
+                latitude: metadata.latitude,
+                longitude: metadata.longitude,
+                accuracyMeters: metadata.accuracyMeters,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+            try localStore.upsertShotMetadata(shot)
+            if metadata.isGuided == true {
+                let guided = try localStore.fetchGuidedShots(propertyID: context.propertyID)
+                try localStore.syncGuidedShotsToSessionMetadata(
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    guidedShots: guided
+                )
+            }
+        } catch {
+            print("[FastLaneProjection] session_metadata_failed propertyID=\(context.propertyID.uuidString) sessionID=\(context.sessionID.uuidString) shotID=\(record.id.uuidString) error=\(error.localizedDescription)")
         }
     }
 
@@ -47996,11 +48107,19 @@ final class AppState: ObservableObject {
         let property = properties.first(where: { $0.id == propertyID }) ??
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
-        guard let draftSummary = fastRuntimeDraftBadgeSummary(
+        let indexedDraft = fastRuntimeDraftBadgeSummary(
             for: propertyID,
             currentUserID: authenticatedSupabaseUser?.id,
             currentDeviceID: currentDeviceIdentifier()
-        ) else {
+        )
+        guard let draftSummary = recoverUnindexedFastRuntimeDraft(
+            propertyID: propertyID,
+            property: property,
+            newerThan: indexedDraft
+        ) ?? indexedDraft else {
+#if DEBUG
+            print("[FastLaneRecovery] no_draft property=\(propertyID.uuidString.prefix(8)) property_found=\(property != nil)")
+#endif
             return nil
         }
 
@@ -48056,6 +48175,231 @@ final class AppState: ObservableObject {
             storageRoot: storageRoot,
             errorMessage: nil
         )
+    }
+
+    private func recoverUnindexedStableFastRuntimeDraft(propertyID: UUID, orgID: UUID) -> FastRuntimeDraftSummary? {
+        do {
+            let propertyRoot = try Self.fastRuntimeDraftsRootURL()
+                .appendingPathComponent("Drafts", isDirectory: true)
+                .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+            let roots = (try? FileManager.default.contentsOfDirectory(
+                at: propertyRoot, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let candidates: [(FastRuntimeDraftSummary, Date)] = roots.compactMap { root in
+                let contextURL = root.appendingPathComponent("Metadata/active-capture-context.json")
+                let shotsURL = Self.fastRuntimeDraftMetadataURL(root: root)
+                guard let contextData = try? Data(contentsOf: contextURL),
+                      let context = try? decoder.decode(ActiveCaptureContext.self, from: contextData),
+                      let shotData = try? Data(contentsOf: shotsURL),
+                      let shots = try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: shotData),
+                      !shots.isEmpty,
+                      context.propertyID == propertyID,
+                      context.orgID == orgID,
+                      context.status == .draft,
+                      fastRuntimeContextIsOwnedByCurrentActor(
+                        ownerUserID: context.ownerUserID,
+                        ownerDeviceID: context.ownerDeviceID,
+                        currentUserID: authenticatedSupabaseUser?.id,
+                        currentDeviceID: currentDeviceIdentifier()
+                      ),
+                      shots.allSatisfy({ shot in
+                        shot.propertyID == propertyID && shot.sessionID == context.sessionID &&
+                        FileManager.default.fileExists(atPath: root.appendingPathComponent(shot.originalRelativePath).path)
+                      }) else { return nil }
+                let newest = shots.map(\.capturedAt).max() ?? context.createdAt
+                let lastMetadata = shots.max(by: { $0.capturedAt < $1.capturedAt })?.metadataContext
+                let summary = FastRuntimeDraftSummary(
+                    propertyID: propertyID,
+                    sessionID: context.sessionID,
+                    orgID: orgID,
+                    sessionType: context.sessionType,
+                    ownerUserID: context.ownerUserID,
+                    ownerEmail: context.ownerEmail,
+                    ownerDeviceID: context.ownerDeviceID,
+                    createdAt: context.createdAt,
+                    updatedAt: newest,
+                    photoCount: shots.count,
+                    lastLocationMode: lastMetadata?.locationMode,
+                    lastMetadataContext: lastMetadata,
+                    draftRootPath: root.path,
+                    metadataPath: shotsURL.path
+                )
+                return (summary, newest)
+            }
+            guard let summary = candidates.max(by: { $0.1 < $1.1 })?.0 else { return nil }
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts[propertyID] = summary
+            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+            fastRuntimeDraftsByPropertyID = nextDrafts
+            return summary
+        } catch {
+            print("[FastLaneRecovery] stable_draft_index_failed propertyID=\(propertyID.uuidString) error=\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func recoverUnindexedFastRuntimeDraft(
+        propertyID: UUID,
+        property: Property?,
+        newerThan indexedDraft: FastRuntimeDraftSummary?
+    ) -> FastRuntimeDraftSummary? {
+        guard let property,
+              let orgID = property.orgId else {
+#if DEBUG
+            print("[FastLaneRecovery] no_org property=\(propertyID.uuidString.prefix(8)) property_found=\(property != nil)")
+#endif
+            return nil
+        }
+        do {
+            let allSessions = try localStore.fetchSessions(propertyID: propertyID)
+#if DEBUG
+            print("[FastLaneRecovery] indexed_sessions property=\(propertyID.uuidString.prefix(8)) count=\(allSessions.count) states=\(allSessions.map { "\($0.status.rawValue):\($0.isSealed ? 1 : 0)" }.joined(separator: ","))")
+#endif
+            let drafts = allSessions
+                .filter { $0.status == .draft && !$0.isSealed && $0.deletedAt == nil }
+                .sorted { $0.startedAt > $1.startedAt }
+            let indexedNewestCapture = indexedDraft.map { summary -> Date in
+                let url = URL(fileURLWithPath: summary.metadataPath, isDirectory: false)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let records = (try? Data(contentsOf: url)).flatMap {
+                    try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: $0)
+                } ?? []
+                return records.map(\.capturedAt).max() ?? summary.createdAt
+            } ?? .distantPast
+            for draft in drafts {
+                let metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: draft.id)
+                guard metadata.status == .draft,
+                      !metadata.isSealed,
+                      metadata.orgID == nil || metadata.orgID == orgID,
+                      metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id else {
+#if DEBUG
+                    print("[FastLaneRecovery] excluded session=\(draft.id.uuidString.prefix(8)) metadata_status=\(metadata.status.rawValue) sealed=\(metadata.isSealed) org_match=\(metadata.orgID == nil || metadata.orgID == orgID) user_match=\(metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id)")
+#endif
+                    continue
+                }
+                let captured = metadata.shots.filter { $0.isActiveForDefaultWorkflows }
+                let newestCapture = captured.map(\.createdAt).max() ?? .distantPast
+#if DEBUG
+                print("[FastLaneRecovery] candidate session=\(draft.id.uuidString.prefix(8)) shots=\(captured.count) guided=\(metadata.guidedShots.count) newer=\(indexedDraft == nil || newestCapture > indexedNewestCapture)")
+#endif
+                guard !captured.isEmpty,
+                      indexedDraft?.sessionID != draft.id,
+                      indexedDraft == nil || newestCapture > indexedNewestCapture else { continue }
+                let sourceURLs = captured.map { shot in
+                    localStore.originalsFolderURL(propertyID: propertyID, sessionID: draft.id)
+                        .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                }
+                guard sourceURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
+#if DEBUG
+                    print("[FastLaneRecovery] missing_original session=\(draft.id.uuidString.prefix(8)) missing=\(sourceURLs.filter { !FileManager.default.fileExists(atPath: $0.path) }.count)")
+#endif
+                    continue
+                }
+                let context = ActiveCaptureContext(
+                    sessionID: draft.id,
+                    propertyID: propertyID,
+                    orgID: orgID,
+                    sessionType: draft.sessionType,
+                    ownerUserID: metadata.capturedByUserID ?? authenticatedSupabaseUser?.id,
+                    ownerEmail: metadata.capturedByEmail ?? authenticatedSupabaseUser?.email,
+                    ownerDeviceID: currentDeviceIdentifier(),
+                    createdAt: draft.startedAt,
+                    status: .draft,
+                    statusReason: "recovered_saved_captures"
+                )
+                let root = try Self.stableFastRuntimeDraftRoot(context: context)
+                try prepareFastRuntimePrototypeStorage(at: root, context: context)
+                let originals = root.appendingPathComponent("Originals", isDirectory: true)
+                let records = try zip(captured, sourceURLs).map { shot, source -> FastRuntimePrototypeShotRecord in
+                    let destination = originals.appendingPathComponent(shot.originalFilename, isDirectory: false)
+                    if !FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.copyItem(at: source, to: destination)
+                    }
+                    let mode = shot.elevation.caseInsensitiveCompare("Interior") == .orderedSame
+                        ? "Interior" : "Exterior"
+                    let captureMetadata = FastRuntimeCaptureMetadataContext(
+                        captureProfile: metadata.captureProfile,
+                        locationMode: mode,
+                        building: shot.building,
+                        elevation: shot.elevation,
+                        detailType: shot.detailType,
+                        trade: shot.trade,
+                        detailNote: shot.noteText,
+                        priority: shot.priority,
+                        angleIndex: shot.angleIndex,
+                        shotKey: shot.shotKey,
+                        isGuided: shot.isGuided,
+                        isFlagged: shot.isFlagged,
+                        issueID: shot.issueID,
+                        issueStatus: shot.issueStatus,
+                        captureIntentSource: shot.isGuided ? "guided" : (shot.isFlagged ? "flagged" : "free"),
+                        propertyName: property.name,
+                        propertyAddress: property.address,
+                        latitude: shot.latitude,
+                        longitude: shot.longitude,
+                        accuracyMeters: shot.accuracyMeters,
+                        captureMode: shot.captureMode,
+                        lens: shot.lens,
+                        appVersion: metadata.appVersion,
+                        osVersion: metadata.osVersion,
+                        deviceModel: metadata.deviceModel
+                    )
+                    return FastRuntimePrototypeShotRecord(
+                        id: shot.shotID,
+                        sessionID: draft.id,
+                        propertyID: propertyID,
+                        orgID: orgID,
+                        sessionType: draft.sessionType,
+                        capturedAt: shot.createdAt,
+                        localFilePath: destination.path,
+                        originalRelativePath: "Originals/\(shot.originalFilename)",
+                        captureKind: shot.captureKind ?? "captured",
+                        firstCaptureKind: shot.firstCaptureKind ?? "captured",
+                        captureLocationMode: mode,
+                        metadataContext: captureMetadata
+                    )
+                }
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(records).write(
+                    to: Self.fastRuntimeDraftMetadataURL(root: root), options: .atomic
+                )
+                let lastMetadata = records.last?.metadataContext
+                let summary = FastRuntimeDraftSummary(
+                    propertyID: propertyID,
+                    sessionID: draft.id,
+                    orgID: orgID,
+                    sessionType: draft.sessionType,
+                    ownerUserID: context.ownerUserID,
+                    ownerEmail: context.ownerEmail,
+                    ownerDeviceID: context.ownerDeviceID,
+                    createdAt: draft.startedAt,
+                    updatedAt: Date(),
+                    photoCount: records.count,
+                    lastLocationMode: lastMetadata?.locationMode,
+                    lastMetadataContext: lastMetadata,
+                    draftRootPath: root.path,
+                    metadataPath: Self.fastRuntimeDraftMetadataURL(root: root).path
+                )
+                var nextDrafts = fastRuntimeDraftsByPropertyID
+                nextDrafts[propertyID] = summary
+                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                fastRuntimeDraftsByPropertyID = nextDrafts
+#if DEBUG
+                print("[FastLaneRecovery] restored session=\(draft.id.uuidString.prefix(8)) shots=\(records.count)")
+#endif
+                return summary
+            }
+        } catch {
+            print("[FastLaneRecovery] propertyID=\(propertyID.uuidString) error=\(error.localizedDescription)")
+        }
+        guard indexedDraft == nil else { return nil }
+        return recoverUnindexedStableFastRuntimeDraft(propertyID: propertyID, orgID: orgID)
     }
 
     func clearFastRuntimePrototypeState() async -> FastRuntimePrototypeCleanupResult {
@@ -48248,10 +48592,9 @@ final class AppState: ObservableObject {
     }
 
     private func prepareFastRuntimePrototypeTempStorage(context: ActiveCaptureContext) throws -> URL {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
-            .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
-            .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+        // Capture into Application Support from the start. The camera may be killed or
+        // updated without ever reaching the normal close-and-save-draft path.
+        let root = try Self.stableFastRuntimeDraftRoot(context: context)
         try prepareFastRuntimePrototypeStorage(at: root, context: context)
         return root
     }
@@ -57087,6 +57430,9 @@ final class AppState: ObservableObject {
             }
         }
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
+        // A recovery may have rebuilt the index after the in-memory cache was
+        // populated. Read it again before choosing a new transient draft.
+        reloadSessionCache(for: selectedPropertyID)
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
             .filter { reusableDraftSession($0) }
@@ -57544,13 +57890,17 @@ final class AppState: ObservableObject {
     @discardableResult
     func ensureCurrentSessionPersisted() -> Session? {
         guard let session = currentSession else { return nil }
-        let alreadyPersisted = sessions(for: session.propertyID).contains { $0.id == session.id }
-        guard !alreadyPersisted else { return session }
-
-        let persisted = (try? localStore.upsertSession(session)) ?? session
-        currentSession = persisted
-        reloadSessionCache(for: session.propertyID)
-        return persisted
+        do {
+            // Reaffirm both the session index and session.json before a photo is
+            // captured. A cached index alone does not prove metadata is durable.
+            let persisted = try localStore.upsertSession(session)
+            currentSession = persisted
+            reloadSessionCache(for: session.propertyID)
+            return persisted
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
     }
 
     @discardableResult
@@ -58261,6 +58611,7 @@ final class AppState: ObservableObject {
                 return nil
             }
         }
+        reloadSessionCache(for: propertyID)
         guard let draft = canonicalDraftSession(for: propertyID, requireCaptures: true) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft

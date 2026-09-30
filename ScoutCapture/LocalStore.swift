@@ -2919,13 +2919,155 @@ final class LocalStore {
     
     func fetchSessions(propertyID: UUID) throws -> [Session] {
         try ensurePropertyExists(propertyID)
+        // Guided captures are durable evidence even if an earlier session-index or
+        // session.json write failed. Rebuild only records backed by an original in
+        // this app container; stale paths from another installation are ignored.
+        try recoverGuidedCapturesMissingFromSessionMetadata(propertyID: propertyID)
         return try readSessions(propertyID: propertyID)
             .filter { $0.deletedAt == nil }
     }
 
+    private func recoverGuidedCapturesMissingFromSessionMetadata(propertyID: UUID) throws {
+        let guidedShots = try readGuidedShots(propertyID: propertyID)
+        var capturesBySession: [UUID: [(GuidedShot, Shot, URL)]] = [:]
+        for guided in guidedShots where guided.status == .active && guided.isCompleted {
+            guard let shot = guided.shot,
+                  let rawPath = shot.imageLocalIdentifier,
+                  let sessionID = sessionIDInGuidedOriginalPath(rawPath, propertyID: propertyID) else { continue }
+            let originalURL = originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent("\(shot.id.uuidString).jpg")
+            guard fileManager.fileExists(atPath: originalURL.path) else { continue }
+            capturesBySession[sessionID, default: []].append((guided, shot, originalURL))
+        }
+        guard !capturesBySession.isEmpty else { return }
+
+        var sessions = try readSessions(propertyID: propertyID)
+        var indexChanged = false
+        for (sessionID, captures) in capturesBySession {
+            let metadataURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
+            let metadataExists = fileManager.fileExists(atPath: metadataURL.path)
+            var metadata = try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            let indexedSession = sessions.first { $0.id == sessionID }
+            var metadataChanged = !metadataExists
+
+            let earliestCapture = captures.map { $0.1.capturedAt }.min() ?? Date()
+            let startedAt = metadataExists ? metadata.startedAt : earliestCapture.addingTimeInterval(-1)
+            let session = indexedSession ?? Session(
+                id: sessionID,
+                propertyID: propertyID,
+                sessionType: metadataExists ? metadata.sessionType : .fullDocumentation,
+                startedAt: startedAt,
+                status: metadataExists ? metadata.status : .draft,
+                captureProfile: currentProperty(for: propertyID)?.captureProfile
+            )
+            if indexedSession == nil {
+                sessions.append(session)
+                indexChanged = true
+            }
+            if !metadataExists {
+                metadata.startedAt = session.startedAt
+                metadata.sessionType = session.sessionType
+                metadata.status = session.status
+            }
+            for (guided, shot, originalURL) in captures {
+                let building = guided.building ?? "B1"
+                let elevation = CanonicalElevation.normalize(guided.targetElevation) ?? guided.targetElevation ?? ""
+                let detailType = guided.detailType ?? ""
+                let angleIndex = max(1, guided.angleIndex ?? 1)
+                if let index = metadata.shots.firstIndex(where: { $0.shotID == shot.id }) {
+                    if !metadata.shots[index].isGuided {
+                        metadata.shots[index].isGuided = true
+                        metadata.shots[index].building = building
+                        metadata.shots[index].elevation = elevation
+                        metadata.shots[index].detailType = detailType
+                        metadata.shots[index].angleIndex = angleIndex
+                        metadata.shots[index].shotKey = ShotMetadata.makeShotKey(
+                            building: building, elevation: elevation,
+                            detailType: detailType, angleIndex: angleIndex
+                        )
+                        metadataChanged = true
+                    }
+                    continue
+                }
+                let size = (try? fileManager.attributesOfItem(atPath: originalURL.path)[.size] as? NSNumber)?.intValue
+                metadata.shots.append(ShotMetadata(
+                    shotID: shot.id,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    createdAt: shot.capturedAt,
+                    updatedAt: shot.capturedAt,
+                    building: building,
+                    elevation: elevation,
+                    detailType: detailType,
+                    angleIndex: angleIndex,
+                    shotKey: ShotMetadata.makeShotKey(building: building, elevation: elevation, detailType: detailType, angleIndex: angleIndex),
+                    isGuided: true,
+                    isFlagged: false,
+                    issueID: nil,
+                    issueStatus: nil,
+                    captureKind: "captured",
+                    firstCaptureKind: "captured",
+                    noteText: shot.note,
+                    noteCategory: nil,
+                    originalFilename: originalURL.lastPathComponent,
+                    originalRelativePath: "Originals/\(originalURL.lastPathComponent)",
+                    originalByteSize: size,
+                    byteSize: size,
+                    stampedFilename: nil,
+                    stampedRelativePath: nil,
+                    captureMode: nil,
+                    lens: nil,
+                    exifOrientation: nil,
+                    latitude: nil,
+                    longitude: nil,
+                    accuracyMeters: nil,
+                    imageWidth: nil,
+                    imageHeight: nil
+                ))
+                metadataChanged = true
+            }
+            // Snapshot checklist state for this session only. Older reference
+            // photos must not be counted as captures in the recovered draft.
+            let recoveredShotIDs = Set(metadata.shots.map(\.shotID))
+            let scopedGuidedShots = guidedShots.map { guided -> GuidedShot in
+                var scoped = guided
+                if let shot = guided.shot, !recoveredShotIDs.contains(shot.id) {
+                    scoped.shot = nil
+                    scoped.isCompleted = false
+                }
+                return scoped
+            }
+            if metadata.guidedShots != scopedGuidedShots {
+                metadata.guidedShots = scopedGuidedShots
+                metadataChanged = true
+            }
+            guard indexedSession == nil || metadataChanged else { continue }
+            // Commit the complete metadata first. If this fails, retry on the
+            // next read without creating an index that points at an empty file.
+            try writeSessionMetadata(metadata)
+            try upsertSessionMetadataLifecycle(for: session)
+        }
+        if indexChanged {
+            sessions.sort { $0.startedAt < $1.startedAt }
+            try writeSessions(sessions, propertyID: propertyID)
+        }
+    }
+
+    private func sessionIDInGuidedOriginalPath(_ path: String, propertyID: UUID) -> UUID? {
+        let parts = URL(fileURLWithPath: path).pathComponents
+        guard let propertyIndex = parts.lastIndex(of: "Properties"),
+              parts.indices.contains(propertyIndex + 5),
+              parts[propertyIndex + 1].caseInsensitiveCompare(propertyID.uuidString) == .orderedSame,
+              parts[propertyIndex + 2] == "Sessions",
+              let sessionID = UUID(uuidString: parts[propertyIndex + 3]),
+              parts[propertyIndex + 4] == "Originals" else { return nil }
+        return sessionID
+    }
+
     func fetchSessionsForCacheBuild(propertyID: UUID) throws -> [Session] {
         try performFileIOSync {
-            try readSessions(propertyID: propertyID)
+            try recoverGuidedCapturesMissingFromSessionMetadata(propertyID: propertyID)
+            return try readSessions(propertyID: propertyID)
         }
     }
     
@@ -2936,8 +3078,8 @@ final class LocalStore {
         sessions.removeAll { $0.id == session.id }
         sessions.append(session)
         sessions.sort { $0.startedAt < $1.startedAt }
-        try writeSessions(sessions, propertyID: session.propertyID)
         try upsertSessionMetadataLifecycle(for: session)
+        try writeSessions(sessions, propertyID: session.propertyID)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         return session
     }

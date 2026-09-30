@@ -15100,9 +15100,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if showFastLaneArmedReferenceOverlay && isFastLaneCaptureIntentArmed {
             GeometryReader { geo in
                 if let reference = fastLaneArmedReferenceThumbnail {
+                    let isLandscape = abs(glyphAngleDegrees) > 45
                     Image(uiImage: reference)
                         .resizable()
                         .scaledToFill()
+                        .frame(
+                            width: isLandscape ? geo.size.height : geo.size.width,
+                            height: isLandscape ? geo.size.width : geo.size.height
+                        )
+                        .rotationEffect(.degrees(glyphAngleDegrees))
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                         .opacity(fastLaneReferenceOverlayOpacity)

@@ -704,6 +704,8 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                             )
                                     }
                                     .buttonStyle(.plain)
+                                    .rotationEffect(display.glyphRotationAngle)
+                                    .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                                     .offset(x: 6, y: -6)
                                 }
                                 .offset(x: 170, y: -12)
