@@ -13,6 +13,10 @@ MANIFEST = Path(__file__).resolve().parents[1] / "supabase/ops/test_org_approved
 RPC = "/rest/v1/rpc/finalize_approved_test_org_property_purge"
 
 
+class ActiveOccupancyBlocked(RuntimeError):
+    """The database forbids deleting a property with an active lock."""
+
+
 def utc_timestamp(value):
     match = re.fullmatch(r"(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d(?:\.\d{1,6})?)(?:Z|\+00(?::00)?)", value)
     if not match:
@@ -53,6 +57,8 @@ def rpc(client, property_id, dry_run):
             raise RuntimeError(f"Scoped purge HTTP {error.code}; database detail unavailable") from None
         code = failure.get("code", "unknown")
         message = failure.get("message", "")
+        if code == "P0001" and message == "Property has active occupancy.":
+            raise ActiveOccupancyBlocked("Property has active occupancy") from None
         constraint = re.search(r'constraint "([A-Za-z_][A-Za-z0-9_]*)"', message)
         label = constraint.group(1) if constraint else "unknown"
         raise RuntimeError(f"Scoped purge HTTP {error.code}; SQLSTATE {code}; constraint {label}") from None
@@ -142,6 +148,7 @@ def main():
     remaining = 0
     processed = 0
     media_total = 0
+    blocked_active_occupancy = 0
     for candidate in manifest["purge"]:
         current = verify_candidate(client, manifest, candidate)
         if current is None:
@@ -149,7 +156,12 @@ def main():
         remaining += 1
         if processed >= args.limit:
             continue
-        if rpc(client, candidate["id"], True) is not False:
+        try:
+            preflight = rpc(client, candidate["id"], True)
+        except ActiveOccupancyBlocked:
+            blocked_active_occupancy += 1
+            continue
+        if preflight is not False:
             raise RuntimeError("Scoped database function preflight failed")
         files = media_manifest(client, current, allow_legacy_pathless_shots=True,
                                allow_legacy_session_paths=True)
@@ -168,6 +180,7 @@ def main():
         processed += 1
     verify_keep_set(client, manifest)
     print(json.dumps({"remaining_at_start": remaining, "processed": processed,
+                      "blocked_active_occupancy": blocked_active_occupancy,
                       "media_total": media_total,
                       "mode": "execute" if args.execute else "dry_run"}))
 

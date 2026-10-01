@@ -59,6 +59,16 @@ class ApprovedTestOrgTests(unittest.TestCase):
         self.assertNotIn("private property data", str(error.exception))
         self.assertNotIn("private-id", str(error.exception))
 
+    def test_rpc_preserves_active_occupancy_block(self):
+        class LockedClient:
+            def request(self, *_args, **_kwargs):
+                payload = json.dumps({"code": "P0001",
+                    "message": "Property has active occupancy."}).encode()
+                raise HTTPError("https://example.test", 400, "Bad Request", {}, BytesIO(payload))
+
+        with self.assertRaises(cleanup.ActiveOccupancyBlocked):
+            cleanup.rpc(LockedClient(), "private-id", True)
+
     def test_read_only_audit_reports_aggregate_legacy_and_lock_counts(self):
         candidate = self.manifest["purge"][0]
         keep_id = self.manifest["keep_property_ids"][0]
