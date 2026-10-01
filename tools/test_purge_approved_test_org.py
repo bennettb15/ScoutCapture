@@ -1,7 +1,8 @@
 import datetime as dt
 import json
 import unittest
-from io import BytesIO
+from io import BytesIO, StringIO
+from contextlib import redirect_stdout
 from urllib.error import HTTPError
 
 import purge_approved_test_org as cleanup
@@ -57,6 +58,44 @@ class ApprovedTestOrgTests(unittest.TestCase):
             cleanup.rpc(FailingClient(), "private-id", False)
         self.assertNotIn("private property data", str(error.exception))
         self.assertNotIn("private-id", str(error.exception))
+
+    def test_read_only_audit_reports_aggregate_legacy_and_lock_counts(self):
+        candidate = self.manifest["purge"][0]
+        keep_id = self.manifest["keep_property_ids"][0]
+        manifest = {"org_id": self.manifest["org_id"],
+            "keep_property_ids": [keep_id], "purge": [candidate]}
+        properties = {
+            keep_id: {"id": keep_id, "org_id": manifest["org_id"],
+                      "is_archived": False, "deleted_at": None},
+            candidate["id"]: {"id": candidate["id"], "org_id": manifest["org_id"],
+                "is_archived": False, "deleted_at": candidate["deleted_at"]},
+        }
+
+        class AuditClient(FakeClient):
+            def rows(self, table, **filters):
+                if table == "properties":
+                    return super().rows(table, **filters)
+                if table == "property_session_occupancy":
+                    return [{"occupied_by_user_id": "user", "occupied_by_device_id": None,
+                             "occupied_at": None, "updated_at": candidate["deleted_at"]}]
+                if table == "sessions":
+                    return [{"id": "s1", "deleted_at": None,
+                             "locked_by_user_id": None, "locked_by_device_id": None,
+                             "locked_at": None, "updated_at": candidate["deleted_at"]}]
+                if table == "shots":
+                    return [{"session_id": "s1", "storage_bucket": "scoutcapture-originals",
+                             "storage_path": None, "upload_state": "uploaded"}]
+                raise AssertionError("Unexpected table")
+
+        output = StringIO()
+        with redirect_stdout(output):
+            cleanup.audit_remaining(AuditClient(properties), manifest)
+        totals = json.loads(output.getvalue())
+        self.assertEqual(totals["remaining"], 1)
+        self.assertEqual(totals["with_occupancy"], 1)
+        self.assertEqual(totals["with_locked_sessions"], 0)
+        self.assertEqual(totals["uploaded_shots_without_path"], 1)
+        self.assertEqual(totals["mode"], "audit")
 
     def test_candidate_rejects_changed_deletion(self):
         candidate = self.manifest["purge"][0]
