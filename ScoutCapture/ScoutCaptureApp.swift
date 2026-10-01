@@ -2599,6 +2599,29 @@ struct SessionHubView: View {
                     .padding(.bottom, 2)
 
                     List {
+                        if appState.requiresAuthentication {
+                            Section("Organization") {
+                                if let activeOrganization = appState.activeOrganization {
+                                    Picker("Active Organization", selection: Binding(
+                                        get: { activeOrganization.id.uuidString },
+                                        set: { newValue in
+                                            if let id = UUID(uuidString: newValue) {
+                                                appState.setActiveOrganization(id: id)
+                                            }
+                                        }
+                                    )) {
+                                        ForEach(appState.organizationSelectionOptions) { organization in
+                                            Text(organization.name)
+                                                .tag(organization.id.uuidString)
+                                        }
+                                    }
+                                } else {
+                                    Text("No active organization")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+
                         Section("View") {
                             Toggle("Show Archived", isOn: $showArchivedProperties)
                                 .tint(.blue)
@@ -2638,27 +2661,6 @@ struct SessionHubView: View {
                                 } else {
                                     Text(authenticatedSupabaseUser.id.uuidString)
                                         .font(.footnote.monospaced())
-                                }
-
-                                if appState.requiresAuthentication {
-                                    if let activeOrganization = appState.activeOrganization {
-                                        Picker("Active Organization", selection: Binding(
-                                            get: { activeOrganization.id.uuidString },
-                                            set: { newValue in
-                                                if let id = UUID(uuidString: newValue) {
-                                                    appState.setActiveOrganization(id: id)
-                                                }
-                                            }
-                                        )) {
-                                            ForEach(appState.organizationSelectionOptions) { organization in
-                                                Text(organization.name)
-                                                    .tag(organization.id.uuidString)
-                                            }
-                                        }
-                                    } else {
-                                        Text("No active organization")
-                                            .foregroundStyle(.secondary)
-                                    }
                                 }
 
                                 if appState.authenticationErrorMessage?.localizedCaseInsensitiveContains("Account deletion is in progress") != true {

@@ -51,6 +51,12 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.sessionFolderURL(
             propertyID: property.id, sessionID: context.sessionID
         ).appendingPathComponent("session.json").path))
+        XCTAssertTrue(appState.propertyCardBadgeModel(for: property.id).showDraft)
+        XCTAssertTrue(appState.prepareFastRuntimeCompletion(
+            context: context, storageRoot: result.storageRoot, shots: []
+        ))
+        XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
+        XCTAssertEqual(appState.propertyRowDraftCount, 0)
 
         // An older indexed draft must not displace a newer interrupted capture.
         let newerSessionID = UUID()

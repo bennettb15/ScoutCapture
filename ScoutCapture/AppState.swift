@@ -42394,6 +42394,9 @@ final class AppState: ObservableObject {
     func propertyCardBadgeModel(for propertyID: UUID) -> PropertyCardBadgeModel {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let completionRequestedSessionIDs = Set(
+            fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).map { $0.context.sessionID }
+        )
         let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
             for: propertyID,
             currentUserID: currentUserID,
@@ -42410,7 +42413,7 @@ final class AppState: ObservableObject {
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
-            let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
+            let canOverlayFastRuntimeDraft = fastRuntimeDraft.map { !completionRequestedSessionIDs.contains($0.sessionID) } == true &&
                 basePropertyStatusAnswer.visibleBadgeState != .locked &&
                 basePropertyStatusAnswer.visibleBadgeState != .pendingExport
             let propertyStatusAnswer = canOverlayFastRuntimeDraft
@@ -42450,8 +42453,10 @@ final class AppState: ObservableObject {
             }()
             let propertyStatusReasonPrefix = "property_status:\(propertyStatus.status.rawValue)"
             let draftSessionID = propertyStatusBadgeState == .draft
-                ? (fastRuntimeDraft?.sessionID ?? propertyStatusSourceSessionID)
+                ? (canOverlayFastRuntimeDraft ? fastRuntimeDraft?.sessionID : propertyStatusSourceSessionID)
                 : nil
+            let showDraft = propertyStatusBadgeState == .draft &&
+                (draftSessionID.map { !completionRequestedSessionIDs.contains($0) } ?? true)
             return PropertyCardBadgeModel(
                 propertyID: propertyID,
                 activeOccupancySessionID: propertyStatus.status == .occupied ? propertyStatus.activeSessionID : nil,
@@ -42459,19 +42464,19 @@ final class AppState: ObservableObject {
                 occupancyOwnerDeviceID: propertyStatus.status == .occupied ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID,
-                materialDraftSessionID: draftSessionID,
-                draftOwnerUserID: propertyStatusBadgeState == .draft ? (fastRuntimeDraft?.ownerUserID ?? propertyStatus.ownerUserID) : nil,
-                draftOwnerDeviceID: propertyStatusBadgeState == .draft ? (fastRuntimeDraft?.ownerDeviceID ?? normalizedSupabaseText(propertyStatus.ownerDeviceID)) : nil,
+                materialDraftSessionID: showDraft ? draftSessionID : nil,
+                draftOwnerUserID: showDraft ? (fastRuntimeDraft?.ownerUserID ?? propertyStatus.ownerUserID) : nil,
+                draftOwnerDeviceID: showDraft ? (fastRuntimeDraft?.ownerDeviceID ?? normalizedSupabaseText(propertyStatus.ownerDeviceID)) : nil,
                 finalizedOrExported: propertyStatus.status == .exported || propertyStatusBadgeState == .exported,
                 showLock: propertyStatusShowsLock,
-                showDraft: propertyStatusBadgeState == .draft,
+                showDraft: showDraft,
                 showPendingExport: propertyStatusBadgeState == .pendingExport,
                 showReExport: showReExport,
                 lockReason: propertyStatusShowsLock
                     ? "\(propertyStatusReasonPrefix):owner_mismatch"
                     : "\(propertyStatusReasonPrefix):lock_hidden",
-                draftReason: propertyStatusBadgeState == .draft
-                    ? "\(propertyStatusReasonPrefix):\(fastRuntimeDraft == nil ? "owner_match" : "fast_runtime_draft_index")"
+                draftReason: showDraft
+                    ? "\(propertyStatusReasonPrefix):\(canOverlayFastRuntimeDraft ? "fast_runtime_draft_index" : "owner_match")"
                     : "\(propertyStatusReasonPrefix):draft_hidden_owner_match=\(propertyStatusOwnedByCurrentActor)",
                 pendingExportReason: propertyStatusBadgeState == .pendingExport
                     ? "\(propertyStatusReasonPrefix):pending_export"
@@ -42483,7 +42488,10 @@ final class AppState: ObservableObject {
 
         let localDraft = draftSessionByProperty[propertyID]
         let localPending = pendingExportSessionByProperty[propertyID]
-        let localShowsDraft = localDraft != nil || fastRuntimeDraft != nil
+        let localDraftSessionID = fastRuntimeDraft?.sessionID ?? localDraft?.id
+        let localShowsDraft = localDraftSessionID.map {
+            !completionRequestedSessionIDs.contains($0)
+        } ?? false
         let localShowsPendingExport = localPending != nil
 
         return PropertyCardBadgeModel(
@@ -42493,7 +42501,7 @@ final class AppState: ObservableObject {
             occupancyOwnerDeviceID: nil,
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID,
-            materialDraftSessionID: fastRuntimeDraft?.sessionID ?? localDraft?.id,
+            materialDraftSessionID: localShowsDraft ? localDraftSessionID : nil,
             draftOwnerUserID: fastRuntimeDraft?.ownerUserID,
             draftOwnerDeviceID: fastRuntimeDraft?.ownerDeviceID,
             finalizedOrExported: localShowsPendingExport,
@@ -42519,6 +42527,9 @@ final class AppState: ObservableObject {
             .union(fastRuntimeDraftsByPropertyID.keys)
 
         for propertyID in propertyIDs {
+            let completionRequestedSessionIDs = Set(
+                fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).map { $0.context.sessionID }
+            )
             let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
                 for: propertyID,
                 currentUserID: currentUserID,
@@ -42532,7 +42543,7 @@ final class AppState: ObservableObject {
                     currentUserID: currentUserID,
                     currentDeviceID: currentDeviceID
                 )
-                let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
+                let canOverlayFastRuntimeDraft = fastRuntimeDraft.map { !completionRequestedSessionIDs.contains($0.sessionID) } == true &&
                     basePropertyStatusAnswer.visibleBadgeState != .locked &&
                     basePropertyStatusAnswer.visibleBadgeState != .pendingExport
                 let propertyStatusAnswer = canOverlayFastRuntimeDraft
@@ -42549,10 +42560,14 @@ final class AppState: ObservableObject {
                         currentUserID: currentUserID,
                         currentDeviceID: currentDeviceID
                     )
-                if propertyStatusAnswer.visibleBadgeState == .draft {
+                let draftSessionID = canOverlayFastRuntimeDraft
+                    ? fastRuntimeDraft?.sessionID : propertyStatus.draftSessionID
+                if propertyStatusAnswer.visibleBadgeState == .draft,
+                   draftSessionID.map({ !completionRequestedSessionIDs.contains($0) }) ?? true {
                     next[propertyID] = true
                 }
-            } else if draftSessionByProperty[propertyID] != nil || fastRuntimeDraft != nil {
+            } else if let draftSessionID = fastRuntimeDraft?.sessionID ?? draftSessionByProperty[propertyID]?.id,
+                      !completionRequestedSessionIDs.contains(draftSessionID) {
                 next[propertyID] = true
             }
         }
@@ -45641,6 +45656,7 @@ final class AppState: ObservableObject {
             storageRoot: storageRoot,
             shots: shots
         )
+        refreshPropertyRowDraftBadgeCache()
         let marker = storageRoot
             .appendingPathComponent("Metadata", isDirectory: true)
             .appendingPathComponent("complete-requested-at.json", isDirectory: false)
