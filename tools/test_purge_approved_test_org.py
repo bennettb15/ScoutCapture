@@ -1,6 +1,8 @@
 import datetime as dt
 import json
 import unittest
+from io import BytesIO
+from urllib.error import HTTPError
 
 import purge_approved_test_org as cleanup
 
@@ -42,6 +44,19 @@ class ApprovedTestOrgTests(unittest.TestCase):
             cleanup.verify_keep_set(FakeClient({property_id: {**active, "deleted_at": "2026-10-01T00:00:00Z"}}), manifest)
         with self.assertRaisesRegex(RuntimeError, "protected"):
             cleanup.verify_keep_set(FakeClient({property_id: {**active, "is_archived": True}}), manifest)
+
+    def test_rpc_reports_constraint_without_row_details(self):
+        class FailingClient:
+            def request(self, *_args, **_kwargs):
+                payload = json.dumps({"code": "23503", "message":
+                    'update or delete violates foreign key constraint "example_row_fkey"',
+                    "details": "private property data"}).encode()
+                raise HTTPError("https://example.test", 409, "Conflict", {}, BytesIO(payload))
+
+        with self.assertRaisesRegex(RuntimeError, "SQLSTATE 23503; constraint example_row_fkey") as error:
+            cleanup.rpc(FailingClient(), "private-id", False)
+        self.assertNotIn("private property data", str(error.exception))
+        self.assertNotIn("private-id", str(error.exception))
 
     def test_candidate_rejects_changed_deletion(self):
         candidate = self.manifest["purge"][0]

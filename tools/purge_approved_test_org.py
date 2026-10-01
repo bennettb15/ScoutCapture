@@ -5,6 +5,7 @@ import datetime as dt
 import json
 from pathlib import Path
 import re
+from urllib.error import HTTPError
 
 from purge_expired_properties import Client, listed_storage_files, media_manifest
 
@@ -41,7 +42,20 @@ def verify_candidate(client, manifest, candidate):
 
 
 def rpc(client, property_id, dry_run):
-    return client.request("POST", RPC, {"target_property_id": property_id, "dry_run": dry_run})
+    try:
+        return client.request("POST", RPC, {"target_property_id": property_id, "dry_run": dry_run})
+    except HTTPError as error:
+        # The service response can include row values. Only expose its SQLSTATE and
+        # constraint name to the workflow log; never log property IDs or record data.
+        try:
+            failure = json.loads(error.read())
+        except (ValueError, UnicodeDecodeError):
+            raise RuntimeError(f"Scoped purge HTTP {error.code}; database detail unavailable") from None
+        code = failure.get("code", "unknown")
+        message = failure.get("message", "")
+        constraint = re.search(r'constraint "([A-Za-z_][A-Za-z0-9_]*)"', message)
+        label = constraint.group(1) if constraint else "unknown"
+        raise RuntimeError(f"Scoped purge HTTP {error.code}; SQLSTATE {code}; constraint {label}") from None
 
 
 def main():
