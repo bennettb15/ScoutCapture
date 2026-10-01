@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args=(--limit 5)
+          args=(--limit 20)
           if [[ "${CLEANUP_EXECUTE}" == "true" ]]; then
             args+=(--execute)
           fi
