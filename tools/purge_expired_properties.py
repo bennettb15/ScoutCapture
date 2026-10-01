@@ -142,7 +142,11 @@ def media_manifest(client, prop, allow_legacy_pathless_shots=False):
                 continue
             if table == "shots":
                 bucket = bucket or ORIGINALS
-                if bucket != ORIGINALS or row["session_id"] not in session_ids or not path.startswith(f"sessions/{row['session_id']}/"):
+                if bucket != ORIGINALS:
+                    raise RuntimeError("Shot uses an unexpected Storage bucket")
+                if row["session_id"] not in session_ids:
+                    raise RuntimeError("Shot session is outside its property")
+                if not path.startswith(f"sessions/{row['session_id']}/"):
                     raise RuntimeError("Shot Storage path is outside its session")
             elif bucket not in (SNAPSHOTS, DELIVERABLES) or not path.startswith(f"orgs/{org_id}/properties/{property_id}/"):
                 raise RuntimeError("Storage path is outside its property")
