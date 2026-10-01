@@ -124,6 +124,10 @@ begin
     delete from public.shots where property_id = target_property_id;
     delete from public.session_events where property_id = target_property_id;
     delete from public.sessions where property_id = target_property_id;
+    if to_regclass('public.portal_invite_property_grants') is not null then
+        execute 'delete from public.portal_invite_property_grants where property_id = $1'
+        using target_property_id;
+    end if;
     delete from public.property_access_grants where property_id = target_property_id;
     delete from public.properties where id = target_property_id;
     return true;
