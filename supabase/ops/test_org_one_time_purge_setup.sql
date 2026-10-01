@@ -103,6 +103,10 @@ begin
         return false;
     end if;
 
+    if to_regclass('public.punchlist_activity') is not null then
+        execute 'delete from public.punchlist_activity where property_id = $1'
+        using target_property_id;
+    end if;
     delete from public.observation_updates where property_id = target_property_id;
     delete from public.observations where property_id = target_property_id;
     if to_regclass('public.report_package_email_notifications') is not null then
