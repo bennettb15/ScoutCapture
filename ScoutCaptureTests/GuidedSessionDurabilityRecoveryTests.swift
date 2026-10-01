@@ -4,6 +4,36 @@ import UIKit
 
 @MainActor
 final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
+    func testElevationChecklistCountsSavedTypesAndDistinctAnglesPerElevation() {
+        func capture(_ building: String, _ elevation: String, _ detail: String, _ angle: Int) -> ElevationChecklistCapture {
+            ElevationChecklistCapture(
+                shotID: UUID(), building: building, elevation: elevation,
+                detailType: detail, angleIndex: angle
+            )
+        }
+        let captures = [
+            capture("B1", "North", "Overview", 1),
+            capture("B1", "North", "Overview", 1), // retake is a second photo, not a new angle
+            capture("B1", "North", "Elevation", 1),
+            capture("B1", "North", "Elevation", 2),
+            capture("B1", "North", "Custom Flashing", 1),
+            capture("B1", "North", "Custom Flashing", 2),
+            capture("B1", "West", "Elevation", 1),
+            capture("B2", "North", "Elevation", 3)
+        ]
+        let north = ElevationChecklist.rows(captures: captures, building: "B1", elevation: "North")
+        XCTAssertEqual(north.map(\.title), ["Overview", "Elevation", "Custom Flashing"])
+        XCTAssertEqual(north[0].photoCount, 2)
+        XCTAssertEqual(north[0].angleCount, 1)
+        XCTAssertEqual(north[1].countLabel, "2/3")
+        XCTAssertEqual(north[2].photoCount, 2)
+        XCTAssertEqual(north[2].angleCount, 2)
+        let west = ElevationChecklist.rows(captures: captures, building: "B1", elevation: "West Elevation")
+        XCTAssertEqual(west.map(\.title), ["Overview", "Elevation"])
+        XCTAssertEqual(west[1].countLabel, "1/3")
+        XCTAssertEqual(ElevationChecklist.rows(captures: captures, building: "B2", elevation: "North")[1].countLabel, "1/3")
+    }
+
     func testFastLaneCaptureCheckpointsDraftAndSessionJSONAtShutter() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FastLaneCheckpoint-\(UUID().uuidString)", isDirectory: true)

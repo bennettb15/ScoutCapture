@@ -3746,8 +3746,8 @@ struct ContentView: View {
     @State private var flaggedPendingCaptureCount: Int = 0
     @State private var isFinalizingCapturePersistence: Bool = false
     @State private var showCoreElevationChecklist: Bool = false
-    @State private var coreElevationChecklistRowsSnapshot: [CoreElevationChecklistRowState] =
-        CoreElevationChecklistCategory.allCases.map { CoreElevationChecklistRowState(category: $0, count: 0) }
+    @State private var coreElevationChecklistRowsSnapshot: [ElevationChecklistRow] =
+        ElevationChecklist.rows(captures: [], building: "", elevation: "")
     @State private var activeIssuesOpenRefreshWorkItem: DispatchWorkItem? = nil
     @State private var firstCameraFrameHydrationWorkItem: DispatchWorkItem? = nil
     @State private var didRunFirstCameraFrameHydration: Bool = false
@@ -6435,144 +6435,28 @@ struct ContentView: View {
         detailTypesModel.selected(for: locationMode, profile: captureProfile)
     }
 
-    private enum CoreElevationChecklistCategory: String, CaseIterable, Identifiable {
-        case overview
-        case elevation
-        case roofline
-        case cladding
-        case foundation
-        case entry
-        case openings
-        case drainage
-        case hardscape
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .overview:
-                return "Overview"
-            case .elevation:
-                return "Elevation (Center / Left / Right)"
-            case .roofline:
-                return "Roofline / Top"
-            case .cladding:
-                return "Cladding / Facade"
-            case .foundation:
-                return "Foundation / Ground Line"
-            case .entry:
-                return "Entry / Access"
-            case .openings:
-                return "Openings"
-            case .drainage:
-                return "Drainage"
-            case .hardscape:
-                return "Hardscape Interface"
-            }
+    private var coreElevationChecklistRows: [ElevationChecklistRow] {
+        guard let currentSession = appState.currentSession else {
+            return ElevationChecklist.rows(captures: [], building: selectedBuilding, elevation: elevation)
         }
-
-        var note: String? {
-            switch self {
-            case .overview, .elevation:
-                return nil
-            case .roofline:
-                return "soffit, fascia, gutter edge"
-            case .cladding:
-                return "siding, facade, wall material"
-            case .foundation:
-                return "foundation, grade, wall interface"
-            case .entry:
-                return "doors, stairs, overhangs"
-            case .openings:
-                return "windows, trim, sealant"
-            case .drainage:
-                return "outlets + termination"
-            case .hardscape:
-                return "paving + slope"
-            }
+        let propertyID = appState.selectedPropertyID ?? currentSession.propertyID
+        let sessionID = currentSession.id
+        guard let metadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: sessionID) else {
+            return ElevationChecklist.rows(captures: [], building: selectedBuilding, elevation: elevation)
         }
-
-        var showsCompletionIndicator: Bool {
-            self == .overview || self == .elevation
+        let originals = localStore.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+        let captures = metadata.shots.compactMap { shot -> ElevationChecklistCapture? in
+            guard shot.sessionID == sessionID, shot.isActiveForDefaultWorkflows,
+                  shot.createdAt >= currentSession.startedAt else { return nil }
+            if let endedAt = currentSession.endedAt, shot.createdAt > endedAt { return nil }
+            guard !shot.originalFilename.isEmpty,
+                  FileManager.default.fileExists(atPath: originals.appendingPathComponent(shot.originalFilename).path) else { return nil }
+            return ElevationChecklistCapture(
+                shotID: shot.shotID, building: shot.building, elevation: shot.elevation,
+                detailType: shot.detailType, angleIndex: shot.angleIndex
+            )
         }
-    }
-
-    private struct CoreElevationChecklistRowState: Identifiable {
-        let category: CoreElevationChecklistCategory
-        let count: Int
-
-        var id: CoreElevationChecklistCategory { category }
-
-        private var requiredCount: Int {
-            switch category {
-            case .overview:
-                return 1
-            case .elevation:
-                return 3
-            default:
-                return 0
-            }
-        }
-
-        var isComplete: Bool {
-            switch category {
-            case .overview, .elevation:
-                return count >= requiredCount
-            default:
-                return false
-            }
-        }
-
-        var countLabel: String {
-            switch category {
-            case .overview, .elevation:
-                return "\(min(count, requiredCount))/\(requiredCount)"
-            default:
-                return "\(count)"
-            }
-        }
-    }
-
-    private static let coreElevationChecklistCategoryByShotType: [String: CoreElevationChecklistCategory] = [
-        "overview": .overview,
-        "elevation": .elevation,
-        "roofline": .roofline,
-        "chimney": .roofline,
-        "canopy / awning": .roofline,
-        "cladding / siding": .cladding,
-        "cladding / facade": .cladding,
-        "foundation": .foundation,
-        "entry / porch": .entry,
-        "porch": .entry,
-        "entry": .entry,
-        "storefront": .entry,
-        "loading dock": .entry,
-        "window": .openings,
-        "window / glazing": .openings,
-        "downspout": .drainage,
-        "downspouts": .drainage,
-        "utility / hvac": .drainage,
-        "mechanical equipment": .drainage,
-        "trash / service area": .drainage,
-        "driveway / garage": .hardscape,
-        "backyard / patio": .hardscape,
-        "landscaping": .hardscape,
-        "fence / gate": .hardscape,
-        "pool / outdoor amenities": .hardscape,
-        "sidewalk": .hardscape,
-        "exterior stairs / ramp": .hardscape,
-        "exterior stairs": .hardscape,
-        "parking area": .hardscape,
-        "site circulation": .hardscape,
-        "landscape / hardscape": .hardscape,
-        "signage": .hardscape
-    ]
-
-    private var coreElevationChecklistRows: [CoreElevationChecklistRowState] {
-        let counts = coreElevationChecklistCounts()
-        return CoreElevationChecklistCategory.allCases.map { category in
-            CoreElevationChecklistRowState(category: category, count: counts[category, default: 0])
-        }
+        return ElevationChecklist.rows(captures: captures, building: selectedBuilding, elevation: elevation)
     }
 
     private func refreshCoreElevationChecklistSnapshot() {
@@ -13415,36 +13299,6 @@ extension ContentView {
         return true
     }
 
-    private func coreElevationChecklistCounts() -> [CoreElevationChecklistCategory: Int] {
-        let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
-        guard let currentSession = appState.currentSession else {
-            return [:]
-        }
-
-        let propertyID = appState.selectedPropertyID ?? currentSession.propertyID
-        let sessionID = currentSession.id
-        guard let metadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: sessionID) else {
-            return [:]
-        }
-
-        return metadata.shots.reduce(into: [CoreElevationChecklistCategory: Int]()) { counts, shot in
-            guard shot.sessionID == sessionID else { return }
-            guard shot.createdAt >= currentSession.startedAt else { return }
-            if let endedAt = currentSession.endedAt, shot.createdAt > endedAt {
-                return
-            }
-
-            let shotElevation = CanonicalElevation.normalize(shot.elevation) ?? shot.elevation
-            guard shotElevation.caseInsensitiveCompare(normalizedElevation) == .orderedSame else { return }
-
-            let detailTypeKey = shot.detailType
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            guard let category = Self.coreElevationChecklistCategoryByShotType[detailTypeKey] else { return }
-            counts[category, default: 0] += 1
-        }
-    }
-
     private func sessionShotIDsForActiveSession(propertyID: UUID, sessionID: UUID?) -> Set<UUID> {
         currentSessionMaterialShotIDs(
             propertyID: propertyID,
@@ -18533,7 +18387,7 @@ extension ContentView {
 
     private struct CoreElevationChecklistSheet: View {
         let elevationTitle: String
-        let rows: [CoreElevationChecklistRowState]
+        let rows: [ElevationChecklistRow]
         let onClose: () -> Void
         @Environment(\.colorScheme) private var colorScheme
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
@@ -18638,15 +18492,15 @@ extension ContentView {
             }
         }
 
-        private func coreChecklistRow(_ row: CoreElevationChecklistRowState) -> some View {
+        private func coreChecklistRow(_ row: ElevationChecklistRow) -> some View {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(row.category.title)
+                    Text(row.title)
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(theme.label)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if let note = row.category.note {
+                    if let note = row.note {
                         Text(note)
                             .font(.system(size: 12, weight: .regular))
                             .foregroundStyle(.secondary)
@@ -18661,7 +18515,7 @@ extension ContentView {
                     .foregroundStyle(theme.label)
                     .frame(minWidth: 36, alignment: .trailing)
 
-                if row.category.showsCompletionIndicator {
+                if row.showsCompletionIndicator {
                     Image(systemName: row.isComplete ? "checkmark.circle.fill" : "checkmark.circle")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(row.isComplete ? Color.green : Color.gray)

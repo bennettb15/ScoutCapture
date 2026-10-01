@@ -14031,121 +14031,6 @@ private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
     }
 }
 
-private enum FastLaneCoreChecklistCategory: String, CaseIterable, Identifiable {
-    case overview
-    case elevation
-    case roofline
-    case cladding
-    case foundation
-    case entry
-    case openings
-    case drainage
-    case hardscape
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .overview:
-            return "Overview"
-        case .elevation:
-            return "Elevation (Center / Left / Right)"
-        case .roofline:
-            return "Roofline / Top"
-        case .cladding:
-            return "Cladding / Facade"
-        case .foundation:
-            return "Foundation / Ground Line"
-        case .entry:
-            return "Entry / Access"
-        case .openings:
-            return "Openings"
-        case .drainage:
-            return "Drainage"
-        case .hardscape:
-            return "Hardscape Interface"
-        }
-    }
-
-    var note: String? {
-        switch self {
-        case .overview, .elevation:
-            return nil
-        case .roofline:
-            return "soffit, fascia, gutter edge"
-        case .cladding:
-            return "siding, facade, wall material"
-        case .foundation:
-            return "foundation, grade, wall interface"
-        case .entry:
-            return "doors, stairs, overhangs"
-        case .openings:
-            return "windows, trim, sealant"
-        case .drainage:
-            return "outlets + termination"
-        case .hardscape:
-            return "paving + slope"
-        }
-    }
-
-    var requiredCount: Int {
-        switch self {
-        case .overview:
-            return 1
-        case .elevation:
-            return 3
-        default:
-            return 0
-        }
-    }
-
-    var showsCompletionIndicator: Bool {
-        self == .overview || self == .elevation
-    }
-
-    static func category(for detailType: String) -> FastLaneCoreChecklistCategory? {
-        switch detailType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "overview":
-            return .overview
-        case "elevation":
-            return .elevation
-        case "roofline", "chimney", "canopy / awning":
-            return .roofline
-        case "cladding / siding", "cladding / facade":
-            return .cladding
-        case "foundation":
-            return .foundation
-        case "entry / porch", "porch", "entry", "storefront", "loading dock":
-            return .entry
-        case "window", "window / glazing":
-            return .openings
-        case "downspout", "downspouts", "utility / hvac", "mechanical equipment", "trash / service area":
-            return .drainage
-        case "driveway / garage", "backyard / patio", "landscaping", "fence / gate", "pool / outdoor amenities", "sidewalk", "exterior stairs / ramp", "exterior stairs", "parking area", "site circulation", "landscape / hardscape", "signage":
-            return .hardscape
-        default:
-            return nil
-        }
-    }
-}
-
-private struct FastLaneCoreChecklistRowState: Identifiable, Equatable {
-    let category: FastLaneCoreChecklistCategory
-    let count: Int
-
-    var id: FastLaneCoreChecklistCategory { category }
-
-    var isComplete: Bool {
-        guard category.requiredCount > 0 else { return false }
-        return count >= category.requiredCount
-    }
-
-    var countLabel: String {
-        guard category.requiredCount > 0 else { return "\(count)" }
-        return "\(min(count, category.requiredCount))/\(category.requiredCount)"
-    }
-}
-
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
@@ -14238,8 +14123,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneReferenceOverlayOpacity: Double = 0.45
     @State private var showFastLaneArmedReferenceMenu: Bool = false
     @State private var showFastLaneCoreChecklist: Bool = false
-    @State private var fastLaneCoreChecklistRows: [FastLaneCoreChecklistRowState] =
-        FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
+    @State private var fastLaneCoreChecklistRows: [ElevationChecklistRow] =
+        ElevationChecklist.rows(captures: [], building: "", elevation: "")
+    @State private var fastLaneCoreChecklistRequestID = UUID()
     @State private var didRefreshFastLaneSideControlCounts: Bool = false
     @State private var didRefreshFastLaneIssuePayload: Bool = false
     @State private var isRefreshingFastLaneSideControlCounts: Bool = false
@@ -17840,48 +17726,44 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func refreshFastLaneCoreChecklistRows() {
-        let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
-        guard let root else {
-            fastLaneCoreChecklistRows = Self.emptyFastLaneCoreChecklistRows
-            return
-        }
-
+        let building = fastMetadataContext.building
+        let elevation = fastMetadataContext.elevation
+        let requestID = UUID()
+        fastLaneCoreChecklistRequestID = requestID
+        fastLaneCoreChecklistRows = ElevationChecklist.rows(captures: [], building: building, elevation: elevation)
+        guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else { return }
         let metadataURL = root
             .appendingPathComponent("Metadata", isDirectory: true)
             .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let sessionID = context.sessionID
+        let propertyID = context.propertyID
 
         DispatchQueue.global(qos: .utility).async {
-            let rows: [FastLaneCoreChecklistRowState] = {
-                guard let data = try? Data(contentsOf: metadataURL) else {
-                    return Self.emptyFastLaneCoreChecklistRows
-                }
+            let captures: [ElevationChecklistCapture] = {
+                guard let data = try? Data(contentsOf: metadataURL) else { return [] }
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
-                guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
-                    return Self.emptyFastLaneCoreChecklistRows
-                }
-
-                let counts = shots
-                    .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
-                    .reduce(into: [FastLaneCoreChecklistCategory: Int]()) { partial, shot in
-                        let detailType = shot.metadataContext?.detailType ?? ""
-                        guard let category = FastLaneCoreChecklistCategory.category(for: detailType) else { return }
-                        partial[category, default: 0] += 1
-                    }
-
-                return FastLaneCoreChecklistCategory.allCases.map { category in
-                    FastLaneCoreChecklistRowState(category: category, count: counts[category, default: 0])
+                guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else { return [] }
+                return shots.compactMap { shot in
+                    guard shot.sessionID == sessionID, shot.propertyID == propertyID,
+                          let metadata = shot.metadataContext,
+                          !shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          FileManager.default.fileExists(atPath: root.appendingPathComponent(shot.originalRelativePath).path) else { return nil }
+                    return ElevationChecklistCapture(
+                        shotID: shot.id, building: metadata.building, elevation: metadata.elevation,
+                        detailType: metadata.detailType, angleIndex: metadata.angleIndex
+                    )
                 }
             }()
-
             DispatchQueue.main.async {
-                fastLaneCoreChecklistRows = rows
+                guard fastLaneCoreChecklistRequestID == requestID,
+                      fastMetadataContext.building == building,
+                      fastMetadataContext.elevation == elevation else { return }
+                fastLaneCoreChecklistRows = ElevationChecklist.rows(
+                    captures: captures, building: building, elevation: elevation
+                )
             }
         }
-    }
-
-    private static var emptyFastLaneCoreChecklistRows: [FastLaneCoreChecklistRowState] {
-        FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
     }
 
     private func pruneFastLaneRetakenIssueRecords(
@@ -20245,7 +20127,7 @@ private struct FastLaneGuidedChecklistRow: View {
 
 private struct FastLaneCoreChecklistSheet: View {
     let elevationTitle: String
-    let rows: [FastLaneCoreChecklistRowState]
+    let rows: [ElevationChecklistRow]
     let onClose: () -> Void
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
 
@@ -20337,15 +20219,15 @@ private struct FastLaneCoreChecklistSheet: View {
         }
     }
 
-    private func coreChecklistRow(_ row: FastLaneCoreChecklistRowState) -> some View {
+    private func coreChecklistRow(_ row: ElevationChecklistRow) -> some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(row.category.title)
+                Text(row.title)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if let note = row.category.note {
+                if let note = row.note {
                     Text(note)
                         .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(.secondary)
@@ -20360,7 +20242,7 @@ private struct FastLaneCoreChecklistSheet: View {
                 .foregroundStyle(.primary)
                 .frame(minWidth: 36, alignment: .trailing)
 
-            if row.category.showsCompletionIndicator {
+            if row.showsCompletionIndicator {
                 Image(systemName: row.isComplete ? "checkmark.circle.fill" : "checkmark.circle")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(row.isComplete ? Color.green : Color.gray)

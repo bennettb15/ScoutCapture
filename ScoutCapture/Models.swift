@@ -31,6 +31,76 @@ enum CanonicalElevation {
     }
 }
 
+// A camera checklist is a view of captured material, not a predefined list of detail names.
+struct ElevationChecklistCapture: Equatable {
+    let shotID: UUID
+    let building: String
+    let elevation: String
+    let detailType: String
+    let angleIndex: Int
+}
+
+struct ElevationChecklistRow: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let photoCount: Int
+    let angleCount: Int
+    let targetAngleCount: Int?
+
+    var note: String? {
+        targetAngleCount == nil ? "\(photoCount) photo\(photoCount == 1 ? "" : "s")" : nil
+    }
+
+    var countLabel: String {
+        if let targetAngleCount { return "\(angleCount)/\(targetAngleCount)" }
+        return "\(angleCount) angle\(angleCount == 1 ? "" : "s")"
+    }
+
+    var showsCompletionIndicator: Bool { targetAngleCount != nil }
+    var isComplete: Bool { targetAngleCount.map { angleCount >= $0 } ?? false }
+}
+
+enum ElevationChecklist {
+    static func rows(
+        captures: [ElevationChecklistCapture],
+        building: String,
+        elevation: String
+    ) -> [ElevationChecklistRow] {
+        func key(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let buildingKey = key(building)
+        let elevationKey = key(CanonicalElevation.normalize(elevation) ?? elevation)
+        var grouped: [String: (title: String, photos: Int, angles: Set<Int>)] = [:]
+        var seenShots: Set<UUID> = []
+        for capture in captures {
+            guard seenShots.insert(capture.shotID).inserted,
+                  key(capture.building) == buildingKey,
+                  key(CanonicalElevation.normalize(capture.elevation) ?? capture.elevation) == elevationKey else { continue }
+            let title = capture.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { continue }
+            let detailKey = key(title)
+            var group = grouped[detailKey] ?? (title: title, photos: 0, angles: Set<Int>())
+            group.photos += 1
+            group.angles.insert(max(1, capture.angleIndex))
+            grouped[detailKey] = group
+        }
+        func row(_ id: String, title: String, target: Int?) -> ElevationChecklistRow {
+            let group = grouped[id]
+            return ElevationChecklistRow(
+                id: id, title: title, photoCount: group?.photos ?? 0,
+                angleCount: group?.angles.count ?? 0, targetAngleCount: target
+            )
+        }
+        let summary = [
+            row("overview", title: "Overview", target: 1),
+            row("elevation", title: "Elevation", target: 3)
+        ]
+        let details = grouped.keys.filter { $0 != "overview" && $0 != "elevation" }.sorted()
+        return summary + details.map { key in row(key, title: grouped[key]!.title, target: nil) }
+    }
+}
+
 enum CaptureProfile: String, Codable, CaseIterable, Equatable {
     case residential
     case commercial
