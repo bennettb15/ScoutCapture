@@ -42,6 +42,23 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(manifest[retention.SNAPSHOTS], ["orgs/o/properties/p/sessions/s1/snapshots/a.json"])
         self.assertEqual(manifest[retention.DELIVERABLES], ["orgs/o/properties/p/sessions/s1/previews/a.jpg"])
 
+    def test_legacy_pathless_uploaded_shot_uses_recursive_session_listing_only_when_scoped(self):
+        client = FakeClient(None)
+        original_list_files = client.list_files
+
+        def listed(bucket, folder):
+            if bucket == retention.ORIGINALS and folder == "sessions/s1":
+                return ["sessions/s1/shots/legacy/photo.heic"]
+            return original_list_files(bucket, folder)
+
+        client.list_files = listed
+        with self.assertRaisesRegex(RuntimeError, "lacks a Storage path"):
+            retention.media_manifest(client, {"id": "p", "org_id": "o"})
+        manifest = retention.media_manifest(
+            client, {"id": "p", "org_id": "o"}, allow_legacy_pathless_shots=True)
+        self.assertEqual(manifest[retention.ORIGINALS],
+                         ["sessions/s1/shots/legacy/photo.heic"])
+
     def test_refuses_media_outside_property(self):
         with self.assertRaisesRegex(RuntimeError, "outside its session"):
             retention.media_manifest(FakeClient("sessions/other/shots/a/photo.heic"),

@@ -118,7 +118,7 @@ def listed_storage_files(client, org_id, property_id, session_ids):
     return files
 
 
-def media_manifest(client, prop):
+def media_manifest(client, prop, allow_legacy_pathless_shots=False):
     org_id, property_id = prop["org_id"], prop["id"]
     sessions = client.rows("sessions", select="id", property_id=f"eq.{property_id}")
     session_ids = {row["id"] for row in sessions}
@@ -133,7 +133,12 @@ def media_manifest(client, prop):
             bucket = row.get(bucket_column)
             if not path:
                 if table == "shots" and row.get("upload_state") == "uploaded":
-                    raise RuntimeError("Uploaded shot lacks a Storage path")
+                    if not allow_legacy_pathless_shots:
+                        raise RuntimeError("Uploaded shot lacks a Storage path")
+                    if bucket not in (None, ORIGINALS) or row["session_id"] not in session_ids:
+                        raise RuntimeError("Legacy shot is outside its session bucket")
+                    # The exact-ID Test Org cleanup recursively lists the entire
+                    # sessions/<id> folder, including photos absent from shot rows.
                 continue
             if table == "shots":
                 bucket = bucket or ORIGINALS
