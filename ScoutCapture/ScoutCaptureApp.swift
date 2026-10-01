@@ -13949,8 +13949,8 @@ private struct FastLaneSharedActionMenuOverlay: View {
     }
 }
 
-private struct FastLaneUnarmedTradeSnapshot {
-    let trade: String?
+private struct FastLaneUnarmedMetadataSnapshot {
+    let context: AppState.FastRuntimeCaptureMetadataContext
 }
 
 private enum FastLaneCaptureIntent: Equatable {
@@ -14111,7 +14111,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isLoadingFastLaneSideControlSheet: Bool = false
     @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
     @State private var fastLaneCaptureIntent: FastLaneCaptureIntent = .free
-    @State private var fastLaneUnarmedTradeSnapshot: FastLaneUnarmedTradeSnapshot?
+    @State private var fastLaneUnarmedMetadataSnapshot: FastLaneUnarmedMetadataSnapshot?
     @State private var fastLaneGuidedThumbnailPathByID: [UUID: String] = [:]
     @State private var fastLaneGuidedReferencePathByID: [UUID: String] = [:]
     @State private var fastLaneGuidedReferencePathByKey: [String: String] = [:]
@@ -15789,7 +15789,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             capturedCount += 1
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
                             let nextBaseContext: AppState.FastRuntimeCaptureMetadataContext
-                            if let savedContext = saveResult.shot?.metadataContext {
+                            if completedIntent != .free,
+                               let unarmedContext = fastLaneUnarmedMetadataSnapshot?.context {
+                                nextBaseContext = fastLaneFreeMetadataContext(from: unarmedContext)
+                                chromeLocationMode = CameraChromeLocationMode(
+                                    fastRuntimeRawValue: nextBaseContext.locationMode
+                                )
+                            } else if let savedContext = saveResult.shot?.metadataContext {
                                 nextBaseContext = AppState.FastRuntimeCaptureMetadataContext(
                                     captureProfile: savedContext.captureProfile ?? fastLaneCaptureProfile.rawValue,
                                     locationMode: savedContext.locationMode,
@@ -15816,7 +15822,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                 )
                             }
                             captureErrorMessage = nil
-                            fastLaneUnarmedTradeSnapshot = nil
+                            fastLaneUnarmedMetadataSnapshot = nil
                             fastLaneCaptureIntent = .free
                             clearFastLaneArmedReferenceState()
                             fastMetadataContext = nextBaseContext.withAngleIndex(
@@ -16701,7 +16707,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func armFastLaneGuidedShotUnchecked(_ guidedShot: GuidedShot) {
-        rememberFastLaneUnarmedTradeIfNeeded()
+        rememberFastLaneUnarmedMetadataIfNeeded()
         clearFastLaneArmedReferenceState()
         fastLaneCaptureIntent = .guided(guidedShot.id)
         let building = fastLaneTrimmedNonEmpty(guidedShot.building) ?? fastMetadataContext.building
@@ -16760,7 +16766,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         intentSourceOverride: String?
     ) {
         let intent: FastLaneCaptureIntent = .flagged(observation.id)
-        rememberFastLaneUnarmedTradeIfNeeded()
+        rememberFastLaneUnarmedMetadataIfNeeded()
         clearFastLaneArmedReferenceState()
         fastLaneCaptureIntent = intent
 
@@ -17295,16 +17301,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneReferenceOverlayOpacity = 0.45
     }
 
-    private func rememberFastLaneUnarmedTradeIfNeeded() {
-        guard fastLaneUnarmedTradeSnapshot == nil else { return }
-        fastLaneUnarmedTradeSnapshot = FastLaneUnarmedTradeSnapshot(
-            trade: fastLaneTrimmedNonEmpty(fastMetadataContext.trade)
+    private func rememberFastLaneUnarmedMetadataIfNeeded() {
+        guard fastLaneUnarmedMetadataSnapshot == nil else { return }
+        fastLaneUnarmedMetadataSnapshot = FastLaneUnarmedMetadataSnapshot(
+            context: fastLaneFreeMetadataContext(from: fastMetadataContext)
         )
     }
 
     private func fastLaneRestoredUnarmedTrade(fallback: String?) -> String? {
-        guard let fastLaneUnarmedTradeSnapshot else { return fallback }
-        return fastLaneUnarmedTradeSnapshot.trade
+        guard let fastLaneUnarmedMetadataSnapshot else { return fallback }
+        return fastLaneUnarmedMetadataSnapshot.context.trade
     }
 
     private func clearFastLaneArmedCapture() {
@@ -17312,8 +17318,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneRetakeGuidedID = nil
         fastLaneRetakeIssueID = nil
         clearFastLaneArmedReferenceState()
-        let clearedContext = fastLaneFreeMetadataContext(from: fastMetadataContext)
-        fastLaneUnarmedTradeSnapshot = nil
+        let clearedContext = fastLaneFreeMetadataContext(
+            from: fastLaneUnarmedMetadataSnapshot?.context ?? fastMetadataContext
+        )
+        fastLaneUnarmedMetadataSnapshot = nil
         fastMetadataContext = clearedContext.withAngleIndex(
             fastLaneAngleIndexForNextCapture(clearedContext)
         )
@@ -18766,7 +18774,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 tempStorageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
                 capturedPhotoCount: capturedCount,
                 lastMetadataContext: isFastLaneCaptureIntentArmed
-                    ? fastLaneFreeMetadataContext(from: fastMetadataContext)
+                    ? fastLaneFreeMetadataContext(
+                        from: fastLaneUnarmedMetadataSnapshot?.context ?? fastMetadataContext
+                    )
                     : fastLaneFreeMetadataContextIfNeeded(fastMetadataContext)
             )
             await MainActor.run {
