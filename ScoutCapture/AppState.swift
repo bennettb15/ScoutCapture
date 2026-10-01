@@ -48272,12 +48272,16 @@ final class AppState: ObservableObject {
             } ?? .distantPast
             for draft in drafts {
                 let metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: draft.id)
+                // Property UUID and the local session path identify these
+                // originals. The demo property's organization can change after
+                // capture; its old org ID must not hide a newer local draft.
                 guard metadata.status == .draft,
                       !metadata.isSealed,
-                      metadata.orgID == nil || metadata.orgID == orgID,
+                      metadata.propertyID == propertyID,
+                      metadata.sessionID == draft.id,
                       metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id else {
 #if DEBUG
-                    print("[FastLaneRecovery] excluded session=\(draft.id.uuidString.prefix(8)) metadata_status=\(metadata.status.rawValue) sealed=\(metadata.isSealed) org_match=\(metadata.orgID == nil || metadata.orgID == orgID) user_match=\(metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id)")
+                    print("[FastLaneRecovery] excluded session=\(draft.id.uuidString.prefix(8)) metadata_status=\(metadata.status.rawValue) sealed=\(metadata.isSealed) identity_match=\(metadata.propertyID == propertyID && metadata.sessionID == draft.id) user_match=\(metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id)")
 #endif
                     continue
                 }

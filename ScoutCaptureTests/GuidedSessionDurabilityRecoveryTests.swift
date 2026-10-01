@@ -133,6 +133,7 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         var unlinked = try store.loadSessionMetadata(propertyID: property.id, sessionID: liveSessionID)
         for index in unlinked.shots.indices { unlinked.shots[index].isGuided = false }
         unlinked.guidedShots = []
+        unlinked.orgID = UUID() // The demo property moved to a different organization.
         try store.saveSessionMetadataAtomically(
             propertyID: property.id, sessionID: liveSessionID, metadata: unlinked
         )
