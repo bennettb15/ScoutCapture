@@ -107,6 +107,17 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(client.list_files(retention.ORIGINALS, "sessions/s1"),
                          ["sessions/s1/child/photo.heic"])
 
+    def test_occupancy_check_requires_a_boolean(self):
+        client = retention.Client.__new__(retention.Client)
+        client.request = Mock(return_value=True)
+        self.assertTrue(client.has_active_occupancy("property-id"))
+        client.request.assert_called_once_with(
+            "POST", "/rest/v1/rpc/property_has_active_occupancy",
+            {"target_property_id": "property-id"})
+        client.request.return_value = None
+        with self.assertRaisesRegex(RuntimeError, "Unexpected occupancy"):
+            client.has_active_occupancy("property-id")
+
     def test_storage_delete_batches_at_api_limit(self):
         client = retention.Client.__new__(retention.Client)
         client.request = Mock(return_value=[])

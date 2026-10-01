@@ -94,6 +94,13 @@ class Client:
         if result is not False:
             raise RuntimeError("Database purge function preflight failed")
 
+    def has_active_occupancy(self, property_id):
+        result = self.request("POST", "/rest/v1/rpc/property_has_active_occupancy",
+                              {"target_property_id": property_id})
+        if not isinstance(result, bool):
+            raise RuntimeError("Unexpected occupancy check response")
+        return result
+
     def finalize(self, property_id):
         result = self.request("POST", "/rest/v1/rpc/finalize_expired_property_purge",
                               {"target_property_id": property_id})
@@ -167,6 +174,8 @@ def main():
     if args.limit < 1 or args.limit > 100:
         raise SystemExit("--limit must be between 1 and 100")
     client = Client()
+    if client.has_active_occupancy("00000000-0000-0000-0000-000000000000"):
+        raise RuntimeError("Database occupancy guard preflight failed")
     if args.execute:
         client.preflight_finalizer()
     now = dt.datetime.now(dt.timezone.utc)
@@ -175,15 +184,24 @@ def main():
                              deleted_at=f"lte.{cutoff}", is_archived="eq.false",
                              order="deleted_at.asc")
     processed = 0
+    blocked_active_occupancy = 0
     media_total = 0
-    for candidate in candidates[:args.limit]:
+    for candidate in candidates:
+        if processed >= args.limit:
+            break
         current = client.rows("properties", select="id,org_id,is_archived,deleted_at",
                               id=f"eq.{candidate['id']}")
         if len(current) != 1 or not expired_non_archived(current[0], now):
             continue
+        if client.has_active_occupancy(candidate["id"]):
+            blocked_active_occupancy += 1
+            continue
         manifest = media_manifest(client, current[0])
         file_count = sum(map(len, manifest.values()))
         if args.execute:
+            if client.has_active_occupancy(candidate["id"]):
+                blocked_active_occupancy += 1
+                continue
             for bucket, paths in manifest.items():
                 client.remove_files(bucket, paths)
             session_ids = {row["id"] for row in client.rows(
@@ -195,6 +213,7 @@ def main():
         media_total += file_count
         processed += 1
     print(json.dumps({"eligible": len(candidates), "processed": processed,
+                      "blocked_active_occupancy": blocked_active_occupancy,
                       "media_total": media_total,
                       "mode": "execute" if args.execute else "dry_run"}))
 
