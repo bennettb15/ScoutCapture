@@ -58,11 +58,73 @@ def rpc(client, property_id, dry_run):
         raise RuntimeError(f"Scoped purge HTTP {error.code}; SQLSTATE {code}; constraint {label}") from None
 
 
+def audit_remaining(client, manifest):
+    verify_keep_set(client, manifest)
+    totals = {
+        "remaining": 0,
+        "with_occupancy": 0,
+        "with_locked_sessions": 0,
+        "occupancy_updated_after_deletion": 0,
+        "locks_updated_after_deletion": 0,
+        "uploaded_shots_without_path": 0,
+        "shot_paths_in_another_property_session": 0,
+        "shot_paths_outside_property": 0,
+    }
+    for candidate in manifest["purge"]:
+        current = verify_candidate(client, manifest, candidate)
+        if current is None:
+            continue
+        totals["remaining"] += 1
+        deleted_at = utc_timestamp(candidate["deleted_at"])
+        occupancy = client.rows("property_session_occupancy",
+            select="occupied_by_user_id,occupied_by_device_id,occupied_at,updated_at",
+            property_id=f"eq.{candidate['id']}")
+        active_occupancy = any(row.get("occupied_by_user_id") or
+            (row.get("occupied_by_device_id") or "").strip() or row.get("occupied_at")
+            for row in occupancy)
+        if active_occupancy:
+            totals["with_occupancy"] += 1
+            if any(row.get("updated_at") and utc_timestamp(row["updated_at"]) > deleted_at
+                   for row in occupancy):
+                totals["occupancy_updated_after_deletion"] += 1
+        sessions = client.rows("sessions",
+            select="id,deleted_at,locked_by_user_id,locked_by_device_id,locked_at,updated_at",
+            property_id=f"eq.{candidate['id']}")
+        session_ids = {row["id"] for row in sessions}
+        locked = [row for row in sessions if row.get("deleted_at") is None and
+            (row.get("locked_by_user_id") or
+             (row.get("locked_by_device_id") or "").strip() or row.get("locked_at"))]
+        if locked:
+            totals["with_locked_sessions"] += 1
+            if any(row.get("updated_at") and utc_timestamp(row["updated_at"]) > deleted_at
+                   for row in locked):
+                totals["locks_updated_after_deletion"] += 1
+        shots = client.rows("shots",
+            select="session_id,storage_bucket,storage_path,upload_state",
+            property_id=f"eq.{candidate['id']}")
+        for shot in shots:
+            path = shot.get("storage_path")
+            if not path:
+                if shot.get("upload_state") == "uploaded":
+                    totals["uploaded_shots_without_path"] += 1
+                continue
+            if shot.get("storage_bucket") not in (None, "scoutcapture-originals") or not any(
+                    path.startswith(f"sessions/{sid}/") for sid in session_ids):
+                totals["shot_paths_outside_property"] += 1
+            elif not path.startswith(f"sessions/{shot['session_id']}/"):
+                totals["shot_paths_in_another_property_session"] += 1
+    verify_keep_set(client, manifest)
+    print(json.dumps({**totals, "mode": "audit"}))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
+    if args.execute and args.audit_only:
+        raise SystemExit("--execute and --audit-only cannot be combined")
     if args.limit < 1 or args.limit > 20:
         raise SystemExit("--limit must be between 1 and 20")
     manifest = json.loads(MANIFEST.read_text())
@@ -73,6 +135,9 @@ def main():
         raise RuntimeError("Approved and protected IDs overlap")
 
     client = Client()
+    if args.audit_only:
+        audit_remaining(client, manifest)
+        return
     verify_keep_set(client, manifest)
     remaining = 0
     processed = 0

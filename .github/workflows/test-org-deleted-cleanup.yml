@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      audit_only:
+        description: "Read-only aggregate audit of legacy shots and property locks"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -24,6 +29,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
       CLEANUP_EXECUTE: ${{ inputs.execute }}
+      CLEANUP_AUDIT: ${{ inputs.audit_only }}
     steps:
       - uses: actions/checkout@v4
       - name: Validate service configuration
@@ -41,5 +47,8 @@ jobs:
           args=(--limit 20)
           if [[ "${CLEANUP_EXECUTE}" == "true" ]]; then
             args+=(--execute)
+          fi
+          if [[ "${CLEANUP_AUDIT}" == "true" ]]; then
+            args+=(--audit-only)
           fi
           python3 tools/purge_approved_test_org.py "${args[@]}"
