@@ -47,13 +47,11 @@ struct ElevationChecklistRow: Identifiable, Equatable {
     let angleCount: Int
     let targetAngleCount: Int?
 
-    var note: String? {
-        targetAngleCount == nil ? "\(photoCount) photo\(photoCount == 1 ? "" : "s")" : nil
-    }
+    var note: String? { nil }
 
     var countLabel: String {
         if let targetAngleCount { return "\(angleCount)/\(targetAngleCount)" }
-        return "\(angleCount) angle\(angleCount == 1 ? "" : "s")"
+        return "\(photoCount)"
     }
 
     var showsCompletionIndicator: Bool { targetAngleCount != nil }

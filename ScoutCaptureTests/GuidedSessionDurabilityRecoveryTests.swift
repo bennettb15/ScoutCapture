@@ -28,6 +28,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertEqual(north[1].countLabel, "2/3")
         XCTAssertEqual(north[2].photoCount, 2)
         XCTAssertEqual(north[2].angleCount, 2)
+        XCTAssertEqual(north[2].countLabel, "2")
+        XCTAssertNil(north[2].note)
         let west = ElevationChecklist.rows(captures: captures, building: "B1", elevation: "West Elevation")
         XCTAssertEqual(west.map(\.title), ["Overview", "Elevation"])
         XCTAssertEqual(west[1].countLabel, "1/3")
