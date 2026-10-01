@@ -86,7 +86,8 @@ def main():
             continue
         if rpc(client, candidate["id"], True) is not False:
             raise RuntimeError("Scoped database function preflight failed")
-        files = media_manifest(client, current, allow_legacy_pathless_shots=True)
+        files = media_manifest(client, current, allow_legacy_pathless_shots=True,
+                               allow_legacy_session_paths=True)
         media_total += sum(map(len, files.values()))
         if args.execute:
             verify_keep_set(client, manifest)
