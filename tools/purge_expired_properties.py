@@ -163,6 +163,7 @@ def main():
                              deleted_at=f"lte.{cutoff}", is_archived="eq.false",
                              order="deleted_at.asc")
     processed = 0
+    media_total = 0
     for candidate in candidates[:args.limit]:
         current = client.rows("properties", select="id,org_id,is_archived,deleted_at",
                               id=f"eq.{candidate['id']}")
@@ -179,10 +180,10 @@ def main():
                                         candidate["id"], session_ids).values()):
                 raise RuntimeError("Storage still contains files; database rows retained")
             client.finalize(candidate["id"])
-        print(json.dumps({"candidate_number": processed + 1, "media_count": file_count,
-                          "action": "purged" if args.execute else "dry_run"}))
+        media_total += file_count
         processed += 1
     print(json.dumps({"eligible": len(candidates), "processed": processed,
+                      "media_total": media_total,
                       "mode": "execute" if args.execute else "dry_run"}))
 
 
