@@ -2627,6 +2627,7 @@ struct SessionHubView: View {
                                 .tint(.blue)
                         }
 
+                        #if DEBUG
                         Section("Storage") {
                             Button("Manage Local Storage") {
                                 dismiss()
@@ -2635,6 +2636,7 @@ struct SessionHubView: View {
                                 }
                             }
                         }
+                        #endif
 
                         if let activeOrganizationID = appState.activeOrganizationID {
                             Section("Activity") {
