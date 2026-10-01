@@ -64,6 +64,20 @@ class RetentionTests(unittest.TestCase):
             retention.media_manifest(FakeClient("sessions/other/shots/a/photo.heic"),
                                      {"id": "p", "org_id": "o"})
 
+    def test_manifest_distinguishes_unexpected_shot_bucket(self):
+        client = FakeClient()
+        original_rows = client.rows
+
+        def rows(table, **filters):
+            result = original_rows(table, **filters)
+            if table == "shots":
+                result[0]["storage_bucket"] = "other-bucket"
+            return result
+
+        client.rows = rows
+        with self.assertRaisesRegex(RuntimeError, "unexpected Storage bucket"):
+            retention.media_manifest(client, {"id": "p", "org_id": "o"})
+
     def test_storage_listing_descends_folders(self):
         client = retention.Client.__new__(retention.Client)
         client.request = Mock(side_effect=[
