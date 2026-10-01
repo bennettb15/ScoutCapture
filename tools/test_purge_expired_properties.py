@@ -60,9 +60,29 @@ class RetentionTests(unittest.TestCase):
                          ["sessions/s1/shots/legacy/photo.heic"])
 
     def test_refuses_media_outside_property(self):
-        with self.assertRaisesRegex(RuntimeError, "outside its session"):
+        with self.assertRaisesRegex(RuntimeError, "outside its property sessions"):
             retention.media_manifest(FakeClient("sessions/other/shots/a/photo.heic"),
                                      {"id": "p", "org_id": "o"})
+
+    def test_scoped_legacy_path_can_belong_to_another_session_of_same_property(self):
+        client = FakeClient("sessions/s2/shots/a/photo.heic")
+        original_rows = client.rows
+
+        def rows(table, **filters):
+            if table == "sessions":
+                return [{"id": "s1"}, {"id": "s2"}]
+            return original_rows(table, **filters)
+
+        client.rows = rows
+        with self.assertRaisesRegex(RuntimeError, "outside its property sessions"):
+            retention.media_manifest(client, {"id": "p", "org_id": "o"})
+        manifest = retention.media_manifest(client, {"id": "p", "org_id": "o"},
+            allow_legacy_session_paths=True)
+        self.assertEqual(manifest[retention.ORIGINALS],
+                         ["sessions/s2/shots/a/photo.heic"])
+        with self.assertRaisesRegex(RuntimeError, "outside its property sessions"):
+            retention.media_manifest(FakeClient("sessions/other/shots/a/photo.heic"),
+                {"id": "p", "org_id": "o"}, allow_legacy_session_paths=True)
 
     def test_manifest_distinguishes_unexpected_shot_bucket(self):
         client = FakeClient()

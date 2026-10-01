@@ -118,7 +118,7 @@ def listed_storage_files(client, org_id, property_id, session_ids):
     return files
 
 
-def media_manifest(client, prop, allow_legacy_pathless_shots=False):
+def media_manifest(client, prop, allow_legacy_pathless_shots=False, allow_legacy_session_paths=False):
     org_id, property_id = prop["org_id"], prop["id"]
     sessions = client.rows("sessions", select="id", property_id=f"eq.{property_id}")
     session_ids = {row["id"] for row in sessions}
@@ -147,7 +147,10 @@ def media_manifest(client, prop, allow_legacy_pathless_shots=False):
                 if row["session_id"] not in session_ids:
                     raise RuntimeError("Shot session is outside its property")
                 if not path.startswith(f"sessions/{row['session_id']}/"):
-                    raise RuntimeError("Shot Storage path is outside its session")
+                    within_property_session = allow_legacy_session_paths and any(
+                        path.startswith(f"sessions/{session_id}/") for session_id in session_ids)
+                    if not within_property_session:
+                        raise RuntimeError("Shot Storage path is outside its property sessions")
             elif bucket not in (SNAPSHOTS, DELIVERABLES) or not path.startswith(f"orgs/{org_id}/properties/{property_id}/"):
                 raise RuntimeError("Storage path is outside its property")
             manifest[bucket].add(path)
