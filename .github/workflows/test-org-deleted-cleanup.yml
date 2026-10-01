@@ -1,0 +1,45 @@
+name: One-Time Test Org Deleted Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Permanently remove only the 53 approved deleted Test Org properties"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: property-retention
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      CLEANUP_EXECUTE: ${{ inputs.execute }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate service configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+            echo "::error::Supabase service configuration is missing."
+            exit 1
+          fi
+      - name: Review or purge approved deleted Test Org properties
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--limit 5)
+          if [[ "${CLEANUP_EXECUTE}" == "true" ]]; then
+            args+=(--execute)
+          fi
+          python3 tools/purge_approved_test_org.py "${args[@]}"
