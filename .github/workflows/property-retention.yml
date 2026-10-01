@@ -1,0 +1,48 @@
+name: Property Retention
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Permanently purge properties that are deleted, non-archived, and older than 30 days"
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: property-retention
+  cancel-in-progress: false
+
+jobs:
+  retention:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && vars.PROPERTY_RETENTION_ENABLED == 'true')
+    env:
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      RETENTION_EXECUTE: ${{ github.event_name == 'schedule' && vars.PROPERTY_RETENTION_ENABLED == 'true' || inputs.execute }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate service configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+            echo "::error::Supabase service configuration is missing."
+            exit 1
+          fi
+      - name: Review or purge expired deleted properties
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--limit 10)
+          if [[ "${RETENTION_EXECUTE}" == "true" ]]; then
+            args+=(--execute)
+          fi
+          python3 tools/purge_expired_properties.py "${args[@]}"
