@@ -2698,3 +2698,11 @@ struct ReportAsset: Identifiable, Equatable {
 
     var id: String { localIdentifier }
 }
+
+extension ReportAsset {
+    static func lastByLocalIdentifier(in assets: [ReportAsset]) -> [String: ReportAsset] {
+        assets.reduce(into: [:]) { result, asset in
+            result[asset.localIdentifier] = asset
+        }
+    }
+}
