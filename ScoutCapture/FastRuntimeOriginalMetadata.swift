@@ -118,7 +118,7 @@ enum FastRuntimeOriginalMetadata {
         authorizationStatus: CLAuthorizationStatus?
     ) throws {
         let sourceData = try Data(contentsOf: originalURL, options: [.mappedIfSafe])
-        if containsScoutShotID(sourceData, shotID: shot.id) { return }
+        if containsCurrentScoutClassification(sourceData, shot: shot) { return }
 
         let stored = shot.metadataContext
         let status = authorizationStatus ?? CLLocationManager.authorizationStatus()
@@ -160,7 +160,7 @@ enum FastRuntimeOriginalMetadata {
             captureDate: shot.capturedAt,
             metadataContext: metadata
         )
-        guard containsScoutShotID(annotatedData, shotID: shot.id),
+        guard containsCurrentScoutClassification(annotatedData, shot: shot),
               hasGPS(annotatedData) == (latitude != nil && longitude != nil) else {
             throw NSError(domain: "ScoutCapture.FastOriginalMetadata", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "The JPG metadata could not be verified. The original photo was kept."
@@ -184,6 +184,19 @@ enum FastRuntimeOriginalMetadata {
               let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
               let comment = exif[kCGImagePropertyExifUserComment] as? String else { return false }
         return comment.split(separator: ";").contains { String($0) == "shotID=\(shotID.uuidString)" }
+    }
+
+    private static func containsCurrentScoutClassification(
+        _ data: Data,
+        shot: AppState.FastRuntimePrototypeShotRecord
+    ) -> Bool {
+        guard containsScoutShotID(data, shotID: shot.id) else { return false }
+        guard let expectedKey = shot.metadataContext?.shotKey else { return true }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let comment = exif[kCGImagePropertyExifUserComment] as? String else { return false }
+        return comment.split(separator: ";").contains { String($0) == "shotKey=\(expectedKey)" }
     }
 
     static func hasGPS(_ data: Data) -> Bool {
