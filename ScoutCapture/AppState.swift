@@ -56323,7 +56323,8 @@ final class AppState: ObservableObject {
 
     func fastRuntimePreviewSideControlPayload(
         propertyID: UUID,
-        sessionType: SessionType
+        sessionType: SessionType,
+        currentSessionID: UUID? = nil
     ) -> FastRuntimePreviewSideControlPayload {
         guard canAccessProperty(propertyID) else {
             return .empty
@@ -56350,7 +56351,14 @@ final class AppState: ObservableObject {
             )
         }
 
-        let guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let otherDraftShotIDs = currentSessionID.map {
+            fastRuntimeShotIDsExclusiveToOtherDrafts(propertyID: propertyID, currentSessionID: $0)
+        } ?? []
+        let guidedRows = ((try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? [])
+            .filter { guidedShot in
+                guard let shotID = guidedShot.shot?.id else { return true }
+                return !otherDraftShotIDs.contains(shotID)
+            }
         let sortedGuidedRows = guidedRows.sorted { lhs, rhs in
             let lhsTitle = lhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let rhsTitle = rhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -56368,6 +56376,36 @@ final class AppState: ObservableObject {
             guidedShots: activeGuided,
             retiredGuidedShots: retiredGuided
         )
+    }
+
+    // A draft's photos remain available in that draft, but cannot become
+    // references in another session until the draft is completed.
+    private func fastRuntimeShotIDsExclusiveToOtherDrafts(
+        propertyID: UUID,
+        currentSessionID: UUID
+    ) -> Set<UUID> {
+        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+        let otherDrafts = sessions.filter {
+            $0.id != currentSessionID && $0.status == .draft && !$0.isSealed && $0.firstDeliveredAt == nil
+        }
+        guard !otherDrafts.isEmpty else { return [] }
+
+        func shotIDs(in session: Session) -> Set<UUID> {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: session.id
+            ) else { return [] }
+            return Set(metadata.shots.map(\.shotID) + metadata.guidedShots.compactMap { $0.shot?.id })
+        }
+
+        let otherDraftShotIDs = otherDrafts.reduce(into: Set<UUID>()) {
+            $0.formUnion(shotIDs(in: $1))
+        }
+        guard !otherDraftShotIDs.isEmpty else { return [] }
+        let completedShotIDs = sessions
+            .filter { $0.status == .completed || $0.isSealed || $0.firstDeliveredAt != nil }
+            .reduce(into: Set<UUID>()) { $0.formUnion(shotIDs(in: $1)) }
+        return otherDraftShotIDs.subtracting(completedShotIDs)
     }
 
     private struct FastRuntimeIssueResolvedReference {
@@ -56796,8 +56834,14 @@ final class AppState: ObservableObject {
         return Array(requests)
     }
 
-    func fastRuntimePropertyAngleReservations(propertyID: UUID) -> [FastRuntimeAngleReservation] {
+    func fastRuntimePropertyAngleReservations(
+        propertyID: UUID,
+        currentSessionID: UUID? = nil
+    ) -> [FastRuntimeAngleReservation] {
         guard canAccessProperty(propertyID) else { return [] }
+        let otherDraftShotIDs = currentSessionID.map {
+            fastRuntimeShotIDsExclusiveToOtherDrafts(propertyID: propertyID, currentSessionID: $0)
+        } ?? []
         var reservations: [FastRuntimeAngleReservation] = []
 
         func appendReservation(
@@ -56821,6 +56865,7 @@ final class AppState: ObservableObject {
 
         if let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID) {
             for guidedShot in guidedShots {
+                if let shotID = guidedShot.shot?.id, otherDraftShotIDs.contains(shotID) { continue }
                 appendReservation(
                     building: guidedShot.building,
                     elevation: guidedShot.targetElevation,
@@ -56849,6 +56894,7 @@ final class AppState: ObservableObject {
                 continue
             }
             for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+                if otherDraftShotIDs.contains(shot.shotID) { continue }
                 appendReservation(
                     building: shot.building,
                     elevation: shot.elevation,

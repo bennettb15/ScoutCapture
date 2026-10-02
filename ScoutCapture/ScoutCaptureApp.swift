@@ -14516,7 +14516,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func reloadFastLaneSideControlPayloadFromLocalStore() {
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
-            sessionType: context.sessionType
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID
         )
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         fastLaneSideControlPayload = scopedPayload
@@ -15884,7 +15885,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func primeFastLaneSideControlSnapshot() {
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
-            sessionType: context.sessionType
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID
         )
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         fastLaneSideControlPayload = scopedPayload
@@ -15926,7 +15928,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
-                sessionType: context.sessionType
+                sessionType: context.sessionType,
+                currentSessionID: context.sessionID
             )
             let scopedPayload = await MainActor.run {
                 fastLanePayloadScopedToCurrentFastSession(payload)
@@ -16145,7 +16148,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 )
             }
         }
-        for reservation in appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID) {
+        for reservation in appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID, currentSessionID: context.sessionID) {
             reserve(
                 building: reservation.building,
                 elevation: reservation.elevation,
@@ -16223,10 +16226,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
         reserveGuidedAngles(from: fastLaneSideControlPayload.guidedShots)
         reserveIssueAngles(from: fastLaneSideControlPayload.activeObservations)
-        reserveAppStateAngles(appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID))
+        reserveAppStateAngles(appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID, currentSessionID: context.sessionID))
         let latestPayload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
-            sessionType: context.sessionType
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID
         )
         let latestScopedPayload = fastLanePayloadScopedToCurrentFastSession(latestPayload)
         reserveGuidedAngles(from: latestScopedPayload.guidedShots)
@@ -16903,7 +16907,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         Task {
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
-                sessionType: context.sessionType
+                sessionType: context.sessionType,
+                currentSessionID: context.sessionID
             )
             let scopedPayload = await MainActor.run {
                 fastLanePayloadScopedToCurrentFastSession(payload)
@@ -17024,7 +17029,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         // property rows here so media can be fetched by its original session.
         let references = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
-            sessionType: context.sessionType
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID
         )
         let guidedRows = references.guidedShots + references.retiredGuidedShots
         let requests = appState.fastRuntimeGuidedPanelMediaHydrationRequests(
@@ -17079,7 +17085,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard didStart else { return }
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
-                sessionType: context.sessionType
+                sessionType: context.sessionType,
+                currentSessionID: context.sessionID
             )
             await MainActor.run {
                 let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
@@ -17205,7 +17212,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         return fastLaneSideControlPayload.guidedShots.first(where: { $0.id == id }) ??
             appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
-                sessionType: context.sessionType
+                sessionType: context.sessionType,
+                currentSessionID: context.sessionID
             ).guidedShots.first(where: { $0.id == id })
     }
 

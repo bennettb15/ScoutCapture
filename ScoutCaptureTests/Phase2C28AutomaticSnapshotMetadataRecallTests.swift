@@ -252,6 +252,75 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         )
     }
 
+    func testAnotherSessionsDraftPhotoDoesNotBecomeGuidedReference() throws {
+        let fixture = try makeFixture()
+        let oldDraft = try fixture.deviceBStore.upsertSession(Session(
+            propertyID: fixture.property.id,
+            startedAt: Date(timeIntervalSinceReferenceDate: 50),
+            status: .draft
+        ))
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+
+        let oldShotID = UUID()
+        let oldOverview = GuidedShot(
+            id: oldShotID,
+            title: "A North Overview",
+            building: "A",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: Shot(id: oldShotID, capturedAt: oldDraft.startedAt),
+            isCompleted: true
+        )
+        let uploadedElevation = GuidedShot(
+            id: fixture.shotID,
+            title: "A North Elevation",
+            building: "A",
+            targetElevation: "North",
+            detailType: "Elevation",
+            angleIndex: 1,
+            shot: Shot(id: fixture.shotID, capturedAt: fixture.session.startedAt),
+            isCompleted: true
+        )
+        var oldMetadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: oldDraft.id
+        )
+        oldMetadata.guidedShots = [oldOverview]
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: oldDraft.id, metadata: oldMetadata
+        )
+        var uploadedMetadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: fixture.session.id
+        )
+        uploadedMetadata.guidedShots = [uploadedElevation]
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: fixture.session.id, metadata: uploadedMetadata
+        )
+        try fixture.deviceBStore.saveGuidedShots(
+            [oldOverview, uploadedElevation], propertyID: fixture.property.id
+        )
+
+        let nextSession = fixture.appState.fastRuntimePreviewSideControlPayload(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: UUID()
+        )
+        XCTAssertEqual(nextSession.guidedShots.map(\.id), [fixture.shotID])
+        let nextAngles = fixture.appState.fastRuntimePropertyAngleReservations(
+            propertyID: fixture.property.id,
+            currentSessionID: UUID()
+        )
+        XCTAssertEqual(Set(nextAngles.map(\.detailType)), Set(["Elevation"]))
+
+        let originalDraft = fixture.appState.fastRuntimePreviewSideControlPayload(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: oldDraft.id
+        )
+        XCTAssertEqual(Set(originalDraft.guidedShots.map(\.id)), Set([oldShotID, fixture.shotID]))
+        XCTAssertEqual(try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).count, 2)
+    }
+
     func testPropertyOpenSnapshotRecallHydratesMissingSessionFlaggedAndGuidedMetadata() async throws {
         let fixture = try makeFixture()
 
