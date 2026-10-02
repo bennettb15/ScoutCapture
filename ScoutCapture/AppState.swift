@@ -44734,7 +44734,13 @@ final class AppState: ObservableObject {
             }
 
             if let updatedRecord {
-                FastRuntimeOriginalMetadata.schedule(updatedRecord)
+                if let originalPath = guidedRows[index].shot?.imageLocalIdentifier {
+                    FastRuntimeOriginalMetadata.scheduleDurableCopy(
+                        updatedRecord, to: URL(fileURLWithPath: originalPath)
+                    )
+                } else {
+                    FastRuntimeOriginalMetadata.schedule(updatedRecord)
+                }
                 scheduleShotMetadataSupabaseWriteIfNeeded(
                     propertyID: propertyID, sessionID: sessionID,
                     shotID: updatedRecord.id, reason: "guided_reclassification"
@@ -44750,19 +44756,180 @@ final class AppState: ObservableObject {
     @discardableResult
     func fastRuntimeReclassifyObservation(
         propertyID: UUID,
+        sessionID: UUID,
         observationID: UUID,
         building: String,
         elevation: String,
-        detailType: String
+        detailType: String,
+        storageRoot: URL? = nil
     ) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
         do {
-            var observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return false }
-            observations[index].building = fastRuntimeTrimmedNonEmpty(building) ?? observations[index].building
-            observations[index].targetElevation = fastRuntimeTrimmedNonEmpty(CanonicalElevation.normalize(elevation) ?? elevation) ?? observations[index].targetElevation
-            observations[index].detailType = fastRuntimeTrimmedNonEmpty(detailType) ?? observations[index].detailType
-            _ = try localStore.updateObservation(observations[index])
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard var observation = observations.first(where: { $0.id == observationID }) else { return false }
+            let revisedBuilding = fastRuntimeTrimmedNonEmpty(building) ?? observation.building ?? ""
+            let revisedElevation = fastRuntimeTrimmedNonEmpty(CanonicalElevation.normalize(elevation) ?? elevation)
+                ?? observation.targetElevation ?? ""
+            let revisedDetail = fastRuntimeTrimmedNonEmpty(detailType) ?? observation.detailType ?? ""
+            guard !revisedBuilding.isEmpty, !revisedElevation.isEmpty, !revisedDetail.isEmpty else { return false }
+
+            let linkedShotID = observation.linkedShotID ?? observation.shots.last?.id
+            let previousLabel = fastRuntimeConciseContextLabel(
+                building: observation.building ?? "",
+                elevation: observation.targetElevation ?? "",
+                detailType: observation.detailType ?? ""
+            )
+            let revisedLabel = fastRuntimeConciseContextLabel(
+                building: revisedBuilding, elevation: revisedElevation, detailType: revisedDetail
+            )
+            let revisedAt = Date()
+            observation.building = revisedBuilding
+            observation.targetElevation = revisedElevation
+            observation.detailType = revisedDetail
+            observation.updatedAt = revisedAt
+            observation.updatedInSessionID = sessionID
+            observation.historyEvents.append(ObservationHistoryEvent(
+                timestamp: revisedAt,
+                sessionID: sessionID,
+                kind: .reclassified,
+                beforeValue: previousLabel,
+                afterValue: revisedLabel,
+                field: "location",
+                shotID: linkedShotID
+            ))
+
+            // A current-session flagged capture has one existing original and one
+            // fast-lane record. Change their classification without adding a capture.
+            let draftRoot = try Self.stableFastRuntimeDraftRoot(
+                propertyID: propertyID, sessionID: sessionID
+            )
+            let durableRecordsURL = Self.fastRuntimeDraftMetadataURL(root: draftRoot)
+            let activeRecordsURL = storageRoot.map(Self.fastRuntimeDraftMetadataURL(root:))
+            let recordsURL = activeRecordsURL.flatMap {
+                FileManager.default.fileExists(atPath: $0.path) ? $0 : nil
+            } ?? durableRecordsURL
+            var previousRecordsData: Data?
+            var updatedRecordsData: Data?
+            var updatedRecord: FastRuntimePrototypeShotRecord?
+            if let linkedShotID, FileManager.default.fileExists(atPath: recordsURL.path) {
+                let data = try Data(contentsOf: recordsURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                var records = try decoder.decode([FastRuntimePrototypeShotRecord].self, from: data)
+                if let recordIndex = records.firstIndex(where: {
+                    $0.id == linkedShotID &&
+                    $0.propertyID == propertyID &&
+                    $0.sessionID == sessionID &&
+                    $0.metadataContext?.issueID == observationID
+                }) {
+                    guard let previousContext = records[recordIndex].metadataContext else { return false }
+                    let revisedContext = previousContext.reclassified(
+                        building: revisedBuilding,
+                        elevation: revisedElevation,
+                        detailType: revisedDetail,
+                        angleIndex: previousContext.angleIndex
+                    )
+                    records[recordIndex].metadataContext = revisedContext
+                    records[recordIndex].captureLocationMode = revisedContext.locationMode
+                    updatedRecord = records[recordIndex]
+                    previousRecordsData = data
+                    let encoder = JSONEncoder()
+                    encoder.dateEncodingStrategy = .iso8601
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    updatedRecordsData = try encoder.encode(records)
+                }
+            }
+
+            if let updatedRecord, let linkedShotID {
+                for index in observation.guidedShots.indices where
+                    (observation.guidedShots[index].shot?.id == linkedShotID ||
+                     observation.guidedShots[index].id == linkedShotID) {
+                    observation.guidedShots[index].title = revisedLabel
+                    observation.guidedShots[index].building = revisedBuilding
+                    observation.guidedShots[index].targetElevation = revisedElevation
+                    observation.guidedShots[index].detailType = revisedDetail
+                    observation.guidedShots[index].angleIndex = updatedRecord.metadataContext?.angleIndex
+                }
+            }
+
+            var previousSessionMetadata: SessionMetadata?
+            var updatedSessionMetadata: SessionMetadata?
+            if var metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID, sessionID: sessionID
+            ) {
+                previousSessionMetadata = metadata
+                if let linkedShotID,
+                   let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == linkedShotID }) {
+                    guard let updatedRecord, let revisedContext = updatedRecord.metadataContext else {
+                        return false
+                    }
+                    metadata.shots[shotIndex].building = revisedBuilding
+                    metadata.shots[shotIndex].elevation = revisedElevation
+                    metadata.shots[shotIndex].detailType = revisedDetail
+                    metadata.shots[shotIndex].angleIndex = revisedContext.angleIndex
+                    metadata.shots[shotIndex].shotKey = revisedContext.shotKey
+                    metadata.shots[shotIndex].updatedAt = revisedAt
+                    if let issueIndex = metadata.issues.firstIndex(where: { $0.issueID == observationID }) {
+                        metadata.issues[issueIndex].shotKey = revisedContext.shotKey
+                    }
+                    for index in metadata.guidedShots.indices where
+                        (metadata.guidedShots[index].shot?.id == linkedShotID ||
+                         metadata.guidedShots[index].id == linkedShotID) {
+                        metadata.guidedShots[index].title = revisedLabel
+                        metadata.guidedShots[index].building = revisedBuilding
+                        metadata.guidedShots[index].targetElevation = revisedElevation
+                        metadata.guidedShots[index].detailType = revisedDetail
+                        metadata.guidedShots[index].angleIndex = revisedContext.angleIndex
+                    }
+                    updatedSessionMetadata = metadata
+                } else if updatedRecord != nil {
+                    return false
+                }
+            } else if updatedRecord != nil {
+                return false
+            }
+
+            var wroteRecords = false
+            var wroteSession = false
+            do {
+                if let updatedRecordsData {
+                    try updatedRecordsData.write(to: recordsURL, options: .atomic)
+                    wroteRecords = true
+                }
+                if let updatedSessionMetadata {
+                    try localStore.saveSessionMetadataAtomically(
+                        propertyID: propertyID, sessionID: sessionID,
+                        metadata: updatedSessionMetadata
+                    )
+                    wroteSession = true
+                }
+                _ = try localStore.updateObservation(observation)
+            } catch {
+                if wroteRecords, let previousRecordsData {
+                    try? previousRecordsData.write(to: recordsURL, options: .atomic)
+                }
+                if wroteSession, let previousSessionMetadata {
+                    try? localStore.saveSessionMetadataAtomically(
+                        propertyID: propertyID, sessionID: sessionID,
+                        metadata: previousSessionMetadata
+                    )
+                }
+                throw error
+            }
+
+            if let updatedRecord {
+                if let originalPath = observation.shots.first(where: { $0.id == updatedRecord.id })?.imageLocalIdentifier {
+                    FastRuntimeOriginalMetadata.scheduleDurableCopy(
+                        updatedRecord, to: URL(fileURLWithPath: originalPath)
+                    )
+                } else {
+                    FastRuntimeOriginalMetadata.schedule(updatedRecord)
+                }
+                scheduleShotMetadataSupabaseWriteIfNeeded(
+                    propertyID: propertyID, sessionID: sessionID,
+                    shotID: updatedRecord.id, reason: "issue_reclassification"
+                )
+            }
             return true
         } catch {
             print("[FastLanePanel] observation_reclassify_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")

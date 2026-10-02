@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import ImageIO
 @testable import ScoutCapture
 
 @MainActor
@@ -176,6 +177,91 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertEqual(session.shots[0].detailType, "Elevation")
         XCTAssertEqual(session.guidedShots.count, 1)
         XCTAssertEqual(session.guidedShots[0].shot?.id, shot.id)
+    }
+
+    func testReclassifyingCapturedFlaggedIssueKeepsOnePhotoAndItsIssueLink() async throws {
+        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
+        let root = externalRoot.appendingPathComponent("FlaggedReclassification-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let org = try store.createOrganization(Organization(name: "Test Organization"))
+        let property = try store.createProperty(Property(orgId: org.id, name: "Test Property", address: "100 Test Way"))
+        let suiteName = "FlaggedReclassification-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        let appState = AppState(localStore: store, userDefaults: defaults)
+        appState._debugRefreshPropertiesLocallyForTests()
+        let deviceID = try XCTUnwrap(defaults.string(forKey: "scoutcapture.deviceIdentifier.v1"))
+        let context = ActiveCaptureContext(
+            sessionID: UUID(), propertyID: property.id, orgID: org.id,
+            sessionType: .fullDocumentation, ownerUserID: nil, ownerEmail: nil,
+            ownerDeviceID: deviceID, createdAt: Date(), status: .draft, statusReason: "test"
+        )
+        let issueID = UUID()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { renderer in
+            UIColor.blue.setFill()
+            renderer.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let jpeg = try XCTUnwrap(image.jpegData(compressionQuality: 0.8))
+        let save = await appState.saveFastRuntimePrototypeCapture(
+            data: jpeg, context: context, capturedAt: Date(),
+            metadataContext: AppState.FastRuntimeCaptureMetadataContext(
+                locationMode: "Exterior", building: "B1", elevation: "East",
+                detailType: "Downspout", angleIndex: 1, isFlagged: true,
+                issueID: issueID, issueStatus: "active"
+            )
+        )
+        XCTAssertTrue(save.success, save.errorMessage ?? "")
+        let shot = try XCTUnwrap(save.shot)
+        let storageRoot = try XCTUnwrap(save.storageRoot)
+        appState.projectFastRuntimeCaptureToLocalCameraState(context: context, shot: shot)
+        XCTAssertTrue(appState.fastRuntimeReclassifyObservation(
+            propertyID: property.id, sessionID: context.sessionID, observationID: issueID,
+            building: "B1", elevation: "East", detailType: "Elevation", storageRoot: storageRoot
+        ))
+
+        let recordsData = try Data(contentsOf: storageRoot.appendingPathComponent("Metadata/fast-lane-shots.json"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = try decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: recordsData)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].id, shot.id)
+        XCTAssertEqual(records[0].metadataContext?.issueID, issueID)
+        XCTAssertEqual(records[0].metadataContext?.detailType, "Elevation")
+        XCTAssertEqual(records[0].metadataContext?.shotKey,
+                       ShotMetadata.makeShotKey(building: "B1", elevation: "East", detailType: "Elevation", angleIndex: 1))
+        let observations = try store.fetchObservations(propertyID: property.id)
+        XCTAssertEqual(observations.count, 1)
+        XCTAssertEqual(observations[0].id, issueID)
+        XCTAssertEqual(observations[0].linkedShotID, shot.id)
+        XCTAssertEqual(observations[0].shots.map(\.id), [shot.id])
+        XCTAssertEqual(observations[0].detailType, "Elevation")
+        XCTAssertEqual(observations[0].guidedShots.first?.detailType, "Elevation")
+        XCTAssertTrue(observations[0].historyEvents.contains { $0.kind == .reclassified && $0.shotID == shot.id })
+        let session = try store.loadSessionMetadata(propertyID: property.id, sessionID: context.sessionID)
+        XCTAssertEqual(session.shots.count, 1)
+        XCTAssertEqual(session.shots[0].shotID, shot.id)
+        XCTAssertEqual(session.shots[0].issueID, issueID)
+        XCTAssertEqual(session.shots[0].detailType, "Elevation")
+        let originals = try FileManager.default.contentsOfDirectory(
+            at: store.originalsFolderURL(propertyID: property.id, sessionID: context.sessionID),
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(originals.count, 1)
+        // Drain the queued annotation and verify the projected original changed
+        // classification without a second JPEG being written.
+        try await FastRuntimeOriginalMetadata.prepareForUpload([])
+        let finished = try Data(contentsOf: originals[0])
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(finished as CFData, nil))
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        let exif = try XCTUnwrap(properties[kCGImagePropertyExifDictionary] as? [CFString: Any])
+        let comment = try XCTUnwrap(exif[kCGImagePropertyExifUserComment] as? String)
+        XCTAssertTrue(comment.contains("shotID=\(shot.id.uuidString)"))
+        XCTAssertTrue(comment.contains("detailType=Elevation"))
+        XCTAssertTrue(comment.contains("shotKey=\(try XCTUnwrap(records[0].metadataContext).shotKey)"))
     }
 
     func testMissingSessionJSONRecoversOnlyOriginalsInCurrentContainerAndIsIdempotent() throws {

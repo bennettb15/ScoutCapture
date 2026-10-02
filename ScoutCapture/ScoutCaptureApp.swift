@@ -14632,12 +14632,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     ) {
         if appState.fastRuntimeReclassifyObservation(
             propertyID: context.propertyID,
+            sessionID: context.sessionID,
             observationID: observation.id,
             building: building,
             elevation: elevation,
-            detailType: detailType
+            detailType: detailType,
+            storageRoot: fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         ) {
             reloadFastLaneSideControlPayloadFromLocalStore()
+            reloadFastLaneGalleryAssets()
         } else {
             showFastLaneSideControlToast("Unable to reclassify issue")
         }
