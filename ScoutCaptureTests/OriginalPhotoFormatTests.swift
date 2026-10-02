@@ -5,6 +5,30 @@ import XCTest
 @testable import ScoutCapture
 
 final class OriginalPhotoFormatTests: XCTestCase {
+    func testPreviousGalleryKeepsLatestRecordForDuplicateLocalPhoto() {
+        let path = "/photos/shared.heic"
+        let older = ReportAsset(
+            localIdentifier: path,
+            fileURL: URL(fileURLWithPath: path),
+            creationDate: Date(timeIntervalSinceReferenceDate: 100),
+            pixelWidth: 0,
+            pixelHeight: 0,
+            originalFilename: "older.heic"
+        )
+        let newer = ReportAsset(
+            localIdentifier: path,
+            fileURL: URL(fileURLWithPath: path),
+            creationDate: Date(timeIntervalSinceReferenceDate: 200),
+            pixelWidth: 0,
+            pixelHeight: 0,
+            originalFilename: "newer.heic"
+        )
+
+        let assets = ReportAsset.lastByLocalIdentifier(in: [older, newer])
+        XCTAssertEqual(assets.count, 1)
+        XCTAssertEqual(assets[path], newer)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "OriginalPhotoFormatTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard

@@ -18288,7 +18288,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         metadata: [String: FastLaneGalleryMetadata],
         requests: [AppState.OperationalMediaHydrationRequest]
     ) {
-        var assetsByPath = Dictionary(uniqueKeysWithValues: primary.assets.map { ($0.localIdentifier, $0) })
+        // Restored session metadata can contain multiple shots for one local photo.
+        // The primary list is oldest first, and its metadata dictionary keeps the last record.
+        var assetsByPath = ReportAsset.lastByLocalIdentifier(in: primary.assets)
         var metadata = primary.metadata
         for asset in fallback.assets where assetsByPath[asset.localIdentifier] == nil {
             assetsByPath[asset.localIdentifier] = asset
