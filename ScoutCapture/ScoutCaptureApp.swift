@@ -14614,9 +14614,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 elevation: elevation,
                 detailType: detailType,
                 excludingGuidedShotID: guidedShot.id
-            )
+            ),
+            storageRoot: fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         ) {
             reloadFastLaneSideControlPayloadFromLocalStore()
+            reloadFastLaneGalleryAssets()
         } else {
             showFastLaneSideControlToast("Unable to reclassify guided photo")
         }
@@ -16251,9 +16253,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneGuidedShotScopedToCurrentSession(guidedShot, localShots: localShots)
         }
         let guidedKeys = Set(guided.map(fastLaneGuidedComparisonKey))
+        let linkedCurrentShotIDs = Set(guided.compactMap { $0.shot?.id })
         let currentSessionGuidedRows = localShots.compactMap { shot -> GuidedShot? in
             guard shot.metadataContext?.isGuided == true else { return nil }
             guard shot.metadataContext?.issueID == nil else { return nil }
+            guard !linkedCurrentShotIDs.contains(shot.id) else { return nil }
             guard let row = fastLaneGuidedShotRow(from: shot) else { return nil }
             guard !guidedKeys.contains(fastLaneGuidedComparisonKey(row)) else { return nil }
             return row
@@ -16502,7 +16506,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             scoped.skipSessionID = nil
         }
 
-        guard let localShot = localShots.first(where: { fastLaneShot($0, matches: guidedShot) }) else {
+        let linkedShot = guidedShot.shot.flatMap { linked in
+            localShots.first(where: { $0.id == linked.id })
+        }
+        guard let localShot = linkedShot ??
+                localShots.first(where: { fastLaneShot($0, matches: guidedShot) }) else {
             return scoped
         }
 

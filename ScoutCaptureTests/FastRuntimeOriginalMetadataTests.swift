@@ -114,6 +114,25 @@ final class FastRuntimeOriginalMetadataTests: XCTestCase {
         }
     }
 
+    func testReclassificationRefreshesEmbeddedPhotoMetadataWithoutNewOriginal() async throws {
+        try await withRawOriginal { url, shot in
+            try FastRuntimeOriginalMetadata.annotateIfNeeded(shot, authorizationStatus: .denied)
+            var revised = shot
+            revised.metadataContext = try XCTUnwrap(shot.metadataContext).reclassified(
+                building: "B1", elevation: "East", detailType: "Downspout", angleIndex: 2
+            )
+            try FastRuntimeOriginalMetadata.annotateIfNeeded(revised, authorizationStatus: .denied)
+            let finished = try Data(contentsOf: url)
+            let exif = try XCTUnwrap((try properties(finished))[kCGImagePropertyExifDictionary] as? [CFString: Any])
+            let comment = try XCTUnwrap(exif[kCGImagePropertyExifUserComment] as? String)
+            XCTAssertTrue(comment.contains("shotID=\(shot.id.uuidString)"))
+            XCTAssertTrue(comment.contains("shotKey=\(try XCTUnwrap(revised.metadataContext).shotKey)"))
+            XCTAssertTrue(comment.contains("elevation=East"))
+            XCTAssertTrue(comment.contains("detailType=Downspout"))
+            XCTAssertFalse(comment.contains("shotKey=b1|north|overview|1"))
+        }
+    }
+
     func testRevokedLocationRemovesSourceGPSAndStillEmbedsScoutFields() async throws {
         try await withRawOriginal { url, shot in
             try FastRuntimeOriginalMetadata.annotateIfNeeded(shot, authorizationStatus: .denied)

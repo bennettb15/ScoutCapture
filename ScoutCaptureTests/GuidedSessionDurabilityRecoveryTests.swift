@@ -109,6 +109,75 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertEqual(selectedDraft.summary?.photoCount, 1)
     }
 
+    func testReclassifyingCapturedGuidedShotKeepsOnePhotoAndCompletedChecklistRow() async throws {
+        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
+        let root = externalRoot.appendingPathComponent("GuidedReclassification-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let org = try store.createOrganization(Organization(name: "Test Organization"))
+        let property = try store.createProperty(Property(orgId: org.id, name: "Test Property", address: "100 Test Way"))
+        let suiteName = "GuidedReclassification-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        let appState = AppState(localStore: store, userDefaults: defaults)
+        appState._debugRefreshPropertiesLocallyForTests()
+        let deviceID = try XCTUnwrap(defaults.string(forKey: "scoutcapture.deviceIdentifier.v1"))
+        let context = ActiveCaptureContext(
+            sessionID: UUID(), propertyID: property.id, orgID: org.id,
+            sessionType: .fullDocumentation, ownerUserID: nil, ownerEmail: nil,
+            ownerDeviceID: deviceID, createdAt: Date(), status: .draft, statusReason: "test"
+        )
+        let guidedID = UUID()
+        try store.saveGuidedShots([
+            GuidedShot(id: guidedID, title: "B1 East Downspout", building: "B1",
+                       targetElevation: "East", detailType: "Downspout", angleIndex: 1)
+        ], propertyID: property.id)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { renderer in
+            UIColor.blue.setFill()
+            renderer.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let jpeg = try XCTUnwrap(image.jpegData(compressionQuality: 0.8))
+        let save = await appState.saveFastRuntimePrototypeCapture(
+            data: jpeg, context: context, capturedAt: Date(),
+            metadataContext: AppState.FastRuntimeCaptureMetadataContext(
+                locationMode: "Exterior", building: "B1", elevation: "East",
+                detailType: "Downspout", angleIndex: 1, isGuided: true
+            )
+        )
+        XCTAssertTrue(save.success, save.errorMessage ?? "")
+        let shot = try XCTUnwrap(save.shot)
+        let storageRoot = try XCTUnwrap(save.storageRoot)
+        appState.projectFastRuntimeCaptureToLocalCameraState(context: context, shot: shot, guidedID: guidedID)
+        XCTAssertTrue(appState.fastRuntimeReclassifyGuidedShot(
+            propertyID: property.id, sessionID: context.sessionID, guidedShotID: guidedID,
+            building: "B1", elevation: "East", detailType: "Elevation", angleIndex: 1,
+            storageRoot: storageRoot
+        ))
+        let recordsData = try Data(contentsOf: storageRoot.appendingPathComponent("Metadata/fast-lane-shots.json"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = try decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: recordsData)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].id, shot.id)
+        XCTAssertEqual(records[0].metadataContext?.detailType, "Elevation")
+        XCTAssertEqual(records[0].metadataContext?.shotKey,
+                       ShotMetadata.makeShotKey(building: "B1", elevation: "East", detailType: "Elevation", angleIndex: 1))
+        let rows = try store.fetchGuidedShots(propertyID: property.id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].shot?.id, shot.id)
+        XCTAssertTrue(rows[0].isCompleted)
+        XCTAssertEqual(rows[0].detailType, "Elevation")
+        let session = try store.loadSessionMetadata(propertyID: property.id, sessionID: context.sessionID)
+        XCTAssertEqual(session.shots.count, 1)
+        XCTAssertEqual(session.shots[0].shotID, shot.id)
+        XCTAssertEqual(session.shots[0].detailType, "Elevation")
+        XCTAssertEqual(session.guidedShots.count, 1)
+        XCTAssertEqual(session.guidedShots[0].shot?.id, shot.id)
+    }
+
     func testMissingSessionJSONRecoversOnlyOriginalsInCurrentContainerAndIsIdempotent() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("GuidedSessionDurability-\(UUID().uuidString)", isDirectory: true)
