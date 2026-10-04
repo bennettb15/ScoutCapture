@@ -112,6 +112,76 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertEqual(selectedDraft.summary?.photoCount, 1)
     }
 
+    func testFlaggedGuidedCaptureKeepsOnePhotoAndCreatesAnActiveIssue() async throws {
+        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
+        let root = externalRoot.appendingPathComponent("FlaggedGuidedCapture-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let org = try store.createOrganization(Organization(name: "Test Organization"))
+        let property = try store.createProperty(Property(orgId: org.id, name: "Test Property", address: "100 Test Way"))
+        let suiteName = "FlaggedGuidedCapture-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        let appState = AppState(localStore: store, userDefaults: defaults)
+        appState._debugRefreshPropertiesLocallyForTests()
+        let deviceID = try XCTUnwrap(defaults.string(forKey: "scoutcapture.deviceIdentifier.v1"))
+        let context = ActiveCaptureContext(
+            sessionID: UUID(), propertyID: property.id, orgID: org.id,
+            sessionType: .fullDocumentation, ownerUserID: nil, ownerEmail: nil,
+            ownerDeviceID: deviceID, createdAt: Date(), status: .draft, statusReason: "test"
+        )
+        let guidedID = UUID()
+        let issueID = UUID()
+        try store.saveGuidedShots([
+            GuidedShot(id: guidedID, title: "B1 North Downspout", building: "B1",
+                       targetElevation: "North", detailType: "Downspout", angleIndex: 1)
+        ], propertyID: property.id)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { renderer in
+            UIColor.blue.setFill()
+            renderer.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let jpeg = try XCTUnwrap(image.jpegData(compressionQuality: 0.8))
+        let save = await appState.saveFastRuntimePrototypeCapture(
+            data: jpeg, context: context, capturedAt: Date(),
+            metadataContext: AppState.FastRuntimeCaptureMetadataContext(
+                locationMode: "Exterior", building: "B1", elevation: "North",
+                detailType: "Downspout", detailNote: "Loose downspout",
+                priority: "High", angleIndex: 1, isGuided: true, isFlagged: true,
+                issueID: issueID, issueStatus: "active", captureIntentSource: "guided"
+            )
+        )
+        XCTAssertTrue(save.success, save.errorMessage ?? "")
+        let shot = try XCTUnwrap(save.shot)
+        let storageRoot = try XCTUnwrap(save.storageRoot)
+        appState.projectFastRuntimeCaptureToLocalCameraState(context: context, shot: shot, guidedID: guidedID)
+
+        let recordsData = try Data(contentsOf: storageRoot.appendingPathComponent("Metadata/fast-lane-shots.json"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = try decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: recordsData)
+        XCTAssertEqual(records.map(\.id), [shot.id])
+        XCTAssertEqual(records.first?.metadataContext?.isGuided, true)
+        XCTAssertEqual(records.first?.metadataContext?.isFlagged, true)
+        XCTAssertEqual(records.first?.metadataContext?.issueID, issueID)
+
+        let session = try store.loadSessionMetadata(propertyID: property.id, sessionID: context.sessionID)
+        XCTAssertEqual(session.shots.map(\.shotID), [shot.id])
+        XCTAssertEqual(session.shots.first?.issueID, issueID)
+        XCTAssertEqual(session.shots.first?.noteText, "Loose downspout")
+        let issues = try store.fetchObservations(propertyID: property.id)
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues.first?.id, issueID)
+        XCTAssertEqual(issues.first?.status, .active)
+        XCTAssertEqual(issues.first?.linkedShotID, shot.id)
+        XCTAssertEqual(issues.first?.shots.map(\.id), [shot.id])
+        let guided = try store.fetchGuidedShots(propertyID: property.id)
+        XCTAssertEqual(guided.count, 1)
+        XCTAssertTrue(guided[0].isRetired)
+    }
+
     func testReclassifyingCapturedGuidedShotKeepsOnePhotoAndCompletedChecklistRow() async throws {
         let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
         let root = externalRoot.appendingPathComponent("GuidedReclassification-\(UUID().uuidString)", isDirectory: true)
