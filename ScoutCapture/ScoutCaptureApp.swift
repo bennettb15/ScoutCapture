@@ -15839,6 +15839,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             if case .flagged(let issueID) = completedIntent,
                                let savedShotID = saveResult.shot?.id {
                                 presentFastLaneFlaggedDecision(issueID: issueID, shotID: savedShotID)
+                            } else if completedIntent.guidedID != nil,
+                                      capturePreparation.metadata.isFlagged == true {
+                                showFastLaneSideControlToast("Guided photo flagged as an active issue")
                             } else if let feedback = fastLanePostCaptureFeedback(for: completedIntent) {
                                 showFastLaneSideControlToast(feedback)
                             }
@@ -16852,7 +16855,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let isFlagged: Bool = {
             switch fastLaneCaptureIntent {
             case .guided:
-                return false
+                return current.detailNote != nil
             case .flagged, .resolution:
                 return true
             default:
@@ -16862,15 +16865,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let issueStatus: String? = {
             switch fastLaneCaptureIntent {
             case .guided:
-                return nil
+                return isFlagged ? Observation.Status.active.issueStatusValue : nil
             case .flagged:
                 return Observation.Status.active.issueStatusValue
             default:
                 return current.detailNote == nil ? nil : Observation.Status.active.issueStatusValue
             }
         }()
-        let captureIssueID = fastLaneCaptureIntent.guidedID == nil
-            ? (fastLaneCaptureIntent.issueID ?? (isFlagged ? UUID() : nil))
+        let captureIssueID = isFlagged
+            ? (fastLaneCaptureIntent.issueID ?? UUID())
             : nil
 
         return AppState.FastRuntimeCaptureMetadataContext(
@@ -18646,9 +18649,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             priority: normalized.priority,
             angleIndex: normalized.angleIndex,
             isGuided: isArmingGuided ? true : (normalized.isGuided ?? fastMetadataContext.isGuided),
-            isFlagged: isArmingGuided ? false : (normalized.isFlagged ?? fastMetadataContext.isFlagged),
+            isFlagged: isArmingGuided ? normalized.detailNote != nil : (normalized.isFlagged ?? fastMetadataContext.isFlagged),
             issueID: isArmingGuided ? nil : (normalized.issueID ?? fastMetadataContext.issueID),
-            issueStatus: isArmingGuided ? nil : (normalized.issueStatus ?? fastMetadataContext.issueStatus),
+            issueStatus: isArmingGuided && normalized.detailNote != nil
+                ? Observation.Status.active.issueStatusValue
+                : (isArmingGuided ? nil : (normalized.issueStatus ?? fastMetadataContext.issueStatus)),
             captureIntentSource: normalized.captureIntentSource ?? fastMetadataContext.captureIntentSource
         )
         if isFastLaneCaptureIntentArmed {
