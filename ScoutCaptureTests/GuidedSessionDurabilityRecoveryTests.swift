@@ -90,6 +90,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         ))
         XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
         XCTAssertEqual(appState.propertyRowDraftCount, 0)
+        XCTAssertNil(appState.fastRuntimeDraftResumeState(for: property.id))
+        XCTAssertNotEqual(appState.preferredPropertyEntrySessionID(for: property.id), context.sessionID)
 
         // An older indexed draft must not displace a newer interrupted capture.
         let newerSessionID = UUID()

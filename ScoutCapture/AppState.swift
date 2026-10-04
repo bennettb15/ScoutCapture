@@ -43573,7 +43573,8 @@ final class AppState: ObservableObject {
         if let currentSession,
            currentSession.propertyID == propertyID,
            currentSession.status == .draft,
-           !isFinalSession(currentSession) {
+           !isFinalSession(currentSession),
+           !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: currentSession.id) {
             return currentSession.id
         }
         if let draft = canonicalDraftSession(for: propertyID, requireCaptures: true) {
@@ -48423,7 +48424,8 @@ final class AppState: ObservableObject {
         currentDeviceID: String
     ) -> FastRuntimeDraftSummary? {
         guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
-              summary.photoCount > 0 else {
+              summary.photoCount > 0,
+              !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID) else {
             return nil
         }
         if let ownerDeviceID = normalizedSupabaseText(summary.ownerDeviceID),
@@ -48459,6 +48461,12 @@ final class AppState: ObservableObject {
 
         let resolvedDraft = Self.resolvedFastRuntimeDraftStorage(for: draftSummary)
         let summary = resolvedDraft.summary
+        guard !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID),
+              !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).contains(where: {
+                  $0.context.sessionID == summary.sessionID
+              }) else {
+            return nil
+        }
         if resolvedDraft.didRelocate {
             var nextDrafts = fastRuntimeDraftsByPropertyID
             nextDrafts[propertyID] = summary
@@ -48533,6 +48541,7 @@ final class AppState: ObservableObject {
                       context.propertyID == propertyID,
                       context.orgID == orgID,
                       context.status == .draft,
+                      !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: context.sessionID),
                       fastRuntimeContextIsOwnedByCurrentActor(
                         ownerUserID: context.ownerUserID,
                         ownerDeviceID: context.ownerDeviceID,
@@ -48613,6 +48622,7 @@ final class AppState: ObservableObject {
                       !metadata.isSealed,
                       metadata.propertyID == propertyID,
                       metadata.sessionID == draft.id,
+                      !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: draft.id),
                       metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id else {
 #if DEBUG
                     print("[FastLaneRecovery] excluded session=\(draft.id.uuidString.prefix(8)) metadata_status=\(metadata.status.rawValue) sealed=\(metadata.isSealed) identity_match=\(metadata.propertyID == propertyID && metadata.sessionID == draft.id) user_match=\(metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id)")
@@ -60981,11 +60991,25 @@ final class AppState: ObservableObject {
             session.firstDeliveredAt != nil
     }
 
+    private static func fastRuntimeCompletionWasRequested(propertyID: UUID, sessionID: UUID) -> Bool {
+        let stableRoot = try? stableFastRuntimeDraftRoot(propertyID: propertyID, sessionID: sessionID)
+        let tempRoot = fastRuntimePrototypeTempRootURL()
+            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+        return [stableRoot, tempRoot].compactMap { $0 }.contains { root in
+            FileManager.default.fileExists(atPath: root
+                .appendingPathComponent("Metadata/complete-requested-at.json", isDirectory: false).path)
+        }
+    }
+
     private static func sessionHasFinalLocalStateEvidence(
         _ session: Session,
         localStore: LocalStore,
         cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus]
     ) -> Bool {
+        if fastRuntimeCompletionWasRequested(propertyID: session.propertyID, sessionID: session.id) {
+            return true
+        }
         if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
            metadata.status == .completed ||
             metadata.endedAt != nil ||
@@ -61499,6 +61523,9 @@ final class AppState: ObservableObject {
     }
 
     private func sessionHasFinalLocalStateEvidence(_ session: Session) -> Bool {
+        if Self.fastRuntimeCompletionWasRequested(propertyID: session.propertyID, sessionID: session.id) {
+            return true
+        }
         if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
            metadata.status == .completed ||
             metadata.endedAt != nil ||
