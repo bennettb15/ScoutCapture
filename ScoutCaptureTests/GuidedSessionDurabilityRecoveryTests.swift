@@ -180,6 +180,20 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         let guided = try store.fetchGuidedShots(propertyID: property.id)
         XCTAssertEqual(guided.count, 1)
         XCTAssertTrue(guided[0].isRetired)
+
+        let manuallyRetired = GuidedShot(
+            status: .retired, title: "B1 West Window", building: "B1",
+            targetElevation: "West", detailType: "Window", angleIndex: 1,
+            isRetired: true, retiredAt: Date(), retiredInSessionID: context.sessionID
+        )
+        try store.saveGuidedShots(guided + [manuallyRetired], propertyID: property.id)
+        let sideControls = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: property.id,
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID
+        )
+        XCTAssertEqual(sideControls.activeObservations.map(\.id), [issueID])
+        XCTAssertEqual(sideControls.retiredGuidedShots.map(\.id), [manuallyRetired.id])
     }
 
     func testReclassifyingCapturedGuidedShotKeepsOnePhotoAndCompletedChecklistRow() async throws {
