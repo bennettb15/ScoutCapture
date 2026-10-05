@@ -177,20 +177,21 @@ struct AuthView: View {
                             }
 
                             Button(action: submit) {
-                                if appState.isAuthenticating {
-                                    ProgressView()
-                                        .tint(.white)
-                                        .frame(maxWidth: .infinity, minHeight: 50)
-                                } else {
-                                    Text("Sign In")
-                                        .font(.system(size: 17, weight: .semibold))
-                                        .frame(maxWidth: .infinity, minHeight: 50)
+                                ZStack {
+                                    if appState.isAuthenticating {
+                                        ProgressView()
+                                            .tint(.white)
+                                    } else {
+                                        Text("Sign In")
+                                            .font(.system(size: 17, weight: .semibold))
+                                    }
                                 }
+                                .frame(maxWidth: .infinity, minHeight: 50)
+                                .background(Color.blue, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(.white)
-                            .background(Color.blue)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .disabled(appState.isAuthenticating || emailTrimmed.isEmpty || password.isEmpty)
                             .opacity(appState.isAuthenticating || emailTrimmed.isEmpty || password.isEmpty ? 0.6 : 1.0)
 
