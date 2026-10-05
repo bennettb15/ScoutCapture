@@ -56378,7 +56378,34 @@ final class AppState: ObservableObject {
             return lhs.id.uuidString < rhs.id.uuidString
         }
         let activeGuided = sortedGuidedRows.filter { !$0.isRetired && $0.status != .retired }
-        let retiredGuided = sortedGuidedRows.filter { $0.isRetired || $0.status == .retired }
+        let retiredGuidedRows = sortedGuidedRows.filter { $0.isRetired || $0.status == .retired }
+        let retiredGuided: [GuidedShot]
+        if retiredGuidedRows.isEmpty {
+            retiredGuided = []
+        } else {
+            let issueLinkedGuidedShots = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+                .flatMap { session -> [ShotMetadata] in
+                    guard let metadata = try? localStore.loadSessionMetadata(
+                        propertyID: propertyID,
+                        sessionID: session.id
+                    ) else { return [] }
+                    return metadata.shots.filter {
+                        $0.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork($0)
+                    }
+                }
+            let promotionEvidence = LocalConflictRules.flaggedGuidedPromotionEvidence(
+                observations: observations,
+                issueLinkedGuidedShots: issueLinkedGuidedShots,
+                includeResolved: true
+            )
+            retiredGuided = retiredGuidedRows.filter {
+                LocalConflictRules.retiredGuidedShotIsRestorable(
+                    $0,
+                    promotionEvidence: promotionEvidence,
+                    retiredGuidedShots: retiredGuidedRows
+                )
+            }
+        }
 
         return FastRuntimePreviewSideControlPayload(
             resolutionRequiredObservations: [],
