@@ -653,62 +653,51 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                     .buttonStyle(.plain)
                     .offset(y: -13)
                     .overlay(alignment: .center) {
-                        let hdOffsetX: CGFloat = -94
-                        let leftEdgeX: CGFloat = -(containerWidth * 0.5)
-                        let cancelOffsetX: CGFloat = (leftEdgeX + hdOffsetX) * 0.5
+                        let referenceOffsetX: CGFloat = -105
 
                         ZStack {
-                            if display.armedReference != nil {
-                                Button(action: actions.onCancelArmedCapture) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(Color.red.opacity(0.95))
-                                            .frame(width: 44, height: 44)
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 16, weight: .bold))
-                                            .foregroundColor(.white)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .rotationEffect(display.glyphRotationAngle)
-                                .animation(glyphRotationAnimation, value: glyphRotationDegrees)
-                                .offset(x: cancelOffsetX, y: -12)
-                            }
-
-                            if display.isHDVisible {
-                                hdQuickButton(size: 44)
-                                    .rotationEffect(display.glyphRotationAngle)
-                                    .animation(glyphRotationAnimation, value: glyphRotationDegrees)
-                                    .offset(x: -94, y: -12)
-                            }
-
                             detailNoteQuickButton(size: 44)
                                 .rotationEffect(display.glyphRotationAngle)
                                 .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                                 .offset(x: 94, y: -12)
 
                             if let armedReference = display.armedReference {
-                                ZStack(alignment: .topTrailing) {
+                                ZStack(alignment: .topLeading) {
                                     armedReferenceCard(armedReference, size: 88)
-                                        .rotationEffect(display.glyphRotationAngle)
-                                        .animation(glyphRotationAnimation, value: glyphRotationDegrees)
 
+                                    Button(action: actions.onCancelArmedCapture) {
+                                        ZStack {
+                                            Circle()
+                                                .fill(Color.red.opacity(0.95))
+                                                .frame(width: 24, height: 24)
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundColor(.white)
+                                        }
+                                    }
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Cancel armed capture")
+                                    .offset(x: -19, y: -19)
+                                }
+                                .overlay(alignment: .topTrailing) {
                                     Button(action: actions.onArmedReferenceMenuTapped) {
                                         Image(systemName: "ellipsis.circle.fill")
-                                            .font(.system(size: 18, weight: .semibold))
+                                            .font(.system(size: 24, weight: .semibold))
                                             .foregroundColor(.white.opacity(0.90))
                                             .background(
                                                 Circle()
                                                     .fill(Color.black.opacity(0.45))
-                                                    .frame(width: 18, height: 18)
+                                                    .frame(width: 24, height: 24)
                                             )
                                     }
                                     .buttonStyle(.plain)
-                                    .rotationEffect(display.glyphRotationAngle)
-                                    .animation(glyphRotationAnimation, value: glyphRotationDegrees)
-                                    .offset(x: 6, y: -6)
+                                    .offset(x: 9, y: -12)
                                 }
-                                .offset(x: 170, y: -12)
+                                .rotationEffect(display.glyphRotationAngle)
+                                .animation(glyphRotationAnimation, value: glyphRotationDegrees)
+                                .offset(x: referenceOffsetX, y: -12)
                             }
                         }
                     }

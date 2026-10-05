@@ -196,7 +196,18 @@ struct ScoutCaptureApp: App {
                     } else if newValue == .inactive {
                         appState.setLiveSyncMonitoringActive(false)
                     } else if newValue == .active {
-                        appState.setLiveSyncMonitoringActive(true)
+                        let canRunAuthenticatedWork = !appState.requiresAuthentication || appState.isAuthenticated
+                        appState.setLiveSyncMonitoringActive(canRunAuthenticatedWork)
+                        if canRunAuthenticatedWork {
+                            appState.handleSceneDidBecomeActive()
+                        }
+                    }
+                }
+                .onChange(of: appState.isAuthenticated) { _, isAuthenticated in
+                    guard scenePhase == .active else { return }
+                    let canRunAuthenticatedWork = !appState.requiresAuthentication || isAuthenticated
+                    appState.setLiveSyncMonitoringActive(canRunAuthenticatedWork)
+                    if canRunAuthenticatedWork {
                         appState.handleSceneDidBecomeActive()
                     }
                 }
@@ -503,6 +514,8 @@ private struct AppRootView: View {
     @State private var sessionHubReady: Bool = false
     @State private var minimumLaunchDelayMet: Bool = false
     @State private var didStartWarmup: Bool = false
+    @State private var didStartAuthenticatedWarmup: Bool = false
+    @State private var didCompleteAuthenticatedWarmup: Bool = false
     @State private var launchProgress: Double = 0
     @State private var showsProgressBar: Bool = false
     @State private var startupLoadingDetail: String? = nil
@@ -512,8 +525,6 @@ private struct AppRootView: View {
     @State private var homePropertyListReadinessTimedOut: Bool = false
     @State private var startupNetworkGateActive: Bool = false
     @State private var startupNetworkRetryToken: Int = 0
-    @State private var startupAuthGraceActive: Bool = false
-    @State private var startupAuthGraceToken: Int = 0
     // Keep first property-row badge/cloud hydration behind splash when possible.
     private let warmLaunchTimeoutSeconds: TimeInterval = 15.0
 
@@ -524,7 +535,8 @@ private struct AppRootView: View {
     private var canPrepareHomePropertyList: Bool {
         guard isAppReady else { return false }
         guard appState.requiresAuthentication else { return true }
-        return appState.isAuthenticationReady &&
+        return didCompleteAuthenticatedWarmup &&
+            appState.isAuthenticationReady &&
             appState.isAuthenticated &&
             appState.isOrganizationContextReady
     }
@@ -570,26 +582,9 @@ private struct AppRootView: View {
         "Connect to Wi-Fi or cellular to load properties."
     }
 
-    private var shouldHoldStartupForAuthResolution: Bool {
-        startupAuthGraceActive &&
-            appState.requiresAuthentication &&
-            appState.isAuthenticationReady &&
-            !appState.isAuthenticated &&
-            appState.isNetworkAvailable
-    }
-
     var body: some View {
         Group {
-            if !isAppReady {
-                LoadingView(
-                    progress: launchProgress,
-                    showsProgressBar: showsProgressBar,
-                    showsLogo: true,
-                    message: startupLoadingMessage,
-                    detailMessage: startupLoadingDetailMessage,
-                    showsSpinner: startupShowsSpinner
-                )
-            } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
+            if appState.requiresAuthentication && !appState.isAuthenticationReady {
                 LoadingView(
                     progress: 0,
                     showsProgressBar: false,
@@ -598,26 +593,17 @@ private struct AppRootView: View {
                     detailMessage: appState.isNetworkAvailable ? "Restoring your saved session." : startupOfflineDetail,
                     showsSpinner: appState.isNetworkAvailable
                 )
-            } else if appState.requiresAuthentication && !appState.isAuthenticated && !appState.isNetworkAvailable {
-                LoadingView(
-                    progress: launchProgress,
-                    showsProgressBar: showsProgressBar,
-                    showsLogo: true,
-                    message: startupOfflineMessage,
-                    detailMessage: startupOfflineDetail,
-                    showsSpinner: false
-                )
-            } else if shouldHoldStartupForAuthResolution {
-                LoadingView(
-                    progress: launchProgress,
-                    showsProgressBar: showsProgressBar,
-                    showsLogo: true,
-                    message: "Checking sign-in...",
-                    detailMessage: "Restoring your saved session.",
-                    showsSpinner: true
-                )
             } else if appState.requiresAuthentication && !appState.isAuthenticated {
                 AuthView()
+            } else if !isAppReady {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: startupLoadingMessage,
+                    detailMessage: startupLoadingDetailMessage,
+                    showsSpinner: startupShowsSpinner
+                )
             } else if appState.requiresAuthentication && !appState.isOrganizationContextReady {
                 ZStack(alignment: .bottom) {
                     LoadingView(
@@ -654,15 +640,18 @@ private struct AppRootView: View {
             }
         }
         .onChange(of: appState.isAuthenticationReady) { _, _ in
-            startStartupAuthGraceIfNeeded()
+            startAuthenticatedWarmupIfNeeded()
             startHomePropertyListReadinessIfNeeded()
         }
         .onChange(of: appState.isAuthenticated) { _, _ in
             if appState.isAuthenticated {
-                startupAuthGraceActive = false
-                startupAuthGraceToken += 1
+                startAuthenticatedWarmupIfNeeded()
+                if startupNetworkGateActive && appState.isNetworkAvailable {
+                    attemptStartupNetworkRecovery()
+                }
             } else {
-                startStartupAuthGraceIfNeeded()
+                homePropertyListReady = false
+                didStartHomePropertyListReadiness = false
             }
             startHomePropertyListReadinessIfNeeded()
         }
@@ -677,9 +666,6 @@ private struct AppRootView: View {
         }
         .onChange(of: appState.isNetworkAvailable) { _, isAvailable in
             handleNetworkAvailabilityChange(isAvailable)
-            if isAvailable {
-                startStartupAuthGraceIfNeeded()
-            }
         }
         .onChange(of: appState.properties.count) { _, newCount in
             if newCount > 0 {
@@ -697,67 +683,45 @@ private struct AppRootView: View {
             if skipStartupLoading {
                 sessionHubReady = true
                 minimumLaunchDelayMet = true
-                CameraManager.prewarm()
-                appState.warmLaunchReadiness {
-                    if appState.properties.isEmpty {
-                        appState.refreshPropertiesInBackground()
-                    }
-                    startHomePropertyListReadinessIfNeeded()
-                }
-                AddPropertyWarmup.prewarm()
-                OptionalDetailNoteWarmup.prewarm()
+                startAuthenticatedWarmupIfNeeded()
                 return
             }
 
             withAnimation(.easeOut(duration: 0.16)) {
                 showsProgressBar = true
             }
-            scheduleStartupLoadingFeedback()
-
             advanceLaunchProgress(to: 0.22)
-            async let minDelay: Void = {
-                try? await Task.sleep(nanoseconds: 1_800_000_000)
-            }()
-
-            CameraManager.prewarm()
-            advanceLaunchProgress(to: 0.40)
-
-            await withCheckedContinuation { continuation in
-                var didResume = false
-                let resumeOnce: () -> Void = {
-                    guard !didResume else { return }
-                    didResume = true
-                    continuation.resume()
-                }
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
-                    guard !sessionHubReady else {
-                        resumeOnce()
-                        return
-                    }
-                    propertyListReadinessTimedOut = true
-                    sessionHubReady = true
-                    advanceLaunchProgress(to: 0.88)
-                    resumeOnce()
-                }
-
-                appState.warmLaunchReadiness {
-                    propertyListReadinessTimedOut = false
-                    sessionHubReady = true
-                    advanceLaunchProgress(to: 0.88)
-                    resumeOnce()
-                }
-            }
-
-            _ = await minDelay
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
             advanceLaunchProgress(to: 0.96)
-            startupLoadingDetail = "Finalizing local row status before showing home."
-            AddPropertyWarmup.prewarm()
-            OptionalDetailNoteWarmup.prewarm()
-            try? await Task.sleep(nanoseconds: 60_000_000)
             minimumLaunchDelayMet = true
-            startHomePropertyListReadinessIfNeeded()
+            sessionHubReady = true
+            startAuthenticatedWarmupIfNeeded()
             onInitialLaunchCompleted()
+        }
+    }
+
+    private func startAuthenticatedWarmupIfNeeded() {
+        guard !didStartAuthenticatedWarmup else { return }
+        guard !appState.requiresAuthentication ||
+                (appState.isAuthenticationReady && appState.isAuthenticated) else { return }
+
+        didStartAuthenticatedWarmup = true
+        scheduleStartupLoadingFeedback()
+        CameraManager.prewarm()
+        AddPropertyWarmup.prewarm()
+        OptionalDetailNoteWarmup.prewarm()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
+            guard !didCompleteAuthenticatedWarmup else { return }
+            propertyListReadinessTimedOut = true
+            didCompleteAuthenticatedWarmup = true
+            startHomePropertyListReadinessIfNeeded()
+        }
+
+        appState.warmLaunchReadiness {
+            propertyListReadinessTimedOut = false
+            didCompleteAuthenticatedWarmup = true
+            startHomePropertyListReadinessIfNeeded()
         }
     }
 
@@ -819,7 +783,6 @@ private struct AppRootView: View {
     private func handleNetworkAvailabilityChange(_ isAvailable: Bool) {
         guard !homePropertyListReady else { return }
         if isAvailable {
-            startStartupAuthGraceIfNeeded()
             if appState.properties.isEmpty {
                 startupNetworkGateActive = true
             }
@@ -832,23 +795,8 @@ private struct AppRootView: View {
         }
     }
 
-    private func startStartupAuthGraceIfNeeded() {
-        guard !homePropertyListReady,
-              appState.requiresAuthentication,
-              appState.isNetworkAvailable,
-              appState.isAuthenticationReady,
-              !appState.isAuthenticated,
-              appState.properties.isEmpty else { return }
-        startupAuthGraceActive = true
-        startupAuthGraceToken += 1
-        let token = startupAuthGraceToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
-            guard token == startupAuthGraceToken else { return }
-            startupAuthGraceActive = false
-        }
-    }
-
     private func attemptStartupNetworkRecovery() {
+        guard !appState.requiresAuthentication || (appState.isAuthenticationReady && appState.isAuthenticated) else { return }
         guard startupNetworkGateActive,
               appState.isNetworkAvailable,
               appState.properties.isEmpty,
