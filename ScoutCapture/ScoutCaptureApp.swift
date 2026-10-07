@@ -18629,28 +18629,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var isFastLaneElevationHeadingAligned: Bool {
         guard chromeLocationMode == .exterior else { return false }
-        guard let rawHeading = locationManager.headingDegrees else { return false }
-        let currentHeading = normalizedFastLaneHeadingForAlignment(rawHeading)
+        guard let currentHeading = locationManager.cameraFacingHeadingDegrees else { return false }
         guard let ideal = idealFastLaneFacingHeading(for: CanonicalElevation.normalize(fastMetadataContext.elevation) ?? fastMetadataContext.elevation) else {
             return false
         }
         return angularFastLaneDifferenceDegrees(currentHeading, ideal) <= 45
-    }
-
-    private func normalizedFastLaneHeadingForAlignment(_ heading: Double) -> Double {
-        let adjusted: Double
-        switch lastValidDeviceOrientation {
-        case .landscapeLeft:
-            adjusted = heading + 90
-        case .landscapeRight:
-            adjusted = heading - 90
-        case .portraitUpsideDown:
-            adjusted = heading + 180
-        default:
-            adjusted = heading
-        }
-        let wrapped = adjusted.truncatingRemainder(dividingBy: 360)
-        return wrapped >= 0 ? wrapped : wrapped + 360
     }
 
     private func idealFastLaneFacingHeading(for normalizedElevation: String) -> Double? {
@@ -20166,15 +20149,18 @@ private struct FastLaneCoreChecklistSheet: View {
             .padding(.top, 18)
             .padding(.bottom, 12)
 
-            VStack(spacing: 0) {
-                ForEach(rows) { row in
-                    coreChecklistRow(row)
-                    if row.id != rows.last?.id {
-                        Divider()
-                            .padding(.leading, 14)
+            ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                    ForEach(rows) { row in
+                        coreChecklistRow(row)
+                        if row.id != rows.last?.id {
+                            Divider()
+                                .padding(.leading, 14)
+                        }
                     }
                 }
             }
+            .frame(maxHeight: min(420, UIScreen.main.bounds.height * 0.55))
             .background(Color(uiColor: .secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
@@ -21199,8 +21185,7 @@ private struct FastLaneMetadataFilterSheet: View {
                         metadataSelectorRow(
                             title: "Elevation",
                             value: selectedElevation,
-                            context: FastLaneMetadataSelectionContext(kind: .elevation, title: "Elevation"),
-                            titleColor: .white
+                            context: FastLaneMetadataSelectionContext(kind: .elevation, title: "Elevation")
                         )
                     }
 
@@ -21324,11 +21309,12 @@ private struct FastLaneMetadataFilterSheet: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.86))
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.blue)
+                        .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .contentShape(Circle())
+                .accessibilityLabel("Manage \(title)")
             }
         }
     }
