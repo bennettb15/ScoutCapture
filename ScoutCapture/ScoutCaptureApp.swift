@@ -13897,6 +13897,34 @@ private struct FastLaneSharedActionMenuOverlay: View {
     }
 }
 
+struct FastLaneAngleReservationIndex {
+    private struct Key: Hashable {
+        let building: String
+        let elevation: String
+        let detailType: String
+    }
+
+    private var anglesByKey: [Key: Set<Int>] = [:]
+
+    mutating func reserve(building: String?, elevation: String?, detailType: String?, angleIndex: Int?) {
+        guard let key = Self.key(building: building, elevation: elevation, detailType: detailType) else { return }
+        anglesByKey[key, default: []].insert(max(1, angleIndex ?? 1))
+    }
+
+    func usedAngles(building: String?, elevation: String?, detailType: String?) -> Set<Int> {
+        guard let key = Self.key(building: building, elevation: elevation, detailType: detailType) else { return [] }
+        return anglesByKey[key] ?? []
+    }
+
+    private static func key(building: String?, elevation: String?, detailType: String?) -> Key? {
+        let building = normalizedFastLaneComparable(building)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(elevation ?? "") ?? elevation)
+        let detailType = normalizedFastLaneComparable(detailType)
+        guard !building.isEmpty, !elevation.isEmpty, !detailType.isEmpty else { return nil }
+        return Key(building: building, elevation: elevation, detailType: detailType)
+    }
+}
+
 private struct FastLaneUnarmedMetadataSnapshot {
     let context: AppState.FastRuntimeCaptureMetadataContext
 }
@@ -14059,6 +14087,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isLoadingFastLaneSideControlSheet: Bool = false
     @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
     @State private var fastLaneCaptureIntent: FastLaneCaptureIntent = .free
+    @State private var fastLaneAngleReservationIndex: FastLaneAngleReservationIndex?
     @State private var fastLaneUnarmedMetadataSnapshot: FastLaneUnarmedMetadataSnapshot?
     @State private var fastLaneGuidedThumbnailPathByID: [UUID: String] = [:]
     @State private var fastLaneGuidedReferencePathByID: [UUID: String] = [:]
@@ -14566,6 +14595,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             ),
             storageRoot: fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         ) {
+            fastLaneAngleReservationIndex = nil
             reloadFastLaneSideControlPayloadFromLocalStore()
             reloadFastLaneGalleryAssets()
         } else {
@@ -14588,6 +14618,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             detailType: detailType,
             storageRoot: fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         ) {
+            fastLaneAngleReservationIndex = nil
             reloadFastLaneSideControlPayloadFromLocalStore()
             reloadFastLaneGalleryAssets()
         } else {
@@ -15725,6 +15756,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         )
                         if saveResult.success {
                             let completedIntent = capturePreparation.intent
+                            if capturePreparation.retakeGuidedID != nil || capturePreparation.retakeIssueID != nil {
+                                // Retakes can remove an old reservation; rebuild from saved state.
+                                fastLaneAngleReservationIndex = nil
+                            } else if let savedMetadata = saveResult.shot?.metadataContext {
+                                fastLaneAngleReservationIndex?.reserve(
+                                    building: savedMetadata.building,
+                                    elevation: savedMetadata.elevation,
+                                    detailType: savedMetadata.detailType,
+                                    angleIndex: savedMetadata.angleIndex
+                                )
+                            } else {
+                                fastLaneAngleReservationIndex = nil
+                            }
                             fastLaneRetakeGuidedID = nil
                             fastLaneRetakeIssueID = nil
                             if !fastLaneCaptureProfileHistoryLocked {
@@ -16124,74 +16168,91 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         case .free:
             break
         }
-
-        let building = normalizedFastLaneComparable(metadata.building)
-        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
-        let detail = normalizedFastLaneComparable(metadata.detailType)
-        guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else {
+        guard !normalizedFastLaneComparable(metadata.building).isEmpty,
+              !normalizedFastLaneComparable(metadata.elevation).isEmpty,
+              !normalizedFastLaneComparable(metadata.detailType).isEmpty else {
             return 1
         }
 
-        var usedAngles = Set<Int>()
-        for shot in fastLaneLocalShotRecords() {
-            guard let shotMetadata = shot.metadataContext else { continue }
-            guard normalizedFastLaneComparable(shotMetadata.building) == building,
-                  normalizedFastLaneComparable(CanonicalElevation.normalize(shotMetadata.elevation) ?? shotMetadata.elevation) == elevation,
-                  normalizedFastLaneComparable(shotMetadata.detailType) == detail else {
-                continue
-            }
-            usedAngles.insert(max(1, shotMetadata.angleIndex))
+        if fastLaneAngleReservationIndex == nil {
+            fastLaneAngleReservationIndex = makeFastLaneAngleReservationIndex()
         }
-        func reserveGuidedAngles(from guidedShots: [GuidedShot]) {
-            for guidedShot in guidedShots {
-                guard normalizedFastLaneComparable(guidedShot.building) == building,
-                      normalizedFastLaneComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation) == elevation,
-                      normalizedFastLaneComparable(guidedShot.detailType) == detail else {
-                    continue
-                }
-                usedAngles.insert(max(1, guidedShot.angleIndex ?? 1))
-            }
-        }
-        func reserveIssueAngles(from observations: [Observation]) {
-            for observation in observations {
-                for guidedShot in observation.guidedShots {
-                    guard normalizedFastLaneComparable(guidedShot.building ?? observation.building) == building,
-                          normalizedFastLaneComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? observation.targetElevation ?? "") ?? (guidedShot.targetElevation ?? observation.targetElevation)) == elevation,
-                          normalizedFastLaneComparable(guidedShot.detailType ?? observation.detailType) == detail else {
-                        continue
-                    }
-                    usedAngles.insert(max(1, guidedShot.angleIndex ?? 1))
-                }
-            }
-        }
-        func reserveAppStateAngles(_ reservations: [AppState.FastRuntimeAngleReservation]) {
-            for reservation in reservations {
-                guard normalizedFastLaneComparable(reservation.building) == building,
-                      normalizedFastLaneComparable(CanonicalElevation.normalize(reservation.elevation) ?? reservation.elevation) == elevation,
-                      normalizedFastLaneComparable(reservation.detailType) == detail else {
-                    continue
-                }
-                usedAngles.insert(max(1, reservation.angleIndex))
-            }
-        }
+        var usedAngles = fastLaneAngleReservationIndex?.usedAngles(
+            building: metadata.building,
+            elevation: metadata.elevation,
+            detailType: metadata.detailType
+        ) ?? []
 
-        reserveGuidedAngles(from: fastLaneSideControlPayload.guidedShots)
-        reserveIssueAngles(from: fastLaneSideControlPayload.activeObservations)
-        reserveAppStateAngles(appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID, currentSessionID: context.sessionID))
-        let latestPayload = appState.fastRuntimePreviewSideControlPayload(
-            propertyID: context.propertyID,
-            sessionType: context.sessionType,
-            currentSessionID: context.sessionID
-        )
-        let latestScopedPayload = fastLanePayloadScopedToCurrentFastSession(latestPayload)
-        reserveGuidedAngles(from: latestScopedPayload.guidedShots)
-        reserveIssueAngles(from: latestScopedPayload.activeObservations)
+        // The side controls can refresh while the camera stays open. Their in-memory
+        // rows are cheap to read and keep new guided and flagged angles current.
+        var liveIndex = FastLaneAngleReservationIndex()
+        reserveFastLanePayloadAngles(fastLaneSideControlPayload, in: &liveIndex)
+        usedAngles.formUnion(liveIndex.usedAngles(
+            building: metadata.building,
+            elevation: metadata.elevation,
+            detailType: metadata.detailType
+        ))
 
         var nextAngle = 1
         while usedAngles.contains(nextAngle) {
             nextAngle += 1
         }
         return nextAngle
+    }
+
+    private func makeFastLaneAngleReservationIndex() -> FastLaneAngleReservationIndex {
+        var index = FastLaneAngleReservationIndex()
+        for shot in fastLaneLocalShotRecords() {
+            guard let metadata = shot.metadataContext else { continue }
+            index.reserve(
+                building: metadata.building,
+                elevation: metadata.elevation,
+                detailType: metadata.detailType,
+                angleIndex: metadata.angleIndex
+            )
+        }
+        for reservation in appState.fastRuntimePropertyAngleReservations(
+            propertyID: context.propertyID,
+            currentSessionID: context.sessionID
+        ) {
+            index.reserve(
+                building: reservation.building,
+                elevation: reservation.elevation,
+                detailType: reservation.detailType,
+                angleIndex: reservation.angleIndex
+            )
+        }
+        let latestPayload = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID
+        )
+        reserveFastLanePayloadAngles(fastLanePayloadScopedToCurrentFastSession(latestPayload), in: &index)
+        return index
+    }
+
+    private func reserveFastLanePayloadAngles(
+        _ payload: AppState.FastRuntimePreviewSideControlPayload,
+        in index: inout FastLaneAngleReservationIndex
+    ) {
+        for guided in payload.guidedShots {
+            index.reserve(
+                building: guided.building,
+                elevation: guided.targetElevation,
+                detailType: guided.detailType,
+                angleIndex: guided.angleIndex
+            )
+        }
+        for observation in payload.activeObservations {
+            for guided in observation.guidedShots {
+                index.reserve(
+                    building: guided.building ?? observation.building,
+                    elevation: guided.targetElevation ?? observation.targetElevation,
+                    detailType: guided.detailType ?? observation.detailType,
+                    angleIndex: guided.angleIndex
+                )
+            }
+        }
     }
 
     private func fastLanePayloadScopedToCurrentFastSession(
