@@ -22,6 +22,18 @@ enum FastRuntimeOriginalMetadata {
         )
     }
 
+    static func uploadFingerprintAsync(at fileURL: URL) async throws -> UploadFingerprint {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    continuation.resume(returning: try uploadFingerprint(at: fileURL))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     static func schedule(_ shot: AppState.FastRuntimePrototypeShotRecord) {
         queue.async {
             do {

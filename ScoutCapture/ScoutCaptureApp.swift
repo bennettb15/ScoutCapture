@@ -109,6 +109,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(
         _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == FastRuntimeBackgroundOriginalUploader.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        FastRuntimeBackgroundOriginalUploader.shared.handleBackgroundEvents(completionHandler: completionHandler)
+    }
+
+    func application(
+        _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         // Keep the app in portrait.
@@ -1593,7 +1605,9 @@ struct SessionHubView: View {
         cloudGlyph: AppState.PropertyRowCloudGlyphState?
     ) -> some View {
         let addressLine = propertyAddressLine(property) ?? property.address
-        let pendingUploadCount = appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id)
+        let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
+        let pendingUploadCount = uploadProgressLabel == nil
+            ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
 
         return Button {
             handlePropertyTap(property)
@@ -1631,7 +1645,9 @@ struct SessionHubView: View {
                 if hasDraft {
                     chipLabel("Draft", tint: .orange)
                 }
-                if pendingUploadCount > 0 {
+                if let uploadProgressLabel {
+                    chipLabel(uploadProgressLabel, tint: uploadProgressLabel.hasPrefix("Uploading") ? .blue : .orange)
+                } else if pendingUploadCount > 0 {
                     chipLabel("\(pendingUploadCount) to upload", tint: .orange)
                 }
             }
@@ -1698,8 +1714,11 @@ struct SessionHubView: View {
         rowStatusChips: [UUID: AppState.PropertyRowStatusChipState]
     ) -> [PropertyListTableRowModel] {
         properties.map { property in
-            let cloudGlyph = rowCloudGlyphs[property.id]
-            let pendingUploadCount = appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id)
+            let cloudGlyph = appState.propertyRowOriginalUploadCloudGlyphState(propertyID: property.id)
+                ?? rowCloudGlyphs[property.id]
+            let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
+            let pendingUploadCount = uploadProgressLabel == nil
+                ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
             return PropertyListTableRowModel(
                 property: property,
                 title: property.name,
@@ -1710,6 +1729,7 @@ struct SessionHubView: View {
                 isArchived: property.isArchived,
                 cloudGlyph: cloudGlyph,
                 pendingUploadCount: pendingUploadCount,
+                uploadProgressLabel: uploadProgressLabel,
                 canRetryUpload: rowStatusChips[property.id] != nil ||
                     cloudGlyph == .warning ||
                     pendingUploadCount > 0,
@@ -1766,13 +1786,15 @@ struct SessionHubView: View {
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
-        let pendingUploadCount = appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id)
+        let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
+        let pendingUploadCount = uploadProgressLabel == nil
+            ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
         let rawHasDraft = badgeModel.showDraft
         let uploadStatusChip = pendingUploadCount > 0 ? nil : sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let isActivelyUploading = sessionUploadStatus?.state == .uploading &&
             sessionUploadStatus?.isConfigurationBlocked == false
         let hasDraft = rawHasDraft && !isActivelyUploading
-        let hasPendingExport = badgeModel.showPendingExport && !isActivelyUploading
+        let hasPendingExport = badgeModel.showPendingExport && !isActivelyUploading && uploadProgressLabel == nil
         let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let manualExportSession = latestReExportSession ?? pendingSession
@@ -1781,7 +1803,7 @@ struct SessionHubView: View {
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil || pendingUploadCount > 0
+        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil || pendingUploadCount > 0 || uploadProgressLabel != nil
         let showLock = badgeModel.showLock
         Button {
             handlePropertyTap(property)
@@ -1839,7 +1861,9 @@ struct SessionHubView: View {
                                     chipLabel("Pending Export", tint: .blue)
                                 }
 
-                                if pendingUploadCount > 0 {
+                                if let uploadProgressLabel {
+                                    chipLabel(uploadProgressLabel, tint: uploadProgressLabel.hasPrefix("Uploading") ? .blue : .orange)
+                                } else if pendingUploadCount > 0 {
                                     chipLabel("\(pendingUploadCount) to upload", tint: .orange)
                                 }
 
@@ -2442,7 +2466,8 @@ struct SessionHubView: View {
     }
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
-        appState.propertyCardBadgeModel(for: property.id).showPendingExport
+        appState.hasPendingFastRuntimeOriginalUpload(propertyID: property.id) ||
+            appState.propertyCardBadgeModel(for: property.id).showPendingExport
     }
 
     private func matchesPropertyFilter(_ property: Property) -> Bool {
@@ -5613,6 +5638,7 @@ private struct PropertyListTableRowModel: Identifiable {
     let isArchived: Bool
     let cloudGlyph: AppState.PropertyRowCloudGlyphState?
     let pendingUploadCount: Int
+    let uploadProgressLabel: String?
     let canRetryUpload: Bool
     let canOpenMaps: Bool
     let canMessage: Bool
@@ -5634,6 +5660,7 @@ extension PropertyListTableRowModel: Equatable {
             lhs.isArchived == rhs.isArchived &&
             lhs.cloudGlyph == rhs.cloudGlyph &&
             lhs.pendingUploadCount == rhs.pendingUploadCount &&
+            lhs.uploadProgressLabel == rhs.uploadProgressLabel &&
             lhs.canRetryUpload == rhs.canRetryUpload &&
             lhs.canOpenMaps == rhs.canOpenMaps &&
             lhs.canMessage == rhs.canMessage &&
@@ -5946,8 +5973,14 @@ private final class PropertyListTableCell: UITableViewCell {
         lockLabel.isHidden = !row.isLocked
         archivedLabel.isHidden = !row.isArchived
         draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft
-        uploadRetryLabel.text = "\(row.pendingUploadCount) to upload"
-        uploadRetryLabel.isHidden = row.pendingUploadCount == 0
+        uploadRetryLabel.text = row.uploadProgressLabel ?? "\(row.pendingUploadCount) to upload"
+        uploadRetryLabel.accessibilityLabel = row.uploadProgressLabel == "Processing"
+            ? "Processing reports" : uploadRetryLabel.text
+        uploadRetryLabel.isHidden = row.uploadProgressLabel == nil && row.pendingUploadCount == 0
+        let isUploading = row.uploadProgressLabel?.hasPrefix("Uploading") == true
+        uploadRetryLabel.textColor = isUploading ? .systemBlue : .systemOrange
+        uploadRetryLabel.backgroundColor = (isUploading ? UIColor.systemBlue : UIColor.systemOrange).withAlphaComponent(0.15)
+        uploadRetryLabel.layer.borderColor = (isUploading ? UIColor.systemBlue : UIColor.systemOrange).withAlphaComponent(0.35).cgColor
     }
 
     private func configureViews() {

@@ -5352,6 +5352,34 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimeOriginalUploadProgress: Codable, Equatable {
+        enum Phase: String, Codable {
+            case uploading
+            case processingReports
+            case failed
+        }
+
+        let organizationID: UUID
+        let ownerUserID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let totalCount: Int
+        var confirmedShotIDs: Set<UUID>
+        var phase: Phase
+
+        var confirmedCount: Int { min(confirmedShotIDs.count, totalCount) }
+    }
+
+    private struct FastRuntimePreparedOriginalUpload: Sendable {
+        let shotID: UUID
+        let localPath: String
+        let fileURL: URL
+        let storagePath: String
+        let checksumSHA256: String
+        let byteSize: Int
+        let contentType: String
+    }
+
     struct FastRuntimeCompleteUploadShotResult: Equatable, Identifiable {
         let id: UUID
         let localFilePath: String
@@ -7784,6 +7812,8 @@ final class AppState: ObservableObject {
         }
     }
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
+    @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
+    private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
     private(set) var lastPropertyStatusRefreshAt: Date?
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
@@ -8421,6 +8451,7 @@ final class AppState: ObservableObject {
     private let sessionSnapshotUploadRetryStateQueue = DispatchQueue(label: "ScoutCapture.AppState.sessionSnapshotUploadRetry")
     private let networkMonitor = NWPathMonitor()
     private let networkMonitorQueue = DispatchQueue(label: "ScoutCapture.AppState.networkMonitor")
+    private var uploadNetworkWaiters: [CheckedContinuation<Void, Never>] = []
     private let launchOfflineReplaySettlingDelay: TimeInterval = 20
     private let automaticLaunchOfflineReplayAttemptLimit = 5
     private var automaticFastRuntimeCompletionRecoveryInFlight = false
@@ -8907,12 +8938,60 @@ final class AppState: ObservableObject {
                 let wasAvailable = self.isNetworkAvailable
                 let isAvailable = path.status == .satisfied
                 self.isNetworkAvailable = isAvailable
+                if isAvailable {
+                    let waiters = self.uploadNetworkWaiters
+                    self.uploadNetworkWaiters.removeAll()
+                    waiters.forEach { $0.resume() }
+                }
                 if isAvailable && !wasAvailable {
                     self.scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect()
                 }
             }
         }
         networkMonitor.start(queue: networkMonitorQueue)
+    }
+
+    @MainActor
+    private func waitForUploadConnection() async {
+        guard !isNetworkAvailable else { return }
+        await withCheckedContinuation { continuation in
+            uploadNetworkWaiters.append(continuation)
+        }
+    }
+
+    @MainActor
+    private func retryTransientUploadOperation<Value>(
+        _ operation: () async throws -> Value
+    ) async throws -> Value {
+        var delay: UInt64 = 2
+        while true {
+            await waitForUploadConnection()
+            do {
+                return try await operation()
+            } catch {
+                guard !Task.isCancelled else { throw error }
+                let nsError = error as NSError
+                let message = error.localizedDescription.lowercased()
+                let retryableURLCodes: Set<Int> = [
+                    URLError.timedOut.rawValue,
+                    URLError.cannotFindHost.rawValue,
+                    URLError.cannotConnectToHost.rawValue,
+                    URLError.networkConnectionLost.rawValue,
+                    URLError.notConnectedToInternet.rawValue,
+                    URLError.dnsLookupFailed.rawValue
+                ]
+                let transient = !isNetworkAvailable ||
+                    (nsError.domain == NSURLErrorDomain && retryableURLCodes.contains(nsError.code)) ||
+                    message.contains("timed out") || message.contains("connection lost") ||
+                    message.contains("temporarily unavailable") || message.contains("503") ||
+                    message.contains("502") || message.contains("504") || message.contains("429")
+                guard transient else { throw error }
+                if isNetworkAvailable {
+                    try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                    delay = min(delay * 2, 60)
+                }
+            }
+        }
     }
 
     @MainActor
@@ -9695,6 +9774,9 @@ final class AppState: ObservableObject {
                 }
                 guard canRefreshProperties else { return }
                 await refreshPropertiesAwaitingForegroundRefresh()
+                await MainActor.run {
+                    self.scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect()
+                }
             }
 
             guard !Task.isCancelled else { return }
@@ -45384,11 +45466,35 @@ final class AppState: ObservableObject {
         capturedPhotoCount: Int
     ) async -> FastRuntimeCompleteUploadResult {
         let startedAt = Date()
+        let alreadyUploading = activeFastRuntimeCompletionUploadSessionIDs.contains(context.sessionID)
+        if !alreadyUploading {
+            activeFastRuntimeCompletionUploadSessionIDs.insert(context.sessionID)
+        }
+        defer {
+            if !alreadyUploading {
+                activeFastRuntimeCompletionUploadSessionIDs.remove(context.sessionID)
+            }
+        }
         var dryRun = await runFastRuntimeCompleteDryRun(
             context: context,
             storageRoot: storageRoot,
             capturedPhotoCount: capturedPhotoCount
         )
+        if alreadyUploading {
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: [],
+                sessionStatus: "unchanged",
+                propertyStatus: "unchanged",
+                packageSummary: "already_uploading",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                diagnostics: ["stage=already_uploading"],
+                shots: [],
+                message: "This upload is already in progress."
+            )
+        }
         guard dryRun.isValid else {
             return FastRuntimeCompleteUploadResult(
                 success: false,
@@ -45498,9 +45604,10 @@ final class AppState: ObservableObject {
         // The claimed capture context is scoped to the remote organization. A local
         // property copy can carry an older org ID and must not redirect completion.
         guard let orgID = context.orgID,
+              let ownerUserID = authenticatedSupabaseUser?.id,
               orgID == activeOrganizationID,
               canAccessOrganization(orgID),
-              context.ownerUserID == authenticatedSupabaseUser?.id else {
+              context.ownerUserID == ownerUserID else {
             return makeFastRuntimeCompleteUploadFailure(
                 dryRun: dryRun,
                 startedAt: startedAt,
@@ -45521,6 +45628,18 @@ final class AppState: ObservableObject {
             )
         }
 
+        let previouslyConfirmed = originalUploadProgress(propertyID: context.propertyID)
+            .flatMap { $0.sessionID == context.sessionID ? $0.confirmedShotIDs : nil } ?? []
+        saveOriginalUploadProgress(FastRuntimeOriginalUploadProgress(
+            organizationID: orgID,
+            ownerUserID: ownerUserID,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            totalCount: dryRun.shots.count,
+            confirmedShotIDs: previouslyConfirmed.intersection(Set(dryRun.shots.map(\.id))),
+            phase: .uploading
+        ))
+
         var createdRowsSummary: [String] = []
         var shotResults: [FastRuntimeCompleteUploadShotResult] = []
         var sessionStatus = "not_started"
@@ -45539,6 +45658,7 @@ final class AppState: ObservableObject {
         ]
 
         do {
+            await waitForUploadConnection()
             let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: context.propertyID)
             let metadata = makeFastRuntimeCompleteSessionMetadata(
                 context: context,
@@ -45571,14 +45691,16 @@ final class AppState: ObservableObject {
             // Field members may complete sessions but cannot edit properties. Verify
             // that the existing property is visible in the claimed organization.
             diagnostics.append("stage=property_verify")
-            let propertyRows = try await client
-                .from("properties")
-                .select("id")
-                .eq("id", value: context.propertyID.uuidString.lowercased())
-                .eq("org_id", value: orgID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value as [SessionIDOnlyRecord]
+            let propertyRows: [SessionIDOnlyRecord] = try await retryTransientUploadOperation {
+                try await client
+                    .from("properties")
+                    .select("id")
+                    .eq("id", value: context.propertyID.uuidString.lowercased())
+                    .eq("org_id", value: orgID.uuidString.lowercased())
+                    .limit(1)
+                    .execute()
+                    .value
+            }
             guard !propertyRows.isEmpty else {
                 throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 21, userInfo: [
                     NSLocalizedDescriptionKey: "Property is no longer accessible in the selected organization."
@@ -45586,23 +45708,29 @@ final class AppState: ObservableObject {
             }
             createdRowsSummary.append("properties verified 1")
             diagnostics.append("stage=session_ensure")
-            try await ensureSupabaseSessionRowForShotMetadata(
-                propertyID: context.propertyID,
-                sessionID: context.sessionID,
-                orgID: orgID,
-                property: property,
-                metadata: metadata
-            )
+            try await retryTransientUploadOperation {
+                try await ensureSupabaseSessionRowForShotMetadata(
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    orgID: orgID,
+                    property: property,
+                    metadata: metadata
+                )
+            }
             createdRowsSummary.append("sessions ensured 1")
             diagnostics.append("stage=session_update")
-            try await updateSessionRowToSupabase(
-                sessionPayload,
-                propertyID: context.propertyID,
-                orgID: orgID
-            )
+            try await retryTransientUploadOperation {
+                try await updateSessionRowToSupabase(
+                    sessionPayload,
+                    propertyID: context.propertyID,
+                    orgID: orgID
+                )
+            }
             sessionStatus = sessionPayload.status
             createdRowsSummary.append("sessions updated 1")
 
+            var preparedUploads: [FastRuntimePreparedOriginalUpload] = []
+            preparedUploads.reserveCapacity(dryRun.shots.count)
             for (index, shotSummary) in dryRun.shots.enumerated() {
                 diagnostics.append("stage=shot_prepare:\(shotSummary.id.uuidString)")
                 guard let localPath = shotSummary.resolvedLocalFilePath else {
@@ -45611,9 +45739,7 @@ final class AppState: ObservableObject {
                     ])
                 }
                 let localFileURL = URL(fileURLWithPath: localPath, isDirectory: false)
-                let fingerprint = try FastRuntimeOriginalMetadata.uploadFingerprint(at: localFileURL)
-                let checksum = fingerprint.checksumSHA256
-                let byteSize = fingerprint.byteSize
+                let fingerprint = try await FastRuntimeOriginalMetadata.uploadFingerprintAsync(at: localFileURL)
                 let storagePath = operationalMediaStoragePath(
                     sessionID: context.sessionID,
                     shotID: shotSummary.id,
@@ -45624,66 +45750,195 @@ final class AppState: ObservableObject {
                     dryRunShot: shotSummary,
                     position: index,
                     originalFilename: localFileURL.lastPathComponent,
-                    byteSize: byteSize,
-                    checksumSHA256: checksum,
+                    byteSize: fingerprint.byteSize,
+                    checksumSHA256: fingerprint.checksumSHA256,
                     storagePath: storagePath,
                     localObservationByIssueID: localObservationByIssueID
                 )
                 diagnostics.append("stage=shot_metadata_insert:\(shotSummary.id.uuidString)")
-                try await persistShotRichMetadataToSupabase(
-                    orgID: orgID,
-                    propertyID: context.propertyID,
-                    sessionID: context.sessionID,
-                    metadata: metadata,
-                    shot: shot,
-                    allowInsert: true
-                )
-                diagnostics.append("stage=blob_upload:\(shotSummary.id.uuidString)")
-                _ = try await client.storage.from(supabaseOperationalMediaBucket).upload(
-                    storagePath,
-                    fileURL: localFileURL,
-                    options: FileOptions(
-                        cacheControl: "31536000",
-                        contentType: contentType(for: localFileURL),
-                        upsert: true
+                try await retryTransientUploadOperation {
+                    try await persistShotRichMetadataToSupabase(
+                        orgID: orgID,
+                        propertyID: context.propertyID,
+                        sessionID: context.sessionID,
+                        metadata: metadata,
+                        shot: shot,
+                        allowInsert: true
                     )
-                )
-                diagnostics.append("stage=shot_storage_metadata:\(shotSummary.id.uuidString)")
-                try await persistShotStorageMetadataToSupabase(
-                    orgID: orgID,
-                    propertyID: context.propertyID,
-                    sessionID: context.sessionID,
+                }
+                preparedUploads.append(FastRuntimePreparedOriginalUpload(
                     shotID: shotSummary.id,
-                    storageBucket: supabaseOperationalMediaBucket,
+                    localPath: localPath,
+                    fileURL: localFileURL,
                     storagePath: storagePath,
-                    checksumSHA256: checksum,
-                    byteSize: byteSize,
-                    uploadState: "uploaded",
-                    uploadAttempts: 1,
-                    lastUploadError: nil
-                )
-                shotResults.append(FastRuntimeCompleteUploadShotResult(
-                    id: shotSummary.id,
-                    localFilePath: localPath,
-                    storageBucket: supabaseOperationalMediaBucket,
-                    storagePath: storagePath,
-                    byteSize: byteSize,
-                    checksumSHA256: checksum,
-                    uploaded: true,
-                    errorMessage: nil
+                    checksumSHA256: fingerprint.checksumSHA256,
+                    byteSize: fingerprint.byteSize,
+                    contentType: contentType(for: localFileURL)
                 ))
             }
-            createdRowsSummary.append("shots upserted \(shotResults.count)")
-            createdRowsSummary.append("storage originals uploaded \(shotResults.count)")
+            createdRowsSummary.append("shots upserted \(preparedUploads.count)")
+
+            // The server row is the acknowledgement. It is written only after
+            // Storage accepted the file, so older pending sessions can resume too.
+            let remoteShots: [SupabaseShotIdentityRecord] = try await retryTransientUploadOperation {
+                try await client
+                    .from("shots")
+                    .select("id,org_id,session_id,storage_bucket,storage_path,checksum_sha256,upload_state")
+                    .eq("org_id", value: orgID.uuidString.lowercased())
+                    .eq("session_id", value: context.sessionID.uuidString.lowercased())
+                    .execute()
+                    .value
+            }
+            let remoteByID = Dictionary(uniqueKeysWithValues: remoteShots.map { ($0.id, $0) })
+            var confirmed = Set(preparedUploads.compactMap { item -> UUID? in
+                guard let remote = remoteByID[item.shotID],
+                      remote.uploadState == "uploaded",
+                      remote.storageBucket == supabaseOperationalMediaBucket,
+                      remote.storagePath == item.storagePath,
+                      remote.checksumSHA256 == item.checksumSHA256 else { return nil }
+                return item.shotID
+            })
+            var progress = FastRuntimeOriginalUploadProgress(
+                organizationID: orgID,
+                ownerUserID: ownerUserID,
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                totalCount: preparedUploads.count,
+                confirmedShotIDs: confirmed,
+                phase: .uploading
+            )
+            saveOriginalUploadProgress(progress)
+            let uploader = FastRuntimeBackgroundOriginalUploader.shared
+            guard let baseURL = supabaseConfiguration.url,
+                  let anonKey = supabaseConfiguration.anonKey else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 26, userInfo: [
+                    NSLocalizedDescriptionKey: "Upload service configuration is unavailable."
+                ])
+            }
+            var retryDelay: UInt64 = 2
+            var authorizationFailures = 0
+            while confirmed.count < preparedUploads.count {
+                let pending = preparedUploads.filter { !confirmed.contains($0.shotID) }
+                let authSession = try await retryTransientUploadOperation { try await client.auth.session }
+                let uploadRequests = pending.map { item in
+                    FastRuntimeBackgroundOriginalUploader.Upload(
+                        sessionID: context.sessionID,
+                        shotID: item.shotID,
+                        checksumSHA256: item.checksumSHA256,
+                        endpoint: baseURL.appendingPathComponent(
+                            "storage/v1/object/\(supabaseOperationalMediaBucket)/\(item.storagePath)"
+                        ),
+                        fileURL: item.fileURL,
+                        contentType: item.contentType,
+                        accessToken: authSession.accessToken,
+                        anonKey: anonKey
+                    )
+                }
+                await uploader.enqueue(uploadRequests)
+                var retryableFailure = false
+                var failedRequestKeys: Set<String> = []
+                var batchHadAuthorizationFailure = false
+                var blockingError: String?
+                await withTaskGroup(of: (FastRuntimePreparedOriginalUpload, String, FastRuntimeBackgroundOriginalUploader.Outcome).self) { group in
+                    for (item, request) in zip(pending, uploadRequests) {
+                        group.addTask { (item, request.key, await uploader.outcome(for: request.key)) }
+                    }
+                    for await (item, requestKey, outcome) in group {
+                        if outcome.succeeded {
+                            do {
+                                diagnostics.append("stage=shot_storage_metadata:\(item.shotID.uuidString)")
+                                try await retryTransientUploadOperation {
+                                    try await persistShotStorageMetadataToSupabase(
+                                        orgID: orgID,
+                                        propertyID: context.propertyID,
+                                        sessionID: context.sessionID,
+                                        shotID: item.shotID,
+                                        storageBucket: supabaseOperationalMediaBucket,
+                                        storagePath: item.storagePath,
+                                        checksumSHA256: item.checksumSHA256,
+                                        byteSize: item.byteSize,
+                                        uploadState: "uploaded",
+                                        uploadAttempts: 1,
+                                        lastUploadError: nil
+                                    )
+                                }
+                                confirmed.insert(item.shotID)
+                                progress.confirmedShotIDs = confirmed
+                                saveOriginalUploadProgress(progress)
+                            } catch {
+                                retryableFailure = true
+                            }
+                        } else if outcome.statusCode == 401 {
+                            batchHadAuthorizationFailure = true
+                            retryableFailure = true
+                            failedRequestKeys.insert(requestKey)
+                        } else if outcome.statusCode == nil || outcome.statusCode == 408 ||
+                                    outcome.statusCode == 429 || (outcome.statusCode ?? 0) >= 500 {
+                            retryableFailure = true
+                            failedRequestKeys.insert(requestKey)
+                        } else {
+                            blockingError = outcome.message ?? "Photo upload was rejected."
+                        }
+                    }
+                }
+                if let blockingError {
+                    throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 22, userInfo: [
+                        NSLocalizedDescriptionKey: blockingError
+                    ])
+                }
+                if batchHadAuthorizationFailure {
+                    authorizationFailures += 1
+                }
+                if authorizationFailures >= 3 {
+                    throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 23, userInfo: [
+                        NSLocalizedDescriptionKey: "Sign in again to continue this upload. Saved photos are still on this iPhone."
+                    ])
+                }
+                guard confirmed.count < preparedUploads.count else { break }
+                guard retryableFailure else {
+                    throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 24, userInfo: [
+                        NSLocalizedDescriptionKey: "Some photos did not finish uploading. Retry the saved session."
+                    ])
+                }
+                // Background URLSession waits while offline. After a transient
+                // server error, back off rather than continually waking the radio.
+                try? await Task.sleep(nanoseconds: retryDelay * 1_000_000_000)
+                retryDelay = min(retryDelay * 2, 60)
+                for key in failedRequestKeys {
+                    uploader.clearOutcome(for: key)
+                }
+            }
+            guard confirmed.count == dryRun.shots.count else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 25, userInfo: [
+                    NSLocalizedDescriptionKey: "Waiting for all saved photos before report processing."
+                ])
+            }
+            progress.phase = .processingReports
+            saveOriginalUploadProgress(progress)
+            shotResults = preparedUploads.map { item in
+                FastRuntimeCompleteUploadShotResult(
+                    id: item.shotID,
+                    localFilePath: item.localPath,
+                    storageBucket: supabaseOperationalMediaBucket,
+                    storagePath: item.storagePath,
+                    byteSize: item.byteSize,
+                    checksumSHA256: item.checksumSHA256,
+                    uploaded: true,
+                    errorMessage: nil
+                )
+            }
+            createdRowsSummary.append("storage originals confirmed \(shotResults.count)")
 
             if !metadata.issues.isEmpty {
                 diagnostics.append("stage=observation_lineage_replay")
-                let observationReplay = try await replayFastRuntimeCompleteObservationLineage(
-                    orgID: orgID,
-                    propertyID: context.propertyID,
-                    sessionID: context.sessionID,
-                    metadata: metadata
-                )
+                let observationReplay = try await retryTransientUploadOperation {
+                    try await replayFastRuntimeCompleteObservationLineage(
+                        orgID: orgID,
+                        propertyID: context.propertyID,
+                        sessionID: context.sessionID,
+                        metadata: metadata
+                    )
+                }
                 createdRowsSummary.append(
                     "observations replayed insert=\(observationReplay.insertedObservationCount) " +
                     "update=\(observationReplay.updatedObservationCount) " +
@@ -45947,6 +46202,66 @@ final class AppState: ObservableObject {
         )
     }
 
+    private static func fastRuntimeOriginalUploadProgressKey(propertyID: UUID) -> String {
+        "scoutcapture.fast-original-upload-progress.\(propertyID.uuidString.lowercased())"
+    }
+
+    @MainActor
+    private func originalUploadProgress(propertyID: UUID) -> FastRuntimeOriginalUploadProgress? {
+        let progress = fastRuntimeOriginalUploadProgressByPropertyID[propertyID] ?? {
+            guard let data = UserDefaults.standard.data(forKey: Self.fastRuntimeOriginalUploadProgressKey(propertyID: propertyID)) else {
+                return nil
+            }
+            return try? JSONDecoder().decode(FastRuntimeOriginalUploadProgress.self, from: data)
+        }()
+        guard progress?.organizationID == activeOrganizationID,
+              progress?.ownerUserID == authenticatedSupabaseUser?.id else { return nil }
+        return progress
+    }
+
+    @MainActor
+    func propertyRowOriginalUploadProgressLabel(propertyID: UUID) -> String? {
+        guard let progress = originalUploadProgress(propertyID: propertyID) else { return nil }
+        switch progress.phase {
+        case .uploading:
+            let title = isNetworkAvailable ? "Uploading" : "Offline"
+            return "\(title) \(progress.confirmedCount)/\(progress.totalCount)"
+        case .processingReports:
+            return "Processing"
+        case .failed:
+            if progress.confirmedCount == progress.totalCount {
+                return "Retry reports"
+            }
+            return "Retry \(progress.confirmedCount)/\(progress.totalCount)"
+        }
+    }
+
+    @MainActor
+    func propertyRowOriginalUploadCloudGlyphState(propertyID: UUID) -> PropertyRowCloudGlyphState? {
+        guard let progress = originalUploadProgress(propertyID: propertyID) else { return nil }
+        switch progress.phase {
+        case .uploading, .processingReports:
+            return .uploading
+        case .failed:
+            return .warning
+        }
+    }
+
+    @MainActor
+    private func saveOriginalUploadProgress(_ progress: FastRuntimeOriginalUploadProgress) {
+        if let data = try? JSONEncoder().encode(progress) {
+            UserDefaults.standard.set(data, forKey: Self.fastRuntimeOriginalUploadProgressKey(propertyID: progress.propertyID))
+        }
+        fastRuntimeOriginalUploadProgressByPropertyID[progress.propertyID] = progress
+    }
+
+    @MainActor
+    private func clearOriginalUploadProgress(propertyID: UUID, sessionID: UUID) {
+        guard originalUploadProgress(propertyID: propertyID)?.sessionID == sessionID else { return }
+        UserDefaults.standard.removeObject(forKey: Self.fastRuntimeOriginalUploadProgressKey(propertyID: propertyID))
+        fastRuntimeOriginalUploadProgressByPropertyID.removeValue(forKey: propertyID)
+    }
+
     @MainActor
     func ownedFastRuntimeCaptureRetryCount(propertyID: UUID) -> Int {
         guard let userID = authenticatedSupabaseUser?.id,
@@ -46119,7 +46434,8 @@ final class AppState: ObservableObject {
             )
         }
         let candidates = fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).filter {
-            $0.context.ownerUserID == userID && $0.context.orgID == orgID
+            $0.context.ownerUserID == userID && $0.context.orgID == orgID &&
+                !activeFastRuntimeCompletionUploadSessionIDs.contains($0.context.sessionID)
         }
         guard !candidates.isEmpty else {
             return FastRuntimePendingExportRecoveryResult(
@@ -46210,9 +46526,13 @@ final class AppState: ObservableObject {
     @MainActor
     private func retryFailedFastRuntimeCompletionUploadsAfterReconnect() async {
         guard !automaticFastRuntimeCompletionRecoveryInFlight else { return }
-        let propertyIDs = Array(Set(fastRuntimeCompletionCloudStatusByPropertyID.values.compactMap { status in
+        let failedPropertyIDs = fastRuntimeCompletionCloudStatusByPropertyID.values.compactMap { status in
             status.state == .failed ? status.propertyID : nil
-        }))
+        }
+        let savedUploadPropertyIDs = properties.compactMap { property in
+            originalUploadProgress(propertyID: property.id) != nil ? property.id : nil
+        }
+        let propertyIDs = Array(Set(failedPropertyIDs + savedUploadPropertyIDs))
         guard !propertyIDs.isEmpty else { return }
 
         automaticFastRuntimeCompletionRecoveryInFlight = true
@@ -46296,6 +46616,7 @@ final class AppState: ObservableObject {
         if removedLocalCaptureStores > 0 {
             print("[FastRuntimeReportHandoff] local_capture_storage_pruned=\(removedLocalCaptureStores)")
         }
+        clearOriginalUploadProgress(propertyID: context.propertyID, sessionID: context.sessionID)
         if let orgID = context.orgID ??
             propertyStatusByPropertyID[context.propertyID]?.orgID ??
             properties.first(where: { $0.id == context.propertyID })?.orgId ??
@@ -46324,6 +46645,12 @@ final class AppState: ObservableObject {
 
     @MainActor
     func markFastRuntimeCompletionFailed(context: ActiveCaptureContext, message: String?) {
+        if var progress = originalUploadProgress(propertyID: context.propertyID),
+           progress.sessionID == context.sessionID,
+           isNetworkAvailable {
+            progress.phase = .failed
+            saveOriginalUploadProgress(progress)
+        }
         applyFastRuntimeCompletionCloudStatus(
             context: context,
             state: .failed,
@@ -58809,10 +59136,15 @@ final class AppState: ObservableObject {
         )
     }
     
+    @MainActor
     func pendingExportCountAcrossProperties() -> Int {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
         return properties.reduce(0) { count, property in
+            // Count each property once while its originals upload or reports process.
+            if hasPendingFastRuntimeOriginalUpload(propertyID: property.id) {
+                return count + 1
+            }
             guard let record = propertyStatusByPropertyID[property.id] else {
                 return count
             }
@@ -58824,6 +59156,11 @@ final class AppState: ObservableObject {
             )
             return count + (answer.pendingExportCountIncluded ? 1 : 0)
         }
+    }
+
+    @MainActor
+    func hasPendingFastRuntimeOriginalUpload(propertyID: UUID) -> Bool {
+        originalUploadProgress(propertyID: propertyID) != nil
     }
 
     func draftPropertyCount() -> Int {
@@ -59453,6 +59790,9 @@ final class AppState: ObservableObject {
 
     private func performSceneDidBecomeActiveWork() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
+        if isNetworkAvailable, isAuthenticated {
+            scheduleAutomaticFastRuntimeCompletionRecoveryAfterReconnect()
+        }
         let shouldRevalidateActiveDraft = currentSession?.status == .draft
         guard shouldRevalidateActiveDraft else { return }
 
