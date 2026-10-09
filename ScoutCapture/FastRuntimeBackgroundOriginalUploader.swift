@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// Queues file-backed transfers with iOS so photos can continue uploading while
 /// the capture app is suspended. Results are durable because the app may be
@@ -166,5 +167,24 @@ private final class BackgroundEventsCompletionOnce: @unchecked Sendable {
         if let handler {
             DispatchQueue.main.async(execute: handler)
         }
+    }
+}
+
+/// Keeps upload preparation running briefly after a user leaves the app, until
+/// file-backed URLSession tasks have been handed to iOS.
+@MainActor
+final class FastRuntimeUploadPreparationBackgroundTask {
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+
+    init() {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "Prepare photo uploads") { [weak self] in
+            Task { @MainActor [weak self] in self?.end() }
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
     }
 }
