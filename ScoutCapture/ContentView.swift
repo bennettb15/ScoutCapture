@@ -421,6 +421,14 @@ final class ReportLibraryModel: ObservableObject {
         var schemaVersion: Int?
     }
 
+    static func sourceExifOrientationRaw(from data: Data) -> UInt32? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let raw = (properties[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value,
+              (1...8).contains(raw) else { return nil }
+        return raw
+    }
+
     static func cgOrientationRawFromDevice(_ orientation: UIDeviceOrientation) -> UInt32 {
         switch orientation {
         case .portrait:
@@ -988,7 +996,7 @@ final class ReportLibraryModel: ObservableObject {
         let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
         let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
         let capturedOrientationRaw = metadataContext?.capturedExifOrientationRaw
-        let resolvedOrientationRaw = capturedOrientationRaw ?? sourceOrientationRaw ?? 1
+        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
         debugLogSaveStage(
             "orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)"
         )
@@ -10596,16 +10604,6 @@ extension ContentView {
         quickButtonHaptic.prepare()
     }
 
-    private func stableDeviceOrientationForCaptureMetadata() -> UIDeviceOrientation {
-        let current = UIDevice.current.orientation
-        switch current {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
-            return current
-        default:
-            return lastValidDeviceOrientation
-        }
-    }
-
     private func capture() {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let isFlaggedCaptureIntent: Bool = {
@@ -10635,8 +10633,6 @@ extension ContentView {
         }
         let propertyID = captureTarget.propertyID
         let sessionID = captureTarget.sessionID
-        let captureDeviceOrientationAtShutter = stableDeviceOrientationForCaptureMetadata()
-        let capturedExifOrientationRawAtShutter = ReportLibraryModel.cgOrientationRawFromDevice(captureDeviceOrientationAtShutter)
         let captureIntent = currentCaptureIntent
         let armedGuidedIDAtCapture: UUID? = {
             switch captureIntent {
@@ -10743,10 +10739,10 @@ extension ContentView {
                 angleIndex: captureAngleIndex
             )
             let captureLocation = locationManager.currentLocationForCapture()
-            let capturedExifOrientationRaw = capturedExifOrientationRawAtShutter
+            let capturedExifOrientationRaw = ReportLibraryModel.sourceExifOrientationRaw(from: data)
             let captureTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
             let capturePriority = Self.normalizedPriority(selectedPriority)
-            print("[SavePhoto] capture orientation device=\(captureDeviceOrientationAtShutter.rawValue) exifRaw=\(capturedExifOrientationRaw)")
+            print("[SavePhoto] capture source exifRaw=\(capturedExifOrientationRaw.map(String.init) ?? "nil")")
             let captureMetadataContext = ReportLibraryModel.EmbeddedMetadataContext(
                 propertyID: propertyID,
                 propertyName: selectedProperty?.name,
@@ -10766,7 +10762,7 @@ extension ContentView {
                 detailNote: captureDescriptionNote,
                 captureMode: camera.effectiveHDEnabled ? "hd" : "normal",
                 lens: camera.selectedZoomId,
-                orientation: "exif:\(capturedExifOrientationRaw)",
+                orientation: capturedExifOrientationRaw.map { "exif:\($0)" },
                 capturedExifOrientationRaw: capturedExifOrientationRaw,
                 latitude: captureLocation?.coordinate.latitude,
                 longitude: captureLocation?.coordinate.longitude,
@@ -10897,7 +10893,7 @@ extension ContentView {
                             issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id ?? resolutionTargetObservation?.id,
                             createdFlaggedObservationID: createdObservationID,
                             priorityAtCapture: capturePriority,
-                            capturedExifOrientation: Int(capturedExifOrientationRawAtShutter),
+                            capturedExifOrientation: capturedExifOrientationRaw.map(Int.init),
                             reservedAngleIndexAtCapture: reservedAngleIndexAtCapture
                         )
                         if !wasGuidedRetakeCapture {

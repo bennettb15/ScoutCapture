@@ -309,6 +309,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var previewRestartAttempt = 0
     private var previewRestartGeneration: UInt64 = 0
     private var videoDevice: AVCaptureDevice?
+    private var photoRotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var defaultFormatByDeviceID: [String: AVCaptureDevice.Format] = [:]
     private let photoOutput = AVCapturePhotoOutput()
 
@@ -327,11 +328,6 @@ final class CameraManager: NSObject, ObservableObject {
     private var debugWorkItem: DispatchWorkItem?
     private var zoomRequestSerial: UInt64 = 0
 
-    // Stable orientation tracking for capture.
-    // UIDevice.current.orientation can be faceUp/unknown at shutter time.
-    private var lastDeviceOrientation: UIDeviceOrientation = .portrait
-    private var orientationObserver: NSObjectProtocol?
-
     override init() {
         super.init()
 
@@ -347,16 +343,6 @@ final class CameraManager: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(self, selector: #selector(captureSessionInterruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: session)
         NotificationCenter.default.addObserver(self, selector: #selector(captureSessionRuntimeError(_:)), name: AVCaptureSession.runtimeErrorNotification, object: session)
 
-        // Track device orientation reliably for capture rotation.
-        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        orientationObserver = NotificationCenter.default.addObserver(
-            forName: UIDevice.orientationDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.updateLastDeviceOrientation()
-        }
-        updateLastDeviceOrientation()
     }
 
     // MARK: App lifecycle
@@ -445,33 +431,6 @@ final class CameraManager: NSObject, ObservableObject {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        if let orientationObserver {
-            NotificationCenter.default.removeObserver(orientationObserver)
-        }
-        UIDevice.current.endGeneratingDeviceOrientationNotifications()
-    }
-
-    private func updateLastDeviceOrientation() {
-        let o = UIDevice.current.orientation
-        switch o {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
-            lastDeviceOrientation = o
-        default:
-            // Do not overwrite with faceUp/faceDown/unknown.
-            break
-        }
-    }
-
-    private func stableDeviceOrientationForCapture() -> UIDeviceOrientation {
-        // At shutter time, UIDevice can report faceUp/unknown even when the phone is held portrait.
-        // Fall back to the last definite orientation we observed instead of forcing portrait.
-        let o = UIDevice.current.orientation
-        switch o {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
-            return o
-        default:
-            return lastDeviceOrientation
-        }
     }
 
     // MARK: Flash
@@ -610,10 +569,6 @@ final class CameraManager: NSObject, ObservableObject {
         // Snapshot the effective HD flag on the main thread to avoid races.
         let hd = effectiveHDEnabled
 
-        // Snapshot a stable orientation on the calling thread.
-        // If the device reports faceUp/unknown, force portrait so portrait shots do not save as landscape.
-        let orientationForCapture = stableDeviceOrientationForCapture()
-
         sessionQueue.async { [weak self] in
             guard let self else {
                 DispatchQueue.main.async { completion(nil) }
@@ -628,9 +583,11 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
 
-            // Make the captured photo match how the user is physically holding the phone.
+            // Use the active camera's gravity-based rotation. UIDevice.orientation can be
+            // stale at shutter time, especially while the phone is held upright or flat.
             if let conn = self.photoOutput.connection(with: .video) {
-                let angle = self.captureVideoRotationAngle(from: orientationForCapture)
+                let angle = self.photoRotationCoordinator?.videoRotationAngleForHorizonLevelCapture
+                    ?? (self.currentPosition == .front ? 0 : 90)
                 if conn.isVideoRotationAngleSupported(angle) {
                     conn.videoRotationAngle = angle
                 }
@@ -982,6 +939,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
         videoDevice = device
+        photoRotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
         configureDefaultContinuousFocus(on: device)
         DispatchQueue.main.async {
             self.hdSupported = self.deviceSupportsHDCapture(device, position: self.currentPosition)
@@ -1044,6 +1002,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
         videoDevice = device
+        photoRotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
         configureDefaultContinuousFocus(on: device)
         DispatchQueue.main.async {
             self.hdSupported = self.deviceSupportsHDCapture(device, position: self.currentPosition)
@@ -1554,6 +1513,7 @@ final class CameraManager: NSObject, ObservableObject {
 
             // Update the active device reference.
             videoDevice = device
+            photoRotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
             rememberDefaultFormatIfNeeded(for: device)
             configureDefaultContinuousFocus(on: device)
             // When HD is enabled on the back camera, force the device into the format
@@ -1654,35 +1614,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func captureVideoRotationAngle(from deviceOrientation: UIDeviceOrientation) -> Double {
-        if currentPosition == .front {
-            switch deviceOrientation {
-            case .portrait:
-                return 0
-            case .portraitUpsideDown:
-                return 180
-            case .landscapeLeft:
-                return 90
-            case .landscapeRight:
-                return 270
-            default:
-                return 0
-            }
-        }
 
-        switch deviceOrientation {
-        case .portrait:
-            return 90
-        case .portraitUpsideDown:
-            return 270
-        case .landscapeLeft:
-            return 0
-        case .landscapeRight:
-            return 180
-        default:
-            return 90
-        }
-    }
 }
 
 // MARK: - Photo Delegate
