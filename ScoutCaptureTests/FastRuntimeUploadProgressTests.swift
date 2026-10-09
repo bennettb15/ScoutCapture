@@ -24,6 +24,35 @@ final class FastRuntimeUploadProgressTests: XCTestCase {
         XCTAssertEqual(restored.confirmedShotIDs, confirmed)
     }
 
+    func testPreparedPhotoManifestSurvivesRelaunch() throws {
+        let shotID = UUID()
+        let fileURL = URL(fileURLWithPath: "/saved/photos/original.jpg")
+        let prepared = AppState.FastRuntimePreparedOriginalUpload(
+            shotID: shotID,
+            localPath: fileURL.path,
+            fileURL: fileURL,
+            storagePath: "originals/saved.jpg",
+            checksumSHA256: "checksum",
+            byteSize: 42,
+            contentType: "image/jpeg"
+        )
+        let progress = AppState.FastRuntimeOriginalUploadProgress(
+            organizationID: UUID(),
+            ownerUserID: UUID(),
+            propertyID: UUID(),
+            sessionID: UUID(),
+            totalCount: 1,
+            confirmedShotIDs: [],
+            phase: .uploading,
+            preparedUploads: [prepared]
+        )
+        let restored = try JSONDecoder().decode(
+            AppState.FastRuntimeOriginalUploadProgress.self,
+            from: JSONEncoder().encode(progress)
+        )
+        XCTAssertEqual(restored.preparedUploads, [prepared])
+    }
+
     func testBackgroundResultKeyChangesWithPhotoChecksum() {
         let sessionID = UUID()
         let shotID = UUID()
