@@ -35361,7 +35361,8 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         metadata: SessionMetadata,
         shot: ShotMetadata,
-        allowInsert: Bool
+        allowInsert: Bool,
+        prerequisitesEnsured: Bool = false
     ) async throws {
 #if DEBUG
         if let shotMetadataWriteOverride {
@@ -35383,12 +35384,14 @@ final class AppState: ObservableObject {
             ])
         }
 
-        try await ensureSupabaseSessionPrerequisites(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            metadata: metadata,
-            orgID: orgID
-        )
+        if !prerequisitesEnsured {
+            try await ensureSupabaseSessionPrerequisites(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata,
+                orgID: orgID
+            )
+        }
 
         var remoteRows: [SessionIDOnlyRecord] = []
         if allowInsert {
@@ -45497,6 +45500,8 @@ final class AppState: ObservableObject {
         capturedPhotoCount: Int
     ) async -> FastRuntimeCompleteUploadResult {
         let startedAt = Date()
+        let preparationTask = FastRuntimeUploadPreparationBackgroundTask()
+        defer { preparationTask.end() }
         let alreadyUploading = activeFastRuntimeCompletionUploadSessionIDs.contains(context.sessionID)
         if !alreadyUploading {
             activeFastRuntimeCompletionUploadSessionIDs.insert(context.sessionID)
@@ -45796,7 +45801,9 @@ final class AppState: ObservableObject {
                 createdRowsSummary.append("sessions updated 1")
 
                 var newPreparedUploads: [FastRuntimePreparedOriginalUpload] = []
+                var metadataWrites: [ShotMetadata] = []
                 newPreparedUploads.reserveCapacity(dryRun.shots.count)
+                metadataWrites.reserveCapacity(dryRun.shots.count)
                 for (index, shotSummary) in dryRun.shots.enumerated() {
                     diagnostics.append("stage=shot_prepare:\(shotSummary.id.uuidString)")
                     guard let localPath = shotSummary.resolvedLocalFilePath else {
@@ -45821,17 +45828,7 @@ final class AppState: ObservableObject {
                         storagePath: storagePath,
                         localObservationByIssueID: localObservationByIssueID
                     )
-                    diagnostics.append("stage=shot_metadata_insert:\(shotSummary.id.uuidString)")
-                    try await retryTransientUploadOperation {
-                        try await persistShotRichMetadataToSupabase(
-                            orgID: orgID,
-                            propertyID: context.propertyID,
-                            sessionID: context.sessionID,
-                            metadata: metadata,
-                            shot: shot,
-                            allowInsert: true
-                        )
-                    }
+                    metadataWrites.append(shot)
                     newPreparedUploads.append(FastRuntimePreparedOriginalUpload(
                         shotID: shotSummary.id,
                         localPath: localPath,
@@ -45841,6 +45838,32 @@ final class AppState: ObservableObject {
                         byteSize: fingerprint.byteSize,
                         contentType: contentType(for: localFileURL)
                     ))
+                }
+                // The property and session were verified above. Bound concurrent
+                // shot writes so even large sessions can hand their file transfers
+                // to iOS before background execution time expires.
+                diagnostics.append("stage=shot_metadata_batch")
+                let batchSize = 6
+                for offset in stride(from: 0, to: metadataWrites.count, by: batchSize) {
+                    let batch = metadataWrites[offset..<min(offset + batchSize, metadataWrites.count)]
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        for shot in batch {
+                            group.addTask {
+                                try await self.retryTransientUploadOperation {
+                                    try await self.persistShotRichMetadataToSupabase(
+                                        orgID: orgID,
+                                        propertyID: context.propertyID,
+                                        sessionID: context.sessionID,
+                                        metadata: metadata,
+                                        shot: shot,
+                                        allowInsert: true,
+                                        prerequisitesEnsured: true
+                                    )
+                                }
+                            }
+                        }
+                        try await group.waitForAll()
+                    }
                 }
                 preparedUploads = newPreparedUploads
                 createdRowsSummary.append("shots upserted \(preparedUploads.count)")
@@ -45941,6 +45964,7 @@ final class AppState: ObservableObject {
                     )
                 }
                 await uploader.enqueue(uploadRequests)
+                preparationTask.end()
                 var retryableFailure = false
                 var failedRequestKeys: Set<String> = []
                 var batchHadAuthorizationFailure = false
