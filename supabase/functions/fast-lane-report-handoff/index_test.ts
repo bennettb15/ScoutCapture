@@ -86,6 +86,41 @@ Deno.test("buildRawSessionMetadata carries punch session type and uploaded shot 
   }
 });
 
+Deno.test("cloud handoff reports shutter time even when shot rows were created later", () => {
+  const request = validateHandoffRequest({
+    orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
+    propertyID: "1ff0eb11-5d02-4d5e-a552-1a11dee26439",
+    sessionID: "028a6f82-2356-412c-a1eb-28099f240325",
+    sessionType: "full_documentation",
+    reportMode: "all",
+  });
+  const metadata = buildRawSessionMetadata({
+    request,
+    user: { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", email: "field@example.com" },
+    property: { id: request.propertyID, org_id: request.orgID, name: "Test Property" },
+    session: {
+      id: request.sessionID,
+      org_id: request.orgID,
+      property_id: request.propertyID,
+      status: "completed",
+      started_at: "2026-10-09T16:24:23Z",
+      completed_at: "2026-10-09T16:50:00Z",
+      is_sealed: true,
+    },
+    shots: [
+      { id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", created_at: "2026-10-09T16:47:00Z", captured_at: "2026-10-09T16:24:30Z" },
+      { id: "cccccccc-cccc-4ccc-cccc-cccccccccccc", created_at: "2026-10-09T16:25:00Z", captured_at: "2026-10-09T16:24:25Z" },
+    ],
+    generatedAt: "2026-10-09T16:50:00Z",
+  });
+  const shots = metadata.shots as Record<string, unknown>[];
+  if (shots[0].shotID !== "cccccccc-cccc-4ccc-cccc-cccccccccccc" ||
+      shots[1].createdAt !== "2026-10-09T16:24:30Z" ||
+      shots[1].capturedAt !== "2026-10-09T16:24:30Z") {
+    throw new Error("photo order or report timestamps used row creation time");
+  }
+});
+
 Deno.test("buildSnapshotPayload creates completed snapshot payload and path", async () => {
   const request = validateHandoffRequest({
     orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
