@@ -5974,8 +5974,8 @@ private final class PropertyListTableCell: UITableViewCell {
         archivedLabel.isHidden = !row.isArchived
         draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft
         uploadRetryLabel.text = row.uploadProgressLabel ?? "\(row.pendingUploadCount) to upload"
-        uploadRetryLabel.accessibilityLabel = row.uploadProgressLabel == "Processing"
-            ? "Processing reports" : uploadRetryLabel.text
+        uploadRetryLabel.accessibilityLabel = row.uploadProgressLabel == "Finishing"
+            ? "Finishing session upload" : uploadRetryLabel.text
         uploadRetryLabel.isHidden = row.uploadProgressLabel == nil && row.pendingUploadCount == 0
         let isUploading = row.uploadProgressLabel?.hasPrefix("Uploading") == true
         uploadRetryLabel.textColor = isUploading ? .systemBlue : .systemOrange
@@ -18573,6 +18573,25 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 if !isClosing {
                     productionCompleteState = .preparingReport
                 }
+            }
+
+            if let snapshotID = upload.serverCompletedSnapshotID {
+                let released = await appState.markFastRuntimeCompletionHandoffAccepted(
+                    context: context,
+                    snapshotID: snapshotID,
+                    snapshotPath: nil
+                )
+                await MainActor.run {
+                    if released {
+                        if !isClosing {
+                            productionCompleteState = .complete
+                            finishProductionComplete()
+                        }
+                    } else if !isClosing {
+                        productionCompleteState = .failed("The cloud accepted the upload, but the property did not release. Please retry from the saved draft.")
+                    }
+                }
+                return
             }
 
             let handoff = await appState.runFastRuntimeReportHandoff(

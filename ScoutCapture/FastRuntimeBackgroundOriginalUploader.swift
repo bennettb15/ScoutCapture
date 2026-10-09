@@ -31,6 +31,7 @@ final class FastRuntimeBackgroundOriginalUploader: NSObject, URLSessionTaskDeleg
     private let lock = NSLock()
     private var waiters: [String: [CheckedContinuation<Outcome, Never>]] = [:]
     private var backgroundEventsCompletionHandler: (() -> Void)?
+    private var backgroundEventsProcessor: (@MainActor () async -> Void)?
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.waitsForConnectivity = true
@@ -50,6 +51,12 @@ final class FastRuntimeBackgroundOriginalUploader: NSObject, URLSessionTaskDeleg
         backgroundEventsCompletionHandler = completionHandler
         lock.unlock()
         _ = session
+    }
+
+    func setBackgroundEventsProcessor(_ processor: @escaping @MainActor () async -> Void) {
+        lock.lock()
+        backgroundEventsProcessor = processor
+        lock.unlock()
     }
 
     /// Scheduling the whole batch allows iOS to finish it even after the app
@@ -122,10 +129,42 @@ final class FastRuntimeBackgroundOriginalUploader: NSObject, URLSessionTaskDeleg
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         lock.lock()
         let completion = backgroundEventsCompletionHandler
+        let processor = backgroundEventsProcessor
         backgroundEventsCompletionHandler = nil
         lock.unlock()
-        if let completion {
-            DispatchQueue.main.async(execute: completion)
+        let finish = BackgroundEventsCompletionOnce(completion)
+        guard let processor else {
+            finish.call()
+            return
+        }
+        // iOS can deliver callbacks while the app is suspended without first
+        // relaunching it. Reconcile those saved outcomes in either case.
+        if completion != nil {
+            // Release a system relaunch promptly if recovery takes too long.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) { finish.call() }
+        }
+        Task { @MainActor in
+            await processor()
+            finish.call()
+        }
+    }
+}
+
+private final class BackgroundEventsCompletionOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: (() -> Void)?
+
+    init(_ completion: (() -> Void)?) {
+        self.completion = completion
+    }
+
+    func call() {
+        lock.lock()
+        let handler = completion
+        completion = nil
+        lock.unlock()
+        if let handler {
+            DispatchQueue.main.async(execute: handler)
         }
     }
 }

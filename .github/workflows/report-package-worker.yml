@@ -57,6 +57,18 @@ jobs:
             exit 1
           fi
 
+      - name: Finish background uploads in Test Org
+        if: github.event_name == 'schedule' || inputs.session_id == ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --max-time 120 \
+            --request POST \
+            --header "x-scoutcapture-service-key: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            "${SUPABASE_URL%/}/functions/v1/background-upload-handoff"
+
       - name: Build report worker image
         run: docker build -f web-contract/report-production/Dockerfile -t scoutcapture-report-worker:report-package .
 

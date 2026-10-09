@@ -691,7 +691,7 @@ async function dispatchReportWorker(
   };
 }
 
-async function handleHandoff(request: Request): Promise<Response> {
+export async function handleHandoff(request: Request): Promise<Response> {
   if (request.method !== "POST") return jsonResponse(405, { ok: false, error: "method_not_allowed" });
   const config = runtimeConfig();
   if (!config.supabaseURL || !config.anonKey || !config.serviceRoleKey) {
@@ -706,8 +706,75 @@ async function handleHandoff(request: Request): Promise<Response> {
   }
 
   try {
-    const user = await authUser(config, bearerToken(request));
-    await verifyCallerAccess(config, handoff, user);
+    const internalKey = request.headers.get("x-scoutcapture-service-key") ?? "";
+    const isInternal = internalKey.length > 0 && internalKey === config.serviceRoleKey;
+    let intent: JsonRecord | undefined;
+    let user: SupabaseUser;
+    if (isInternal) {
+      const intents = await selectRows<JsonRecord>(config, "session_upload_intents", new URLSearchParams({
+        select: "session_id,org_id,property_id,owner_user_id,session_type,report_mode,expected_shot_count,completed_snapshot_id",
+        session_id: `eq.${handoff.sessionID}`, limit: "1",
+      }));
+      intent = intents[0];
+      if (!intent || normalizeUuid(intent.org_id) !== handoff.orgID ||
+          normalizeUuid(intent.property_id) !== handoff.propertyID ||
+          lowerString(intent.session_type) !== handoff.sessionType ||
+          lowerString(intent.report_mode) !== handoff.reportMode ||
+          !isUuid(normalizeUuid(intent.owner_user_id))) {
+        throw new Error("internal_upload_intent_mismatch");
+      }
+      const profiles = await selectRows<JsonRecord>(config, "users_profile", new URLSearchParams({
+        select: "email", id: `eq.${intent.owner_user_id}`, limit: "1",
+      }));
+      user = { id: normalizeUuid(intent.owner_user_id), email: nullableString(profiles[0]?.email) ?? undefined };
+    } else {
+      user = await authUser(config, bearerToken(request));
+      await verifyCallerAccess(config, handoff, user);
+      const intents = await selectRows<JsonRecord>(config, "session_upload_intents", new URLSearchParams({
+        select: "session_id,org_id,property_id,owner_user_id,session_type,report_mode,expected_shot_count,completed_snapshot_id",
+        session_id: `eq.${handoff.sessionID}`, limit: "1",
+      }));
+      intent = intents[0];
+    }
+
+    const existingSnapshotResponse = async (): Promise<Response | null> => {
+      const existing = await selectRows<JsonRecord>(config, "session_snapshots", new URLSearchParams({
+        select: "id,payload_storage_path,payload_storage_bucket,snapshot_payload_sha256,raw_session_json_sha256,shot_count",
+        session_id: `eq.${handoff.sessionID}`, snapshot_kind: "eq.completed",
+        trigger: `eq.${TRIGGER}`, deleted_at: "is.null", order: "created_at.desc", limit: "1",
+      }));
+      if (!existing[0]) return null;
+      if (intent && !intent.completed_snapshot_id) {
+        const update = await supabaseFetch(config, `/rest/v1/session_upload_intents?session_id=eq.${handoff.sessionID}`, {
+          method: "PATCH", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ completed_snapshot_id: existing[0].id, updated_at: new Date().toISOString() }),
+        });
+        if (!update.ok) throw new Error(`upload_intent_completion_failed:${update.status}`);
+      }
+      return jsonResponse(200, {
+        ok: true, reused: true, snapshot_id: existing[0].id,
+        snapshot_path: existing[0].payload_storage_path,
+        snapshot_bucket: existing[0].payload_storage_bucket,
+        snapshot_payload_sha256: existing[0].snapshot_payload_sha256,
+        raw_session_json_sha256: existing[0].raw_session_json_sha256,
+        session_id: handoff.sessionID, session_type: handoff.sessionType,
+        report_mode: handoff.reportMode, shot_count: existing[0].shot_count,
+        idempotency_key: `fast-lane-report-handoff:${handoff.sessionID}`,
+        dispatch_expected: true, dispatch_status: "existing_snapshot",
+      });
+    };
+    const existingResponse = await existingSnapshotResponse();
+    if (existingResponse) return existingResponse;
+    if (isInternal) {
+      const preparation = await supabaseFetch(config, "/rest/v1/rpc/prepare_background_upload_handoff", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ p_session_id: handoff.sessionID }),
+      });
+      if (!preparation.ok || (await preparation.json()) !== true) {
+        throw new Error("background_upload_not_ready");
+      }
+    }
 
     const propertyQuery = new URLSearchParams({
       select: "id,org_id,name,address_line1,address_line2,city,state,postal_code,country_code,deleted_at",
@@ -775,12 +842,14 @@ async function handleHandoff(request: Request): Promise<Response> {
     });
 
     await uploadSnapshotObject(config, snapshot.storagePath, snapshot.payloadBytes);
-    await insertRow(config, "session_snapshots", {
+    try {
+      await insertRow(config, "session_snapshots", {
       id: snapshotID,
       org_id: handoff.orgID,
       property_id: handoff.propertyID,
       session_id: handoff.sessionID,
       snapshot_kind: "completed",
+      upload_intent_session_id: intent ? handoff.sessionID : null,
       snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
       session_metadata_schema_version: SESSION_METADATA_SCHEMA_VERSION,
       trigger: TRIGGER,
@@ -811,7 +880,25 @@ async function handleHandoff(request: Request): Promise<Response> {
       supabase_storage_metadata_count: shots.length,
       created_by: user.id,
       updated_by: user.id,
-    });
+      });
+    } catch (error) {
+      // A foreground handoff and the background poll may race. The unique
+      // upload-intent index lets the loser reuse the winner's snapshot.
+      if (!(error instanceof Error) || !error.message.includes("23505")) throw error;
+      const winner = await existingSnapshotResponse();
+      if (winner) return winner;
+      throw error;
+    }
+    if (intent) {
+      const intentUpdate = await supabaseFetch(config, `/rest/v1/session_upload_intents?session_id=eq.${handoff.sessionID}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ completed_snapshot_id: snapshotID, updated_at: new Date().toISOString() }),
+      });
+      if (!intentUpdate.ok) {
+        throw new Error(`upload_intent_completion_failed:${intentUpdate.status}`);
+      }
+    }
     const dispatch = await dispatchReportWorker(config, snapshotID, handoff.sessionID, handoff.orgID, handoff.propertyID);
 
     return jsonResponse(200, {

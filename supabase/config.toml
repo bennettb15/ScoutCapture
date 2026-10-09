@@ -383,6 +383,9 @@ deno_version = 2
 [functions.report-package-dispatch]
 verify_jwt = false
 
+[functions.background-upload-handoff]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
