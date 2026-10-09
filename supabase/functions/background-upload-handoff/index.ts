@@ -32,8 +32,24 @@ async function handle(request: Request): Promise<Response> {
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const baseURL = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/+$/, "");
   if (!key || !baseURL) return reply(503, { ok: false, error: "service_unavailable" });
-  if (request.headers.get("x-scoutcapture-service-key") !== key) {
-    return reply(401, { ok: false, error: "unauthorized" });
+  const callerKey = request.headers.get("x-scoutcapture-service-key") ?? "";
+  if (!callerKey) return reply(401, { ok: false, error: "unauthorized" });
+  if (callerKey !== key) {
+    // GitHub may hold a different active service-role key from the Edge runtime.
+    // Prove it has service_role privileges with a no-op call to the existing
+    // service-only RPC; an absent session ID cannot change property status.
+    const proof = await fetch(`${baseURL}/rest/v1/rpc/prepare_background_upload_handoff`, {
+      method: "POST",
+      headers: {
+        apikey: callerKey,
+        authorization: `Bearer ${callerKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ p_session_id: "00000000-0000-0000-0000-000000000000" }),
+    });
+    if (!proof.ok || (await proof.json()) !== false) {
+      return reply(401, { ok: false, error: "unauthorized" });
+    }
   }
   const summary = { examined: 0, waiting: 0, completed: 0, failed: 0 };
   try {
