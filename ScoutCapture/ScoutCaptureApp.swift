@@ -19007,9 +19007,10 @@ private final class FastLaneDetailTypesModel: ObservableObject {
     private var pendingPersist: DispatchWorkItem?
 
     private let defaultResidentialInteriorTypes = [
-        "Overview", "Entry / Foyer", "Living Room", "Kitchen", "Dining Area", "Primary Bedroom",
-        "Bedroom 2", "Bedroom 3", "Bedroom 4", "Bedroom 5", "Bathroom", "Hallway",
-        "Stairs", "Laundry", "Garage", "Mechanical / HVAC", "Storage"
+        "Overview", "Entry / Foyer", "Living Room", "Sitting room", "Kitchen", "Guest kitchen",
+        "Dining Area", "Primary Bedroom", "Primary bath", "Bedroom 2", "Bedroom 3", "Bedroom 4",
+        "Bedroom 5", "Bathroom", "Half bath", "Guest bathroom", "Hallway", "Stairs",
+        "Basement stairs", "Secondary stairs", "Laundry", "Garage", "Mechanical / HVAC", "Storage"
     ]
     private let defaultResidentialExteriorTypes = [
         "Overview", "Elevation", "Entry / Porch", "Window", "Roofline", "Cladding / Siding",
@@ -19032,6 +19033,38 @@ private final class FastLaneDetailTypesModel: ObservableObject {
     init() {
         load()
         normalizeDefaultsIfNeeded()
+        addNewResidentialInteriorPresetsIfNeeded()
+    }
+
+    private func addNewResidentialInteriorPresetsIfNeeded() {
+        let migrationKey = "scout.detailTypes.residential.interior.additions.2026-10-09"
+        if !UserDefaults.standard.bool(forKey: migrationKey) {
+            let additions = ["Sitting room", "Guest kitchen", "Primary bath", "Half bath", "Guest bathroom", "Basement stairs", "Secondary stairs"]
+            for name in additions where !residentialInteriorTypes.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                residentialInteriorTypes.append(DetailTypeItem(name: name))
+            }
+            UserDefaults.standard.set(true, forKey: migrationKey)
+        }
+
+        let orderKey = "scout.detailTypes.residential.interior.additions.order.2026-10-09"
+        guard !UserDefaults.standard.bool(forKey: orderKey) else { return }
+        let placements = [
+            ("Sitting room", "Living Room"),
+            ("Guest kitchen", "Kitchen"),
+            ("Primary bath", "Primary Bedroom"),
+            ("Half bath", "Bathroom"),
+            ("Guest bathroom", "Half bath"),
+            ("Basement stairs", "Stairs"),
+            ("Secondary stairs", "Basement stairs")
+        ]
+        for (name, anchor) in placements {
+            guard let index = residentialInteriorTypes.firstIndex(where: { $0.name == name }),
+                  let anchorIndex = residentialInteriorTypes.firstIndex(where: { $0.name == anchor }) else { continue }
+            let item = residentialInteriorTypes.remove(at: index)
+            residentialInteriorTypes.insert(item, at: min(anchorIndex + (index < anchorIndex ? 0 : 1), residentialInteriorTypes.count))
+        }
+        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
+        UserDefaults.standard.set(true, forKey: orderKey)
     }
 
     func items(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [DetailTypeItem] {

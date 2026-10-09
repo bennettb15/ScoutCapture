@@ -3390,16 +3390,23 @@ final class DetailTypesModel: ObservableObject {
         "Overview",
         "Entry / Foyer",
         "Living Room",
+        "Sitting room",
         "Kitchen",
+        "Guest kitchen",
         "Dining Area",
         "Primary Bedroom",
+        "Primary bath",
         "Bedroom 2",
         "Bedroom 3",
         "Bedroom 4",
         "Bedroom 5",
         "Bathroom",
+        "Half bath",
+        "Guest bathroom",
         "Hallway",
         "Stairs",
+        "Basement stairs",
+        "Secondary stairs",
         "Laundry",
         "Garage",
         "Mechanical / HVAC",
@@ -3473,7 +3480,38 @@ final class DetailTypesModel: ObservableObject {
     init() {
         load()
         normalizeDefaultsIfNeeded()
+        addNewResidentialInteriorPresetsIfNeeded()
         persistAll()
+    }
+
+    private func addNewResidentialInteriorPresetsIfNeeded() {
+        let migrationKey = "scout.detailTypes.residential.interior.additions.2026-10-09"
+        if !UserDefaults.standard.bool(forKey: migrationKey) {
+            let additions = ["Sitting room", "Guest kitchen", "Primary bath", "Half bath", "Guest bathroom", "Basement stairs", "Secondary stairs"]
+            for name in additions where !residentialInteriorTypes.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                residentialInteriorTypes.append(DetailTypeItem(name: name))
+            }
+            UserDefaults.standard.set(true, forKey: migrationKey)
+        }
+
+        let orderKey = "scout.detailTypes.residential.interior.additions.order.2026-10-09"
+        guard !UserDefaults.standard.bool(forKey: orderKey) else { return }
+        let placements = [
+            ("Sitting room", "Living Room"),
+            ("Guest kitchen", "Kitchen"),
+            ("Primary bath", "Primary Bedroom"),
+            ("Half bath", "Bathroom"),
+            ("Guest bathroom", "Half bath"),
+            ("Basement stairs", "Stairs"),
+            ("Secondary stairs", "Basement stairs")
+        ]
+        for (name, anchor) in placements {
+            guard let index = residentialInteriorTypes.firstIndex(where: { $0.name == name }),
+                  let anchorIndex = residentialInteriorTypes.firstIndex(where: { $0.name == anchor }) else { continue }
+            let item = residentialInteriorTypes.remove(at: index)
+            residentialInteriorTypes.insert(item, at: min(anchorIndex + (index < anchorIndex ? 0 : 1), residentialInteriorTypes.count))
+        }
+        UserDefaults.standard.set(true, forKey: orderKey)
     }
 
     func types(for mode: ContentView.LocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
