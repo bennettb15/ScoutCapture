@@ -61,6 +61,7 @@ type ShotRow = {
   property_id?: string | null;
   session_id?: string | null;
   created_at?: string | null;
+  captured_at?: string | null;
   updated_at?: string | null;
   updated_by?: string | null;
   building?: string | null;
@@ -282,8 +283,8 @@ export function buildRawSessionMetadata(input: {
   const completedAt = sessionTimestamp(session.completed_at, startedAt);
   const sessionActor = actor(user, session.updated_by);
   const orderedShots = [...shots].sort((lhs, rhs) => {
-    const lhsDate = stringValue(lhs.created_at);
-    const rhsDate = stringValue(rhs.created_at);
+    const lhsDate = stringValue(lhs.captured_at) || stringValue(lhs.created_at);
+    const rhsDate = stringValue(rhs.captured_at) || stringValue(rhs.created_at);
     if (lhsDate !== rhsDate) return lhsDate.localeCompare(rhsDate);
     return lhs.id.localeCompare(rhs.id);
   });
@@ -331,6 +332,7 @@ export function buildRawSessionMetadata(input: {
       const storagePath = nullableString(shot.storage_path);
       const detailType = nullableString(shot.detail_type) ?? (request.sessionType === "punchlist_visit" ? "Punchlist Capture" : "Fast Lane Capture");
       const angleIndex = Math.max(1, Number(shot.angle_index ?? index + 1));
+      const capturedAt = sessionTimestamp(shot.captured_at, sessionTimestamp(shot.created_at, completedAt));
       const shotActor = actor(user, shot.updated_by ?? session.updated_by);
       return {
         shotID: shot.id,
@@ -340,9 +342,9 @@ export function buildRawSessionMetadata(input: {
         propertyId: request.propertyID,
         sessionID: request.sessionID,
         sessionId: request.sessionID,
-        createdAt: sessionTimestamp(shot.created_at, completedAt),
-        capturedAt: sessionTimestamp(shot.created_at, completedAt),
-        updatedAt: sessionTimestamp(shot.updated_at, sessionTimestamp(shot.created_at, completedAt)),
+        createdAt: capturedAt,
+        capturedAt,
+        updatedAt: sessionTimestamp(shot.updated_at, capturedAt),
         actor: shotActor,
         actorUserID: shotActor.user_id,
         actorEmail: shotActor.email,
@@ -797,7 +799,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
     });
     const shotsQuery = new URLSearchParams({
       select: [
-        "id,org_id,property_id,session_id,created_at,updated_at,updated_by,deleted_at",
+        "id,org_id,property_id,session_id,created_at,captured_at,updated_at,updated_by,deleted_at",
         "building,elevation,detail_type,angle_index,shot_key,logical_shot_identity",
         "capture_kind,first_capture_kind,is_guided,is_flagged,issue_id,issue_status,trade,reason,priority",
         "capture_mode,lens,latitude,longitude,accuracy_meters,image_width,image_height,lifecycle_state",
