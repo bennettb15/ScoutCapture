@@ -148,6 +148,7 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
             sessionShadowWriteOverride: sessionOverride,
             disableCloudBackupForTests: true
         )
+        appState._debugSetPropertyStatusShadowWriteOverrideForTests { _, _, _, _, _ in true }
         appState._debugSetOrganizationContextForTests(
             memberships: [
                 ActiveOrganizationMembership(id: organizationID, name: "Test Org", role: "owner")
@@ -344,7 +345,7 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         XCTAssertEqual(rpcCallCount, 0)
         XCTAssertEqual(
             fixture.appState.hubTransientStatusMessage,
-            "This property is currently in use and cannot be deleted."
+            "Exit the active session before deleting this property."
         )
     }
 
@@ -880,6 +881,7 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
             "id": "\(fixture.property.id.uuidString.lowercased())",
             "org_id": "\(fixture.organizationID.uuidString.lowercased())",
             "name": "Coordination Property",
+            "is_archived": false,
             "address_line1": "123 Main Street",
             "city": "Atlanta",
             "state": "GA",

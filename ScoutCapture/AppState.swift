@@ -7883,6 +7883,9 @@ final class AppState: ObservableObject {
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
     private let propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride?
+#if DEBUG
+    private var propertyStatusShadowWriteOverrideForTests: ((String, UUID, UUID?, String, String) async -> Bool)?
+#endif
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let shotMetadataWriteOverride: ShotMetadataWriteOverride?
     private let sessionSnapshotStorageUploadOverride: SessionSnapshotStorageUploadOverride?
@@ -9066,6 +9069,12 @@ final class AppState: ObservableObject {
         _ override: PropertyStatusFetchOverride?
     ) {
         propertyStatusFetchOverride = override
+    }
+
+    func _debugSetPropertyStatusShadowWriteOverrideForTests(
+        _ override: ((String, UUID, UUID?, String, String) async -> Bool)?
+    ) {
+        propertyStatusShadowWriteOverrideForTests = override
     }
 
     func _debugSetLightweightPropertyEntryStatusOverrideForTests(
@@ -50029,6 +50038,13 @@ final class AppState: ObservableObject {
         deviceID: String,
         reason: String
     ) async -> Bool {
+#if DEBUG
+        if let propertyStatusShadowWriteOverrideForTests {
+            return await propertyStatusShadowWriteOverrideForTests(
+                transition.rawValue, propertyID, sessionID, deviceID, reason
+            )
+        }
+#endif
         guard let client = supabaseClient else {
             print(
                 "[PropertyStatusShadowWrite] property_status_shadow_write_failure " +
