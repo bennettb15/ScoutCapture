@@ -4639,7 +4639,7 @@ struct SessionHubView: View {
         progress?(.sessionData)
 
         let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
-        let zipData = buildZipData(entries: zipEntries)
+        let zipData = try StoredZipArchive.buildData(entries: zipEntries)
         let fileManager = FileManager.default
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename(for: property, session: session))
         let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
@@ -4673,7 +4673,7 @@ struct SessionHubView: View {
             throw NSError(domain: "ScoutCapture.PendingExport", code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
         }
 
-        let listedEntries = try listPendingExportZipEntryPaths(at: finalURL)
+        let listedEntries = try StoredZipArchive.entryPaths(at: finalURL)
 #if DEBUG
         let preview = Array(listedEntries.prefix(12))
         print("Pending export ZIP entries count: \(listedEntries.count)")
@@ -5406,184 +5406,6 @@ struct SessionHubView: View {
             .replacingOccurrences(of: "\t", with: " ")
         let compact = cleaned.replacingOccurrences(of: "  ", with: " ")
         return compact.isEmpty ? fallback : compact
-    }
-
-    private func buildZipData(entries: [(path: String, data: Data, modifiedAt: Date?)]) -> Data {
-        struct CentralRecord {
-            let pathData: Data
-            let crc32: UInt32
-            let size: UInt32
-            let localHeaderOffset: UInt32
-            let dosTime: UInt16
-            let dosDate: UInt16
-        }
-
-        var zip = Data()
-        var centralRecords: [CentralRecord] = []
-        centralRecords.reserveCapacity(entries.count)
-
-        for entry in entries {
-            let pathData = Data(entry.path.utf8)
-            let crc = crc32(entry.data)
-            let size = UInt32(entry.data.count)
-            let localHeaderOffset = UInt32(zip.count)
-            let (dosTime, dosDate) = dosDateTime(entry.modifiedAt ?? Date())
-
-            appendUInt32LE(0x04034B50, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(dosTime, to: &zip)
-            appendUInt16LE(dosDate, to: &zip)
-            appendUInt32LE(crc, to: &zip)
-            appendUInt32LE(size, to: &zip)
-            appendUInt32LE(size, to: &zip)
-            appendUInt16LE(UInt16(pathData.count), to: &zip)
-            appendUInt16LE(0, to: &zip)
-            zip.append(pathData)
-            zip.append(entry.data)
-
-            centralRecords.append(
-                CentralRecord(
-                    pathData: pathData,
-                    crc32: crc,
-                    size: size,
-                    localHeaderOffset: localHeaderOffset,
-                    dosTime: dosTime,
-                    dosDate: dosDate
-                )
-            )
-        }
-
-        let centralDirectoryOffset = UInt32(zip.count)
-        for record in centralRecords {
-            appendUInt32LE(0x02014B50, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(record.dosTime, to: &zip)
-            appendUInt16LE(record.dosDate, to: &zip)
-            appendUInt32LE(record.crc32, to: &zip)
-            appendUInt32LE(record.size, to: &zip)
-            appendUInt32LE(record.size, to: &zip)
-            appendUInt16LE(UInt16(record.pathData.count), to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt32LE(0, to: &zip)
-            appendUInt32LE(record.localHeaderOffset, to: &zip)
-            zip.append(record.pathData)
-        }
-
-        let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
-        let count = UInt16(centralRecords.count)
-        appendUInt32LE(0x06054B50, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        appendUInt16LE(count, to: &zip)
-        appendUInt16LE(count, to: &zip)
-        appendUInt32LE(centralDirectorySize, to: &zip)
-        appendUInt32LE(centralDirectoryOffset, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        return zip
-    }
-
-    private func dosDateTime(_ date: Date) -> (UInt16, UInt16) {
-        let calendar = Calendar(identifier: .gregorian)
-        let comps = calendar.dateComponents(in: TimeZone.current, from: date)
-        let year = min(max(comps.year ?? 1980, 1980), 2107)
-        let month = min(max(comps.month ?? 1, 1), 12)
-        let day = min(max(comps.day ?? 1, 1), 31)
-        let hour = min(max(comps.hour ?? 0, 0), 23)
-        let minute = min(max(comps.minute ?? 0, 0), 59)
-        let second = min(max(comps.second ?? 0, 0), 59)
-
-        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
-        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
-        return (dosTime, dosDate)
-    }
-
-    private func listPendingExportZipEntryPaths(at url: URL) throws -> [String] {
-        let data = try Data(contentsOf: url)
-        let bytes = [UInt8](data)
-        let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
-        guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
-            var i = idx
-            while i >= 0 {
-                if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
-                if i == 0 { break }
-                i -= 1
-            }
-            return nil
-        }) else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 8, userInfo: [NSLocalizedDescriptionKey: "EOCD not found."])
-        }
-
-        func u16(_ offset: Int) -> Int {
-            Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
-        }
-        func u32(_ offset: Int) -> Int {
-            Int(bytes[offset]) |
-            (Int(bytes[offset + 1]) << 8) |
-            (Int(bytes[offset + 2]) << 16) |
-            (Int(bytes[offset + 3]) << 24)
-        }
-
-        guard eocdIndex + 22 <= bytes.count else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 9, userInfo: [NSLocalizedDescriptionKey: "EOCD truncated."])
-        }
-
-        let totalEntries = u16(eocdIndex + 10)
-        let centralOffset = u32(eocdIndex + 16)
-        var cursor = centralOffset
-        var paths: [String] = []
-        paths.reserveCapacity(totalEntries)
-
-        while paths.count < totalEntries, cursor + 46 <= bytes.count {
-            guard cursor + 3 < bytes.count,
-                  bytes[cursor] == 0x50, bytes[cursor + 1] == 0x4B, bytes[cursor + 2] == 0x01, bytes[cursor + 3] == 0x02 else {
-                break
-            }
-            let nameLength = u16(cursor + 28)
-            let extraLength = u16(cursor + 30)
-            let commentLength = u16(cursor + 32)
-            let nameStart = cursor + 46
-            let nameEnd = nameStart + nameLength
-            guard nameEnd <= bytes.count else { break }
-            let nameBytes = Array(bytes[nameStart..<nameEnd])
-            let name = String(bytes: nameBytes, encoding: .utf8) ?? ""
-            paths.append(name)
-            cursor = nameEnd + extraLength + commentLength
-        }
-
-        return paths
-    }
-
-    private func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >>= 1
-                }
-            }
-        }
-        return crc ^ 0xFFFF_FFFF
-    }
-
-    private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
-    }
-
-    private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
     }
 
     private func requestDeleteProperty(_ property: Property) {

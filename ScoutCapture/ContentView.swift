@@ -13391,7 +13391,7 @@ extension ContentView {
         progress?(.sessionData)
 
         let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
-        let zipData = buildSessionExportZipData(entries: zipEntries)
+        let zipData = try StoredZipArchive.buildData(entries: zipEntries)
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
         let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
 #if DEBUG
@@ -13424,7 +13424,7 @@ extension ContentView {
             throw NSError(domain: "ScoutCapture.Export", code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
         }
 
-        let listedEntries = try listSessionExportZipEntryPaths(at: finalURL)
+        let listedEntries = try StoredZipArchive.entryPaths(at: finalURL)
 #if DEBUG
         let preview = Array(listedEntries.prefix(12))
         print("Export ZIP entries count: \(listedEntries.count)")
@@ -14151,191 +14151,6 @@ extension ContentView {
         let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
         let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
         return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
-    }
-
-    private func buildSessionExportZipData(entries: [(path: String, data: Data, modifiedAt: Date?)]) -> Data {
-        struct CentralRecord {
-            let pathData: Data
-            let crc32: UInt32
-            let size: UInt32
-            let localHeaderOffset: UInt32
-            let dosTime: UInt16
-            let dosDate: UInt16
-        }
-
-        var zip = Data()
-        var centralRecords: [CentralRecord] = []
-        centralRecords.reserveCapacity(entries.count)
-
-        for entry in entries {
-            let pathData = Data(entry.path.utf8)
-            let crc = sessionExportCRC32(entry.data)
-            let size = UInt32(entry.data.count)
-            let localHeaderOffset = UInt32(zip.count)
-            let (dosTime, dosDate) = dosDateTimeForSessionExport(entry.modifiedAt ?? Date())
-
-            appendUInt32LEForSessionExport(0x04034B50, to: &zip)
-            appendUInt16LEForSessionExport(20, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(dosTime, to: &zip)
-            appendUInt16LEForSessionExport(dosDate, to: &zip)
-            appendUInt32LEForSessionExport(crc, to: &zip)
-            appendUInt32LEForSessionExport(size, to: &zip)
-            appendUInt32LEForSessionExport(size, to: &zip)
-            appendUInt16LEForSessionExport(UInt16(pathData.count), to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            zip.append(pathData)
-            zip.append(entry.data)
-
-            centralRecords.append(
-                CentralRecord(
-                    pathData: pathData,
-                    crc32: crc,
-                    size: size,
-                    localHeaderOffset: localHeaderOffset,
-                    dosTime: dosTime,
-                    dosDate: dosDate
-                )
-            )
-        }
-
-        let centralDirectoryOffset = UInt32(zip.count)
-
-        for record in centralRecords {
-            appendUInt32LEForSessionExport(0x02014B50, to: &zip)
-            appendUInt16LEForSessionExport(20, to: &zip)
-            appendUInt16LEForSessionExport(20, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(record.dosTime, to: &zip)
-            appendUInt16LEForSessionExport(record.dosDate, to: &zip)
-            appendUInt32LEForSessionExport(record.crc32, to: &zip)
-            appendUInt32LEForSessionExport(record.size, to: &zip)
-            appendUInt32LEForSessionExport(record.size, to: &zip)
-            appendUInt16LEForSessionExport(UInt16(record.pathData.count), to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt32LEForSessionExport(0, to: &zip)
-            appendUInt32LEForSessionExport(record.localHeaderOffset, to: &zip)
-            zip.append(record.pathData)
-        }
-
-        let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
-        let count = UInt16(centralRecords.count)
-
-        appendUInt32LEForSessionExport(0x06054B50, to: &zip)
-        appendUInt16LEForSessionExport(0, to: &zip)
-        appendUInt16LEForSessionExport(0, to: &zip)
-        appendUInt16LEForSessionExport(count, to: &zip)
-        appendUInt16LEForSessionExport(count, to: &zip)
-        appendUInt32LEForSessionExport(centralDirectorySize, to: &zip)
-        appendUInt32LEForSessionExport(centralDirectoryOffset, to: &zip)
-        appendUInt16LEForSessionExport(0, to: &zip)
-
-        return zip
-    }
-
-    private func dosDateTimeForSessionExport(_ date: Date) -> (UInt16, UInt16) {
-        let calendar = Calendar(identifier: .gregorian)
-        let comps = calendar.dateComponents(in: TimeZone.current, from: date)
-        let year = min(max(comps.year ?? 1980, 1980), 2107)
-        let month = min(max(comps.month ?? 1, 1), 12)
-        let day = min(max(comps.day ?? 1, 1), 31)
-        let hour = min(max(comps.hour ?? 0, 0), 23)
-        let minute = min(max(comps.minute ?? 0, 0), 59)
-        let second = min(max(comps.second ?? 0, 0), 59)
-
-        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
-        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
-        return (dosTime, dosDate)
-    }
-
-    private func listSessionExportZipEntryPaths(at url: URL) throws -> [String] {
-        let data = try Data(contentsOf: url)
-        let bytes = [UInt8](data)
-        let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
-        guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
-            var i = idx
-            while i >= 0 {
-                if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
-                if i == 0 { break }
-                i -= 1
-            }
-            return nil
-        }) else {
-            throw NSError(domain: "ScoutCapture.Export", code: 8, userInfo: [NSLocalizedDescriptionKey: "EOCD not found."])
-        }
-
-        func u16(_ offset: Int) -> Int {
-            Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
-        }
-        func u32(_ offset: Int) -> Int {
-            Int(bytes[offset]) |
-            (Int(bytes[offset + 1]) << 8) |
-            (Int(bytes[offset + 2]) << 16) |
-            (Int(bytes[offset + 3]) << 24)
-        }
-
-        guard eocdIndex + 22 <= bytes.count else {
-            throw NSError(domain: "ScoutCapture.Export", code: 9, userInfo: [NSLocalizedDescriptionKey: "EOCD truncated."])
-        }
-
-        let totalEntries = u16(eocdIndex + 10)
-        let centralOffset = u32(eocdIndex + 16)
-        var cursor = centralOffset
-        var paths: [String] = []
-        paths.reserveCapacity(totalEntries)
-
-        while paths.count < totalEntries, cursor + 46 <= bytes.count {
-            guard cursor + 3 < bytes.count,
-                  bytes[cursor] == 0x50, bytes[cursor + 1] == 0x4B, bytes[cursor + 2] == 0x01, bytes[cursor + 3] == 0x02 else {
-                break
-            }
-            let nameLength = u16(cursor + 28)
-            let extraLength = u16(cursor + 30)
-            let commentLength = u16(cursor + 32)
-            let nameStart = cursor + 46
-            let nameEnd = nameStart + nameLength
-            guard nameEnd <= bytes.count else { break }
-            let nameBytes = Array(bytes[nameStart..<nameEnd])
-            let name = String(bytes: nameBytes, encoding: .utf8) ?? ""
-            paths.append(name)
-            cursor = nameEnd + extraLength + commentLength
-        }
-
-        return paths
-    }
-
-    private func sessionExportCRC32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >>= 1
-                }
-            }
-        }
-        return crc ^ 0xFFFF_FFFF
-    }
-
-    private func appendUInt16LEForSessionExport(_ value: UInt16, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { bytes in
-            data.append(contentsOf: bytes)
-        }
-    }
-
-    private func appendUInt32LEForSessionExport(_ value: UInt32, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { bytes in
-            data.append(contentsOf: bytes)
-        }
     }
 
     private func applyArmedIssueCaptureIfNeeded(with shot: Shot) -> Bool {
@@ -17137,7 +16952,7 @@ extension ContentView {
 #endif
             
             let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data) }
-            let zipData = buildZipData(entries: zipEntries)
+            let zipData = try StoredZipArchive.buildData(entries: zipEntries)
             let zipURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename())
             if fileManager.fileExists(atPath: zipURL.path) {
                 try fileManager.removeItem(at: zipURL)
@@ -17148,7 +16963,7 @@ extension ContentView {
                 throw ExportError.zipCreationFailed
             }
 #if DEBUG
-            let zipPaths = Set(try listZipEntryPaths(at: zipURL))
+            let zipPaths = Set(try StoredZipArchive.entryPaths(at: zipURL))
             guard zipPaths.contains("session.json"), zipPaths.contains("validation.txt") else {
                 assertionFailure("Export ZIP root missing session.json or validation.txt")
                 throw ExportError.zipCreationFailed
@@ -17178,169 +16993,6 @@ extension ContentView {
             let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
             let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
             return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
-        }
-        
-        private func buildZipData(entries: [(path: String, data: Data)]) -> Data {
-            struct CentralRecord {
-                let pathData: Data
-                let crc32: UInt32
-                let size: UInt32
-                let localHeaderOffset: UInt32
-            }
-            
-            var zip = Data()
-            var centralRecords: [CentralRecord] = []
-            centralRecords.reserveCapacity(entries.count)
-            
-            for entry in entries {
-                let pathData = Data(entry.path.utf8)
-                let crc = crc32(entry.data)
-                let size = UInt32(entry.data.count)
-                let localHeaderOffset = UInt32(zip.count)
-                
-                appendUInt32LE(0x04034B50, to: &zip)
-                appendUInt16LE(20, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt32LE(crc, to: &zip)
-                appendUInt32LE(size, to: &zip)
-                appendUInt32LE(size, to: &zip)
-                appendUInt16LE(UInt16(pathData.count), to: &zip)
-                appendUInt16LE(0, to: &zip)
-                zip.append(pathData)
-                zip.append(entry.data)
-                
-                centralRecords.append(
-                    CentralRecord(
-                        pathData: pathData,
-                        crc32: crc,
-                        size: size,
-                        localHeaderOffset: localHeaderOffset
-                    )
-                )
-            }
-            
-            let centralDirectoryOffset = UInt32(zip.count)
-            
-            for record in centralRecords {
-                appendUInt32LE(0x02014B50, to: &zip)
-                appendUInt16LE(20, to: &zip)
-                appendUInt16LE(20, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt32LE(record.crc32, to: &zip)
-                appendUInt32LE(record.size, to: &zip)
-                appendUInt32LE(record.size, to: &zip)
-                appendUInt16LE(UInt16(record.pathData.count), to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt32LE(0, to: &zip)
-                appendUInt32LE(record.localHeaderOffset, to: &zip)
-                zip.append(record.pathData)
-            }
-            
-            let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
-            let count = UInt16(centralRecords.count)
-            
-            appendUInt32LE(0x06054B50, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(count, to: &zip)
-            appendUInt16LE(count, to: &zip)
-            appendUInt32LE(centralDirectorySize, to: &zip)
-            appendUInt32LE(centralDirectoryOffset, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            
-            return zip
-        }
-
-        private func listZipEntryPaths(at url: URL) throws -> [String] {
-            let data = try Data(contentsOf: url)
-            let bytes = [UInt8](data)
-            let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
-            guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
-                var i = idx
-                while i >= 0 {
-                    if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
-                    if i == 0 { break }
-                    i -= 1
-                }
-                return nil
-            }) else {
-                throw ExportError.zipCreationFailed
-            }
-
-            func u16(_ offset: Int) -> Int {
-                Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
-            }
-            func u32(_ offset: Int) -> Int {
-                Int(bytes[offset]) |
-                (Int(bytes[offset + 1]) << 8) |
-                (Int(bytes[offset + 2]) << 16) |
-                (Int(bytes[offset + 3]) << 24)
-            }
-
-            guard eocdIndex + 22 <= bytes.count else {
-                throw ExportError.zipCreationFailed
-            }
-
-            let totalEntries = u16(eocdIndex + 10)
-            let centralDirectoryOffset = u32(eocdIndex + 16)
-            var cursor = centralDirectoryOffset
-            var paths: [String] = []
-            paths.reserveCapacity(totalEntries)
-
-            for _ in 0..<totalEntries {
-                guard cursor + 46 <= bytes.count else { break }
-                let signature = u32(cursor)
-                guard signature == 0x02014B50 else { break }
-                let nameLength = u16(cursor + 28)
-                let extraLength = u16(cursor + 30)
-                let commentLength = u16(cursor + 32)
-                let nameStart = cursor + 46
-                let nameEnd = nameStart + nameLength
-                guard nameEnd <= bytes.count else { break }
-                let path = String(decoding: bytes[nameStart..<nameEnd], as: UTF8.self)
-                paths.append(path)
-                cursor = nameEnd + extraLength + commentLength
-            }
-
-            return paths
-        }
-        
-        private func crc32(_ data: Data) -> UInt32 {
-            var crc: UInt32 = 0xFFFF_FFFF
-            for byte in data {
-                crc ^= UInt32(byte)
-                for _ in 0..<8 {
-                    if (crc & 1) == 1 {
-                        crc = (crc >> 1) ^ 0xEDB8_8320
-                    } else {
-                        crc >>= 1
-                    }
-                }
-            }
-            return crc ^ 0xFFFF_FFFF
-        }
-        
-        private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
-            var v = value.littleEndian
-            withUnsafeBytes(of: &v) { rawBuffer in
-                data.append(contentsOf: rawBuffer)
-            }
-        }
-        
-        private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
-            var v = value.littleEndian
-            withUnsafeBytes(of: &v) { rawBuffer in
-                data.append(contentsOf: rawBuffer)
-            }
         }
         
         private struct LibraryThumb: View {
