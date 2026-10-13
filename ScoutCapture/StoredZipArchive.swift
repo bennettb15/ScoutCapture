@@ -232,32 +232,57 @@ enum StoredZipArchive {
     }
 
     static func entryPaths(at url: URL) throws -> [String] {
-        let bytes = [UInt8](try Data(contentsOf: url))
-        guard bytes.count >= 22 else { throw ArchiveError.invalidArchive }
-        let lowerBound = max(0, bytes.count - 22 - Int(UInt16.max))
-        guard let eocd = stride(from: bytes.count - 22, through: lowerBound, by: -1).first(where: {
-            bytes[$0] == 0x50 && bytes[$0 + 1] == 0x4B && bytes[$0 + 2] == 0x05 && bytes[$0 + 3] == 0x06
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        let fileSize = try input.seekToEnd()
+        guard fileSize >= 22 else { throw ArchiveError.invalidArchive }
+        let tailSize = min(fileSize, UInt64(UInt16.max) + 22)
+        try input.seek(toOffset: fileSize - tailSize)
+        let tail = [UInt8](try readExactly(Int(tailSize), from: input))
+        guard let eocd = stride(from: tail.count - 22, through: 0, by: -1).first(where: {
+            tail[$0] == 0x50 && tail[$0 + 1] == 0x4B && tail[$0 + 2] == 0x05 && tail[$0 + 3] == 0x06 &&
+            $0 + 22 + int16(tail, at: $0 + 20) == tail.count
         }) else { throw ArchiveError.invalidArchive }
-        let count = int16(bytes, at: eocd + 10)
-        var cursor = int32(bytes, at: eocd + 16)
+        let count = int16(tail, at: eocd + 10)
+        let centralOffset = UInt64(int32(tail, at: eocd + 16))
+        let centralSize = UInt64(int32(tail, at: eocd + 12))
+        let centralEnd = centralOffset + centralSize
+        guard centralEnd <= fileSize - tailSize + UInt64(eocd) else {
+            throw ArchiveError.invalidArchive
+        }
+        try input.seek(toOffset: centralOffset)
+        var cursor = centralOffset
         var paths: [String] = []
         paths.reserveCapacity(count)
         for _ in 0..<count {
-            guard cursor >= 0, cursor + 46 <= bytes.count,
-                  int32(bytes, at: cursor) == 0x02014B50 else { throw ArchiveError.invalidArchive }
-            let nameLength = int16(bytes, at: cursor + 28)
-            let extraLength = int16(bytes, at: cursor + 30)
-            let commentLength = int16(bytes, at: cursor + 32)
-            let nameStart = cursor + 46
-            let next = nameStart + nameLength + extraLength + commentLength
-            guard next <= bytes.count,
-                  let name = String(bytes: bytes[nameStart..<(nameStart + nameLength)], encoding: .utf8) else {
+            guard cursor + 46 <= centralEnd else { throw ArchiveError.invalidArchive }
+            let header = [UInt8](try readExactly(46, from: input))
+            guard int32(header, at: 0) == 0x02014B50 else { throw ArchiveError.invalidArchive }
+            let nameLength = int16(header, at: 28)
+            let extraLength = int16(header, at: 30)
+            let commentLength = int16(header, at: 32)
+            let next = cursor + 46 + UInt64(nameLength + extraLength + commentLength)
+            guard next <= centralEnd else { throw ArchiveError.invalidArchive }
+            let nameData = try readExactly(nameLength, from: input)
+            guard let name = String(data: nameData, encoding: .utf8) else {
                 throw ArchiveError.invalidArchive
             }
             paths.append(name)
+            try input.seek(toOffset: next)
             cursor = next
         }
         return paths
+    }
+
+    private static func readExactly(_ count: Int, from input: FileHandle) throws -> Data {
+        var result = Data()
+        while result.count < count {
+            guard let chunk = try input.read(upToCount: count - result.count), !chunk.isEmpty else {
+                throw ArchiveError.invalidArchive
+            }
+            result.append(chunk)
+        }
+        return result
     }
 
     private static func int16(_ bytes: [UInt8], at index: Int) -> Int {

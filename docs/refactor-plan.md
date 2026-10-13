@@ -4,14 +4,14 @@
 
 - Branch: `codex/refactor-test`, based on source commit `4e04061` (app version 1.2, build 19).
 - The original `main` working tree has separate local edits and is not used for these changes.
-- The prechange simulator test run produced 1,108 passes and 105 failures before one test stalled and the run was stopped. Those failures precede this refactor. The full suite is not yet a reliable pass/fail gate.
+- The prechange simulator test run produced 1,108 passes and 105 failures before one test stalled and the run was stopped. One property-status failure reproduced in isolation (`testCachedExportedFreshRemoteOccupiedByOtherBlocksEntry`, cache status was `nil` instead of `occupied`) and that run also stalled after the assertion. These failures precede this refactor. The full suite is not yet a reliable pass/fail gate.
 
 ## Completed on the refactor branch
 
 1. **Preset ownership.** One shared `DetailTypesModel` now serves standard and fast capture. The second model and its duplicate persistence logic were removed. Focused tests cover cross-view edits, persistence, and fast capture's Overview selection.
 2. **Credential exposure check.** A value-redacting scanner checks tracked files and optionally a built app for recognizable privileged keys. A pull request workflow runs the source scan. The current source and Build 19 / refactor app bundles contain no recognized privileged credentials. The Supabase publishable key remains in the app as a public client identifier.
 3. **ZIP export code.** Three in-memory ZIP writers and duplicate entry readers were consolidated into `StoredZipArchive`. Focused tests and an independent ZIP reader verified archive paths, file contents, and checksums. ZIP32 bounds now fail explicitly.
-4. **Export memory use.** Export enumeration keeps file URLs rather than all photo bytes. The active export paths stream ZIP contents in 64 KiB chunks and copy staged photos at the file level.
+4. **Export memory use.** Export enumeration keeps file URLs rather than all photo bytes. The active export paths stream ZIP contents in 64 KiB chunks, copy staged photos at the file level, and read only the ZIP directory during validation.
 
 ## Next steps, in order
 
