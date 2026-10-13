@@ -702,6 +702,15 @@ enum TemporaryMigrationImportManager {
         let documentsPrefix = "\(rootPrefix)\(TemporaryMigrationExportConstants.documentsFolderName)/"
         let userDefaultsPath = "\(rootPrefix)\(TemporaryMigrationExportConstants.userDefaultsFilename)"
 
+        // Reject unsafe restore paths before replacing any local data.
+        for entry in entries where !entry.path.hasSuffix("/") {
+            if entry.path.hasPrefix(applicationSupportPrefix) {
+                _ = try validatedRestoreRelativePath(entry.path, after: applicationSupportPrefix)
+            } else if entry.path.hasPrefix(documentsPrefix) {
+                _ = try validatedRestoreRelativePath(entry.path, after: documentsPrefix)
+            }
+        }
+
         let applicationSupportRoot = StorageRoot.prepareStorage()
         let documentsRoot = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
 
@@ -731,11 +740,11 @@ enum TemporaryMigrationImportManager {
 
             let destinationURL: URL?
             if entry.path.hasPrefix(applicationSupportPrefix) {
-                let relativePath = String(entry.path.dropFirst(applicationSupportPrefix.count))
+                let relativePath = try validatedRestoreRelativePath(entry.path, after: applicationSupportPrefix)
                 destinationURL = applicationSupportRoot.appendingPathComponent(relativePath, isDirectory: false)
                 onPhaseUpdate("Restoring Application Support files...")
             } else if entry.path.hasPrefix(documentsPrefix) {
-                let relativePath = String(entry.path.dropFirst(documentsPrefix.count))
+                let relativePath = try validatedRestoreRelativePath(entry.path, after: documentsPrefix)
                 destinationURL = documentsRoot.appendingPathComponent(relativePath, isDirectory: false)
                 onPhaseUpdate("Restoring Documents files...")
             } else {
@@ -749,6 +758,19 @@ enum TemporaryMigrationImportManager {
 
         onPhaseUpdate("Imported \(restoredFileCount) files.")
         return restoredDefaultsPayload.selectedPropertyID
+    }
+
+    nonisolated static func validatedRestoreRelativePath(_ path: String, after prefix: String) throws -> String {
+        guard path.hasPrefix(prefix) else { throw ImportError.invalidArchiveStructure }
+        let relativePath = String(path.dropFirst(prefix.count))
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !relativePath.isEmpty,
+              !relativePath.contains("\\"),
+              !relativePath.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw ImportError.invalidArchiveStructure
+        }
+        return relativePath
     }
 
     private nonisolated static func clearDirectoryContentsIfPresent(
