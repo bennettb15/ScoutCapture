@@ -2267,6 +2267,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             Property(orgId: orgID, folderId: "status-cutover", name: "Status Cutover", address: "1 Status Way")
         )
         let appState = AppState(localStore: localStore, userDefaults: defaults, disableCloudBackupForTests: true)
+        appState.stopAuthenticationObservation()
         appState._debugSetOrganizationContextForTests(
             memberships: [
                 ActiveOrganizationMembership(id: orgID, name: "Status Cutover Org", role: "owner")

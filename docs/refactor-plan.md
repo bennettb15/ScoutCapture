@@ -4,7 +4,7 @@
 
 - Branch: `codex/refactor-test`, based on source commit `4e04061` (app version 1.2, build 19).
 - The original `main` working tree has separate local edits and is not used for these changes.
-- The prechange simulator test run produced 1,108 passes and 105 failures before one test stalled and the run was stopped. One property-status failure reproduced in isolation (`testCachedExportedFreshRemoteOccupiedByOtherBlocksEntry`, cache status was `nil` instead of `occupied`) and that run also stalled after the assertion. These failures precede this refactor. The full suite is not yet a reliable pass/fail gate.
+- The prechange simulator test run produced 1,108 passes and 105 failures before one test stalled and the run was stopped. One property-status failure reproduced in isolation (`testCachedExportedFreshRemoteOccupiedByOtherBlocksEntry`, cache status was `nil` instead of `occupied`). Tracing showed a startup authentication callback arriving after its fixture installed a fake user; that callback cleared the organization scope and status cache. Cancelling the startup callback when observation stops and stopping the unused observer in this fixture made the isolated test pass. The other prechange failures remain unclassified, so the full suite is not yet a reliable pass/fail gate.
 
 ## Completed on the refactor branch
 

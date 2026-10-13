@@ -8582,6 +8582,7 @@ final class AppState: ObservableObject {
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
+    private var authBootstrapTask: Task<Void, Never>?
     private var authAccessRebuildTask: Task<Void, Never>?
     private var authenticatedAccessContextGeneration: UInt64 = 0
     private var nextPropertyRefreshToken: UInt64 = 0
@@ -9264,6 +9265,9 @@ final class AppState: ObservableObject {
         let existingTask = authStateChangesTask
         authStateChangesTask = nil
         existingTask?.cancel()
+        let existingBootstrapTask = authBootstrapTask
+        authBootstrapTask = nil
+        existingBootstrapTask?.cancel()
     }
 
     func stopAllObservers() {
@@ -9290,7 +9294,8 @@ final class AppState: ObservableObject {
             return
         }
 
-        Task { @MainActor [weak self] in
+        authBootstrapTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
             self?.applyAuthenticationStateNow(user: nil, ready: false)
         }
 
