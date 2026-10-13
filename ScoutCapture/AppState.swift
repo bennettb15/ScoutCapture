@@ -97,7 +97,7 @@ struct PortalPunchlistNote: Identifiable, Equatable {
     }
 }
 
-private enum AppStateTestEnvironment {
+enum AppStateTestEnvironment {
     static var isRunningUnderXCTest: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
