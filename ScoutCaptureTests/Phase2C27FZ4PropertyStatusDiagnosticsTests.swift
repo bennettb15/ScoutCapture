@@ -1806,7 +1806,10 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         fixture.appState._debugReplacePropertyStatusCacheWithoutReconcileForTests([exportedRecord])
 
         fixture.appState._debugSchedulePersistentDataCacheRefreshForTests()
-        await yieldMainActor(times: 6)
+        for _ in 0..<40 {
+            if fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests() == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
 
         let writesAfterConvergence = fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests()
         let refreshed = try XCTUnwrap(deliveredSession(session.id, propertyID: fixture.property.id, localStore: fixture.localStore))
@@ -1814,7 +1817,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertNotNil(refreshed.firstDeliveredAt)
 
         fixture.appState._debugSchedulePersistentDataCacheRefreshForTests()
-        await yieldMainActor(times: 6)
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertEqual(fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests(), writesAfterConvergence)
     }
