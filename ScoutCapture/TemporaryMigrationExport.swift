@@ -394,15 +394,6 @@ enum TemporaryMigrationExportManager {
         let modifiedAt: Date
     }
 
-    private struct ZipCentralDirectoryRecord {
-        let pathData: Data
-        let crc32: UInt32
-        let size: UInt32
-        let dosTime: UInt16
-        let dosDate: UInt16
-        let localHeaderOffset: UInt32
-    }
-
     private nonisolated static func makeZipEntries(rootURL: URL, fileManager: FileManager) throws -> [ZipEntry] {
         var entries: [ZipEntry] = []
         let rootName = rootURL.lastPathComponent
@@ -455,175 +446,14 @@ enum TemporaryMigrationExportManager {
         onProgress: @escaping @Sendable (Int, Int) -> Void = { _, _ in }
     ) throws -> Int {
         let entries = try makeZipEntries(rootURL: rootURL, fileManager: fileManager)
-        fileManager.createFile(atPath: archiveURL.path, contents: nil)
-        let fileHandle = try FileHandle(forWritingTo: archiveURL)
-        defer { try? fileHandle.close() }
-
-        var centralDirectory: [ZipCentralDirectoryRecord] = []
-        var offset: UInt32 = 0
-
-        for (index, entry) in entries.enumerated() {
-            let pathData = Data(entry.path.utf8)
-            let (crc, size): (UInt32, UInt32)
-            if let fileURL = entry.fileURL {
-                (crc, size) = try fileCRC32AndSize(at: fileURL)
-            } else {
-                (crc, size) = (0, 0)
-            }
-
-            let (dosTime, dosDate) = dosDateTime(for: entry.modifiedAt)
-            let localHeaderOffset = offset
-
-            var header = Data()
-            appendUInt32LE(0x04034B50, to: &header)
-            appendUInt16LE(20, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(dosTime, to: &header)
-            appendUInt16LE(dosDate, to: &header)
-            appendUInt32LE(crc, to: &header)
-            appendUInt32LE(size, to: &header)
-            appendUInt32LE(size, to: &header)
-            appendUInt16LE(UInt16(pathData.count), to: &header)
-            appendUInt16LE(0, to: &header)
-            header.append(pathData)
-
-            try write(header, to: fileHandle)
-            offset += UInt32(header.count)
-
-            if let fileURL = entry.fileURL {
-                let written = try streamFile(at: fileURL, to: fileHandle)
-                offset += UInt32(written)
-            }
-
-            centralDirectory.append(
-                ZipCentralDirectoryRecord(
-                    pathData: pathData,
-                    crc32: crc,
-                    size: size,
-                    dosTime: dosTime,
-                    dosDate: dosDate,
-                    localHeaderOffset: localHeaderOffset
-                )
-            )
-            onProgress(index + 1, entries.count)
-        }
-
-        let centralDirectoryOffset = offset
-        for record in centralDirectory {
-            var header = Data()
-            appendUInt32LE(0x02014B50, to: &header)
-            appendUInt16LE(20, to: &header)
-            appendUInt16LE(20, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(record.dosTime, to: &header)
-            appendUInt16LE(record.dosDate, to: &header)
-            appendUInt32LE(record.crc32, to: &header)
-            appendUInt32LE(record.size, to: &header)
-            appendUInt32LE(record.size, to: &header)
-            appendUInt16LE(UInt16(record.pathData.count), to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt16LE(0, to: &header)
-            appendUInt32LE(0, to: &header)
-            appendUInt32LE(record.localHeaderOffset, to: &header)
-            header.append(record.pathData)
-            try write(header, to: fileHandle)
-            offset += UInt32(header.count)
-        }
-
-        let centralDirectorySize = offset - centralDirectoryOffset
-        let count = UInt16(min(centralDirectory.count, Int(UInt16.max)))
-        var endOfCentralDirectory = Data()
-        appendUInt32LE(0x06054B50, to: &endOfCentralDirectory)
-        appendUInt16LE(0, to: &endOfCentralDirectory)
-        appendUInt16LE(0, to: &endOfCentralDirectory)
-        appendUInt16LE(count, to: &endOfCentralDirectory)
-        appendUInt16LE(count, to: &endOfCentralDirectory)
-        appendUInt32LE(centralDirectorySize, to: &endOfCentralDirectory)
-        appendUInt32LE(centralDirectoryOffset, to: &endOfCentralDirectory)
-        appendUInt16LE(0, to: &endOfCentralDirectory)
-        try write(endOfCentralDirectory, to: fileHandle)
-
+        try StoredZipArchive.writeFileArchive(
+            entries: entries.map { (path: $0.path, fileURL: $0.fileURL, modifiedAt: Optional($0.modifiedAt)) },
+            at: archiveURL,
+            onProgress: onProgress
+        )
         return entries.count
     }
 
-    private nonisolated static func fileCRC32AndSize(at url: URL) throws -> (UInt32, UInt32) {
-        let fileHandle = try FileHandle(forReadingFrom: url)
-        defer { try? fileHandle.close() }
-
-        var crc: UInt32 = 0xFFFF_FFFF
-        var size: UInt32 = 0
-        while let chunk = try fileHandle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-            size += UInt32(chunk.count)
-            crc = updateCRC32(crc, with: chunk)
-        }
-        return (~crc, size)
-    }
-
-    private nonisolated static func streamFile(at url: URL, to fileHandle: FileHandle) throws -> Int {
-        let inputHandle = try FileHandle(forReadingFrom: url)
-        defer { try? inputHandle.close() }
-
-        var totalWritten = 0
-        while let chunk = try inputHandle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-            try write(chunk, to: fileHandle)
-            totalWritten += chunk.count
-        }
-        return totalWritten
-    }
-
-    private nonisolated static func dosDateTime(for date: Date) -> (UInt16, UInt16) {
-        let calendar = Calendar(identifier: .gregorian)
-        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-        let year = max(1980, components.year ?? 1980)
-        let month = max(1, min(12, components.month ?? 1))
-        let day = max(1, min(31, components.day ?? 1))
-        let hour = max(0, min(23, components.hour ?? 0))
-        let minute = max(0, min(59, components.minute ?? 0))
-        let second = max(0, min(59, components.second ?? 0))
-        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
-        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
-        return (dosTime, dosDate)
-    }
-
-    private nonisolated static func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
-        crc = updateCRC32(crc, with: data)
-        return ~crc
-    }
-
-    private nonisolated static func updateCRC32(_ crc: UInt32, with data: Data) -> UInt32 {
-        var currentCRC = crc
-        for byte in data {
-            currentCRC ^= UInt32(byte)
-            for _ in 0..<8 {
-                let mask = UInt32(bitPattern: -Int32(currentCRC & 1))
-                currentCRC = (currentCRC >> 1) ^ (0xEDB8_8320 & mask)
-            }
-        }
-        return currentCRC
-    }
-
-    private nonisolated static func write(_ data: Data, to fileHandle: FileHandle) throws {
-        try fileHandle.write(contentsOf: data)
-    }
-
-    private nonisolated static func appendUInt16LE(_ value: UInt16, to data: inout Data) {
-        var littleEndian = value.littleEndian
-        withUnsafeBytes(of: &littleEndian) { bytes in
-            data.append(contentsOf: bytes)
-        }
-    }
-
-    private nonisolated static func appendUInt32LE(_ value: UInt32, to data: inout Data) {
-        var littleEndian = value.littleEndian
-        withUnsafeBytes(of: &littleEndian) { bytes in
-            data.append(contentsOf: bytes)
-        }
-    }
 }
 
 struct TemporaryMigrationImportView: View {

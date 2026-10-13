@@ -101,6 +101,19 @@ enum StoredZipArchive {
         at url: URL,
         timestamped: Bool = true
     ) throws {
+        try writeFileArchive(
+            entries: entries.map { (path: $0.path, fileURL: $0.fileURL, modifiedAt: $0.modifiedAt) },
+            at: url,
+            timestamped: timestamped
+        )
+    }
+
+    nonisolated static func writeFileArchive(
+        entries: [(path: String, fileURL: URL?, modifiedAt: Date?)],
+        at url: URL,
+        timestamped: Bool = true,
+        onProgress: @escaping @Sendable (Int, Int) -> Void = { _, _ in }
+    ) throws {
         struct CentralRecord {
             let pathData: Data
             let crc32: UInt32
@@ -153,6 +166,7 @@ enum StoredZipArchive {
                     pathData: pathData, crc32: checksum, size: size, offset: localOffset,
                     dosTime: dosTime, dosDate: dosDate
                 ))
+                onProgress(records.count, entries.count)
             }
 
             guard let centralOffset = UInt32(exactly: offset) else { throw ArchiveError.exceedsZip32Limits }
@@ -202,7 +216,7 @@ enum StoredZipArchive {
         }
     }
 
-    private static func fileCRC32AndSize(_ url: URL) throws -> (UInt32, UInt32) {
+    private nonisolated static func fileCRC32AndSize(_ url: URL) throws -> (UInt32, UInt32) {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         var crc: UInt32 = 0xFFFF_FFFF
@@ -220,7 +234,7 @@ enum StoredZipArchive {
         return (crc ^ 0xFFFF_FFFF, UInt32(size))
     }
 
-    private static func copyFile(from url: URL, to output: FileHandle) throws -> UInt64 {
+    private nonisolated static func copyFile(from url: URL, to output: FileHandle) throws -> UInt64 {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         var count: UInt64 = 0
@@ -293,7 +307,7 @@ enum StoredZipArchive {
         int16(bytes, at: index) | (int16(bytes, at: index + 2) << 16)
     }
 
-    private static func dosDateTime(_ date: Date) -> (UInt16, UInt16) {
+    private nonisolated static func dosDateTime(_ date: Date) -> (UInt16, UInt16) {
         let parts = Calendar(identifier: .gregorian).dateComponents(in: TimeZone.current, from: date)
         let year = min(max(parts.year ?? 1980, 1980), 2107)
         let month = min(max(parts.month ?? 1, 1), 12)
@@ -316,12 +330,12 @@ enum StoredZipArchive {
         return crc ^ 0xFFFF_FFFF
     }
 
-    private static func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+    private nonisolated static func appendUInt16LE(_ value: UInt16, to data: inout Data) {
         var little = value.littleEndian
         withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
     }
 
-    private static func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+    private nonisolated static func appendUInt32LE(_ value: UInt32, to data: inout Data) {
         var little = value.littleEndian
         withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
     }

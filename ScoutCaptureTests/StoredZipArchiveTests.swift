@@ -46,6 +46,31 @@ final class StoredZipArchiveTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
     }
 
+    func testMigrationStyleArchiveUsesSharedWriter() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("userdefaults_export.json")
+        let archive = directory.appendingPathComponent("migration.zip")
+        try Data("{\"selection\":true}".utf8).write(to: source)
+        let modifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try StoredZipArchive.writeFileArchive(
+            entries: [
+                (path: "ScoutCapture_Migration/", fileURL: nil, modifiedAt: modifiedAt),
+                (path: "ScoutCapture_Migration/userdefaults_export.json", fileURL: source, modifiedAt: modifiedAt)
+            ],
+            at: archive,
+            onProgress: { completed, total in
+                XCTAssertEqual(total, 2)
+                XCTAssertTrue((1...2).contains(completed))
+            }
+        )
+        XCTAssertEqual(
+            try StoredZipArchive.entryPaths(at: archive),
+            ["ScoutCapture_Migration/", "ScoutCapture_Migration/userdefaults_export.json"]
+        )
+    }
+
     func testZip32FilenameLimitIsEnforced() {
         let oversizedPath = String(repeating: "a", count: Int(UInt16.max) + 1)
         XCTAssertThrowsError(try StoredZipArchive.buildData(entries: [(path: oversizedPath, data: Data())]))
