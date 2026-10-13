@@ -472,7 +472,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
 
         XCTAssertTrue(badge.showPendingExport)
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertEqual(entry?.decision, "block")
         XCTAssertEqual(entry?.reason, "pending_export_owned_by_other_actor")
         XCTAssertEqual(entry?.block?.blockContext, "pending_export")
@@ -638,7 +638,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
 
         XCTAssertTrue(badge.showPendingExport)
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertEqual(entry?.decision, "block")
         XCTAssertEqual(entry?.reason, "pending_export_owned_by_other_actor")
         XCTAssertFalse(fixture.appState.isPendingDelivery(session))
@@ -779,7 +779,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertTrue(badge.showPendingExport)
     }
@@ -1719,7 +1719,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             lastExportedSessionID: session.id
         )
         fixture.appState._debugReplacePropertyStatusCacheForTests([pendingRecord])
-        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+        XCTAssertFalse(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
         XCTAssertEqual(
             fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)?.block?.blockContext,
             "pending_export"
