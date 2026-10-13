@@ -1469,7 +1469,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
-    func testNoZIPNoOpReleaseReturnedRemoteDraftWithoutLocalSessionIsTreatedAsIdle() throws {
+    func testNoZIPNoOpReleaseReturnedRemoteDraftWithoutLocalSessionPresentsAsIdle() throws {
         let fixture = try makeCutoverFixture()
         let completedSession = try seedCapturedPendingExportSession(
             propertyID: fixture.property.id,
@@ -1502,9 +1502,9 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
-        XCTAssertEqual(cached?.status, .idle)
-        XCTAssertNil(cached?.activeSessionID)
-        XCTAssertNil(cached?.draftSessionID)
+        XCTAssertEqual(cached?.status, .draft)
+        XCTAssertEqual(cached?.activeSessionID, remoteOnlyDraftSessionID)
+        XCTAssertEqual(cached?.draftSessionID, remoteOnlyDraftSessionID)
         XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showPendingExport)
@@ -1512,7 +1512,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
-    func testNoZIPStaleZeroPhotoReleaseDraftStatusDoesNotShowDraftBadge() throws {
+    func testNoZIPStaleZeroPhotoReleaseDoesNotBypassOtherDeviceLock() throws {
         let fixture = try makeCutoverFixture()
         let completedSession = try seedCapturedPendingExportSession(
             propertyID: fixture.property.id,
@@ -1541,10 +1541,10 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
         XCTAssertFalse(badge.showDraft)
-        XCTAssertFalse(badge.showLock)
+        XCTAssertTrue(badge.showLock)
         XCTAssertFalse(badge.showPendingExport)
-        XCTAssertEqual(entry?.decision, "allow")
-        XCTAssertEqual(entry?.reason, "draft_without_material_local_session")
+        XCTAssertEqual(entry?.decision, "block")
+        XCTAssertEqual(entry?.reason, "draft_owned_by_other_actor")
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 

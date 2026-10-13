@@ -51574,7 +51574,8 @@ final class AppState: ObservableObject {
         let draftHasNoMaterialLocalSession = record.status == .draft &&
             propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
         let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor &&
-            propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
+            (propertyStatusDraftRepresentsKnownNoOpSession(record, propertyID: propertyID) ||
+             propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID))
 
         if draftHasNoMaterialLocalSession,
            draftCanBeTreatedAsStaleLocalNoOp {
