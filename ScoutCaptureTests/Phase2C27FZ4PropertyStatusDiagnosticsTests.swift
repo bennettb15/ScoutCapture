@@ -317,7 +317,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftCountSource(), "property_status")
     }
 
-    func testPropertyStatusOwnerDraftSameUserDifferentDeviceStillOwns() throws {
+    func testPropertyStatusSameUserDifferentDeviceDraftRemainsLocked() throws {
         let fixture = try makeCutoverFixture()
         let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
         fixture.appState._debugRefreshPropertiesLocallyForTests()
@@ -334,14 +334,14 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
-        XCTAssertTrue(badge.showDraft)
-        XCTAssertFalse(badge.showLock)
-        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertTrue(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
 
         let preflight = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
-        XCTAssertEqual(preflight?.decision, "allow")
-        XCTAssertEqual(preflight?.reason, "draft_owned_by_current_actor")
-        XCTAssertNil(preflight?.block)
+        XCTAssertEqual(preflight?.decision, "block")
+        XCTAssertEqual(preflight?.reason, "draft_owned_by_other_actor")
+        XCTAssertNotNil(preflight?.block)
     }
 
     func testPropertyStatusOwnerDraftForKnownEmptyLocalSessionDoesNotShowDraftBadge() throws {
@@ -1317,7 +1317,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
     }
 
-    func testDraftPromotionLocalCacheUpdateAcceptsSameUserDifferentDeviceDraft() throws {
+    func testDraftPromotionLocalCacheUpdateRejectsSameUserDifferentDeviceDraft() throws {
         let fixture = try makeCutoverFixture()
         let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
         fixture.appState._debugRefreshPropertiesLocallyForTests()
@@ -1340,13 +1340,10 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-        XCTAssertEqual(cached?.status, .draft)
-        XCTAssertEqual(cached?.draftSessionID, sessionID)
-        XCTAssertEqual(cached?.ownerUserID, fixture.userID)
-        XCTAssertEqual(cached?.ownerDeviceID, "old-device")
-        XCTAssertTrue(badge.showDraft)
+        XCTAssertNil(cached)
+        XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showLock)
-        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
     func testClaimReturnedOccupiedUpdatesLocalPropertyStatusCache() throws {
