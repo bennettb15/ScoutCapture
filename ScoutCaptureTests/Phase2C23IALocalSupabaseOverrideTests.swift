@@ -405,7 +405,7 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.attemptedCount, 0)
     }
 
-    func testSnapshotUploadHasOnlyManualUICallSite() throws {
+    func testSnapshotUploadUICallSitesRemainManual() throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let projectRoot = testFile
             .deletingLastPathComponent()
@@ -415,7 +415,8 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
             .appendingPathComponent("ScoutCaptureApp.swift")
         let source = try String(contentsOf: appSource)
 
-        XCTAssertEqual(source.components(separatedBy: "uploadCurrentSessionSnapshotShadowWrite(").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "uploadCurrentSessionSnapshotShadowWrite(").count - 1, 2)
+        XCTAssertEqual(source.components(separatedBy: "trigger: \"manual_diagnostic\"").count - 1, 2)
         XCTAssertFalse(source.contains("uploadSessionSnapshotShadowWrite("))
     }
 
