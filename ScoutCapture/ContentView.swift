@@ -13334,11 +13334,10 @@ extension ContentView {
             "Originals/"
         ])
         for originalFile in exportArtifacts.originalFiles {
-            let data = try Data(contentsOf: originalFile.sourceURL)
             let attrs = try? fileManager.attributesOfItem(atPath: originalFile.sourceURL.path)
             let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
             let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
-            try data.write(to: destinationURL, options: .atomic)
+            try fileManager.copyItem(at: originalFile.sourceURL, to: destinationURL)
             if let modifiedAt {
                 try? fileManager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
             }
@@ -13390,8 +13389,7 @@ extension ContentView {
 #endif
         progress?(.sessionData)
 
-        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
-        let zipData = try StoredZipArchive.buildData(entries: zipEntries)
+        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
         let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
 #if DEBUG
@@ -13404,7 +13402,7 @@ extension ContentView {
         if fileManager.fileExists(atPath: finalURL.path) {
             try fileManager.removeItem(at: finalURL)
         }
-        try zipData.write(to: tempURL, options: [.atomic])
+        try StoredZipArchive.writeFileArchive(entries: zipEntries, at: tempURL)
         let tempExists = fileManager.fileExists(atPath: tempURL.path)
         let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
 #if DEBUG
@@ -16943,21 +16941,19 @@ extension ContentView {
             }
             
             for originalFile in exportArtifacts.originalFiles {
-                let imageData = try Data(contentsOf: originalFile.sourceURL)
-                try imageData.write(to: originalsRoot.appendingPathComponent(originalFile.filename), options: .atomic)
-                try imageData.write(to: stampedRoot.appendingPathComponent(originalFile.filename), options: .atomic)
+                try fileManager.copyItem(at: originalFile.sourceURL, to: originalsRoot.appendingPathComponent(originalFile.filename))
+                try fileManager.copyItem(at: originalFile.sourceURL, to: stampedRoot.appendingPathComponent(originalFile.filename))
             }
 #if DEBUG
             print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
             
-            let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data) }
-            let zipData = try StoredZipArchive.buildData(entries: zipEntries)
+            let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
             let zipURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename())
             if fileManager.fileExists(atPath: zipURL.path) {
                 try fileManager.removeItem(at: zipURL)
             }
-            try zipData.write(to: zipURL, options: .atomic)
+            try StoredZipArchive.writeFileArchive(entries: zipEntries, at: zipURL, timestamped: false)
             
             if !fileManager.fileExists(atPath: zipURL.path) {
                 throw ExportError.zipCreationFailed

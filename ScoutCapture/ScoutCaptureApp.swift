@@ -4608,11 +4608,10 @@ struct SessionHubView: View {
         }
 #endif
         for originalFile in validationArtifacts.originalFiles {
-            let data = try Data(contentsOf: originalFile.sourceURL)
             let attrs = try? FileManager.default.attributesOfItem(atPath: originalFile.sourceURL.path)
             let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
             let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
-            try data.write(to: destinationURL, options: .atomic)
+            try FileManager.default.copyItem(at: originalFile.sourceURL, to: destinationURL)
             if let modifiedAt {
                 try? FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
             }
@@ -4638,8 +4637,7 @@ struct SessionHubView: View {
 #endif
         progress?(.sessionData)
 
-        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
-        let zipData = try StoredZipArchive.buildData(entries: zipEntries)
+        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
         let fileManager = FileManager.default
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename(for: property, session: session))
         let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
@@ -4653,7 +4651,7 @@ struct SessionHubView: View {
         if fileManager.fileExists(atPath: finalURL.path) {
             try fileManager.removeItem(at: finalURL)
         }
-        try zipData.write(to: tempURL, options: [.atomic])
+        try StoredZipArchive.writeFileArchive(entries: zipEntries, at: tempURL)
         let tempExists = fileManager.fileExists(atPath: tempURL.path)
         let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
 #if DEBUG

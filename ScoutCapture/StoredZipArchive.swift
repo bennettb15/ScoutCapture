@@ -95,6 +95,142 @@ enum StoredZipArchive {
         return zip
     }
 
+    /// Writes one media file at a time, keeping archive size out of process memory.
+    static func writeFileArchive(
+        entries: [StorageRoot.ExportZipEntry],
+        at url: URL,
+        timestamped: Bool = true
+    ) throws {
+        struct CentralRecord {
+            let pathData: Data
+            let crc32: UInt32
+            let size: UInt32
+            let offset: UInt32
+            let dosTime: UInt16
+            let dosDate: UInt16
+        }
+
+        guard entries.count <= Int(UInt16.max) else { throw ArchiveError.exceedsZip32Limits }
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+        guard fileManager.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let output = try FileHandle(forWritingTo: url)
+        do {
+            var records: [CentralRecord] = []
+            records.reserveCapacity(entries.count)
+            var offset: UInt64 = 0
+            for entry in entries {
+                let pathData = Data(entry.path.utf8)
+                guard let nameLength = UInt16(exactly: pathData.count),
+                      let localOffset = UInt32(exactly: offset) else {
+                    throw ArchiveError.exceedsZip32Limits
+                }
+                let (checksum, size) = try entry.fileURL.map(fileCRC32AndSize) ?? (0, 0)
+                let (dosTime, dosDate) = timestamped ? dosDateTime(entry.modifiedAt ?? Date()) : (0, 0)
+                var header = Data()
+                appendUInt32LE(0x04034B50, to: &header)
+                appendUInt16LE(20, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(dosTime, to: &header)
+                appendUInt16LE(dosDate, to: &header)
+                appendUInt32LE(checksum, to: &header)
+                appendUInt32LE(size, to: &header)
+                appendUInt32LE(size, to: &header)
+                appendUInt16LE(nameLength, to: &header)
+                appendUInt16LE(0, to: &header)
+                header.append(pathData)
+                try output.write(contentsOf: header)
+                offset += UInt64(header.count)
+                if let source = entry.fileURL {
+                    let copied = try copyFile(from: source, to: output)
+                    guard copied == UInt64(size) else { throw ArchiveError.invalidArchive }
+                    offset += copied
+                }
+                records.append(CentralRecord(
+                    pathData: pathData, crc32: checksum, size: size, offset: localOffset,
+                    dosTime: dosTime, dosDate: dosDate
+                ))
+            }
+
+            guard let centralOffset = UInt32(exactly: offset) else { throw ArchiveError.exceedsZip32Limits }
+            for record in records {
+                var header = Data()
+                appendUInt32LE(0x02014B50, to: &header)
+                appendUInt16LE(20, to: &header)
+                appendUInt16LE(20, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(record.dosTime, to: &header)
+                appendUInt16LE(record.dosDate, to: &header)
+                appendUInt32LE(record.crc32, to: &header)
+                appendUInt32LE(record.size, to: &header)
+                appendUInt32LE(record.size, to: &header)
+                appendUInt16LE(UInt16(record.pathData.count), to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt16LE(0, to: &header)
+                appendUInt32LE(0, to: &header)
+                appendUInt32LE(record.offset, to: &header)
+                header.append(record.pathData)
+                try output.write(contentsOf: header)
+                offset += UInt64(header.count)
+            }
+            guard let centralSize = UInt32(exactly: offset - UInt64(centralOffset)),
+                  UInt32(exactly: offset) != nil else {
+                throw ArchiveError.exceedsZip32Limits
+            }
+            var end = Data()
+            let count = UInt16(records.count)
+            appendUInt32LE(0x06054B50, to: &end)
+            appendUInt16LE(0, to: &end)
+            appendUInt16LE(0, to: &end)
+            appendUInt16LE(count, to: &end)
+            appendUInt16LE(count, to: &end)
+            appendUInt32LE(centralSize, to: &end)
+            appendUInt32LE(centralOffset, to: &end)
+            appendUInt16LE(0, to: &end)
+            try output.write(contentsOf: end)
+            try output.close()
+        } catch {
+            try? output.close()
+            try? fileManager.removeItem(at: url)
+            throw error
+        }
+    }
+
+    private static func fileCRC32AndSize(_ url: URL) throws -> (UInt32, UInt32) {
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        var crc: UInt32 = 0xFFFF_FFFF
+        var size: UInt64 = 0
+        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            size += UInt64(chunk.count)
+            guard size <= UInt64(UInt32.max) else { throw ArchiveError.exceedsZip32Limits }
+            for byte in chunk {
+                crc ^= UInt32(byte)
+                for _ in 0..<8 {
+                    crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
+                }
+            }
+        }
+        return (crc ^ 0xFFFF_FFFF, UInt32(size))
+    }
+
+    private static func copyFile(from url: URL, to output: FileHandle) throws -> UInt64 {
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        var count: UInt64 = 0
+        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+            count += UInt64(chunk.count)
+        }
+        return count
+    }
+
     static func entryPaths(at url: URL) throws -> [String] {
         let bytes = [UInt8](try Data(contentsOf: url))
         guard bytes.count >= 22 else { throw ArchiveError.invalidArchive }

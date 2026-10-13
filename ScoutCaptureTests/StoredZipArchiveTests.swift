@@ -25,6 +25,27 @@ final class StoredZipArchiveTests: XCTestCase {
         XCTAssertThrowsError(try StoredZipArchive.entryPaths(at: directory.appendingPathComponent("absent-\(UUID().uuidString).zip")))
     }
 
+    func testStreamingArchivePreservesFilesAndCleansUpOnFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("session.json")
+        let archive = directory.appendingPathComponent("export.zip")
+        try Data("{\"ok\":true}".utf8).write(to: source)
+        let entries = [
+            StorageRoot.ExportZipEntry(path: "Session/", fileURL: nil, modifiedAt: nil),
+            StorageRoot.ExportZipEntry(path: "Session/session.json", fileURL: source, modifiedAt: nil)
+        ]
+        try StoredZipArchive.writeFileArchive(entries: entries, at: archive)
+        XCTAssertEqual(try StoredZipArchive.entryPaths(at: archive), ["Session/", "Session/session.json"])
+
+        let missing = StorageRoot.ExportZipEntry(
+            path: "missing.json", fileURL: directory.appendingPathComponent("missing.json"), modifiedAt: nil
+        )
+        XCTAssertThrowsError(try StoredZipArchive.writeFileArchive(entries: [missing], at: archive))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
+    }
+
     func testZip32FilenameLimitIsEnforced() {
         let oversizedPath = String(repeating: "a", count: Int(UInt16.max) + 1)
         XCTAssertThrowsError(try StoredZipArchive.buildData(entries: [(path: oversizedPath, data: Data())]))
