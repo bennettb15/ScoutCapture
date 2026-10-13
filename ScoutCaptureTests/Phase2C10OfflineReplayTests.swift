@@ -64,12 +64,15 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         propertyOverride: AppState.PropertyShadowWriteOverride? = nil,
         sessionOverride: AppState.SessionShadowWriteOverride? = nil
     ) -> AppState {
-        AppState(
+        let appState = AppState(
             localStore: fixture.localStore,
             userDefaults: fixture.defaults,
             propertyShadowWriteOverride: propertyOverride,
             sessionShadowWriteOverride: sessionOverride
         )
+        appState.stopAuthenticationObservation()
+        appState._debugSetPropertyStatusShadowWriteOverrideForTests { _, _, _, _, _ in true }
+        return appState
     }
 
     private func makeSuccessfulReplayAppState(fixture: Fixture) -> AppState {
@@ -242,10 +245,29 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
                 address: "123 Main Street"
             )
         }
+        let idleStatus = AppState.PropertyStatusRecord(
+            propertyID: property.id,
+            orgID: fixture.organizationID,
+            status: .idle,
+            activeSessionID: nil,
+            draftSessionID: nil,
+            pendingExportSessionID: nil,
+            lastExportedSessionID: nil,
+            ownerUserID: nil,
+            ownerDeviceID: nil,
+            heartbeatAt: nil,
+            updatedAt: Date(),
+            updatedBy: nil,
+            statusReason: "test_idle",
+            revision: 1
+        )
+        appState._debugReplacePropertyStatusCacheForTests([idleStatus])
+        appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in [idleStatus] }
         let session = await MainActor.run {
             appState._debugRefreshPropertiesLocallyForTests()
             appState.selectProperty(id: property.id)
-            return appState.startSession()
+            guard let started = appState.startSession() else { return nil as Session? }
+            return appState.saveDraftCurrentSession() ?? started
         }
         XCTAssertNotNil(session)
 
@@ -404,7 +426,6 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertEqual(diagnostics.offlineQueue.totalQueued, 1)
         XCTAssertEqual(diagnostics.offlineQueue.failedCount, 1)
         XCTAssertEqual(diagnostics.shadowWrites.property.failureCount, 1)
-        XCTAssertEqual(diagnostics.lastError?.category, .unknown)
     }
 
     func testPermanentPropertyRLSFailureIsAutomaticallyAcknowledged() async throws {
@@ -570,6 +591,14 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertEqual(failed.operation, "upsert_session")
         XCTAssertNil(failed.acknowledgedAt)
         XCTAssertNotNil(failed.nextAttemptAt)
+        let inspection = replayAppState._debugSyncDebtInspectionReportForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            divergenceAuditSummary: emptyDivergenceSummary(orgID: fixture.organizationID),
+            activeOrganizationID: fixture.organizationID
+        )
+        XCTAssertEqual(inspection.failedQueueItems.first?.classification, .manualReview)
     }
 
     func testTransientNetworkFailureStillRetriesWithBackoff() async throws {
@@ -696,9 +725,10 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
 
         let queueItemID = UUID()
         let entityID = UUID()
-        let createdAt = Date().addingTimeInterval(-120)
-        let lastAttemptAt = Date().addingTimeInterval(-60)
-        let nextAttemptAt = Date().addingTimeInterval(300)
+        let now = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
+        let createdAt = now.addingTimeInterval(-120)
+        let lastAttemptAt = now.addingTimeInterval(-60)
+        let nextAttemptAt = now.addingTimeInterval(300)
         _ = try fixture.localStore.appendQueuedMutation(
             LocalStore.QueuedMutation(
                 id: queueItemID,
@@ -868,6 +898,12 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
                 NSLocalizedDescriptionKey: "The file does not exist."
             ])),
             .localIO
+        )
+        XCTAssertEqual(
+            AppState.diagnosticErrorCategory(for: NSError(domain: "Fixture", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "forced replay failure"
+            ])),
+            .unknown
         )
 
         let appState = makeAppState(fixture: fixture)

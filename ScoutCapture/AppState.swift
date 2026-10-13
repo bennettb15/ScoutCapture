@@ -12709,7 +12709,7 @@ final class AppState: ObservableObject {
                 message.contains("rls") else {
             return false
         }
-        guard message.contains("properties") || message.contains("sessions") else { return false }
+        guard message.contains("properties") else { return false }
         if Self.isTransientReplayErrorMessage(message) {
             return false
         }
@@ -15223,10 +15223,10 @@ final class AppState: ObservableObject {
             normalizedError.contains("row-level security") ||
             normalizedError.contains("row level security") ||
             normalizedError.contains("rls")
-        if operation == "upsert_property", isRLSFailure {
+        if operation == "upsert_property", isRLSFailure, normalizedError.contains("properties") {
             return .staleRLSPropertyUpsert
         }
-        if operation == "upsert_session", isRLSFailure {
+        if operation == "upsert_session", isRLSFailure, normalizedError.contains("properties") {
             return .staleRLSSessionParentProperty
         }
         if lastErrorCategory == .network {
@@ -15501,6 +15501,7 @@ final class AppState: ObservableObject {
         let combined = "\(domain) \(message)"
 
         if combined.contains("rls") ||
+            combined.contains("row-level security") ||
             combined.contains("row level security") ||
             combined.contains("permission denied") ||
             combined.contains("unauthorized") ||
