@@ -514,7 +514,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         XCTAssertEqual(block.blockContext, "pending_export")
         XCTAssertEqual(block.ownerDescription, "owner@example.com")
-        XCTAssertEqual(message, "Locked by: owner@example.com\nPending since: Aug 19, 9:15 AM")
+        XCTAssertEqual(message, "Locked by: owner@example.com")
     }
 
     func testRemotePendingExportLockDetailUsesUpdatedByOwnerEmailWhenOwnerFieldsAreCleared() async throws {
@@ -551,7 +551,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let message = AppState.sessionEntryBlockMessage(for: block) { _ in "Aug 19, 9:15 AM" }
 
         XCTAssertEqual(block.ownerDescription, "device-a@example.com")
-        XCTAssertEqual(message, "Locked by: device-a@example.com\nPending since: Aug 19, 9:15 AM")
+        XCTAssertEqual(message, "Locked by: device-a@example.com")
     }
 
     func testRemotePendingExportLockDetailFallsBackWhenOwnerEmailMissing() async throws {
@@ -578,7 +578,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(block.ownerDescription, "another user")
         XCTAssertFalse(message.contains(ownerID.uuidString))
         XCTAssertFalse(message.contains("device-a-origin"))
-        XCTAssertEqual(message, "Locked by: another user\nPending since: Aug 19, 9:15 AM")
+        XCTAssertEqual(message, "Locked by: another user")
     }
 
     func testPendingExportWithClearedOwnerFieldsRemainsAccessibleOnOriginatingDevicePackage() throws {
@@ -1141,7 +1141,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(evaluation.decision?.block?.blockContext, "missing_property_status")
         XCTAssertFalse(evaluation.skipCachedPropertyStatusPreflight)
         XCTAssertEqual(evaluation.source, "property_status_missing")
-        XCTAssertEqual(evaluation.reason, "missing_property_status_row")
+        XCTAssertEqual(evaluation.reason, "fresh_read_missing_row")
 
         fixture.appState.selectProperty(id: fixture.property.id)
         let session = fixture.appState.startSession()
@@ -1995,7 +1995,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let decision = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
 
         XCTAssertEqual(decision?.decision, "block")
-        XCTAssertEqual(decision?.block?.ownerDescription, "Morgan Owner on device owner-de")
+        XCTAssertEqual(decision?.block?.ownerDescription, "Morgan Owner • device owner-de")
     }
 
     func testPropertyStatusEntryBlockUsesShortFriendlyFallbackOwnerDescription() throws {
@@ -2016,7 +2016,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(decision?.decision, "block")
         XCTAssertEqual(
             decision?.block?.ownerDescription,
-            "another signed-in user (11111111) on device aaaaaaaa"
+            "another signed-in user (11111111) • device aaaaaaaa"
         )
         XCTAssertFalse(decision?.block?.ownerDescription.contains(ownerID.uuidString) ?? true)
     }
@@ -2048,7 +2048,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                     blockContext: "occupied"
                 )
             ),
-            "Property is currently occupied by owner@example.com."
+            "Locked by: owner@example.com"
         )
         XCTAssertEqual(
             AppState.sessionEntryBlockMessage(
@@ -2058,7 +2058,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                     blockContext: "draft"
                 )
             ),
-            "A draft is in progress by owner@example.com."
+            "Draft in progress by: owner@example.com"
         )
         XCTAssertEqual(
             AppState.sessionEntryBlockMessage(
@@ -2069,7 +2069,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                 ),
                 lockedAtFormatter: { _ in "Aug 19, 9:15 AM" }
             ),
-            "Locked by: owner@example.com\nPending since: Aug 19, 9:15 AM"
+            "Locked by: owner@example.com"
         )
         XCTAssertEqual(
             AppState.sessionEntryBlockMessage(

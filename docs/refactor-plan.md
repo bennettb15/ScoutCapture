@@ -6,6 +6,19 @@
 - The original `main` working tree has separate local edits and is not used for these changes.
 - The prechange simulator test run produced 1,108 passes and 105 failures before one test stalled and the run was stopped. One property-status failure reproduced in isolation (`testCachedExportedFreshRemoteOccupiedByOtherBlocksEntry`, cache status was `nil` instead of `occupied`). Tracing showed a startup authentication callback arriving after its fixture installed a fake user; that callback cleared the organization scope and status cache. Cancelling the startup callback when observation stops and stopping the unused observer in this fixture made the isolated test pass. The other prechange failures remain unclassified, so the full suite is not yet a reliable pass/fail gate.
 
+## Test baseline investigation
+
+After cancelling the stale authentication startup callback in the property-status test fixture, the full `Phase2C27FZ4PropertyStatusDiagnosticsTests` class ran to completion: **75 tests, 58 passing cases, 17 failing cases (35 failed assertions)**. The isolated case that first exposed the callback race passes, along with two neighboring entry tests. The initial failing cases clustered as follows:
+
+| Area | Failing cases | Examples |
+| --- | ---: | --- |
+| Cross-device ownership, lock, and badge state | 7 | Same user on another device treated as owner by an older test, but current code treats the device as the owner when one is recorded; pending-export badge and lock expectations also differ. |
+| No-ZIP release and local reconciliation | 3 | Stale draft or released status remains visible; one persistent-data reconciliation assertion does not update. |
+| User-facing lock wording | 6 | Tests expect older phrases such as “on device”; the app now renders a short bullet-separated description. |
+| Missing-row preflight reason | 1 | The app reports `fresh_read_missing_row`; the test expects `missing_property_status_row`. |
+
+Source history confirmed that the six lock-message tests expected older copy. After updating only those assertions, the full class reran with **64 passing and 11 failing cases (27 failed assertions)**. The missing-row test also expected an older diagnostic reason; its updated assertion passed in isolation. The ten remaining behavior cases are in the first two rows of the table. Review current product rules and history before changing runtime behavior or those assertions. This class is one slice of the earlier 105-failure Build 19 run; the other failures are still unclassified.
+
 ## Completed on the refactor branch
 
 1. **Preset ownership.** One shared `DetailTypesModel` now serves standard and fast capture. The second model and its duplicate persistence logic were removed. Focused tests cover cross-view edits, persistence, and fast capture's Overview selection.
