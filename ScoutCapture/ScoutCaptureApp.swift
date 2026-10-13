@@ -14086,8 +14086,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
     @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
     @State private var chromeLocationMode: CameraChromeLocationMode = .exterior
-    @StateObject private var fastDetailTypesModel = FastLaneDetailTypesModel()
-    @StateObject private var fastPanelDetailTypesModel = DetailTypesModel()
+    @StateObject private var fastDetailTypesModel = DetailTypesModel.shared
     @StateObject private var locationManager = LocationManager()
     @State private var fastLaneCaptureProfileState: CaptureProfile = .residential
     @State private var fastMetadataContext: AppState.FastRuntimeCaptureMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
@@ -14424,7 +14423,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     selectedTrade: fastMetadataContext.trade
                 ),
                 buildingOptions: $fastBuildingOptions,
-                detailTypesModel: fastPanelDetailTypesModel,
+                detailTypesModel: fastDetailTypesModel,
                 buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 cache: fastLaneGalleryImageCache,
@@ -14472,7 +14471,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 allowReferenceFallback: true,
                 captureProfile: fastLaneCaptureProfile,
                 buildingOptions: $fastBuildingOptions,
-                detailTypesModel: fastPanelDetailTypesModel,
+                detailTypesModel: fastDetailTypesModel,
                 buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 refreshToken: fastLaneGalleryRefreshToken,
@@ -14933,7 +14932,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         guard !isFastLaneCaptureProfileLocked else { return }
         let targetProfile: CaptureProfile = fastLaneCaptureProfile == .residential ? .commercial : .residential
         fastLaneCaptureProfileState = targetProfile
-        fastDetailTypesModel.resetSelectionsToOverview(for: targetProfile)
+        fastDetailTypesModel.resetFastLaneSelectionsToOverview(for: targetProfile)
         let currentMode = chromeLocationMode
         let nextElevation = currentMode == .interior
             ? "Interior"
@@ -18973,297 +18972,6 @@ private enum FastLaneMetadataOptions {
     }
 }
 
-private final class FastLaneDetailTypesModel: ObservableObject {
-    struct DetailTypeItem: Identifiable, Codable, Equatable {
-        var id: UUID = UUID()
-        var name: String
-    }
-
-    @Published var residentialInteriorTypes: [DetailTypeItem] = []
-    @Published var residentialExteriorTypes: [DetailTypeItem] = []
-    @Published var commercialInteriorTypes: [DetailTypeItem] = []
-    @Published var commercialExteriorTypes: [DetailTypeItem] = []
-    @Published var selectedResidentialInterior: String = ""
-    @Published var selectedResidentialExterior: String = ""
-    @Published var selectedCommercialInterior: String = ""
-    @Published var selectedCommercialExterior: String = ""
-
-    private let residentialInteriorTypesKey = "scout.detailTypes.residential.interior.list.v1"
-    private let residentialExteriorTypesKey = "scout.detailTypes.residential.exterior.list.v1"
-    private let commercialInteriorTypesKey = "scout.detailTypes.commercial.interior.list.v1"
-    private let commercialExteriorTypesKey = "scout.detailTypes.commercial.exterior.list.v1"
-    private let selectedResidentialInteriorKey = "scout.detailTypes.residential.interior.selected.v1"
-    private let selectedResidentialExteriorKey = "scout.detailTypes.residential.exterior.selected.v1"
-    private let selectedCommercialInteriorKey = "scout.detailTypes.commercial.interior.selected.v1"
-    private let selectedCommercialExteriorKey = "scout.detailTypes.commercial.exterior.selected.v1"
-    private let legacyResidentialInteriorTypesKey = "scout.detailTypes.interior.list.v4"
-    private let legacyResidentialExteriorTypesKey = "scout.detailTypes.exterior.list.v4"
-    private let legacySelectedResidentialInteriorKey = "scout.detailTypes.interior.selected.v4"
-    private let legacySelectedResidentialExteriorKey = "scout.detailTypes.exterior.selected.v4"
-    private let legacyInteriorTypesKey = "scout.detailTypes.interior.list.v2"
-    private let legacyExteriorTypesKey = "scout.detailTypes.exterior.list.v2"
-    private let legacySelectedInteriorKey = "scout.detailTypes.interior.selected.v2"
-    private let legacySelectedExteriorKey = "scout.detailTypes.exterior.selected.v2"
-    private var pendingPersist: DispatchWorkItem?
-
-    private let defaultResidentialInteriorTypes = [
-        "Overview", "Entry / Foyer", "Living Room", "Sitting room", "Kitchen", "Guest kitchen",
-        "Dining Area", "Primary Bedroom", "Primary bath", "Bedroom 2", "Bedroom 3", "Bedroom 4",
-        "Bedroom 5", "Bathroom", "Half bath", "Guest bathroom", "Hallway", "Stairs",
-        "Basement stairs", "Secondary stairs", "Laundry", "Garage", "Mechanical / HVAC", "Storage"
-    ]
-    private let defaultResidentialExteriorTypes = [
-        "Overview", "Elevation", "Entry / Porch", "Window", "Roofline", "Cladding / Siding",
-        "Driveway / Garage", "Backyard / Patio", "Landscaping", "Fence / Gate", "Utility / HVAC",
-        "Pool / Outdoor Amenities", "Sidewalk", "Exterior Stairs / Ramp", "Downspout", "Chimney", "Foundation"
-    ]
-    private let defaultCommercialInteriorTypes = [
-        "Overview", "Lobby / Reception", "Corridor", "Stairs", "Elevator", "Office",
-        "Conference Room", "Open Workspace", "Break Room / Kitchenette", "Restroom", "Storage",
-        "Electrical Room", "Mechanical Room", "IT / Server Room", "Janitorial / Service Room",
-        "Retail Floor", "Suite Entry", "Leasing / Amenity Area"
-    ]
-    private let defaultCommercialExteriorTypes = [
-        "Overview", "Elevation", "Entry", "Storefront", "Loading Dock", "Parking Area",
-        "Site Circulation", "Signage", "Window / Glazing", "Roofline", "Cladding / Facade",
-        "Canopy / Awning", "Exterior Stairs / Ramp", "Trash / Service Area", "Fence / Gate",
-        "Utility / HVAC", "Mechanical Equipment", "Landscape / Hardscape", "Downspout", "Foundation"
-    ]
-
-    init() {
-        load()
-        normalizeDefaultsIfNeeded()
-        addNewResidentialInteriorPresetsIfNeeded()
-    }
-
-    private func addNewResidentialInteriorPresetsIfNeeded() {
-        let migrationKey = "scout.detailTypes.residential.interior.additions.2026-10-09"
-        if !UserDefaults.standard.bool(forKey: migrationKey) {
-            let additions = ["Sitting room", "Guest kitchen", "Primary bath", "Half bath", "Guest bathroom", "Basement stairs", "Secondary stairs"]
-            for name in additions where !residentialInteriorTypes.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-                residentialInteriorTypes.append(DetailTypeItem(name: name))
-            }
-            UserDefaults.standard.set(true, forKey: migrationKey)
-        }
-
-        let orderKey = "scout.detailTypes.residential.interior.additions.order.2026-10-09"
-        guard !UserDefaults.standard.bool(forKey: orderKey) else { return }
-        let placements = [
-            ("Sitting room", "Living Room"),
-            ("Guest kitchen", "Kitchen"),
-            ("Primary bath", "Primary Bedroom"),
-            ("Half bath", "Bathroom"),
-            ("Guest bathroom", "Half bath"),
-            ("Basement stairs", "Stairs"),
-            ("Secondary stairs", "Basement stairs")
-        ]
-        for (name, anchor) in placements {
-            guard let index = residentialInteriorTypes.firstIndex(where: { $0.name == name }),
-                  let anchorIndex = residentialInteriorTypes.firstIndex(where: { $0.name == anchor }) else { continue }
-            let item = residentialInteriorTypes.remove(at: index)
-            residentialInteriorTypes.insert(item, at: min(anchorIndex + (index < anchorIndex ? 0 : 1), residentialInteriorTypes.count))
-        }
-        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
-        UserDefaults.standard.set(true, forKey: orderKey)
-    }
-
-    func items(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
-        switch (profile, mode) {
-        case (.residential, .interior): return residentialInteriorTypes
-        case (.residential, .exterior): return residentialExteriorTypes
-        case (.commercial, .interior): return commercialInteriorTypes
-        case (.commercial, .exterior): return commercialExteriorTypes
-        }
-    }
-
-    func names(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [String] {
-        items(for: mode, profile: profile).map(\.name).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-    }
-
-    func selected(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> String {
-        switch (profile, mode) {
-        case (.residential, .interior): return selectedResidentialInterior
-        case (.residential, .exterior): return selectedResidentialExterior
-        case (.commercial, .interior): return selectedCommercialInterior
-        case (.commercial, .exterior): return selectedCommercialExterior
-        }
-    }
-
-    func setSelected(_ value: String, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior): selectedResidentialInterior = value
-        case (.residential, .exterior): selectedResidentialExterior = value
-        case (.commercial, .interior): selectedCommercialInterior = value
-        case (.commercial, .exterior): selectedCommercialExterior = value
-        }
-        persistSelected()
-    }
-
-    func resetSelectionsToOverview(for profile: CaptureProfile) {
-        let interiorOverview = names(for: .interior, profile: profile)
-            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
-            names(for: .interior, profile: profile).first ??
-            ""
-        let exteriorOverview = names(for: .exterior, profile: profile)
-            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
-            names(for: .exterior, profile: profile).first ??
-            ""
-        setSelected(interiorOverview, for: .interior, profile: profile)
-        setSelected(exteriorOverview, for: .exterior, profile: profile)
-    }
-
-    @discardableResult
-    func insertBlankItem(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> UUID {
-        let newItem = DetailTypeItem(name: "")
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes.append(newItem)
-        case (.residential, .exterior): residentialExteriorTypes.append(newItem)
-        case (.commercial, .interior): commercialInteriorTypes.append(newItem)
-        case (.commercial, .exterior): commercialExteriorTypes.append(newItem)
-        }
-        persistAll()
-        return newItem.id
-    }
-
-    func updateItem(_ value: String, id: UUID, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        let cleaned = value.trimmingCharacters(in: .newlines)
-        switch (profile, mode) {
-        case (.residential, .interior):
-            guard let idx = residentialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            residentialInteriorTypes[idx].name = cleaned
-        case (.residential, .exterior):
-            guard let idx = residentialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            residentialExteriorTypes[idx].name = cleaned
-        case (.commercial, .interior):
-            guard let idx = commercialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            commercialInteriorTypes[idx].name = cleaned
-        case (.commercial, .exterior):
-            guard let idx = commercialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            commercialExteriorTypes[idx].name = cleaned
-        }
-        normalizeDefaultsIfNeeded()
-        persistAll()
-    }
-
-    func delete(at offsets: IndexSet, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior):
-            let deleting = offsets.compactMap { residentialInteriorTypes.indices.contains($0) ? residentialInteriorTypes[$0].name : nil }
-            residentialInteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedResidentialInterior) { selectedResidentialInterior = residentialInteriorTypes.first?.name ?? "" }
-        case (.residential, .exterior):
-            let deleting = offsets.compactMap { residentialExteriorTypes.indices.contains($0) ? residentialExteriorTypes[$0].name : nil }
-            residentialExteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedResidentialExterior) { selectedResidentialExterior = residentialExteriorTypes.first?.name ?? "" }
-        case (.commercial, .interior):
-            let deleting = offsets.compactMap { commercialInteriorTypes.indices.contains($0) ? commercialInteriorTypes[$0].name : nil }
-            commercialInteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedCommercialInterior) { selectedCommercialInterior = commercialInteriorTypes.first?.name ?? "" }
-        case (.commercial, .exterior):
-            let deleting = offsets.compactMap { commercialExteriorTypes.indices.contains($0) ? commercialExteriorTypes[$0].name : nil }
-            commercialExteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedCommercialExterior) { selectedCommercialExterior = commercialExteriorTypes.first?.name ?? "" }
-        }
-        normalizeDefaultsIfNeeded()
-        persistAll()
-    }
-
-    func move(from source: IndexSet, to destination: Int, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.residential, .exterior): residentialExteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.commercial, .interior): commercialInteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.commercial, .exterior): commercialExteriorTypes.move(fromOffsets: source, toOffset: destination)
-        }
-        schedulePersist()
-    }
-
-    private func schedulePersist() {
-        pendingPersist?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.normalizeDefaultsIfNeeded()
-            self.persistAll()
-        }
-        pendingPersist = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
-    }
-
-    private func load() {
-        residentialInteriorTypes = loadItems(key: residentialInteriorTypesKey, legacyKeys: [legacyResidentialInteriorTypesKey, legacyInteriorTypesKey])
-        residentialExteriorTypes = loadItems(key: residentialExteriorTypesKey, legacyKeys: [legacyResidentialExteriorTypesKey, legacyExteriorTypesKey])
-        commercialInteriorTypes = loadItems(key: commercialInteriorTypesKey, legacyKeys: [])
-        commercialExteriorTypes = loadItems(key: commercialExteriorTypesKey, legacyKeys: [])
-        selectedResidentialInterior = UserDefaults.standard.string(forKey: selectedResidentialInteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialInteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedInteriorKey)
-            ?? ""
-        selectedResidentialExterior = UserDefaults.standard.string(forKey: selectedResidentialExteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialExteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedExteriorKey)
-            ?? ""
-        selectedCommercialInterior = UserDefaults.standard.string(forKey: selectedCommercialInteriorKey) ?? ""
-        selectedCommercialExterior = UserDefaults.standard.string(forKey: selectedCommercialExteriorKey) ?? ""
-    }
-
-    private func persistAll() {
-        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
-        saveItems(residentialExteriorTypes, key: residentialExteriorTypesKey)
-        saveItems(commercialInteriorTypes, key: commercialInteriorTypesKey)
-        saveItems(commercialExteriorTypes, key: commercialExteriorTypesKey)
-        persistSelected()
-    }
-
-    private func persistSelected() {
-        UserDefaults.standard.set(selectedResidentialInterior, forKey: selectedResidentialInteriorKey)
-        UserDefaults.standard.set(selectedResidentialExterior, forKey: selectedResidentialExteriorKey)
-        UserDefaults.standard.set(selectedCommercialInterior, forKey: selectedCommercialInteriorKey)
-        UserDefaults.standard.set(selectedCommercialExterior, forKey: selectedCommercialExteriorKey)
-    }
-
-    private func normalizeDefaultsIfNeeded() {
-        if residentialInteriorTypes.isEmpty { residentialInteriorTypes = defaultResidentialInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if residentialExteriorTypes.isEmpty { residentialExteriorTypes = defaultResidentialExteriorTypes.map { DetailTypeItem(name: $0) } }
-        if commercialInteriorTypes.isEmpty { commercialInteriorTypes = defaultCommercialInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if commercialExteriorTypes.isEmpty { commercialExteriorTypes = defaultCommercialExteriorTypes.map { DetailTypeItem(name: $0) } }
-        if selectedResidentialInterior.isEmpty { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
-        if selectedResidentialExterior.isEmpty { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
-        if selectedCommercialInterior.isEmpty { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
-        if selectedCommercialExterior.isEmpty { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
-        if !residentialInteriorTypes.contains(where: { $0.name == selectedResidentialInterior }) { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
-        if !residentialExteriorTypes.contains(where: { $0.name == selectedResidentialExterior }) { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
-        if !commercialInteriorTypes.contains(where: { $0.name == selectedCommercialInterior }) { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
-        if !commercialExteriorTypes.contains(where: { $0.name == selectedCommercialExterior }) { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
-    }
-
-    private func firstNonEmpty(from list: [DetailTypeItem]) -> String? {
-        list.first(where: { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.name
-    }
-
-    private func loadItems(key: String, legacyKeys: [String]) -> [DetailTypeItem] {
-        if let data = UserDefaults.standard.data(forKey: key),
-           let decoded = try? JSONDecoder().decode([DetailTypeItem].self, from: data) {
-            return decoded
-        }
-        for legacyKey in legacyKeys {
-            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
-               let decodedItems = try? JSONDecoder().decode([DetailTypeItem].self, from: legacyData) {
-                return decodedItems
-            }
-            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
-               let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
-                return decodedStrings.map { DetailTypeItem(name: $0) }
-            }
-        }
-        return []
-    }
-
-    private func saveItems(_ items: [DetailTypeItem], key: String) {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        UserDefaults.standard.set(data, forKey: key)
-    }
-}
-
 private struct FastLaneSessionActionsSummary: Equatable {
     let guidedRemainingCount: Int
     let flaggedRemainingCount: Int
@@ -21255,7 +20963,7 @@ private struct FastLaneMetadataFilterSheet: View {
     let context: AppState.FastRuntimeCaptureMetadataContext
     @Binding var buildingOptions: [String]
     @Binding var tradeOptions: [String]
-    @ObservedObject var detailTypesModel: FastLaneDetailTypesModel
+    @ObservedObject var detailTypesModel: DetailTypesModel
     let onCancel: () -> Void
     let onConfirm: (AppState.FastRuntimeCaptureMetadataContext) -> Void
 
@@ -21275,7 +20983,7 @@ private struct FastLaneMetadataFilterSheet: View {
         context: AppState.FastRuntimeCaptureMetadataContext,
         buildingOptions: Binding<[String]>,
         tradeOptions: Binding<[String]>,
-        detailTypesModel: FastLaneDetailTypesModel,
+        detailTypesModel: DetailTypesModel,
         onCancel: @escaping () -> Void,
         onConfirm: @escaping (AppState.FastRuntimeCaptureMetadataContext) -> Void
     ) {
@@ -21621,7 +21329,7 @@ private struct FastLaneMetadataSelectionListView: View {
 private struct FastLaneManageDetailTypesView: View {
     let mode: CameraChromeLocationMode
     let profile: CaptureProfile
-    @ObservedObject var model: FastLaneDetailTypesModel
+    @ObservedObject var model: DetailTypesModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @State private var editModeState: EditMode = .inactive
@@ -21729,7 +21437,7 @@ private struct FastLaneManageDetailTypesView: View {
     }
 
     @ViewBuilder
-    private func rowView(item: FastLaneDetailTypesModel.DetailTypeItem) -> some View {
+    private func rowView(item: DetailTypesModel.DetailTypeItem) -> some View {
         if isEditing {
             TextField("Name", text: bindingForRow(id: item.id))
                 .focused($focusedRow, equals: item.id)
