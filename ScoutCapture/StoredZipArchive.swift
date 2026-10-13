@@ -221,7 +221,8 @@ enum StoredZipArchive {
         defer { try? input.close() }
         var crc: UInt32 = 0xFFFF_FFFF
         var size: UInt64 = 0
-        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+        while try autoreleasepool(invoking: {
+            guard let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty else { return false }
             size += UInt64(chunk.count)
             guard size <= UInt64(UInt32.max) else { throw ArchiveError.exceedsZip32Limits }
             for byte in chunk {
@@ -230,7 +231,8 @@ enum StoredZipArchive {
                     crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
                 }
             }
-        }
+            return true
+        }) {}
         return (crc ^ 0xFFFF_FFFF, UInt32(size))
     }
 
@@ -238,10 +240,12 @@ enum StoredZipArchive {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         var count: UInt64 = 0
-        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+        while try autoreleasepool(invoking: {
+            guard let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty else { return false }
             try output.write(contentsOf: chunk)
             count += UInt64(chunk.count)
-        }
+            return true
+        }) {}
         return count
     }
 
