@@ -13,6 +13,29 @@ import ImageIO
 import UniformTypeIdentifiers
 import CoreMotion
 
+private func standardCapsuleButton(
+    title: String,
+    isEnabled: Bool,
+    fill: Color,
+    stroke: Color,
+    label: Color,
+    action: @escaping () -> Void
+) -> some View {
+    Button(action: action) {
+        Text(title)
+            .font(.system(size: 17, weight: .medium))
+            .foregroundColor(isEnabled ? label : label.opacity(0.45))
+            .frame(minHeight: 42)
+            .padding(.horizontal, 14)
+            .background(fill)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(stroke, lineWidth: 1)
+            )
+    }
+}
+
 private let isVerboseConsoleLoggingEnabled = false
 
 @inline(__always)
@@ -3765,7 +3788,6 @@ struct SessionHubView: View {
         propertyToDelete = property
     }
     
-    @ViewBuilder
     private func customCapsuleToolbarButton(
         title: String,
         isEnabled: Bool,
@@ -3774,23 +3796,14 @@ struct SessionHubView: View {
         label: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let resolvedFill = fill ?? buttonFill
-        let resolvedStroke = stroke ?? buttonStroke
-        let resolvedLabel = label ?? buttonLabel
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 42)
-                .padding(.horizontal, 14)
-                .background(resolvedFill)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(resolvedStroke, lineWidth: 1)
-                )
-        }
+        standardCapsuleButton(
+            title: title,
+            isEnabled: isEnabled,
+            fill: fill ?? buttonFill,
+            stroke: stroke ?? buttonStroke,
+            label: label ?? buttonLabel,
+            action: action
+        )
         .buttonStyle(.plain)
         .tint(.clear)
         .disabled(!isEnabled)
@@ -4880,7 +4893,6 @@ private struct HubAddPropertySheet: View {
         }
     }
     
-    @ViewBuilder
     private func customCapsuleButton(
         title: String,
         isEnabled: Bool,
@@ -4889,23 +4901,14 @@ private struct HubAddPropertySheet: View {
         label: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let resolvedFill = fill ?? buttonFill
-        let resolvedStroke = stroke ?? buttonStroke
-        let resolvedLabel = label ?? buttonLabel
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 42)
-                .padding(.horizontal, 14)
-                .background(resolvedFill)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(resolvedStroke, lineWidth: 1)
-                )
-        }
+        standardCapsuleButton(
+            title: title,
+            isEnabled: isEnabled,
+            fill: fill ?? buttonFill,
+            stroke: stroke ?? buttonStroke,
+            label: label ?? buttonLabel,
+            action: action
+        )
         .buttonStyle(.plain)
         .disabled(!isEnabled)
     }
@@ -5254,7 +5257,6 @@ private struct EditContactSheet: View {
         return digits
     }
 
-    @ViewBuilder
     private func customCapsuleButton(
         title: String,
         isEnabled: Bool,
@@ -5263,23 +5265,14 @@ private struct EditContactSheet: View {
         label: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let resolvedFill = fill ?? buttonFill
-        let resolvedStroke = stroke ?? buttonStroke
-        let resolvedLabel = label ?? buttonLabel
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 42)
-                .padding(.horizontal, 14)
-                .background(resolvedFill)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(resolvedStroke, lineWidth: 1)
-                )
-        }
+        standardCapsuleButton(
+            title: title,
+            isEnabled: isEnabled,
+            fill: fill ?? buttonFill,
+            stroke: stroke ?? buttonStroke,
+            label: label ?? buttonLabel,
+            action: action
+        )
         .buttonStyle(.plain)
         .disabled(!isEnabled)
     }
