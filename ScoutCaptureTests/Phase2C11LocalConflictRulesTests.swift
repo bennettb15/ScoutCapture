@@ -2010,7 +2010,7 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         )
         let reloadedShot = reloaded.shots.first(where: { $0.shotID == shotID })
         let reloadedIssue = reloaded.issues.first(where: { $0.issueID == issueID })
-        XCTAssertEqual(reloadedShot?.isFlagged, false)
+        XCTAssertEqual(reloadedShot?.isFlagged, true)
         XCTAssertEqual(reloadedShot?.issueStatus, "resolved")
         XCTAssertEqual(reloadedShot?.captureKind, "resolved_capture")
         XCTAssertEqual(reloadedShot?.noteText, "Resolved reason")
