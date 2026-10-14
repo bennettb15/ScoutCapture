@@ -3992,7 +3992,7 @@ struct ContentView: View {
         return loaded
     }
 
-    private func guidedHistoricalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
+    private func historicalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
         let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !existing.isEmpty {
             return [existing]
@@ -4007,7 +4007,7 @@ struct ContentView: View {
         return ["Originals/\(originalFilename)"]
     }
 
-    private func guidedHistoricalResolvedSessionImagePath(
+    private func historicalResolvedSessionImagePath(
         for shot: ShotMetadata,
         propertyID: UUID,
         sessionID: UUID
@@ -4022,7 +4022,7 @@ struct ContentView: View {
             return resolved
         }
 
-        let fallbackRelativePaths = guidedHistoricalRelativePathCandidates(for: shot)
+        let fallbackRelativePaths = historicalRelativePathCandidates(for: shot)
         guard let primaryFallbackRelativePath = fallbackRelativePaths.first, !primaryFallbackRelativePath.isEmpty else {
             return resolved
         }
@@ -4079,7 +4079,7 @@ struct ContentView: View {
 
             let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let resolved = guidedHistoricalResolvedSessionImagePath(
+                let resolved = historicalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
@@ -4170,7 +4170,7 @@ struct ContentView: View {
 
             let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let resolved = guidedHistoricalResolvedSessionImagePath(
+                let resolved = historicalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
@@ -4549,58 +4549,6 @@ struct ContentView: View {
             .first
     }
 
-    private func flaggedHistoricalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
-        let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !existing.isEmpty {
-            return [existing]
-        }
-        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-        if originalFilename.isEmpty {
-            return [
-                "Originals/\(OriginalPhotoFormat.defaultFilename(for: shot.shotID))",
-                "Originals/\(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID))"
-            ]
-        }
-        return ["Originals/\(originalFilename)"]
-    }
-
-    private func flaggedResolvedSessionImagePath(
-        for shot: ShotMetadata,
-        propertyID: UUID,
-        sessionID: UUID
-    ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
-        let resolved = resolvedSessionImagePath(
-            for: shot,
-            propertyID: propertyID,
-            sessionID: sessionID,
-            suppressAutoHydration: true
-        )
-        if resolved.absolutePath != nil || !resolved.relativePath.isEmpty {
-            return resolved
-        }
-
-        let fallbackRelativePaths = flaggedHistoricalRelativePathCandidates(for: shot)
-        guard let primaryFallbackRelativePath = fallbackRelativePaths.first, !primaryFallbackRelativePath.isEmpty else {
-            return resolved
-        }
-
-        for fallbackRelativePath in fallbackRelativePaths {
-            if let originalURL = localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                relativePath: fallbackRelativePath
-            ) {
-                return (originalURL.path, "original_derived", fallbackRelativePath, true)
-            }
-        }
-
-        let derivedPath = localStore
-            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            .appendingPathComponent(primaryFallbackRelativePath, isDirectory: false)
-            .path
-        return (derivedPath, "original_derived", primaryFallbackRelativePath, false)
-    }
-
     private func flaggedResolutionCandidate(
         propertyID: UUID,
         sessionID: UUID,
@@ -4608,7 +4556,7 @@ struct ContentView: View {
         match: (shot: ShotMetadata, matchBy: String)?
     ) -> FlaggedShotResolutionCandidate? {
         guard let match else { return nil }
-        let resolved = flaggedResolvedSessionImagePath(
+        let resolved = historicalResolvedSessionImagePath(
             for: match.shot,
             propertyID: propertyID,
             sessionID: sessionID
