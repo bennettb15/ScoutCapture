@@ -25,5 +25,6 @@ xcodebuild test \
     -only-testing:ScoutCaptureTests/Phase2C07bMediaBackfillTests \
     -only-testing:ScoutCaptureTests/Phase2C08CutoverTests \
     -only-testing:ScoutCaptureTests/Phase2C10OfflineReplayTests \
+    -only-testing:ScoutCaptureTests/ClientPortalPriorityTradeSyncTests \
     -only-testing:ScoutCaptureTests/StoredZipArchiveTests \
     -only-testing:ScoutCaptureTests/TemporaryMigrationImportTests
