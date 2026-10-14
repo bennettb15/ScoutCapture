@@ -24139,6 +24139,63 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    private func selectedSessionReplayAuthorization(
+        selectedTarget: ManualSessionSnapshotUploadTarget?,
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        pipelineAuthorizationContext: SelectedSessionValidationPipelineAuthorizationContext?,
+        checkedAt: Date
+    ) -> (orgID: UUID?, blockedReason: String?) {
+        guard let selectedTarget else {
+            return (nil, "selected_session_snapshot_target_required")
+        }
+        let propertyID = selectedTarget.propertyID
+        let sessionID = selectedTarget.sessionID
+        guard let productionValidationEvidence else {
+            return (nil, "package_validation_evidence_required")
+        }
+        guard productionValidationEvidence.targetScope.propertyID == propertyID,
+              productionValidationEvidence.targetScope.sessionID == sessionID else {
+            return (nil, "package_validation_selected_scope_mismatch")
+        }
+        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
+            productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return (nil, "package_validation_evidence_not_ready")
+        }
+        guard activeOrganizationID == orgID,
+              isOrganizationContextReady,
+              canAccessOrganization(orgID) else {
+            return (orgID, "selected_session_org_scope_not_verified")
+        }
+        guard selectedTarget.propertyID == propertyID,
+              selectedTarget.sessionID == sessionID else {
+            return (orgID, "selected_session_scope_not_exact")
+        }
+        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
+            pipelineAuthorizationContext,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        )
+        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
+            return (orgID, "exact_singleton_candidate_allowlist_required")
+        }
+        guard !backendFeatureFlags.supabaseReadEnabled,
+              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
+            return (orgID, "production_wide_canonical_reads_must_be_disabled")
+        }
+        return (orgID, nil)
+    }
+
+    @MainActor
     func replayFlaggedObservationShadowWritesForSelectedSession(
         checkedAt: Date = Date(),
         productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
@@ -24173,52 +24230,19 @@ final class AppState: ObservableObject {
             )
         }
 
-        guard let selectedTarget,
+        let authorization = selectedSessionReplayAuthorization(
+            selectedTarget: selectedTarget,
+            productionValidationEvidence: productionValidationEvidence,
+            pipelineAuthorizationContext: pipelineAuthorizationContext,
+            checkedAt: checkedAt
+        )
+        if let reason = authorization.blockedReason {
+            return blocked(reason, orgID: authorization.orgID)
+        }
+        guard let orgID = authorization.orgID,
               let propertyID,
               let sessionID else {
             return blocked("selected_session_snapshot_target_required")
-        }
-        guard let productionValidationEvidence else {
-            return blocked("package_validation_evidence_required")
-        }
-        guard productionValidationEvidence.targetScope.propertyID == propertyID,
-              productionValidationEvidence.targetScope.sessionID == sessionID else {
-            return blocked("package_validation_selected_scope_mismatch")
-        }
-        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
-            productionValidationEvidence,
-            propertyID: propertyID,
-            sessionID: sessionID
-        ) else {
-            return blocked("package_validation_evidence_not_ready")
-        }
-        guard activeOrganizationID == orgID,
-              isOrganizationContextReady,
-              canAccessOrganization(orgID) else {
-            return blocked("selected_session_org_scope_not_verified", orgID: orgID)
-        }
-        guard selectedTarget.propertyID == propertyID,
-              selectedTarget.sessionID == sessionID else {
-            return blocked("selected_session_scope_not_exact", orgID: orgID)
-        }
-        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID
-        )
-        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
-            pipelineAuthorizationContext,
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID,
-            checkedAt: checkedAt
-        )
-        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
-            return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
-        }
-        guard !backendFeatureFlags.supabaseReadEnabled,
-              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
-            return blocked("production_wide_canonical_reads_must_be_disabled", orgID: orgID)
         }
 
         let replayResult: NormalizedBackfillEntityResult
@@ -24355,52 +24379,19 @@ final class AppState: ObservableObject {
             )
         }
 
-        guard let selectedTarget,
+        let authorization = selectedSessionReplayAuthorization(
+            selectedTarget: selectedTarget,
+            productionValidationEvidence: productionValidationEvidence,
+            pipelineAuthorizationContext: pipelineAuthorizationContext,
+            checkedAt: checkedAt
+        )
+        if let reason = authorization.blockedReason {
+            return blocked(reason, orgID: authorization.orgID)
+        }
+        guard let orgID = authorization.orgID,
               let propertyID,
               let sessionID else {
             return blocked("selected_session_snapshot_target_required")
-        }
-        guard let productionValidationEvidence else {
-            return blocked("package_validation_evidence_required")
-        }
-        guard productionValidationEvidence.targetScope.propertyID == propertyID,
-              productionValidationEvidence.targetScope.sessionID == sessionID else {
-            return blocked("package_validation_selected_scope_mismatch")
-        }
-        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
-            productionValidationEvidence,
-            propertyID: propertyID,
-            sessionID: sessionID
-        ) else {
-            return blocked("package_validation_evidence_not_ready")
-        }
-        guard activeOrganizationID == orgID,
-              isOrganizationContextReady,
-              canAccessOrganization(orgID) else {
-            return blocked("selected_session_org_scope_not_verified", orgID: orgID)
-        }
-        guard selectedTarget.propertyID == propertyID,
-              selectedTarget.sessionID == sessionID else {
-            return blocked("selected_session_scope_not_exact", orgID: orgID)
-        }
-        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID
-        )
-        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
-            pipelineAuthorizationContext,
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID,
-            checkedAt: checkedAt
-        )
-        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
-            return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
-        }
-        guard !backendFeatureFlags.supabaseReadEnabled,
-              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
-            return blocked("production_wide_canonical_reads_must_be_disabled", orgID: orgID)
         }
 
         let preflightDiagnostics = await runCanonicalReadDiagnosticsForPinnedSession(
