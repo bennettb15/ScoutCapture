@@ -39444,35 +39444,7 @@ final class AppState: ObservableObject {
             guard seenIDs.insert(record.id).inserted else {
                 throw RemotePropertyFetchError.duplicatePropertyID(record.id)
             }
-            guard remotePropertyDateIsValid(record.updatedAt) else {
-                logRemotePropertyTimestampIssue(
-                    kind: "updated_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: record.updatedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
-            if let createdAt = record.createdAt,
-               !remotePropertyDateIsValid(createdAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "created_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: createdAt
-                )
-                throw RemotePropertyFetchError.invalidCreatedAt(record.id)
-            }
-            if let deletedAt = record.deletedAt,
-               !remotePropertyDateIsValid(deletedAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "deleted_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: deletedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
+            try validateRemotePropertyDates(record)
         }
 
         return records
@@ -39666,38 +39638,42 @@ final class AppState: ObservableObject {
                     propertyID: record.id
                 )
             }
-            guard remotePropertyDateIsValid(record.updatedAt) else {
-                logRemotePropertyTimestampIssue(
-                    kind: "updated_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: record.updatedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
-            if let createdAt = record.createdAt,
-               !remotePropertyDateIsValid(createdAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "created_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: createdAt
-                )
-                throw RemotePropertyFetchError.invalidCreatedAt(record.id)
-            }
-            if let deletedAt = record.deletedAt,
-               !remotePropertyDateIsValid(deletedAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "deleted_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: deletedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
+            try validateRemotePropertyDates(record)
             _ = try resolvedRemotePropertyCreatedAt(for: record)
         }
         return sortedRecords
+    }
+
+    private func validateRemotePropertyDates(_ record: RemotePropertyRecord) throws {
+        guard remotePropertyDateIsValid(record.updatedAt) else {
+            logRemotePropertyTimestampIssue(
+                kind: "updated_at",
+                propertyID: record.id,
+                orgID: record.orgID,
+                value: record.updatedAt
+            )
+            throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
+        }
+        if let createdAt = record.createdAt,
+           !remotePropertyDateIsValid(createdAt) {
+            logRemotePropertyTimestampIssue(
+                kind: "created_at",
+                propertyID: record.id,
+                orgID: record.orgID,
+                value: createdAt
+            )
+            throw RemotePropertyFetchError.invalidCreatedAt(record.id)
+        }
+        if let deletedAt = record.deletedAt,
+           !remotePropertyDateIsValid(deletedAt) {
+            logRemotePropertyTimestampIssue(
+                kind: "deleted_at",
+                propertyID: record.id,
+                orgID: record.orgID,
+                value: deletedAt
+            )
+            throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
+        }
     }
 
     private func remotePropertyDateIsValid(_ value: Date) -> Bool {
