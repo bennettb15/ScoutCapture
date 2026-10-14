@@ -27,6 +27,20 @@ private extension ColorScheme {
     }
 }
 
+private extension View {
+    func scoutDiagnosticResultCard(fill: Color, stroke: Color) -> some View {
+        self
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(stroke, lineWidth: 1)
+            )
+    }
+}
+
 private func standardCapsuleButton(
     title: String,
     isEnabled: Bool,
@@ -19475,14 +19489,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLaneReportHandoffResultBlock(
@@ -19512,14 +19519,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLanePendingExportCleanupResultBlock(
@@ -19547,14 +19547,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLaneLauncherResultBlock(
@@ -19589,14 +19582,7 @@ private struct DebugToolsView: View {
                     .foregroundColor(.orange)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLaneLauncherCloseResultBlock(
@@ -19624,14 +19610,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastRuntimeCleanupResultBlock(
@@ -19652,14 +19631,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func captureProfileBackfillSummaryHint(
