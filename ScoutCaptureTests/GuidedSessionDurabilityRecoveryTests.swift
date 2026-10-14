@@ -84,10 +84,21 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.sessionFolderURL(
             propertyID: property.id, sessionID: context.sessionID
         ).appendingPathComponent("session.json").path))
-        XCTAssertTrue(appState.propertyCardBadgeModel(for: property.id).showDraft)
-        XCTAssertTrue(appState.prepareFastRuntimeCompletion(
+        let draftBadge = appState.propertyCardBadgeModel(for: property.id)
+        let draftSummary = appState.fastRuntimeDraftsByPropertyID[property.id]
+        XCTAssertTrue(
+            draftBadge.showDraft,
+            "badge=\(draftBadge.badgeSource):\(draftBadge.draftReason), " +
+                "summaryOwner=\(draftSummary?.ownerDeviceID ?? "nil"), device=\(deviceID)"
+        )
+        // An unauthenticated local fixture cannot start the upload phase, but the
+        // completion request still checkpoints its marker and hides the draft.
+        XCTAssertFalse(appState.prepareFastRuntimeCompletion(
             context: context, storageRoot: result.storageRoot, shots: []
         ))
+        let completionStorageRoot = try XCTUnwrap(result.storageRoot)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: completionStorageRoot
+            .appendingPathComponent("Metadata/complete-requested-at.json").path))
         XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
         XCTAssertEqual(appState.propertyRowDraftCount, 0)
         XCTAssertNil(appState.fastRuntimeDraftResumeState(for: property.id))
