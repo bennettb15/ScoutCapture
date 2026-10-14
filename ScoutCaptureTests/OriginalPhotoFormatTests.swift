@@ -176,6 +176,33 @@ final class OriginalPhotoFormatTests: XCTestCase {
         XCTAssertEqual((gps[kCGImagePropertyGPSHPositioningError] as? NSNumber)?.doubleValue, 3.5)
         XCTAssertEqual(gps[kCGImagePropertyGPSDateStamp] as? String, "2023:11:14")
         XCTAssertEqual(gps[kCGImagePropertyGPSTimeStamp] as? String, "22:13:20")
+
+        let storageRoot = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+        let originalURL = storageRoot.appendingPathComponent("original.jpg")
+        let stampedURL = storageRoot.appendingPathComponent("Stamped/stamped.jpg")
+        try sourceData.write(to: originalURL)
+        let captureDate = Date(timeIntervalSince1970: 1_700_000_000)
+        func writeStampedFile() throws {
+            try writeScoutStampedJPEGIfMissing(
+                sourceURL: originalURL,
+                destinationURL: stampedURL,
+                captureDate: captureDate,
+                overlayLines: ["Test Property", "North"],
+                metadataContext: context,
+                fileManager: .default,
+                errorDomain: "ScoutCapture.Stamp",
+                missingSourceDescription: "Missing source image for stamped export",
+                logMetadata: false,
+                drawOverlay: { cgImage, _ in cgImage }
+            )
+        }
+        try writeStampedFile()
+        XCTAssertGreaterThan(try Data(contentsOf: stampedURL).count, 0)
+        let modifiedAt = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: stampedURL.path)[.modificationDate] as? Date)
+        XCTAssertEqual(modifiedAt.timeIntervalSince1970, captureDate.timeIntervalSince1970, accuracy: 1)
+        try FileManager.default.removeItem(at: originalURL)
+        try writeStampedFile() // A valid stamp is reused without rereading the source.
     }
 
     @MainActor

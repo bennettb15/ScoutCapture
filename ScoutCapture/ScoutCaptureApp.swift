@@ -4706,7 +4706,7 @@ struct SessionHubView: View {
 
             let stampedURL = localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID)
                 .appendingPathComponent(stampedName, isDirectory: false)
-            try createPendingStampedJPEGIfMissing(
+            try writeScoutStampedJPEGIfMissing(
                 sourceURL: originalURL,
                 destinationURL: stampedURL,
                 captureDate: shot.updatedAt,
@@ -4723,7 +4723,11 @@ struct SessionHubView: View {
                     shot: shot,
                     schemaVersion: metadata.schemaVersion
                 ),
-                fileManager: fileManager
+                fileManager: fileManager,
+                errorDomain: "ScoutCapture.PendingStamp",
+                missingSourceDescription: "Missing source image for pending stamped export",
+                logMetadata: true,
+                drawOverlay: { image, lines in drawPendingStampOverlay(on: image, lines: lines) }
             )
             output[shot.originalFilename] = stampedURL
         }
@@ -4742,79 +4746,6 @@ struct SessionHubView: View {
         }
 
         return output
-    }
-
-    private func createPendingStampedJPEGIfMissing(
-        sourceURL: URL,
-        destinationURL: URL,
-        captureDate: Date,
-        overlayLines: [String],
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext,
-        fileManager: FileManager
-    ) throws {
-        if fileManager.fileExists(atPath: destinationURL.path),
-           ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0 > 0 {
-            return
-        }
-
-        let parentDir = destinationURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        let sourceData = try Data(contentsOf: sourceURL)
-        let stampedData = try encodePendingStampedJPEG(
-            from: sourceData,
-            captureDate: captureDate,
-            overlayLines: overlayLines,
-            metadataContext: metadataContext
-        )
-        try stampedData.write(to: destinationURL, options: [.atomic])
-
-        let size = ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("[Stamp] destination=\(destinationURL.path) utType=\(UTType.jpeg.identifier) bytes=\(size)")
-#endif
-        guard fileManager.fileExists(atPath: destinationURL.path), size > 0 else {
-            throw NSError(domain: "ScoutCapture.PendingStamp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Stamped JPEG write failed"])
-        }
-
-        try fileManager.setAttributes(
-            [
-                .creationDate: captureDate,
-                .modificationDate: captureDate
-            ],
-            ofItemAtPath: destinationURL.path
-        )
-#if DEBUG
-        if let attrs = try? fileManager.attributesOfItem(atPath: destinationURL.path) {
-            let created = attrs[.creationDate] as? Date
-            let modified = attrs[.modificationDate] as? Date
-            print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
-        }
-        if let source = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
-           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-            let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
-            let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
-            let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
-            print("[Stamp] readback pixelWidth=\(width) pixelHeight=\(height) orientation=\(orientation)")
-        }
-#endif
-    }
-
-    private func encodePendingStampedJPEG(
-        from sourceData: Data,
-        captureDate: Date,
-        overlayLines: [String],
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) throws -> Data {
-        try encodeScoutStampedJPEG(
-            from: sourceData,
-            captureDate: captureDate,
-            overlayLines: overlayLines,
-            metadataContext: metadataContext,
-            errorDomain: "ScoutCapture.PendingStamp",
-            missingSourceDescription: "Missing source image for pending stamped export",
-            logMetadata: true,
-            drawOverlay: { image, lines in drawPendingStampOverlay(on: image, lines: lines) }
-        )
     }
 
     private func drawPendingStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
@@ -23663,6 +23594,70 @@ struct PropertySessionView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
+}
+
+@MainActor
+func writeScoutStampedJPEGIfMissing(
+    sourceURL: URL,
+    destinationURL: URL,
+    captureDate: Date,
+    overlayLines: [String],
+    metadataContext: ReportLibraryModel.EmbeddedMetadataContext,
+    fileManager: FileManager,
+    errorDomain: String,
+    missingSourceDescription: String,
+    logMetadata: Bool,
+    drawOverlay: (CGImage, [String]) -> CGImage?
+) throws {
+    if fileManager.fileExists(atPath: destinationURL.path),
+       ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0 > 0 {
+        return
+    }
+
+    let parentDir = destinationURL.deletingLastPathComponent()
+    try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+    let sourceData = try Data(contentsOf: sourceURL)
+    let stampedData = try encodeScoutStampedJPEG(
+        from: sourceData,
+        captureDate: captureDate,
+        overlayLines: overlayLines,
+        metadataContext: metadataContext,
+        errorDomain: errorDomain,
+        missingSourceDescription: missingSourceDescription,
+        logMetadata: logMetadata,
+        drawOverlay: drawOverlay
+    )
+    try stampedData.write(to: destinationURL, options: [.atomic])
+
+    let size = ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+#if DEBUG
+    print("[Stamp] destination=\(destinationURL.path) utType=\(UTType.jpeg.identifier) bytes=\(size)")
+#endif
+    guard fileManager.fileExists(atPath: destinationURL.path), size > 0 else {
+        throw NSError(domain: errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Stamped JPEG write failed"])
+    }
+
+    try fileManager.setAttributes(
+        [
+            .creationDate: captureDate,
+            .modificationDate: captureDate
+        ],
+        ofItemAtPath: destinationURL.path
+    )
+#if DEBUG
+    if let attrs = try? fileManager.attributesOfItem(atPath: destinationURL.path) {
+        let created = attrs[.creationDate] as? Date
+        let modified = attrs[.modificationDate] as? Date
+        print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
+    }
+    if let source = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
+       let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+        let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
+        print("[Stamp] readback pixelWidth=\(width) pixelHeight=\(height) orientation=\(orientation)")
+    }
+#endif
 }
 
 @MainActor
