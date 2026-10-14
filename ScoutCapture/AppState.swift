@@ -17412,13 +17412,14 @@ final class AppState: ObservableObject {
         propertyID: UUID?,
         sessionID: UUID?,
         outcome: SessionSnapshotRestoreDiagnosticOutcome,
-        failureReason: String
+        failureReason: String,
+        snapshotID: UUID? = nil
     ) -> SessionSnapshotRestoreDiagnosticsResult {
         SessionSnapshotRestoreDiagnosticsResult(
             checkedAt: checkedAt,
             propertyID: propertyID,
             sessionID: sessionID,
-            snapshotID: nil,
+            snapshotID: snapshotID,
             result: outcome,
             failureReason: failureReason,
             rowFound: false,
@@ -30621,35 +30622,13 @@ final class AppState: ObservableObject {
         reason: String,
         restore: SessionSnapshotRestoreDiagnosticsResult? = nil
     ) -> LocalHealthSessionSnapshotPackageValidationReport {
-        let fallbackRestore = restore ?? SessionSnapshotRestoreDiagnosticsResult(
+        let fallbackRestore = restore ?? makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
             checkedAt: checkedAt,
             propertyID: targetScope.propertyID,
             sessionID: targetScope.sessionID,
-            snapshotID: snapshotID,
-            result: .noSnapshotFound,
+            outcome: .noSnapshotFound,
             failureReason: reason,
-            rowFound: false,
-            objectReadable: false,
-            checksumVerified: false,
-            byteSizeMatches: false,
-            rowObjectVerified: false,
-            parentRemoteVerified: false,
-            snapshotSchemaVersion: nil,
-            snapshotCreatedAt: nil,
-            snapshotGeneratedAt: nil,
-            localSessionExists: false,
-            localSessionStatus: nil,
-            localShotCount: nil,
-            localIssueCount: nil,
-            localGuidedCount: nil,
-            snapshotShotCount: nil,
-            snapshotIssueCount: nil,
-            snapshotGuidedCount: nil,
-            snapshotMediaManifestCount: nil,
-            snapshotMissingLocalOriginalsCount: nil,
-            snapshotSupabaseStorageMetadataCount: nil,
-            freshness: "unknown",
-            mediaRecoveryDiagnostics: .notChecked
+            snapshotID: snapshotID
         )
         let hydration = SessionSnapshotHydrationResult(
             hydratedAt: checkedAt,
