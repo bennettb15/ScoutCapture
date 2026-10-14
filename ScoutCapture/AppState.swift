@@ -19768,21 +19768,7 @@ final class AppState: ObservableObject {
         } else {
             localOriginalExists = false
         }
-        return SessionSnapshotMediaManifestItem(
-            id: shot.shotID,
-            originalFilenamePreview: diagnosticsPreviewText(shot.originalFilename, maxLength: 80),
-            originalRelativePathPresent: relativePath != nil,
-            originalByteSize: shot.originalByteSize,
-            localOriginalExists: localOriginalExists,
-            storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
-            storagePathPresent: trimmedNonEmpty(shot.storagePath) != nil,
-            checksumPresent: trimmedNonEmpty(shot.checksumSHA256) != nil,
-            storageByteSize: shot.byteSize,
-            capturedByUserID: shot.capturedByUserID,
-            capturedByEmail: trimmedNonEmpty(shot.capturedByEmail),
-            uploadedByUserID: shot.uploadedByUserID,
-            uploadedByEmail: trimmedNonEmpty(shot.uploadedByEmail)
-        )
+        return makeSessionSnapshotMediaManifestItem(for: shot, localOriginalExists: localOriginalExists)
     }
 
     private static func makeSessionSnapshotMediaManifestItem(
@@ -19797,10 +19783,16 @@ final class AppState: ObservableObject {
         } else {
             localOriginalExists = false
         }
+        return makeSessionSnapshotMediaManifestItem(for: shot, localOriginalExists: localOriginalExists)
+    }
+
+    private static func makeSessionSnapshotMediaManifestItem(
+        for shot: ShotMetadata, localOriginalExists: Bool
+    ) -> SessionSnapshotMediaManifestItem {
         return SessionSnapshotMediaManifestItem(
             id: shot.shotID,
             originalFilenamePreview: diagnosticsPreviewText(shot.originalFilename, maxLength: 80),
-            originalRelativePathPresent: relativePath != nil,
+            originalRelativePathPresent: trimmedNonEmpty(shot.originalRelativePath) != nil,
             originalByteSize: shot.originalByteSize,
             localOriginalExists: localOriginalExists,
             storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
