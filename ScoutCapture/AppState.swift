@@ -16835,7 +16835,7 @@ final class AppState: ObservableObject {
         }
 
         for item in replayable {
-            guard ignoreBackoff || shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
+            guard ignoreBackoff || OfflineReplayPolicy.shouldReplaySnapshotUpload(item, now: now) else {
                 if item.status == .failed, let next = item.nextAttemptAt, now < next {
                     skippedBackoffCount += 1
                 }
@@ -17026,7 +17026,7 @@ final class AppState: ObservableObject {
         guard let item = items.first(where: { $0.id == itemID }) else {
             return nil
         }
-        guard shouldReplaySessionSnapshotUploadRetry(item, now: now) else { return nil }
+        guard OfflineReplayPolicy.shouldReplaySnapshotUpload(item, now: now) else { return nil }
         guard let session = try? localSessionForSnapshotUpload(propertyID: item.propertyID, sessionID: item.sessionID) else {
             var terminal = item
             terminal.status = .terminalFailed
@@ -17057,20 +17057,6 @@ final class AppState: ObservableObject {
             return nil
         }
         return await performSessionSnapshotUploadRetryAttempt(item: item, now: now)
-    }
-
-    private func shouldReplaySessionSnapshotUploadRetry(
-        _ item: LocalStore.SessionSnapshotUploadRetryWorkItem,
-        now: Date
-    ) -> Bool {
-        switch item.status {
-        case .pending:
-            return true
-        case .failed:
-            return item.nextAttemptAt.map { now >= $0 } ?? true
-        case .inFlight, .terminalFailed:
-            return false
-        }
     }
 
     private func pruneLocalArchiveSnapshotAfterSuccessfulUpload(

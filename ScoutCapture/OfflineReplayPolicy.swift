@@ -28,9 +28,27 @@ enum OfflineReplayPolicy {
         case .pending:
             return true
         case .failed:
-            return mutation.nextAttemptAt.map { now >= $0 } ?? true
+            return retryIsDue(nextAttemptAt: mutation.nextAttemptAt, now: now)
         case .inFlight, .completed:
             return false
         }
+    }
+
+    static func shouldReplaySnapshotUpload(
+        _ item: LocalStore.SessionSnapshotUploadRetryWorkItem,
+        now: Date
+    ) -> Bool {
+        switch item.status {
+        case .pending:
+            return true
+        case .failed:
+            return retryIsDue(nextAttemptAt: item.nextAttemptAt, now: now)
+        case .inFlight, .terminalFailed:
+            return false
+        }
+    }
+
+    private static func retryIsDue(nextAttemptAt: Date?, now: Date) -> Bool {
+        nextAttemptAt.map { now >= $0 } ?? true
     }
 }
