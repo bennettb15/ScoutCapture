@@ -9522,7 +9522,7 @@ extension ContentView {
     @ViewBuilder
     private func armedReferenceActionOverlay() -> some View {
         let items = [
-            SharedActionMenuItem(
+            CaptureActionMenuItem(
                 title: "View Reference Image",
                 isEnabled: armedReferenceImageLocalIdentifier(isCaptured: false) != nil,
                 action: {
@@ -9530,7 +9530,7 @@ extension ContentView {
                     showArmedReferenceImage(isCaptured: false)
                 }
             ),
-            SharedActionMenuItem(
+            CaptureActionMenuItem(
                 title: "View Captured Image",
                 isEnabled: armedReferenceImageLocalIdentifier(isCaptured: true) != nil,
                 action: {
@@ -9540,10 +9540,11 @@ extension ContentView {
             )
         ]
 
-        SharedActionMenuOverlay(
+        CaptureActionMenuOverlay(
             rotation: bottomGlyphRotationAngle,
             items: items,
-            onDismiss: { showArmedReferenceMenu = false }
+            onDismiss: { showArmedReferenceMenu = false },
+            cornerStyle: .circular
         )
     }
 
@@ -16874,88 +16875,6 @@ extension ContentView {
         }
     }
 
-    private struct SharedActionMenuItem: Identifiable {
-        let id = UUID()
-        let title: String
-        var isEnabled: Bool = true
-        let action: () -> Void
-    }
-
-    private struct SharedActionMenuOverlay: View {
-        let rotation: Angle
-        let items: [SharedActionMenuItem]
-        let onDismiss: () -> Void
-
-        var body: some View {
-            ZStack {
-                Color.black.opacity(0.55)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        onDismiss()
-                    }
-
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("Actions")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.92))
-                        Spacer(minLength: 0)
-                        Button("Done") {
-                            onDismiss()
-                        }
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.92))
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.20))
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            Button(action: item.action) {
-                                HStack(spacing: 10) {
-                                    Text(item.title)
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundColor(.white.opacity(0.95))
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.78)
-                                    Spacer(minLength: 0)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 12)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!item.isEnabled)
-                            .opacity(item.isEnabled ? 1.0 : 0.45)
-
-                            if index != items.count - 1 {
-                                Rectangle()
-                                    .fill(Color.white.opacity(0.12))
-                                    .frame(height: 1)
-                                    .padding(.horizontal, 12)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 6)
-                }
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
-                .padding(.horizontal, 20)
-                .frame(maxWidth: 360)
-                .rotationEffect(rotation)
-            }
-        }
-    }
-
     struct ManageDetailTypesView: View {
         
         let mode: ContentView.LocationMode
@@ -17929,7 +17848,7 @@ extension ContentView {
         }
     }
 
-    private struct ManageTradesSheet: View {
+    struct ManageTradesSheet: View {
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
         @State private var editModeState: EditMode = .inactive
@@ -17938,6 +17857,7 @@ extension ContentView {
         @Binding var options: [String]
         @Binding var selectedTrade: String
         let onClose: () -> Void
+        var onPersist: ((inout [String], inout String) -> Void)? = nil
 
         var body: some View {
             NavigationStack {
@@ -18056,6 +17976,10 @@ extension ContentView {
                     .padding(.bottom, 4)
                 }
                 .onDisappear {
+                    if let onPersist {
+                        onPersist(&options, &selectedTrade)
+                        return
+                    }
                     let cleaned = ContentView.canonicalTradeOptions(options, selectedTrade: selectedTrade)
                     options = cleaned.isEmpty ? ContentView.defaultTradeOptions : cleaned
                     if !selectedTrade.isEmpty {
@@ -18083,6 +18007,7 @@ extension ContentView {
         let buildingCodeForOption: (String) -> String
         let buildingFullLabelForOption: (String) -> String
         let onClose: () -> Void
+        var onPersist: ((inout [String], inout String) -> Void)? = nil
         @State private var editModeState: EditMode = .inactive
         @FocusState private var focusedIndex: Int?
 
@@ -18203,6 +18128,10 @@ extension ContentView {
                     .padding(.bottom, 4)
                 }
                 .onDisappear {
+                    if let onPersist {
+                        onPersist(&options, &selectedBuilding)
+                        return
+                    }
                     let cleaned = options
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { !$0.isEmpty }

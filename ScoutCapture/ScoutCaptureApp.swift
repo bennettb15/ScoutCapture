@@ -13554,17 +13554,18 @@ private struct FastLaneReferenceViewerState: Identifiable {
     let startIndex: Int
 }
 
-private struct FastLaneSharedActionMenuItem: Identifiable {
+struct CaptureActionMenuItem: Identifiable {
     let id = UUID()
     let title: String
     var isEnabled: Bool = true
     let action: () -> Void
 }
 
-private struct FastLaneSharedActionMenuOverlay: View {
+struct CaptureActionMenuOverlay: View {
     let rotation: Angle
-    let items: [FastLaneSharedActionMenuItem]
+    let items: [CaptureActionMenuItem]
     let onDismiss: () -> Void
+    var cornerStyle: RoundedCornerStyle = .continuous
 
     var body: some View {
         ZStack {
@@ -13623,9 +13624,9 @@ private struct FastLaneSharedActionMenuOverlay: View {
                 .padding(.vertical, 6)
             }
             .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: cornerStyle))
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: cornerStyle)
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
@@ -14037,7 +14038,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
         }
         .sheet(isPresented: $showFastLaneManageBuildingsSheet) {
-            FastLaneManageBuildingsSheet(
+            ContentView.ManageBuildingsSheet(
                 options: $fastBuildingOptions,
                 selectedBuilding: Binding(
                     get: { fastMetadataContext.building },
@@ -14054,14 +14055,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         ))
                     }
                 ),
-                onClose: { showFastLaneManageBuildingsSheet = false }
+                buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                buildingFullLabelForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                onClose: { showFastLaneManageBuildingsSheet = false },
+                onPersist: { options, selectedBuilding in
+                    FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
+                }
             )
         }
         .sheet(item: $fastLaneManageDetailMode) { mode in
-            FastLaneManageDetailTypesView(mode: mode, profile: fastLaneCaptureProfile, model: fastDetailTypesModel)
+            ContentView.ManageDetailTypesView(mode: mode == .interior ? .interior : .exterior, profile: fastLaneCaptureProfile, model: fastDetailTypesModel)
         }
         .sheet(isPresented: $showFastLaneManageTradesSheet) {
-            FastLaneManageTradesSheet(
+            ContentView.ManageTradesSheet(
                 options: $fastTradeOptions,
                 selectedTrade: Binding(
                     get: { fastMetadataContext.trade ?? "" },
@@ -14078,7 +14084,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         ))
                     }
                 ),
-                onClose: { showFastLaneManageTradesSheet = false }
+                onClose: { showFastLaneManageTradesSheet = false },
+                onPersist: { options, selectedTrade in
+                    FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
+                }
             )
         }
         .fullScreenCover(isPresented: $showFastLaneGallery) {
@@ -14887,10 +14896,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var fastLaneArmedReferenceActionOverlay: some View {
         let referencePath = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: false)
         let capturedPath = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: true)
-        return FastLaneSharedActionMenuOverlay(
+        return CaptureActionMenuOverlay(
             rotation: .degrees(glyphAngleDegrees),
             items: [
-                FastLaneSharedActionMenuItem(
+                CaptureActionMenuItem(
                     title: "View Reference Image",
                     isEnabled: referencePath != nil,
                     action: {
@@ -14898,7 +14907,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         showFastLaneArmedReferenceImage(isCaptured: false)
                     }
                 ),
-                FastLaneSharedActionMenuItem(
+                CaptureActionMenuItem(
                     title: "View Captured Image",
                     isEnabled: capturedPath != nil,
                     action: {
@@ -20855,20 +20864,28 @@ private struct FastLaneMetadataFilterSheet: View {
                 .background(Color.clear)
             }
             .sheet(isPresented: $showManageBuildingsSheet, onDismiss: normalizeBuildingSelection) {
-                FastLaneManageBuildingsSheet(
+                ContentView.ManageBuildingsSheet(
                     options: $buildingOptions,
                     selectedBuilding: $selectedBuilding,
-                    onClose: { showManageBuildingsSheet = false }
+                    buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                    buildingFullLabelForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                    onClose: { showManageBuildingsSheet = false },
+                    onPersist: { options, selectedBuilding in
+                        FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
+                    }
                 )
             }
             .sheet(item: $manageDetailMode, onDismiss: normalizeDetailSelection) { mode in
-                FastLaneManageDetailTypesView(mode: mode, profile: profile, model: detailTypesModel)
+                ContentView.ManageDetailTypesView(mode: mode == .interior ? .interior : .exterior, profile: profile, model: detailTypesModel)
             }
             .sheet(isPresented: $showManageTradesSheet, onDismiss: normalizeTradeOptions) {
-                FastLaneManageTradesSheet(
+                ContentView.ManageTradesSheet(
                     options: $tradeOptions,
                     selectedTrade: $selectedTrade,
-                    onClose: { showManageTradesSheet = false }
+                    onClose: { showManageTradesSheet = false },
+                    onPersist: { options, selectedTrade in
+                        FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
+                    }
                 )
             }
             .onAppear {
@@ -21062,385 +21079,6 @@ private struct FastLaneMetadataSelectionListView: View {
             .padding(.top, 14)
             .padding(.bottom, 4)
             .background(Color(uiColor: .systemGroupedBackground))
-        }
-    }
-}
-
-private struct FastLaneManageDetailTypesView: View {
-    let mode: CameraChromeLocationMode
-    let profile: CaptureProfile
-    @ObservedObject var model: DetailTypesModel
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.dismiss) private var dismiss
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedRow: UUID?
-    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
-    private var titleText: String { "\(profile.title) \(mode == .interior ? "Interior Detail Types" : "Exterior Detail Types")" }
-    private var isEditing: Bool { editModeState == .active }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(model.items(for: mode, profile: profile)) { item in
-                    rowView(item: item)
-                }
-                .onDelete { offsets in
-                    withAnimation(.none) { model.delete(at: offsets, for: mode, profile: profile) }
-                }
-                .onMove { source, destination in
-                    withAnimation(.none) { model.move(from: source, to: destination, for: mode, profile: profile) }
-                }
-            }
-            .environment(\.editMode, $editModeState)
-            .listStyle(.insetGrouped)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack(spacing: 10) {
-                    Button { dismiss() } label: {
-                        toolbarCapsuleLabel {
-                            Text("Done")
-                                .font(.system(size: 17, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    Text(titleText)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .minimumScaleFactor(0.72)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 0) {
-                        Button {
-                            if editModeState != .active { editModeState = .active }
-                            let newId = model.insertBlankItem(for: mode, profile: profile)
-                            DispatchQueue.main.async { focusedRow = newId }
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundColor(theme.label)
-                                .frame(width: 44, height: 42)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            if editModeState == .active {
-                                editModeState = .inactive
-                                focusedRow = nil
-                            } else {
-                                editModeState = .active
-                            }
-                        } label: {
-                            Group {
-                                if editModeState == .active {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 17, weight: .medium))
-                                } else {
-                                    Text("Edit")
-                                        .font(.system(size: 17, weight: .medium))
-                                }
-                            }
-                            .foregroundColor(theme.label)
-                            .frame(width: 72, height: 42)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
-                .background(Color.clear)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func toolbarCapsuleLabel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .foregroundColor(theme.label)
-            .frame(minHeight: 42)
-            .padding(.horizontal, 14)
-            .background(theme.fill)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-    }
-
-    @ViewBuilder
-    private func rowView(item: DetailTypesModel.DetailTypeItem) -> some View {
-        if isEditing {
-            TextField("Name", text: bindingForRow(id: item.id))
-                .focused($focusedRow, equals: item.id)
-                .submitLabel(.done)
-                .onSubmit { focusedRow = nil }
-        } else {
-            HStack(spacing: 10) {
-                Text(item.name.isEmpty ? " " : item.name)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    private func bindingForRow(id: UUID) -> Binding<String> {
-        Binding(
-            get: { model.items(for: mode, profile: profile).first(where: { $0.id == id })?.name ?? "" },
-            set: { newValue in
-                withAnimation(.none) {
-                    model.updateItem(newValue, id: id, for: mode, profile: profile)
-                }
-            }
-        )
-    }
-}
-
-private struct FastLaneManageTradesSheet: View {
-    @Environment(\.colorScheme) private var colorScheme
-    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedIndex: Int?
-    @Binding var options: [String]
-    @Binding var selectedTrade: String
-    let onClose: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(Array(options.indices), id: \.self) { index in
-                    if editModeState == .active {
-                        TextField("Trade", text: Binding(
-                            get: { options.indices.contains(index) ? options[index] : "" },
-                            set: { newValue in
-                                guard options.indices.contains(index) else { return }
-                                options[index] = newValue
-                            }
-                        ))
-                        .focused($focusedIndex, equals: index)
-                        .submitLabel(.done)
-                    } else {
-                        HStack(spacing: 10) {
-                            Text(options[index])
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                .onDelete { offsets in options.remove(atOffsets: offsets) }
-                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
-            }
-            .listStyle(.insetGrouped)
-            .environment(\.editMode, $editModeState)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                manageToolbar(title: "Trades")
-            }
-            .onDisappear {
-                FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
-            }
-        }
-    }
-
-    private func manageToolbar(title: String) -> some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Text("Done")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(minHeight: 42)
-                    .padding(.horizontal, 14)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
-
-            Text(title)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundColor(theme.label)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 0) {
-                Button {
-                    if editModeState != .active { editModeState = .active }
-                    options.append("New Trade")
-                    focusedIndex = max(0, options.count - 1)
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .frame(width: 44, height: 42)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    if editModeState == .active {
-                        editModeState = .inactive
-                        focusedIndex = nil
-                    } else {
-                        editModeState = .active
-                    }
-                } label: {
-                    Group {
-                        if editModeState == .active {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 17, weight: .medium))
-                        } else {
-                            Text("Edit")
-                                .font(.system(size: 17, weight: .medium))
-                        }
-                    }
-                    .foregroundColor(theme.label)
-                    .frame(width: 72, height: 42)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
-            .background(theme.fill)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 4)
-    }
-}
-
-private struct FastLaneManageBuildingsSheet: View {
-    @Environment(\.colorScheme) private var colorScheme
-    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedIndex: Int?
-    @Binding var options: [String]
-    @Binding var selectedBuilding: String
-    let onClose: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(Array(options.indices), id: \.self) { index in
-                    if editModeState == .active {
-                        TextField("Building", text: Binding(
-                            get: { options.indices.contains(index) ? options[index] : "" },
-                            set: { newValue in
-                                guard options.indices.contains(index) else { return }
-                                options[index] = newValue
-                            }
-                        ))
-                        .focused($focusedIndex, equals: index)
-                        .submitLabel(.done)
-                    } else {
-                        HStack(spacing: 10) {
-                            Text(FastLaneMetadataOptions.buildingDisplayName(for: options[index]))
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                .onDelete { offsets in options.remove(atOffsets: offsets) }
-                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
-            }
-            .listStyle(.insetGrouped)
-            .environment(\.editMode, $editModeState)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack(spacing: 10) {
-                    Button(action: onClose) {
-                        Text("Done")
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundColor(theme.label)
-                            .frame(minHeight: 42)
-                            .padding(.horizontal, 14)
-                            .background(theme.fill)
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    Text("Buildings")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 0) {
-                        Button {
-                            if editModeState != .active { editModeState = .active }
-                            options.append("New Building")
-                            focusedIndex = max(0, options.count - 1)
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundColor(theme.label)
-                                .frame(width: 44, height: 42)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            if editModeState == .active {
-                                editModeState = .inactive
-                                focusedIndex = nil
-                            } else {
-                                editModeState = .active
-                            }
-                        } label: {
-                            Group {
-                                if editModeState == .active {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 17, weight: .medium))
-                                } else {
-                                    Text("Edit")
-                                        .font(.system(size: 17, weight: .medium))
-                                }
-                            }
-                            .foregroundColor(theme.label)
-                            .frame(width: 72, height: 42)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
-            }
-            .onDisappear {
-                FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
-            }
         }
     }
 }
