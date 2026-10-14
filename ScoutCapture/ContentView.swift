@@ -17848,23 +17848,26 @@ extension ContentView {
         }
     }
 
-    struct ManageTradesSheet: View {
+    private struct ManageOptionValuesSheet: View {
+        let title: String
+        let fieldTitle: String
+        let newOptionTitle: String
+        let displayName: (String) -> String
+        @Binding var options: [String]
+        @Binding var selectedValue: String
+        let onClose: () -> Void
+        let onPersist: (inout [String], inout String) -> Void
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
         @State private var editModeState: EditMode = .inactive
         @FocusState private var focusedIndex: Int?
-
-        @Binding var options: [String]
-        @Binding var selectedTrade: String
-        let onClose: () -> Void
-        var onPersist: ((inout [String], inout String) -> Void)? = nil
 
         var body: some View {
             NavigationStack {
                 List {
                     ForEach(Array(options.indices), id: \.self) { index in
                         if editModeState == .active {
-                            TextField("Trade", text: Binding(
+                            TextField(fieldTitle, text: Binding(
                                 get: {
                                     guard options.indices.contains(index) else { return "" }
                                     return options[index]
@@ -17879,7 +17882,7 @@ extension ContentView {
                         } else {
                             let option = options[index]
                             HStack(spacing: 10) {
-                                Text(option)
+                                Text(displayName(option))
                                     .font(.system(size: 16, weight: .medium))
                                     .foregroundColor(.primary)
                                     .lineLimit(1)
@@ -17918,7 +17921,7 @@ extension ContentView {
 
                         Spacer(minLength: 0)
 
-                        Text("Trades")
+                        Text(title)
                             .font(.system(size: 18, weight: .medium))
                             .foregroundColor(theme.label)
                             .lineLimit(1)
@@ -17928,7 +17931,7 @@ extension ContentView {
                         HStack(spacing: 0) {
                             Button {
                                 if editModeState != .active { editModeState = .active }
-                                options.append("New Trade")
+                                options.append(newOptionTitle)
                                 focusedIndex = max(0, options.count - 1)
                             } label: {
                                 Image(systemName: "plus")
@@ -17976,6 +17979,28 @@ extension ContentView {
                     .padding(.bottom, 4)
                 }
                 .onDisappear {
+                    onPersist(&options, &selectedValue)
+                }
+            }
+        }
+    }
+
+    struct ManageTradesSheet: View {
+        @Binding var options: [String]
+        @Binding var selectedTrade: String
+        let onClose: () -> Void
+        var onPersist: ((inout [String], inout String) -> Void)? = nil
+
+        var body: some View {
+            ManageOptionValuesSheet(
+                title: "Trades",
+                fieldTitle: "Trade",
+                newOptionTitle: "New Trade",
+                displayName: { $0 },
+                options: $options,
+                selectedValue: $selectedTrade,
+                onClose: onClose,
+                onPersist: { options, selectedTrade in
                     if let onPersist {
                         onPersist(&options, &selectedTrade)
                         return
@@ -17993,141 +18018,28 @@ extension ContentView {
                         selectedTrade = ""
                     }
                 }
-            }
+            )
         }
     }
 
     struct ManageBuildingsSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-        @Environment(\.editMode) private var editMode
-
         @Binding var options: [String]
         @Binding var selectedBuilding: String
         let buildingCodeForOption: (String) -> String
         let buildingFullLabelForOption: (String) -> String
         let onClose: () -> Void
         var onPersist: ((inout [String], inout String) -> Void)? = nil
-        @State private var editModeState: EditMode = .inactive
-        @FocusState private var focusedIndex: Int?
 
         var body: some View {
-            NavigationStack {
-                List {
-                    ForEach(Array(options.indices), id: \.self) { index in
-                        if editModeState == .active {
-                            TextField("Building", text: Binding(
-                                get: {
-                                    guard options.indices.contains(index) else { return "" }
-                                    return options[index]
-                                },
-                                set: { newValue in
-                                    guard options.indices.contains(index) else { return }
-                                    options[index] = newValue
-                                }
-                            ))
-                            .focused($focusedIndex, equals: index)
-                            .submitLabel(.done)
-                        } else {
-                            let option = options[index]
-                            HStack(spacing: 10) {
-                                Text(buildingFullLabelForOption(option))
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundColor(.primary)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
-
-                                Spacer(minLength: 0)
-                            }
-                        }
-                    }
-                    .onDelete { offsets in
-                        options.remove(atOffsets: offsets)
-                    }
-                    .onMove { source, destination in
-                        options.move(fromOffsets: source, toOffset: destination)
-                    }
-                }
-                .listStyle(.insetGrouped)
-                .environment(\.editMode, $editModeState)
-                .toolbar(.hidden, for: .navigationBar)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    HStack(spacing: 10) {
-                        Button(action: onClose) {
-                            Text("Done")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundColor(theme.label)
-                                .frame(minHeight: 42)
-                                .padding(.horizontal, 14)
-                                .background(theme.fill)
-                                .clipShape(Capsule())
-                                .overlay(
-                                    Capsule()
-                                        .stroke(theme.stroke, lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-
-                        Spacer(minLength: 0)
-
-                        Text("Buildings")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(theme.label)
-                            .lineLimit(1)
-
-                        Spacer(minLength: 0)
-
-                        HStack(spacing: 0) {
-                            Button {
-                                if editModeState != .active { editModeState = .active }
-                                options.append("New Building")
-                                focusedIndex = max(0, options.count - 1)
-                            } label: {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 17, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 44, height: 42)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                if editModeState == .active {
-                                    editModeState = .inactive
-                                    focusedIndex = nil
-                                } else {
-                                    editModeState = .active
-                                }
-                            } label: {
-                                Group {
-                                    if editModeState == .active {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 17, weight: .medium))
-                                    } else {
-                                        Text("Edit")
-                                            .font(.system(size: 17, weight: .medium))
-                                    }
-                                }
-                                .foregroundColor(theme.label)
-                                .frame(width: 72, height: 42)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(theme.fill)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(theme.stroke, lineWidth: 1)
-                        )
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 14)
-                    .padding(.bottom, 4)
-                }
-                .onDisappear {
+            ManageOptionValuesSheet(
+                title: "Buildings",
+                fieldTitle: "Building",
+                newOptionTitle: "New Building",
+                displayName: buildingFullLabelForOption,
+                options: $options,
+                selectedValue: $selectedBuilding,
+                onClose: onClose,
+                onPersist: { options, selectedBuilding in
                     if let onPersist {
                         onPersist(&options, &selectedBuilding)
                         return
@@ -18143,10 +18055,10 @@ extension ContentView {
                         selectedBuilding = selectedCode
                     }
                 }
-            }
+            )
         }
     }
-    
+
     private struct QuickMenuButton: View {
         let glyphRotationAngle: Angle
         let icon: String
