@@ -421,6 +421,45 @@ final class ReportLibraryModel: ObservableObject {
         var schemaVersion: Int?
     }
 
+    static func stampedMetadataContext(
+        propertyID: UUID,
+        propertyName: String,
+        propertyAddress: String?,
+        sessionID: UUID,
+        shot: ShotMetadata,
+        schemaVersion: Int
+    ) -> EmbeddedMetadataContext {
+        EmbeddedMetadataContext(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            propertyAddress: propertyAddress,
+            sessionID: sessionID,
+            shotID: shot.shotID,
+            shotKey: shot.shotKey,
+            building: shot.building,
+            elevation: shot.elevation,
+            detailType: shot.detailType,
+            angleIndex: shot.angleIndex,
+            trade: shot.trade,
+            priority: shot.priority,
+            isGuided: shot.isGuided,
+            isFlagged: shot.isFlagged,
+            issueStatus: shot.issueStatus,
+            detailNote: shot.noteText,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
+            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseScoutExifOrientationRaw(from: shot.orientation),
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            osVersion: UIDevice.current.systemVersion,
+            deviceModel: UIDevice.current.model,
+            schemaVersion: schemaVersion
+        )
+    }
+
     static func sourceExifOrientationRaw(from data: Data) -> UInt32? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -13481,12 +13520,12 @@ extension ContentView {
                     shot: metadata.shots[index],
                     isBaselineSession: metadata.isBaselineSession
                 ),
-                metadataContext: stampedMetadataContext(
+                metadataContext: ReportLibraryModel.stampedMetadataContext(
                     propertyID: propertyID,
-                    sessionID: sessionID,
-                    shot: metadata.shots[index],
                     propertyName: propertyName,
                     propertyAddress: propertyAddress,
+                    sessionID: sessionID,
+                    shot: metadata.shots[index],
                     schemaVersion: metadata.schemaVersion
                 ),
                 fileManager: fileManager
@@ -13620,7 +13659,7 @@ extension ContentView {
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
         mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
         print("[Stamp] orientation writeTag exif/tiff=1")
-        if let gps = makeStampedGPSDictionary(
+        if let gps = ScoutStampGPS.dictionary(
             latitude: metadataContext.latitude,
             longitude: metadataContext.longitude,
             accuracyMeters: metadataContext.accuracyMeters,
@@ -13671,85 +13710,6 @@ extension ContentView {
         }
         return destinationData as Data
     }
-
-    private func stampedMetadataContext(
-        propertyID: UUID,
-        sessionID: UUID,
-        shot: ShotMetadata,
-        propertyName: String,
-        propertyAddress: String?,
-        schemaVersion: Int
-    ) -> ReportLibraryModel.EmbeddedMetadataContext {
-        ReportLibraryModel.EmbeddedMetadataContext(
-            propertyID: propertyID,
-            propertyName: propertyName,
-            propertyAddress: propertyAddress,
-            sessionID: sessionID,
-            shotID: shot.shotID,
-            shotKey: shot.shotKey,
-            building: shot.building,
-            elevation: shot.elevation,
-            detailType: shot.detailType,
-            angleIndex: shot.angleIndex,
-            trade: shot.trade,
-            priority: shot.priority,
-            isGuided: shot.isGuided,
-            isFlagged: shot.isFlagged,
-            issueStatus: shot.issueStatus,
-            detailNote: shot.noteText,
-            captureMode: shot.captureMode,
-            lens: shot.lens,
-            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
-            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseScoutExifOrientationRaw(from: shot.orientation),
-            latitude: shot.latitude,
-            longitude: shot.longitude,
-            accuracyMeters: shot.accuracyMeters,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            osVersion: UIDevice.current.systemVersion,
-            deviceModel: UIDevice.current.model,
-            schemaVersion: schemaVersion
-        )
-    }
-
-    private func makeStampedGPSDictionary(
-        latitude: Double?,
-        longitude: Double?,
-        accuracyMeters: Double?,
-        captureDate: Date
-    ) -> [CFString: Any]? {
-        guard let latitude, let longitude else { return nil }
-        var gps: [CFString: Any] = [:]
-        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
-        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
-        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
-        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
-        gps[kCGImagePropertyGPSDateStamp] = Self.exportGPSDateFormatter.string(from: captureDate)
-        gps[kCGImagePropertyGPSTimeStamp] = Self.exportGPSTimeFormatter.string(from: captureDate)
-        if let accuracyMeters, accuracyMeters >= 0 {
-            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
-        }
-        return gps
-    }
-
-
-
-    private static let exportGPSDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy:MM:dd"
-        return formatter
-    }()
-
-    private static let exportGPSTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
 
     private func drawStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
         guard !lines.isEmpty else { return image }

@@ -4714,7 +4714,7 @@ struct SessionHubView: View {
                     shot: shot,
                     isBaselineSession: metadata.isBaselineSession
                 ),
-                metadataContext: pendingStampedMetadataContext(
+                metadataContext: ReportLibraryModel.stampedMetadataContext(
                     propertyID: propertyID,
                     propertyName: propertyName,
                     propertyAddress: propertyAddress,
@@ -4848,7 +4848,7 @@ struct SessionHubView: View {
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
         mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
         print("[Stamp] orientation writeTag exif/tiff=1")
-        if let gps = makePendingGPSDictionary(
+        if let gps = ScoutStampGPS.dictionary(
             latitude: metadataContext.latitude,
             longitude: metadataContext.longitude,
             accuracyMeters: metadataContext.accuracyMeters,
@@ -4911,67 +4911,6 @@ struct SessionHubView: View {
         }
         return destinationData as Data
     }
-
-    private func pendingStampedMetadataContext(
-        propertyID: UUID,
-        propertyName: String,
-        propertyAddress: String?,
-        sessionID: UUID,
-        shot: ShotMetadata,
-        schemaVersion: Int
-    ) -> ReportLibraryModel.EmbeddedMetadataContext {
-        ReportLibraryModel.EmbeddedMetadataContext(
-            propertyID: propertyID,
-            propertyName: propertyName,
-            propertyAddress: propertyAddress,
-            sessionID: sessionID,
-            shotID: shot.shotID,
-            shotKey: shot.shotKey,
-            building: shot.building,
-            elevation: shot.elevation,
-            detailType: shot.detailType,
-            angleIndex: shot.angleIndex,
-            trade: shot.trade,
-            priority: shot.priority,
-            isGuided: shot.isGuided,
-            isFlagged: shot.isFlagged,
-            issueStatus: shot.issueStatus,
-            detailNote: shot.noteText,
-            captureMode: shot.captureMode,
-            lens: shot.lens,
-            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
-            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseScoutExifOrientationRaw(from: shot.orientation),
-            latitude: shot.latitude,
-            longitude: shot.longitude,
-            accuracyMeters: shot.accuracyMeters,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            osVersion: UIDevice.current.systemVersion,
-            deviceModel: UIDevice.current.model,
-            schemaVersion: schemaVersion
-        )
-    }
-
-    private func makePendingGPSDictionary(
-        latitude: Double?,
-        longitude: Double?,
-        accuracyMeters: Double?,
-        captureDate: Date
-    ) -> [CFString: Any]? {
-        guard let latitude, let longitude else { return nil }
-        var gps: [CFString: Any] = [:]
-        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
-        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
-        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
-        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
-        gps[kCGImagePropertyGPSDateStamp] = Self.pendingExportGPSDateFormatter.string(from: captureDate)
-        gps[kCGImagePropertyGPSTimeStamp] = Self.pendingExportGPSTimeFormatter.string(from: captureDate)
-        if let accuracyMeters, accuracyMeters >= 0 {
-            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
-        }
-        return gps
-    }
-
-
 
     private func drawPendingStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
         guard !lines.isEmpty else { return image }
@@ -5058,24 +4997,6 @@ struct SessionHubView: View {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "SSS"
-        return formatter
-    }()
-
-    private static let pendingExportGPSDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy:MM:dd"
-        return formatter
-    }()
-
-    private static let pendingExportGPSTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
 
@@ -23828,6 +23749,47 @@ struct PropertySessionView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
+}
+
+@MainActor
+enum ScoutStampGPS {
+    static func dictionary(
+        latitude: Double?,
+        longitude: Double?,
+        accuracyMeters: Double?,
+        captureDate: Date
+    ) -> [CFString: Any]? {
+        guard let latitude, let longitude else { return nil }
+        var gps: [CFString: Any] = [:]
+        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
+        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
+        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
+        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
+        gps[kCGImagePropertyGPSDateStamp] = dateFormatter.string(from: captureDate)
+        gps[kCGImagePropertyGPSTimeStamp] = timeFormatter.string(from: captureDate)
+        if let accuracyMeters, accuracyMeters >= 0 {
+            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
+        }
+        return gps
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy:MM:dd"
+        return formatter
+    }()
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }
 
 @MainActor
