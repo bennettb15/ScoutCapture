@@ -60092,12 +60092,7 @@ final class AppState: ObservableObject {
     }
 
     private static func isFinalSession(_ session: Session?) -> Bool {
-        guard let session else { return false }
-        return session.status == .completed ||
-            session.endedAt != nil ||
-            session.exportedAt != nil ||
-            session.isSealed ||
-            session.firstDeliveredAt != nil
+        SessionLifecyclePolicy.isFinal(session)
     }
 
     private static func fastRuntimeCompletionWasRequested(propertyID: UUID, sessionID: UUID) -> Bool {
@@ -60120,11 +60115,7 @@ final class AppState: ObservableObject {
             return true
         }
         if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
-           metadata.status == .completed ||
-            metadata.endedAt != nil ||
-            metadata.exportedAt != nil ||
-            metadata.isSealed ||
-            metadata.firstDeliveredAt != nil {
+           SessionLifecyclePolicy.metadataIsFinal(metadata) {
             return true
         }
         guard let status = cloudStatusBySessionID[session.id],
@@ -60141,28 +60132,7 @@ final class AppState: ObservableObject {
     }
 
     private static func sessionMaterialContentCount(_ session: Session, localStore: LocalStore) -> Int {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
-            return 0
-        }
-        return metadata.shots.filter { shot in
-            guard shot.lifecycleState.isActiveForDefaultWorkflows else { return false }
-            if shot.createdAt < session.startedAt { return false }
-            if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
-            let captureKind = normalizedRowDetailText(shot.captureKind)?.lowercased()
-            if captureKind == "reference" ||
-                captureKind == "reclassified" ||
-                captureKind == "restored" ||
-                captureKind == "historical" {
-                return false
-            }
-            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !originalRelative.isEmpty else { return false }
-            return localStore.resolveSessionRelativeFileURL(
-                propertyID: session.propertyID,
-                sessionID: session.id,
-                relativePath: originalRelative
-            ) != nil
-        }.count
+        SessionLifecyclePolicy.materialContentCount(session, localStore: localStore)
     }
 
     private static func isPendingDelivery(
@@ -60614,12 +60584,7 @@ final class AppState: ObservableObject {
     }
 
     private func isFinalSession(_ session: Session?) -> Bool {
-        guard let session else { return false }
-        return session.status == .completed ||
-            session.endedAt != nil ||
-            session.exportedAt != nil ||
-            session.isSealed ||
-            session.firstDeliveredAt != nil
+        SessionLifecyclePolicy.isFinal(session)
     }
 
     private func reusableDraftSession(_ session: Session) -> Bool {
@@ -60636,11 +60601,7 @@ final class AppState: ObservableObject {
             return true
         }
         if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
-           metadata.status == .completed ||
-            metadata.endedAt != nil ||
-            metadata.exportedAt != nil ||
-            metadata.isSealed ||
-            metadata.firstDeliveredAt != nil {
+           SessionLifecyclePolicy.metadataIsFinal(metadata) {
             return true
         }
         guard let status = sessionSnapshotCloudStatusBySessionID[session.id],
@@ -60664,28 +60625,7 @@ final class AppState: ObservableObject {
     }
 
     private func sessionMaterialContentCount(_ session: Session) -> Int {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
-            return 0
-        }
-        return metadata.shots.filter { shot in
-            guard shot.lifecycleState.isActiveForDefaultWorkflows else { return false }
-            if shot.createdAt < session.startedAt { return false }
-            if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
-            let captureKind = normalizedSupabaseText(shot.captureKind)?.lowercased()
-            if captureKind == "reference" ||
-                captureKind == "reclassified" ||
-                captureKind == "restored" ||
-                captureKind == "historical" {
-                return false
-            }
-            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !originalRelative.isEmpty else { return false }
-            return localStore.resolveSessionRelativeFileURL(
-                propertyID: session.propertyID,
-                sessionID: session.id,
-                relativePath: originalRelative
-            ) != nil
-        }.count
+        SessionLifecyclePolicy.materialContentCount(session, localStore: localStore)
     }
 
     private func logInitialSessionTypeSelectionDecision(
