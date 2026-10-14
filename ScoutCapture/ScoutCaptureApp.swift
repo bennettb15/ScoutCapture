@@ -20041,7 +20041,7 @@ private struct FastLaneFilmThumb: View {
     }
 }
 
-private struct FastLaneSheetControlTheme {
+struct FastLaneSheetControlTheme {
     let fill: Color
     let stroke: Color
     let label: Color
@@ -20180,7 +20180,7 @@ private struct FastLaneMetadataFilterSheet: View {
                 }
             }
             .navigationDestination(item: $selectionContext) { context in
-                FastLaneMetadataSelectionListView(
+                SharedMetadataSelectionListView(
                     title: context.title,
                     options: selectionOptions(for: context.kind),
                     selectedValue: currentSelectionValue(for: context.kind),
@@ -20388,7 +20388,7 @@ private struct FastLaneMetadataFilterSheet: View {
     private static let exteriorElevationOptions = ["North", "South", "East", "West"]
 }
 
-private struct FastLaneMetadataSelectionListView: View {
+struct SharedMetadataSelectionListView: View {
     let title: String
     let options: [(title: String, value: String)]
     let selectedValue: String

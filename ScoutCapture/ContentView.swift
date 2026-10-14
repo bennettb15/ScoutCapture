@@ -7851,84 +7851,8 @@ struct ContentView: View {
         }
     }
 
-    private struct MetadataSelectionListView: View {
-        let title: String
-        let options: [(title: String, value: String)]
-        let selectedValue: String
-        let onSelect: (String) -> Void
-
-        @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-
-        var body: some View {
-            List(options, id: \.value) { option in
-                Button {
-                    dismiss()
-                    DispatchQueue.main.async {
-                        onSelect(option.value)
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Text(option.title)
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundColor(.primary)
-                            .lineLimit(2)
-
-                        Spacer(minLength: 0)
-
-                        if selectedValue == option.value {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(.blue)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .listStyle(.insetGrouped)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack(spacing: 12) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundColor(theme.label)
-                            .frame(width: 44, height: 44)
-                            .background(theme.fill)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(theme.stroke, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    Text(title)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    Color.clear.frame(width: 44, height: 44)
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
-                .background(Color(uiColor: .systemGroupedBackground))
-            }
-        }
-    }
-
     private func metadataSelectionDestination(context: MetadataSelectionContext) -> some View {
-        MetadataSelectionListView(
+        SharedMetadataSelectionListView(
             title: context.title,
             options: selectionOptions(for: context.kind),
             selectedValue: currentMetadataSelectionValue(for: context.kind),
