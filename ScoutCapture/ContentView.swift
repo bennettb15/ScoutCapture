@@ -15287,7 +15287,6 @@ extension ContentView {
     
     
     private struct SessionActionsSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
         let summary: SessionActionsSummary
         let isPreparingExport: Bool
         let isEndingSession: Bool
@@ -15296,118 +15295,22 @@ extension ContentView {
         let onSaveDraftAndExit: () -> Void
         let onExportNow: () -> Void
 
-        private var neutralFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
-
-        private var neutralStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
-
-        private var neutralLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
-
         var body: some View {
-            GeometryReader { geo in
-                let constrainedHeight = geo.size.height < 620
-
-                ZStack {
-                    Color.black.opacity(0.52)
-                        .ignoresSafeArea()
-                        .onTapGesture { }
-
-                    VStack {
-                        Spacer(minLength: 0)
-
-                        VStack(spacing: 14) {
-                            Text("Session Actions")
-                                .font(.system(size: 24, weight: .bold))
-                                .foregroundColor(.white)
-
-                            VStack(spacing: 8) {
-                                summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
-                                if !summary.isPunchlistVisit {
-                                    summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                            )
-
-                            if constrainedHeight {
-                                ScrollView(.vertical, showsIndicators: true) {
-                                    actionButtonsStack
-                                }
-                                .frame(maxHeight: geo.size.height * 0.38)
-                            } else {
-                                actionButtonsStack
-                            }
-                        }
-                        .padding(18)
-                        .frame(width: min(max(310, geo.size.width * 0.84), 470))
-                        .background(Color.black.opacity(0.82))
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.white.opacity(0.20), lineWidth: 1)
-                        )
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 16)
-                }
-            }
-        }
-
-        @ViewBuilder
-        private func summaryRow(title: String, value: Int) -> some View {
-            HStack {
-                Text(title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.white.opacity(0.92))
-                Spacer(minLength: 0)
-                Text("\(value)")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white)
-            }
-        }
-
-        @ViewBuilder
-        private var actionButtonsStack: some View {
-            VStack(spacing: 10) {
-                actionButton(
-                    title: "Resume",
-                    role: .primary,
-                    isEnabled: !isPreparingExport && !isEndingSession,
-                    action: onResume
-                )
-                actionButton(
-                    title: summary.exitActionTitle,
-                    role: .secondary,
-                    isEnabled: !isPreparingExport && !isEndingSession,
-                    action: onSaveDraftAndExit
-                )
-                actionButton(
-                    title: isEndingSession ? endingTitle : summary.exportActionTitle,
-                    role: .tertiary,
-                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
-                    action: onExportNow
-                )
-
-                if !summary.isExportActionEnabled {
-                    Text(disabledHintText)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.72))
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 2)
-                }
-            }
+            SessionActionsPanel(
+                flaggedRemainingCount: summary.flaggedRemainingCount,
+                guidedRemainingCount: summary.guidedRemainingCount,
+                isPunchlistVisit: summary.isPunchlistVisit,
+                exitActionTitle: summary.exitActionTitle,
+                completeActionTitle: summary.exportActionTitle,
+                isEndingSession: isEndingSession,
+                endingTitle: endingTitle,
+                isActionEnabled: !isPreparingExport && !isEndingSession,
+                isCompleteEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
+                disabledReason: summary.isExportActionEnabled ? nil : disabledHintText,
+                onResume: onResume,
+                onSaveDraftAndExit: onSaveDraftAndExit,
+                onComplete: onExportNow
+            )
         }
 
         private var disabledHintText: String {
@@ -15427,68 +15330,6 @@ extension ContentView {
                 return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
-        }
-
-        private enum ActionRole {
-            case primary
-            case secondary
-            case tertiary
-        }
-
-        @ViewBuilder
-        private func actionButton(
-            title: String,
-            role: ActionRole,
-            isEnabled: Bool,
-            action: @escaping () -> Void
-        ) -> some View {
-            let fill: Color = {
-                switch role {
-                case .primary:
-                    return .blue
-                case .secondary:
-                    return neutralFill
-                case .tertiary:
-                    return .white
-                }
-            }()
-            let stroke: Color = {
-                switch role {
-                case .primary:
-                    return .blue.opacity(0.85)
-                case .secondary:
-                    return neutralStroke
-                case .tertiary:
-                    return Color.red.opacity(0.30)
-                }
-            }()
-            let label: Color = {
-                switch role {
-                case .primary:
-                    return .white
-                case .secondary:
-                    return neutralLabel
-                case .tertiary:
-                    return .red.opacity(0.88)
-                }
-            }()
-
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(isEnabled ? label : label.opacity(0.45))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 46)
-                    .background(isEnabled ? fill : fill.opacity(0.45))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
-                    )
-            }
-            .opacity(isEnabled ? 1.0 : 0.72)
-            .buttonStyle(.plain)
-            .disabled(!isEnabled)
         }
     }
 

@@ -18779,10 +18779,44 @@ private struct FastLaneSessionActionsSummary: Equatable {
 }
 
 private struct FastLaneSessionActionsSheet: View {
-    @Environment(\.colorScheme) private var colorScheme
     let summary: FastLaneSessionActionsSummary
     let isEndingSession: Bool
     let endingTitle: String
+    let onResume: () -> Void
+    let onSaveDraftAndExit: () -> Void
+    let onComplete: () -> Void
+
+    var body: some View {
+        SessionActionsPanel(
+            flaggedRemainingCount: summary.flaggedRemainingCount,
+            guidedRemainingCount: summary.guidedRemainingCount,
+            isPunchlistVisit: summary.isPunchlistVisit,
+            exitActionTitle: summary.exitActionTitle,
+            completeActionTitle: summary.exportActionTitle,
+            isEndingSession: isEndingSession,
+            endingTitle: endingTitle,
+            isActionEnabled: !isEndingSession,
+            isCompleteEnabled: !isEndingSession && summary.isExportActionEnabled,
+            disabledReason: summary.isExportActionEnabled ? nil : summary.disabledReason,
+            onResume: onResume,
+            onSaveDraftAndExit: onSaveDraftAndExit,
+            onComplete: onComplete
+        )
+    }
+}
+
+struct SessionActionsPanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let flaggedRemainingCount: Int
+    let guidedRemainingCount: Int
+    let isPunchlistVisit: Bool
+    let exitActionTitle: String
+    let completeActionTitle: String
+    let isEndingSession: Bool
+    let endingTitle: String
+    let isActionEnabled: Bool
+    let isCompleteEnabled: Bool
+    let disabledReason: String?
     let onResume: () -> Void
     let onSaveDraftAndExit: () -> Void
     let onComplete: () -> Void
@@ -18817,9 +18851,9 @@ private struct FastLaneSessionActionsSheet: View {
                             .foregroundColor(.white)
 
                         VStack(spacing: 8) {
-                            summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
-                            if !summary.isPunchlistVisit {
-                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                            summaryRow(title: "Flagged Remaining", value: flaggedRemainingCount)
+                            if !isPunchlistVisit {
+                                summaryRow(title: "Guided Remaining", value: guidedRemainingCount)
                             }
                         }
                         .padding(.horizontal, 12)
@@ -18875,23 +18909,23 @@ private struct FastLaneSessionActionsSheet: View {
             actionButton(
                 title: "Resume",
                 role: .primary,
-                isEnabled: !isEndingSession,
+                isEnabled: isActionEnabled,
                 action: onResume
             )
             actionButton(
-                title: summary.exitActionTitle,
+                title: exitActionTitle,
                 role: .secondary,
-                isEnabled: !isEndingSession,
+                isEnabled: isActionEnabled,
                 action: onSaveDraftAndExit
             )
             actionButton(
-                title: isEndingSession ? endingTitle : summary.exportActionTitle,
+                title: isEndingSession ? endingTitle : completeActionTitle,
                 role: .tertiary,
-                isEnabled: !isEndingSession && summary.isExportActionEnabled,
+                isEnabled: isCompleteEnabled,
                 action: onComplete
             )
 
-            if !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
+            if let disabledReason {
                 Text(disabledReason)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.72))
