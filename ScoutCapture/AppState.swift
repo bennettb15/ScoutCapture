@@ -39477,17 +39477,7 @@ final class AppState: ObservableObject {
         return category != "transient_transport_failure"
     }
 
-    private func fetchShotStorageMetadataFromSupabase(
-        sessionID: UUID,
-        shotID: UUID
-    ) async throws -> SupabaseShotStorageRecord? {
-        guard let client = supabaseClient else { return nil }
-        guard let activeOrganizationID else { return nil }
-
-        let rows = try await client
-            .from("shots")
-            .select(
-                """
+    private static let supabaseShotStorageSelectColumns = """
                 id,
                 org_id,
                 property_id,
@@ -39537,7 +39527,17 @@ final class AppState: ObservableObject {
                 upload_attempts,
                 last_upload_error
                 """
-            )
+
+    private func fetchShotStorageMetadataFromSupabase(
+        sessionID: UUID,
+        shotID: UUID
+    ) async throws -> SupabaseShotStorageRecord? {
+        guard let client = supabaseClient else { return nil }
+        guard let activeOrganizationID else { return nil }
+
+        let rows = try await client
+            .from("shots")
+            .select(Self.supabaseShotStorageSelectColumns)
             .eq("id", value: shotID.uuidString.lowercased())
             .eq("session_id", value: sessionID.uuidString.lowercased())
             .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
@@ -39556,58 +39556,7 @@ final class AppState: ObservableObject {
 
         let rows = try await client
             .from("shots")
-            .select(
-                """
-                id,
-                org_id,
-                property_id,
-                session_id,
-                created_at,
-                updated_at,
-                updated_by,
-                revision,
-                deleted_at,
-                building,
-                elevation,
-                detail_type,
-                angle_index,
-                shot_key,
-                logical_shot_identity,
-                capture_kind,
-                first_capture_kind,
-                is_guided,
-                is_flagged,
-                issue_id,
-                issue_status,
-                trade,
-                reason,
-                priority,
-                capture_mode,
-                lens,
-                latitude,
-                longitude,
-                accuracy_meters,
-                image_width,
-                image_height,
-                lifecycle_state,
-                retired_at,
-                retired_reason,
-                retired_by,
-                superseded_by_shot_id,
-                supersedes_shot_id,
-                replacement_reason,
-                hidden_from_reports,
-                hidden_from_gallery,
-                lifecycle_updated_at,
-                storage_bucket,
-                storage_path,
-                checksum_sha256,
-                byte_size,
-                upload_state,
-                upload_attempts,
-                last_upload_error
-                """
-            )
+            .select(Self.supabaseShotStorageSelectColumns)
             .eq("id", value: shotID.uuidString.lowercased())
             .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
             .limit(1)
@@ -46703,58 +46652,7 @@ final class AppState: ObservableObject {
     ) async throws -> [SupabaseShotStorageRecord] {
         try await client
             .from("shots")
-            .select(
-                """
-                id,
-                org_id,
-                property_id,
-                session_id,
-                created_at,
-                updated_at,
-                updated_by,
-                revision,
-                deleted_at,
-                building,
-                elevation,
-                detail_type,
-                angle_index,
-                shot_key,
-                logical_shot_identity,
-                capture_kind,
-                first_capture_kind,
-                is_guided,
-                is_flagged,
-                issue_id,
-                issue_status,
-                trade,
-                reason,
-                priority,
-                capture_mode,
-                lens,
-                latitude,
-                longitude,
-                accuracy_meters,
-                image_width,
-                image_height,
-                lifecycle_state,
-                retired_at,
-                retired_reason,
-                retired_by,
-                superseded_by_shot_id,
-                supersedes_shot_id,
-                replacement_reason,
-                hidden_from_reports,
-                hidden_from_gallery,
-                lifecycle_updated_at,
-                storage_bucket,
-                storage_path,
-                checksum_sha256,
-                byte_size,
-                upload_state,
-                upload_attempts,
-                last_upload_error
-                """
-            )
+            .select(Self.supabaseShotStorageSelectColumns)
             .eq("session_id", value: sessionID.uuidString.lowercased())
             .eq("property_id", value: propertyID.uuidString.lowercased())
             .is("deleted_at", value: nil)
