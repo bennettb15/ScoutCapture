@@ -13,6 +13,20 @@ import ImageIO
 import UniformTypeIdentifiers
 import CoreMotion
 
+private extension ColorScheme {
+    func scoutSheetButtonFill(darkOpacity: Double) -> Color {
+        self == .light ? Color.white.opacity(0.90) : Color.black.opacity(darkOpacity)
+    }
+
+    var scoutSheetButtonStroke: Color {
+        self == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+    }
+
+    var scoutSheetButtonLabel: Color {
+        self == .light ? Color.black.opacity(0.88) : .white
+    }
+}
+
 private func standardCapsuleButton(
     title: String,
     isEnabled: Bool,
@@ -303,17 +317,11 @@ private struct CloudBackupSheet: View {
     @State private var localStorageBreakdown: StorageRoot.LocalStorageBreakdownResult?
     @State private var localStorageBreakdownErrorMessage: String? = nil
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     var body: some View {
         NavigationStack {
@@ -992,17 +1000,11 @@ struct SessionHubView: View {
         case zipReady
     }
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.85)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.85) }
     
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
     
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
     
     private var headerPrimaryLabel: Color {
         colorScheme == .light ? .black : .white
@@ -2183,17 +2185,11 @@ struct SessionHubView: View {
         @Environment(\.colorScheme) private var colorScheme
         private let showDeveloperSection: Bool = false
 
-        private var buttonFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
+        private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
 
-        private var buttonStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
+        private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-        private var buttonLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
+        private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
         var body: some View {
             NavigationStack {
@@ -2419,17 +2415,11 @@ struct SessionHubView: View {
         @State private var isLoading: Bool = true
         @State private var errorMessage: String?
 
-        private var buttonFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
+        private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
 
-        private var buttonStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
+        private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-        private var buttonLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
+        private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
         var body: some View {
             VStack(spacing: 0) {
@@ -4413,17 +4403,11 @@ private struct HubAddPropertySheet: View {
         !streetAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
     
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
     
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     private var primaryButtonFill: Color { .blue }
     private var primaryButtonStroke: Color { .blue.opacity(0.85) }
@@ -4936,17 +4920,11 @@ private struct EditContactSheet: View {
     @State private var showPendingExportRenameConfirm: Bool = false
     private let addOrganizationToken = "__add_new_organization__"
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     private var primaryButtonFill: Color { .blue }
     private var primaryButtonStroke: Color { .blue.opacity(0.85) }
@@ -5908,17 +5886,11 @@ private struct PropertySessionsManagerView: View {
     @State private var showDeleteError: Bool = false
     @State private var deleteErrorMessage: String? = nil
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     private var destructiveFill: Color { Color.red.opacity(0.86) }
     private var destructiveStroke: Color { Color.red.opacity(0.90) }
@@ -15575,17 +15547,9 @@ struct SessionActionsPanel: View {
     let onSaveDraftAndExit: () -> Void
     let onComplete: () -> Void
 
-    private var neutralFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-    }
-
-    private var neutralStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
-
-    private var neutralLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var neutralFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
+    private var neutralStroke: Color { colorScheme.scoutSheetButtonStroke }
+    private var neutralLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     var body: some View {
         GeometryReader { geo in
@@ -17106,10 +17070,11 @@ struct FastLaneSheetControlTheme {
     let label: Color
 
     static func forScheme(_ scheme: ColorScheme) -> FastLaneSheetControlTheme {
-        if scheme == .light {
-            return FastLaneSheetControlTheme(fill: Color.white.opacity(0.90), stroke: Color.black.opacity(0.14), label: Color.black.opacity(0.88))
-        }
-        return FastLaneSheetControlTheme(fill: Color.black.opacity(0.55), stroke: Color.white.opacity(0.28), label: Color.white)
+        return FastLaneSheetControlTheme(
+            fill: scheme.scoutSheetButtonFill(darkOpacity: 0.55),
+            stroke: scheme.scoutSheetButtonStroke,
+            label: scheme.scoutSheetButtonLabel
+        )
     }
 }
 
@@ -18616,17 +18581,11 @@ private struct DebugToolsView: View {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     var body: some View {
         ZStack {
