@@ -15930,12 +15930,8 @@ private struct FastLaneIssueListSheet: View {
     }
 
     private func refreshOrientation() {
-        let orientation = UIDevice.current.orientation
-        switch orientation {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+        if let orientation = UIDevice.current.orientation.scoutCaptureStableOrientation(includingUpsideDown: true) {
             lastValidOrientation = orientation
-        default:
-            break
         }
     }
 
@@ -16303,12 +16299,8 @@ private struct FastLaneCoreChecklistSheet: View {
     }
 
     private func refreshOrientation() {
-        let orientation = UIDevice.current.orientation
-        switch orientation {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+        if let orientation = UIDevice.current.orientation.scoutCaptureStableOrientation(includingUpsideDown: true) {
             lastValidOrientation = orientation
-        default:
-            break
         }
     }
 }
@@ -16590,16 +16582,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
 
     private func refreshOrientation() {
         let orientation = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch orientation {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return orientation
-            default:
-                return nil
-            }
-        }()
+        let newValue = orientation.scoutCaptureStableOrientation()
         guard let newValue, newValue != lastValidOrientation else { return }
         lastValidOrientation = newValue
     }
@@ -16866,16 +16849,7 @@ private struct FastLanePhotoViewer: View {
 
     private func refreshOrientation() {
         let orientation = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch orientation {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return orientation
-            default:
-                return nil
-            }
-        }()
+        let newValue = orientation.scoutCaptureStableOrientation()
         guard let newValue, newValue != lastValidOrientation else { return }
         lastValidOrientation = newValue
     }

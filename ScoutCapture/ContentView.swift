@@ -1780,16 +1780,7 @@ struct ReportPhotoViewer: View {
             return
         }
 
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
+        let newValue = o.scoutCaptureStableOrientation()
 
         guard let newValue else { return }
         guard newValue != lastValidOrientation else { return }
@@ -13684,16 +13675,7 @@ extension ContentView {
             // Accept only portrait (upright) and the two landscapes.
             // Explicitly ignore portraitUpsideDown so the UI does not snap back to portrait when the phone is inverted.
             // Also ignore transitional/invalid states (faceUp, faceDown, unknown).
-            let newValue: UIDeviceOrientation? = {
-                switch o {
-                case .portrait:
-                    return .portrait
-                case .landscapeLeft, .landscapeRight:
-                    return o
-                default:
-                    return nil
-                }
-            }()
+            let newValue = o.scoutCaptureStableOrientation()
             
             guard let newValue else { return }
             guard newValue != lastValidOrientation else { return }
@@ -15295,12 +15277,8 @@ extension ContentView {
         }
 
         private func refreshOrientation() {
-            let orientation = UIDevice.current.orientation
-            switch orientation {
-            case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            if let orientation = UIDevice.current.orientation.scoutCaptureStableOrientation(includingUpsideDown: true) {
                 lastValidOrientation = orientation
-            default:
-                break
             }
         }
 

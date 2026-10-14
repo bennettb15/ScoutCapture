@@ -18,6 +18,14 @@ extension UIDeviceOrientation {
         default: return 0
         }
     }
+
+    func scoutCaptureStableOrientation(includingUpsideDown: Bool = false) -> UIDeviceOrientation? {
+        switch self {
+        case .portrait, .landscapeLeft, .landscapeRight: return self
+        case .portraitUpsideDown where includingUpsideDown: return self
+        default: return nil
+        }
+    }
 }
 
 // Extracted production camera panel views. Keep behavior in sync with ContentView call sites.
@@ -902,16 +910,7 @@ struct GuidedChecklistOverlay: View {
 
     private func refreshOrientation() {
         let o = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
+        let newValue = o.scoutCaptureStableOrientation()
 
         guard let newValue else { return }
         guard newValue != lastValidOrientation else { return }
@@ -2849,16 +2848,7 @@ struct ActiveIssuesSheet: View {
 
     private func refreshOrientation() {
         let o = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
+        let newValue = o.scoutCaptureStableOrientation()
 
         guard let newValue else { return }
         guard newValue != lastValidOrientation else { return }
