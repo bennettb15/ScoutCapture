@@ -6,6 +6,20 @@
 import SwiftUI
 import UIKit
 
+extension UIDeviceOrientation {
+    var scoutCaptureIsLandscape: Bool {
+        self == .landscapeLeft || self == .landscapeRight
+    }
+
+    var scoutCaptureRotationDegrees: Double {
+        switch self {
+        case .landscapeLeft: return 90
+        case .landscapeRight: return -90
+        default: return 0
+        }
+    }
+}
+
 // Extracted production camera panel views. Keep behavior in sync with ContentView call sites.
 
 private let isCameraPanelVerboseConsoleLoggingEnabled = false
@@ -423,20 +437,9 @@ struct GuidedChecklistOverlay: View {
         let viewerToken: Int
     }
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     var body: some View {
         GeometryReader { geo in
@@ -1644,20 +1647,9 @@ struct ActiveIssuesSheet: View {
         let metadataSessionID: UUID?
     }
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     private var issueIDSignature: String {
         observations

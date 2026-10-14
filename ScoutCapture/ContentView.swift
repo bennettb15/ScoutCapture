@@ -1765,20 +1765,9 @@ struct ReportPhotoViewer: View {
     // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     private func refreshOrientation() {
         let o = UIDevice.current.orientation
@@ -13680,25 +13669,14 @@ extension ContentView {
         // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
         
-        private var isLandscape: Bool {
-            lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-        }
+        private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
         private var headerPropertyName: String {
             let trimmed = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return trimmed.isEmpty ? "No Property Selected" : trimmed
         }
         
-        private var rotationDegrees: Double {
-            switch lastValidOrientation {
-            case .landscapeLeft:
-                return 90
-            case .landscapeRight:
-                return -90
-            default:
-                return 0
-            }
-        }
+        private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
         
         private func refreshOrientation() {
             let o = UIDevice.current.orientation
