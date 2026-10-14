@@ -4709,10 +4709,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabaseOrgPayload: Encodable {
-        let id: UUID
-        let name: String
-    }
 
     private struct SupabaseAccessibleOrgRecord: Decodable {
         let id: UUID
@@ -4868,21 +4864,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabasePropertyAccessGrantMutationPayload: Encodable {
-        let orgID: UUID
-        let propertyID: UUID
-        let userID: UUID
-        let grantedBy: UUID
-        let deletedAt: String?
-
-        enum CodingKeys: String, CodingKey {
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case userID = "user_id"
-            case grantedBy = "granted_by"
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct SupabasePropertyAccessGrantInsertPayload: Encodable {
         let id: UUID
@@ -7000,7 +6981,7 @@ final class AppState: ObservableObject {
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
     private let localActivityFeedDefaultsKey = "scoutcapture.localActivityFeed.v1"
-    private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
+
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
     private static let propertyStatusOccupiedStaleThreshold: TimeInterval = 3 * 60
@@ -7924,24 +7905,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func applyOrganizationContext(
-        memberships: [ActiveOrganizationMembership],
-        activeOrganizationID: UUID?,
-        ready: Bool,
-        expectedAuthenticatedUserID: UUID? = nil,
-        persistActiveSelection: Bool = true
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.applyOrganizationContextNow(
-                memberships: memberships,
-                activeOrganizationID: activeOrganizationID,
-                ready: ready,
-                expectedAuthenticatedUserID: expectedAuthenticatedUserID,
-                persistActiveSelection: persistActiveSelection
-            )
-        }
-    }
 
     @MainActor
     private func applyOrganizationContextNow(
@@ -16377,18 +16340,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func refreshVisiblePropertySessionCachesFromLocalStoreIncrementally(reason: String) async {
-        let propertyIDs = Set(properties.map(\.id))
-            .sorted { $0.uuidString < $1.uuidString }
-        guard !propertyIDs.isEmpty else { return }
-
-        for propertyID in propertyIDs {
-            let sessions = refreshSessionDerivedCaches(propertyID: propertyID)
-            _ = updatePropertyRowSecondaryDetails(propertyID: propertyID, sessions: sessions)
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 12_000_000)
-        }
-    }
 
     private func schedulePersistentDataCacheRefresh(reason: String) {
         if persistentDataCacheRefreshRunning || persistentDataCacheRefreshScheduled {
@@ -28889,22 +28840,14 @@ final class AppState: ObservableObject {
             propertyID: record.propertyID,
             sessionID: record.sessionID
         )
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
         let exactSingleScopeSelected = packageScope.orgID != nil &&
             packageScope.propertyID != nil &&
             packageScope.sessionID != nil &&
             record.exactSingleScopeSelected
-        let scopesMatch = scopesAreEqual(packageScope, decisionRecordScope) &&
-            scopesAreEqual(packageScope, preflight.recordScope) &&
-            scopesAreEqual(packageScope, preflight.gateSelectedScope) &&
-            scopesAreEqual(packageScope, preflight.gateApprovedScope)
+        let scopesMatch = packageScope == decisionRecordScope &&
+            packageScope == preflight.recordScope &&
+            packageScope == preflight.gateSelectedScope &&
+            packageScope == preflight.gateApprovedScope
         let approvalFreshnessRepresented = record.approvalTimestamp != nil &&
             record.expirationTimestamp != nil
         let approvalFresh = record.approvalState == .approved &&
@@ -29056,32 +28999,24 @@ final class AppState: ObservableObject {
             propertyID: activationResult.propertyID,
             sessionID: activationResult.sessionID
         )
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let exactSingleScopeSelected = packageScope.orgID != nil &&
             packageScope.propertyID != nil &&
             packageScope.sessionID != nil &&
             record.exactSingleScopeSelected &&
             persistencePreflight.exactSingleScopeSelected
-        let scopesMatch = scopesAreEqual(packageScope, decisionRecordScope) &&
-            scopesAreEqual(packageScope, activationPreflight.recordScope) &&
-            scopesAreEqual(packageScope, activationPreflight.gateSelectedScope) &&
-            scopesAreEqual(packageScope, activationPreflight.gateApprovedScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.packageScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.decisionRecordScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.preflightRecordScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.preflightGateSelectedScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.preflightGateApprovedScope) &&
-            scopesAreEqual(packageScope, gate.selectedScope) &&
-            scopesAreEqual(packageScope, gate.approvedScope) &&
-            scopesAreEqual(packageScope, activationResultScope)
+        let scopesMatch = packageScope == decisionRecordScope &&
+            packageScope == activationPreflight.recordScope &&
+            packageScope == activationPreflight.gateSelectedScope &&
+            packageScope == activationPreflight.gateApprovedScope &&
+            packageScope == persistencePreflight.packageScope &&
+            packageScope == persistencePreflight.decisionRecordScope &&
+            packageScope == persistencePreflight.preflightRecordScope &&
+            packageScope == persistencePreflight.preflightGateSelectedScope &&
+            packageScope == persistencePreflight.preflightGateApprovedScope &&
+            packageScope == gate.selectedScope &&
+            packageScope == gate.approvedScope &&
+            packageScope == activationResultScope
         let activationPreflightManualReviewOnly = activationPreflight.state == .readyForManualReviewOnly &&
             activationPreflight.blockers.isEmpty
         let operatorRecordPersistencePreflightReviewOnly = persistencePreflight.state == .readyForOperatorRecordPersistenceReviewOnly &&
@@ -29290,14 +29225,6 @@ final class AppState: ObservableObject {
             propertyID: activationResult.propertyID,
             sessionID: activationResult.sessionID
         )
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let candidatePackageReadyForManualReviewOnly = package.state == .readyForActivationCandidateManualReviewOnly &&
             package.blockers.isEmpty
@@ -29305,15 +29232,15 @@ final class AppState: ObservableObject {
             package.packageScope.orgID != nil &&
             package.packageScope.propertyID != nil &&
             package.packageScope.sessionID != nil
-        let scopesMatch = scopesAreEqual(package.packageScope, package.decisionRecordScope) &&
-            scopesAreEqual(package.packageScope, package.activationPreflightScope) &&
-            scopesAreEqual(package.packageScope, package.persistencePreflightScope) &&
-            scopesAreEqual(package.packageScope, package.gateSelectedScope) &&
-            scopesAreEqual(package.packageScope, package.gateApprovedScope) &&
-            scopesAreEqual(package.packageScope, package.activationResultScope) &&
-            scopesAreEqual(package.packageScope, gate.selectedScope) &&
-            scopesAreEqual(package.packageScope, gate.approvedScope) &&
-            scopesAreEqual(package.packageScope, activationResultScope)
+        let scopesMatch = package.packageScope == package.decisionRecordScope &&
+            package.packageScope == package.activationPreflightScope &&
+            package.packageScope == package.persistencePreflightScope &&
+            package.packageScope == package.gateSelectedScope &&
+            package.packageScope == package.gateApprovedScope &&
+            package.packageScope == package.activationResultScope &&
+            package.packageScope == gate.selectedScope &&
+            package.packageScope == gate.approvedScope &&
+            package.packageScope == activationResultScope
         let productionWideDisabledConfirmation = package.productionWideDisabledConfirmation &&
             gate.productionWideDisabledConfirmed
         let productionSingleSessionGateDisabled = package.productionSingleSessionGateDisabled &&
@@ -29479,14 +29406,6 @@ final class AppState: ObservableObject {
         hydrationPolicy policy: SessionSnapshotHydrationPolicyDiagnostics,
         hydrationConfirmation confirmation: SessionSnapshotHydrationConfirmation
     ) -> ProductionSingleSessionHydrationReadinessPreflight {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: package.packageScope.orgID,
@@ -29500,8 +29419,8 @@ final class AppState: ObservableObject {
             package.packageScope.orgID != nil &&
             package.packageScope.propertyID != nil &&
             package.packageScope.sessionID != nil
-        let restoreDiagnosticsScopeMatchesPackage = scopesAreEqual(package.packageScope, validation.candidatePackageScope) &&
-            scopesAreEqual(package.packageScope, restoreScope)
+        let restoreDiagnosticsScopeMatchesPackage = package.packageScope == validation.candidatePackageScope &&
+            package.packageScope == restoreScope
         let expectedPropertyIDText = package.packageScope.propertyID?.uuidString ?? "none"
         let expectedSessionIDText = package.packageScope.sessionID?.uuidString ?? "none"
         let expectedSnapshotIDText = restore.snapshotID?.uuidString ?? "none"
@@ -29682,14 +29601,6 @@ final class AppState: ObservableObject {
         rollbackOperation: ProductionSingleSessionHydrationRehearsalOperationEvidence,
         restoredFixture: ProductionSingleSessionHydrationFixtureMetadataEvidence
     ) -> ProductionSingleSessionHydrationExecutionRehearsal {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: preflight.candidatePackageScope.orgID,
@@ -29709,7 +29620,7 @@ final class AppState: ObservableObject {
             postHydrationFixture.scope,
             rollbackOperation.targetScope,
             restoredFixture.scope
-        ].allSatisfy { scopesAreEqual(preflight.candidatePackageScope, $0) }
+        ].allSatisfy { preflight.candidatePackageScope == $0 }
         let productionHydrationDisabled = preflight.productionHydrationDisabledNonWriting &&
             !policy.productionHydrationAllowed &&
             policy.hydrationMode != "operator_approved_single_session" &&
@@ -31141,14 +31052,6 @@ final class AppState: ObservableObject {
         fallbackRetained: Bool = true,
         exportSealSyncMediaICloudBehaviorChanged: Bool = false
     ) -> ProductionSingleSessionSnapshotPackageParityValidation {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: targetScope.orgID,
@@ -31191,7 +31094,7 @@ final class AppState: ObservableObject {
             candidateScope,
             overlayScope,
             comparisonScope
-        ].allSatisfy { scopesAreEqual(targetScope, $0) }
+        ].allSatisfy { targetScope == $0 }
 
         let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate
         let rowObjectChecksumSchemaParentPassed = restore.rowFound &&
@@ -31472,14 +31375,6 @@ final class AppState: ObservableObject {
         exportSealSyncMediaICloudBehaviorChanged: Bool = false,
         schemaRLSDataBehaviorChanged: Bool = false
     ) -> ProductionSingleSessionFullyRestoredPackageRollbackValidation {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: targetScope.orgID,
@@ -31502,7 +31397,7 @@ final class AppState: ObservableObject {
             mediaRetrievalScope,
             mediaRestoration.targetScope,
             mediaRollback.targetScope
-        ].allSatisfy { scopesAreEqual(targetScope, $0) }
+        ].allSatisfy { targetScope == $0 }
         let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate &&
             restore.checksumVerified &&
             restore.rowObjectVerified &&
@@ -35325,42 +35220,6 @@ final class AppState: ObservableObject {
         return rows.first
     }
 
-    private func fetchRemotePropertySessionLockRecords(
-        orgID: UUID,
-        propertyID: UUID
-    ) async throws -> [RemotePropertySessionLockRecord] {
-#if DEBUG
-        if AppStateTestEnvironment.isRunningUnderXCTest {
-            return sessionCoordinationDebugRemoteRecords.values
-                .filter { $0.orgID == orgID && $0.propertyID == propertyID }
-                .map {
-                    RemotePropertySessionLockRecord(
-                        id: $0.id,
-                        orgID: $0.orgID,
-                        propertyID: $0.propertyID,
-                        status: $0.status,
-                        completedAt: $0.completedAt,
-                        exportedAt: $0.exportedAt,
-                        isSealed: $0.isSealed,
-                        firstDeliveredAt: $0.firstDeliveredAt,
-                        lockedByUserID: $0.lockedByUserID,
-                        lockedByDeviceID: $0.lockedByDeviceID,
-                        lockedAt: $0.lockedAt
-                    )
-                }
-        }
-#endif
-        let rows = try await fetchRemotePropertySessionLockRecordsDirect(
-            orgID: orgID,
-            propertyID: propertyID
-        )
-        applyRemoteFinalSessionStatesFromLockRecords(rows, reason: "property_lock_refresh")
-        return rows.filter { record in
-            record.lockedByUserID != nil ||
-            normalizedSupabaseText(record.lockedByDeviceID) != nil ||
-            normalizedSupabaseText(record.lockedAt) != nil
-        }
-    }
 
     private func fetchRemotePropertySessionLockRecordsDirect(
         orgID: UUID,
@@ -35723,17 +35582,6 @@ final class AppState: ObservableObject {
         return candidates.max { $0.timestamp < $1.timestamp }
     }
 
-    private func remotePropertySessionLockRecordsSorted(
-        orgID: UUID,
-        propertyID: UUID
-    ) async -> [RemotePropertySessionLockRecord] {
-        (await fetchRemotePropertySessionLockRecordsForPrecedence(orgID: orgID, propertyID: propertyID))
-            .filter { hasActiveRemoteLock(record: $0) }
-            .sorted {
-                ($0.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast) >
-                ($1.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast)
-            }
-    }
 
     private func activeRemotePropertyLockOwnedByOther(
         orgID: UUID,
@@ -35789,20 +35637,6 @@ final class AppState: ObservableObject {
             .first
     }
 
-    private func refreshRemotePropertySessionOccupancyState(
-        orgID: UUID
-    ) async throws {
-        let records = try await fetchRemotePropertySessionOccupancyRecords(activeOrganizationID: orgID)
-        var nextState: [UUID: PropertySessionOccupancyState] = [:]
-        for record in records {
-            nextState[record.propertyID] = PropertySessionOccupancyState(
-                occupiedByUserID: record.occupiedByUserID,
-                occupiedByDeviceID: normalizedSupabaseText(record.occupiedByDeviceID),
-                occupiedAt: record.occupiedAt.flatMap(parseSupabaseDateString)
-            )
-        }
-        propertySessionOccupancyByPropertyID = nextState
-    }
 
     @MainActor
     private func clearLockDisplayState(propertyIDs: [UUID]) {
@@ -40109,68 +39943,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func testFetchRemoteProperties() async {
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.supabaseReadEnabled else {
-            logRemotePropertyFetchResult(
-                outcome: "skipped_gate_disabled",
-                recordCount: nil,
-                error: nil
-            )
-            return
-        }
-
-        guard supabaseClient != nil else {
-            logRemotePropertyFetchResult(
-                outcome: "skipped_missing_client",
-                recordCount: nil,
-                error: RemotePropertyFetchError.missingClient
-            )
-            return
-        }
-
-        guard let activeOrganizationID else {
-            logRemotePropertyFetchResult(
-                outcome: "skipped_missing_active_org",
-                recordCount: nil,
-                error: RemotePropertyFetchError.missingActiveOrganization
-            )
-            return
-        }
-
-        do {
-            let localBackingCount = backingPropertyCount(for: activeOrganizationID)
-            let records = try await fetchRemotePropertyList(activeOrganizationID: activeOrganizationID)
-            let validated = try validateRemotePropertyResponse(
-                records: records,
-                localCacheCount: localBackingCount,
-                activeOrganizationID: activeOrganizationID
-            )
-            let payload = try makeRemotePropertyRefreshPayload(
-                validatedRecords: validated,
-                requestedOrganizationID: activeOrganizationID
-            )
-            logRemotePropertyFetchResult(
-                outcome: "success",
-                recordCount: payload.properties.count,
-                error: nil,
-                fingerprint: payload.fingerprint
-            )
-        } catch {
-            let outcome: String
-            if let remoteError = error as? RemotePropertyFetchError,
-               case .timedOut = remoteError {
-                outcome = "timeout"
-            } else {
-                outcome = "rejected"
-            }
-            logRemotePropertyFetchResult(
-                outcome: outcome,
-                recordCount: nil,
-                error: error
-            )
-        }
-    }
 
     func loadIfNeeded() {
         guard !didLoad else { return }
@@ -40360,28 +40132,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func waitForInitialPropertyRowDetailsToSettle(
-        propertyIDs: [UUID],
-        reason: String,
-        renderSettleDelayNanoseconds: UInt64 = 500_000_000
-    ) async {
-        let expectedIDs = Set(propertyIDs)
-        let start = Date()
-        while true {
-            let hydratedIDs = Set(propertyRowDetailsHydratedAtByPropertyID.keys).intersection(expectedIDs)
-            if hydratedIDs.count >= expectedIDs.count {
-                break
-            }
-            if Date().timeIntervalSince(start) >= 1.0 {
-                break
-            }
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 40_000_000)
-        }
-
-        try? await Task.sleep(nanoseconds: renderSettleDelayNanoseconds)
-        await Task.yield()
-    }
 
     func refreshProperties() {
         cloudBackupManager?.refreshStatus()
@@ -40682,17 +40432,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct RefreshLockBadgeDecision {
-        let propertyID: UUID
-        let showLocked: Bool
-        let reason: String
-        let occupancyState: PropertySessionOccupancyState?
-        let sessionLockState: (sessionID: UUID, state: SessionCoordinationState)?
-        let clearSessionIDs: [UUID]
-        let lockTimestamp: Date?
-        let finalizationTimestamp: Date?
-        let precedenceWinner: String
-    }
 
     private struct PropertyFinalizationEvidence {
         let sessionID: UUID?
@@ -46771,28 +46510,6 @@ final class AppState: ObservableObject {
         return sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
     }
 
-    private func repairFastRuntimeLocalSessionShotCaptureKind(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        captureKind: String
-    ) {
-        guard var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
-              let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
-            return
-        }
-        guard metadata.shots[index].captureKind != captureKind else { return }
-        metadata.shots[index].captureKind = captureKind
-        if metadata.shots[index].firstCaptureKind == nil {
-            metadata.shots[index].firstCaptureKind = "captured"
-        }
-        metadata.shots[index].updatedAt = Date()
-        try? localStore.saveSessionMetadataAtomically(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            metadata: metadata
-        )
-    }
 
     private func repairFastRuntimeLocalSessionShotWorkflowMetadata(
         propertyID: UUID,
@@ -51215,9 +50932,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func markLiveSyncBurstWindow(seconds: TimeInterval) {
-        liveSyncBurstUntil = Date().addingTimeInterval(max(seconds, 1))
-    }
 
     @discardableResult
     func createProperty(
@@ -54494,18 +54208,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func knownLocalSessionCaptureProfile(propertyID: UUID, session: Session) -> CaptureProfile? {
-        if let captureProfile = session.captureProfile {
-            return captureProfile
-        }
-        guard let metadata = try? localStore.loadSessionMetadata(
-            propertyID: propertyID,
-            sessionID: session.id
-        ) else {
-            return nil
-        }
-        return CaptureProfile(storedValue: metadata.captureProfile)
-    }
 
     private func localSessionCaptureProfileScanState(
         propertyID: UUID,
@@ -60112,13 +59814,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private static func normalizedRowDetailText(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed
-    }
 
     @discardableResult
     private func refreshSessionDerivedCaches(propertyID: UUID) -> [Session] {
