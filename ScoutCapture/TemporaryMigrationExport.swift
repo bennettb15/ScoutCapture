@@ -346,7 +346,7 @@ enum TemporaryMigrationExportManager {
 
     private nonisolated static func makeUserDefaultsExportData(userDefaults: UserDefaults) throws -> Data {
         let rawDefaults = userDefaults.dictionaryRepresentation()
-        let normalizedDefaults = normalizeJSONValue(rawDefaults) as? [String: Any] ?? [:]
+        let normalizedDefaults = UserDefaultsJSONValueNormalizer.normalize(rawDefaults) as? [String: Any] ?? [:]
 
         let payload: [String: Any] = [
             "exportedAt": ISO8601DateFormatter().string(from: Date()),
@@ -354,38 +354,6 @@ enum TemporaryMigrationExportManager {
         ]
 
         return try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-    }
-
-    private nonisolated static func normalizeJSONValue(_ value: Any) -> Any {
-        switch value {
-        case let string as String:
-            return string
-        case let number as NSNumber:
-            return number
-        case let bool as Bool:
-            return bool
-        case let int as Int:
-            return int
-        case let double as Double:
-            return double
-        case let float as Float:
-            return float
-        case let url as URL:
-            return url.absoluteString
-        case let data as Data:
-            return [
-                "type": "data",
-                "base64": data.base64EncodedString()
-            ]
-        case let date as Date:
-            return ISO8601DateFormatter().string(from: date)
-        case let array as [Any]:
-            return array.map { normalizeJSONValue($0) }
-        case let dictionary as [String: Any]:
-            return dictionary.mapValues { normalizeJSONValue($0) }
-        default:
-            return String(describing: value)
-        }
     }
 
     private struct ZipEntry {

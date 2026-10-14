@@ -136,6 +136,40 @@ enum CloudBackupDedupeSupport {
     }
 }
 
+enum UserDefaultsJSONValueNormalizer {
+    nonisolated static func normalize(_ value: Any) -> Any {
+        switch value {
+        case let string as String:
+            return string
+        case let number as NSNumber:
+            return number
+        case let bool as Bool:
+            return bool
+        case let int as Int:
+            return int
+        case let double as Double:
+            return double
+        case let float as Float:
+            return float
+        case let url as URL:
+            return url.absoluteString
+        case let data as Data:
+            return [
+                "type": "data",
+                "base64": data.base64EncodedString()
+            ]
+        case let date as Date:
+            return ISO8601DateFormatter().string(from: date)
+        case let array as [Any]:
+            return array.map { normalize($0) }
+        case let dictionary as [String: Any]:
+            return dictionary.mapValues { normalize($0) }
+        default:
+            return String(describing: value)
+        }
+    }
+}
+
 final class CloudBackupManager: ObservableObject {
     private enum Constants {
         static let latestSchemaVersion = 2
@@ -1433,7 +1467,7 @@ final class CloudBackupManager: ObservableObject {
         let filtered = rawDefaults.filter { shouldRestoreUserDefaultsKey($0.key) }
         let payload: [String: Any] = [
             "exportedAt": ISO8601DateFormatter().string(from: Date()),
-            "values": normalizeJSONValue(filtered)
+            "values": UserDefaultsJSONValueNormalizer.normalize(filtered)
         ]
         return try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
     }
@@ -1461,38 +1495,6 @@ final class CloudBackupManager: ObservableObject {
         key.hasPrefix("scout.") ||
         key.hasPrefix("scoutcapture.") ||
         key.hasPrefix("scout.captureProfile.property.")
-    }
-
-    private func normalizeJSONValue(_ value: Any) -> Any {
-        switch value {
-        case let string as String:
-            return string
-        case let number as NSNumber:
-            return number
-        case let bool as Bool:
-            return bool
-        case let int as Int:
-            return int
-        case let double as Double:
-            return double
-        case let float as Float:
-            return float
-        case let url as URL:
-            return url.absoluteString
-        case let data as Data:
-            return [
-                "type": "data",
-                "base64": data.base64EncodedString()
-            ]
-        case let date as Date:
-            return ISO8601DateFormatter().string(from: date)
-        case let array as [Any]:
-            return array.map { normalizeJSONValue($0) }
-        case let dictionary as [String: Any]:
-            return dictionary.mapValues { normalizeJSONValue($0) }
-        default:
-            return String(describing: value)
-        }
     }
 
     private func decodedUserDefaultsValue(_ value: Any) -> Any? {

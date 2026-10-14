@@ -56076,29 +56076,7 @@ final class AppState: ObservableObject {
             properties.first(where: { $0.id == id })
         let counts = propertyDataCounts(for: id)
         guard counts.isEmpty else { return false }
-        do {
-            try localStore.deleteProperty(id: id)
-            allProperties.removeAll { $0.id == id }
-            let caches = makeHubCaches(for: allProperties)
-            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
-            if selectedPropertyID == id {
-                selectedPropertyID = nil
-                clearCurrentSession()
-            }
-            cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
-            if let propertyForAudit {
-                emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
-            }
-            return true
-        } catch {
-            if handleDeletePropertyNotFound(id: id, error: error) {
-                if let propertyForAudit {
-                    emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
-                }
-                return true
-            }
-            return false
-        }
+        return deleteLocalProperty(id: id, propertyForAudit: propertyForAudit)
     }
 
     @discardableResult
@@ -56107,6 +56085,10 @@ final class AppState: ObservableObject {
         let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
             properties.first(where: { $0.id == id })
         refreshProperties()
+        return deleteLocalProperty(id: id, propertyForAudit: propertyForAudit)
+    }
+
+    private func deleteLocalProperty(id: UUID, propertyForAudit: Property?) -> Bool {
         do {
             try localStore.deleteProperty(id: id)
             allProperties.removeAll { $0.id == id }
