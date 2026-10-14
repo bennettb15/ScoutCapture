@@ -14600,7 +14600,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneGalleryRefreshToken = UUID()
                 refreshFastLaneGalleryThumbnail(from: gallery.assets)
                 scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
-                scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(requests: mergedPreviousGallery.requests)
+                scheduleFastLaneGalleryMediaHydrationIfNeeded(requests: mergedPreviousGallery.requests)
             }
         }
     }
@@ -14963,24 +14963,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             sessionID: context.sessionID,
             shots: localShots
         )
-        let pending = requests.filter { request in
-            !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
-        }
-        guard !pending.isEmpty else { return }
-        for request in pending {
-            fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
-        }
-
-        Task {
-            let didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
-            guard didStart else { return }
-            await MainActor.run {
-                reloadFastLaneGalleryAssets()
-            }
-        }
+        scheduleFastLaneGalleryMediaHydrationIfNeeded(requests: requests)
     }
 
-    private func scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(
+    private func scheduleFastLaneGalleryMediaHydrationIfNeeded(
         requests: [AppState.OperationalMediaHydrationRequest]
     ) {
         let pending = requests.filter { request in
