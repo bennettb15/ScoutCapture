@@ -119,6 +119,66 @@ final class OriginalPhotoFormatTests: XCTestCase {
     }
 
     @MainActor
+    func testStampedJPEGPreservesCaptureMetadataAndInvokesSelectedOverlay() throws {
+        let propertyID = UUID()
+        let sessionID = UUID()
+        var shot = makeShot(
+            shotID: UUID(),
+            propertyID: propertyID,
+            sessionID: sessionID,
+            originalFilename: "original.jpg",
+            originalRelativePath: "Originals/original.jpg"
+        )
+        shot.latitude = 40.5
+        shot.longitude = -73.25
+        shot.accuracyMeters = 3.5
+        let context = ReportLibraryModel.stampedMetadataContext(
+            propertyID: propertyID,
+            propertyName: "Test Property",
+            propertyAddress: nil,
+            sessionID: sessionID,
+            shot: shot,
+            schemaVersion: 1
+        )
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 6)).image { renderer in
+            UIColor.red.setFill()
+            renderer.fill(CGRect(x: 0, y: 0, width: 8, height: 6))
+        }
+        let sourceData = try XCTUnwrap(image.jpegData(compressionQuality: 0.92))
+        var overlayCalled = false
+        let stampedData = try encodeScoutStampedJPEG(
+            from: sourceData,
+            captureDate: Date(timeIntervalSince1970: 1_700_000_000),
+            overlayLines: ["Test Property", "North"],
+            metadataContext: context,
+            errorDomain: "ScoutCapture.Stamp",
+            missingSourceDescription: "Missing source image for stamped export",
+            logMetadata: false,
+            drawOverlay: { cgImage, lines in
+                overlayCalled = true
+                XCTAssertEqual(lines, ["Test Property", "North"])
+                return cgImage
+            }
+        )
+
+        XCTAssertTrue(overlayCalled)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(stampedData as CFData, nil))
+        let outputType = try XCTUnwrap(CGImageSourceGetType(source))
+        XCTAssertTrue(UTType(outputType as String)?.conforms(to: .jpeg) == true)
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        let exif = try XCTUnwrap(properties[kCGImagePropertyExifDictionary] as? [CFString: Any])
+        let gps = try XCTUnwrap(properties[kCGImagePropertyGPSDictionary] as? [CFString: Any])
+        XCTAssertNotNil(exif[kCGImagePropertyExifDateTimeOriginal])
+        XCTAssertEqual((properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual((gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue, 40.5)
+        XCTAssertEqual((gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue, 73.25)
+        XCTAssertEqual(gps[kCGImagePropertyGPSLongitudeRef] as? String, "W")
+        XCTAssertEqual((gps[kCGImagePropertyGPSHPositioningError] as? NSNumber)?.doubleValue, 3.5)
+        XCTAssertEqual(gps[kCGImagePropertyGPSDateStamp] as? String, "2023:11:14")
+        XCTAssertEqual(gps[kCGImagePropertyGPSTimeStamp] as? String, "22:13:20")
+    }
+
+    @MainActor
     func testUploadFallbackUsesJPGAndExplicitHEICIsPreserved() throws {
         let appState = AppState(userDefaults: makeDefaults(), disableCloudBackupForTests: true)
         defer { appState.shutdown() }

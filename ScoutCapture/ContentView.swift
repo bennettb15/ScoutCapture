@@ -13618,97 +13618,16 @@ extension ContentView {
         overlayLines: [String],
         metadataContext: ReportLibraryModel.EmbeddedMetadataContext
     ) throws -> Data {
-        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
-        }
-
-        let sourceCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
-        let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
-        let capturedOrientationRaw = metadataContext.capturedExifOrientationRaw
-        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
-        print("[Stamp] orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)")
-        if let sourceCGImage {
-            print("[Stamp] before encode pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
-        }
-        let image = normalizedScoutUprightCGImage(from: sourceData)
-            ?? sourceCGImage
-        guard let image else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
-        }
-        print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
-        var mergedProps = sourceProps
-        mergedProps.removeValue(forKey: kCGImagePropertyGPSDictionary)
-        var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-        var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
-
-        let captureTime = ReportLibraryModel.EmbeddedCaptureTime(captureDate: captureDate)
-        exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
-        exif[kCGImagePropertyExifDateTimeDigitized] = captureTime.localDateTimeString
-        exif[kCGImagePropertyExifSubsecTimeOriginal] = captureTime.subsecString
-        exif[kCGImagePropertyExifSubsecTimeDigitized] = captureTime.subsecString
-        exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifUserComment] = scoutStructuredMetadataComment(captureTime: captureTime, metadataContext: metadataContext)
-        tiff[kCGImagePropertyTIFFDateTime] = captureTime.localDateTimeString
-        mergedProps[kCGImagePropertyExifDictionary] = exif
-        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-        mergedProps[kCGImagePropertyOrientation] = 1
-        tiff[kCGImagePropertyTIFFOrientation] = 1
-        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-        mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
-        print("[Stamp] orientation writeTag exif/tiff=1")
-        if let gps = ScoutStampGPS.dictionary(
-            latitude: metadataContext.latitude,
-            longitude: metadataContext.longitude,
-            accuracyMeters: metadataContext.accuracyMeters,
-            captureDate: captureDate
-        ) {
-            mergedProps[kCGImagePropertyGPSDictionary] = gps
-        }
-        let caption = overlayLines.joined(separator: "\n")
-        if !caption.isEmpty {
-            tiff[kCGImagePropertyTIFFImageDescription] = caption
-            mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-            var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
-            iptc[kCGImagePropertyIPTCCaptionAbstract] = caption
-            iptc[kCGImagePropertyIPTCKeywords] = scoutMetadataKeywords(metadataContext: metadataContext)
-            mergedProps[kCGImagePropertyIPTCDictionary] = iptc
-        }
-
-        let stampedCGImage = drawStampOverlay(
-            on: image,
-            lines: overlayLines
-        ) ?? image
-
-        let destinationData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            destinationData,
-            UTType.jpeg.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
-        }
-        if let xmpMetadata = buildScoutXMPMetadata(
-            source: source,
-            captureTime: captureTime,
-            metadataContext: metadataContext
-        ) {
-            CGImageDestinationAddImageAndMetadata(
-                destination,
-                stampedCGImage,
-                xmpMetadata,
-                mergedProps as CFDictionary
-            )
-        } else {
-            CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
-        }
-        guard CGImageDestinationFinalize(destination) else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
-        }
-        return destinationData as Data
+        try encodeScoutStampedJPEG(
+            from: sourceData,
+            captureDate: captureDate,
+            overlayLines: overlayLines,
+            metadataContext: metadataContext,
+            errorDomain: "ScoutCapture.Stamp",
+            missingSourceDescription: "Missing source image for stamped export",
+            logMetadata: false,
+            drawOverlay: { image, lines in drawStampOverlay(on: image, lines: lines) }
+        )
     }
 
     private func drawStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
