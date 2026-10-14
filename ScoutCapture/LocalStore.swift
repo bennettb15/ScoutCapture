@@ -6594,49 +6594,53 @@ final class LocalStore {
         try writeSessionMetadata(normalized)
     }
 
+    private func makeRecoveredSessionMetadata(propertyID: UUID, sessionID: UUID) -> SessionMetadata {
+        let now = Date()
+        let captureTimeZone = captureTimeZoneContext(for: now)
+        let property = currentProperty(for: propertyID)
+        return SessionMetadata(
+            schemaVersion: currentSessionSchemaVersion,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            orgID: property?.orgId,
+            orgNameAtCapture: property?.orgId.flatMap { organization(withID: $0)?.name },
+            folderIDAtCapture: property?.folderId,
+            propertyNameAtCapture: nil,
+            propertyNameAtExport: nil,
+            primaryContactNameAtCapture: property?.clientName,
+            primaryContactEmailAtCapture: property?.clientEmail,
+            propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
+            propertyStreetAtCapture: trimmedNonEmpty(property?.street),
+            propertyCityAtCapture: trimmedNonEmpty(property?.city),
+            propertyStateAtCapture: trimmedNonEmpty(property?.state),
+            propertyZipAtCapture: trimmedNonEmpty(property?.zip),
+            propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
+            timeZoneIdentifierAtCapture: captureTimeZone.identifier,
+            timeZoneOffsetAtCapture: captureTimeZone.offsetString,
+            timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+            startedAt: now,
+            sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
+            endedAt: nil,
+            sessionEndedAtLocal: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: false,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil,
+            appVersion: appVersionString(),
+            deviceModel: deviceModelString(),
+            osVersion: osVersionString(),
+            shots: [],
+            issues: [],
+            guidedShots: []
+        )
+    }
+
     private func readOrRecoverSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
         let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: fileURL.path) {
-            let now = Date()
-            let captureTimeZone = captureTimeZoneContext(for: now)
-            let property = currentProperty(for: propertyID)
-            return SessionMetadata(
-                schemaVersion: currentSessionSchemaVersion,
-                propertyID: propertyID,
-                sessionID: sessionID,
-                orgID: property?.orgId,
-                orgNameAtCapture: property?.orgId.flatMap { organization(withID: $0)?.name },
-                folderIDAtCapture: property?.folderId,
-                propertyNameAtCapture: nil,
-                propertyNameAtExport: nil,
-                primaryContactNameAtCapture: property?.clientName,
-                primaryContactEmailAtCapture: property?.clientEmail,
-                propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
-                propertyStreetAtCapture: trimmedNonEmpty(property?.street),
-                propertyCityAtCapture: trimmedNonEmpty(property?.city),
-                propertyStateAtCapture: trimmedNonEmpty(property?.state),
-                propertyZipAtCapture: trimmedNonEmpty(property?.zip),
-                propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
-                timeZoneIdentifierAtCapture: captureTimeZone.identifier,
-                timeZoneOffsetAtCapture: captureTimeZone.offsetString,
-                timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
-                startedAt: now,
-                sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
-                endedAt: nil,
-                sessionEndedAtLocal: nil,
-                status: .draft,
-                isBaselineSession: false,
-                exportedAt: nil,
-                isSealed: false,
-                firstDeliveredAt: nil,
-                reExportExpiresAt: nil,
-                appVersion: appVersionString(),
-                deviceModel: deviceModelString(),
-                osVersion: osVersionString(),
-                shots: [],
-                issues: [],
-                guidedShots: []
-            )
+            return makeRecoveredSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         }
 
         do {
@@ -6657,46 +6661,7 @@ final class LocalStore {
             return normalizeSessionMetadata(metadata, propertyID: propertyID, sessionID: sessionID)
         } catch {
             print("Recoverable session metadata decode failure for session \(sessionID): \(error)")
-            let now = Date()
-            let captureTimeZone = captureTimeZoneContext(for: now)
-            let property = currentProperty(for: propertyID)
-            return SessionMetadata(
-                schemaVersion: currentSessionSchemaVersion,
-                propertyID: propertyID,
-                sessionID: sessionID,
-                orgID: property?.orgId,
-                orgNameAtCapture: property?.orgId.flatMap { organization(withID: $0)?.name },
-                folderIDAtCapture: property?.folderId,
-                propertyNameAtCapture: nil,
-                propertyNameAtExport: nil,
-                primaryContactNameAtCapture: property?.clientName,
-                primaryContactEmailAtCapture: property?.clientEmail,
-                propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
-                propertyStreetAtCapture: trimmedNonEmpty(property?.street),
-                propertyCityAtCapture: trimmedNonEmpty(property?.city),
-                propertyStateAtCapture: trimmedNonEmpty(property?.state),
-                propertyZipAtCapture: trimmedNonEmpty(property?.zip),
-                propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
-                timeZoneIdentifierAtCapture: captureTimeZone.identifier,
-                timeZoneOffsetAtCapture: captureTimeZone.offsetString,
-                timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
-                startedAt: now,
-                sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
-                endedAt: nil,
-                sessionEndedAtLocal: nil,
-                status: .draft,
-                isBaselineSession: false,
-                exportedAt: nil,
-                isSealed: false,
-                firstDeliveredAt: nil,
-                reExportExpiresAt: nil,
-                appVersion: appVersionString(),
-                deviceModel: deviceModelString(),
-                osVersion: osVersionString(),
-                shots: [],
-                issues: [],
-                guidedShots: []
-            )
+            return makeRecoveredSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         }
     }
 
