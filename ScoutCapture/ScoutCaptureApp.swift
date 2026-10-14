@@ -4637,69 +4637,25 @@ struct SessionHubView: View {
 #endif
         progress?(.sessionData)
 
-        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
         let fileManager = FileManager.default
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename(for: property, session: session))
-        let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
+        let archive = try SessionExportZip.package(
+            exportRoot: exportRoot,
+            expectedPaths: expectedPaths,
+            finalURL: finalURL,
+            errorDomain: "ScoutCapture.PendingExport",
+            fileManager: fileManager
+        )
 #if DEBUG
-        print("Pending export ZIP temp path: \(tempURL.path)")
-        print("Pending export ZIP final path: \(finalURL.path)")
-#endif
-        if fileManager.fileExists(atPath: tempURL.path) {
-            try fileManager.removeItem(at: tempURL)
-        }
-        if fileManager.fileExists(atPath: finalURL.path) {
-            try fileManager.removeItem(at: finalURL)
-        }
-        try StoredZipArchive.writeFileArchive(entries: zipEntries, at: tempURL)
-        let tempExists = fileManager.fileExists(atPath: tempURL.path)
-        let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("Pending export ZIP temp exists: \(tempExists ? "YES" : "NO"), bytes: \(tempSize)")
-#endif
-        guard tempExists, tempSize > 0 else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 5, userInfo: [NSLocalizedDescriptionKey: "Temporary ZIP write failed."])
-        }
-
-        try fileManager.moveItem(at: tempURL, to: finalURL)
-        let finalExists = fileManager.fileExists(atPath: finalURL.path)
-        let finalSize = ((try? fileManager.attributesOfItem(atPath: finalURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("Pending export ZIP final exists: \(finalExists ? "YES" : "NO"), bytes: \(finalSize)")
-#endif
-        guard finalExists, finalSize > 0 else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
-        }
-
-        let listedEntries = try StoredZipArchive.entryPaths(at: finalURL)
-#if DEBUG
-        let preview = Array(listedEntries.prefix(12))
-        print("Pending export ZIP entries count: \(listedEntries.count)")
-        print("Pending export ZIP entries preview: \(preview)")
-#endif
-        let zipRootFolderName = exportRoot.deletingLastPathComponent().lastPathComponent
-        let normalizedExpectedPaths = Set(expectedPaths.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
-        let actualPaths = Set(listedEntries.compactMap { path -> String? in
-            let normalized = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !normalized.isEmpty else { return nil }
-            if normalized == zipRootFolderName { return nil }
-            let prefix = "\(zipRootFolderName)/"
-            if normalized.hasPrefix(prefix) {
-                return String(normalized.dropFirst(prefix.count))
-            }
-            return normalized
-        })
-        guard normalizedExpectedPaths.isSubset(of: actualPaths) else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
-        }
-#if DEBUG
-        guard actualPaths.contains("session.json"), actualPaths.contains("validation.txt") else {
+        print("Pending export ZIP entries count: \(archive.listedEntries.count)")
+        print("Pending export ZIP entries preview: \(Array(archive.listedEntries.prefix(12)))")
+        guard archive.relativePaths.contains("session.json"), archive.relativePaths.contains("validation.txt") else {
             assertionFailure("Pending export ZIP root missing session.json or validation.txt")
             throw NSError(domain: "ScoutCapture.PendingExport", code: 10, userInfo: [NSLocalizedDescriptionKey: "ZIP root missing validation artifacts."])
         }
 #endif
         progress?(.zipReady)
-        return finalURL
+        return archive.url
     }
 
     private func requestImageData(for fileURL: URL) -> Data? {

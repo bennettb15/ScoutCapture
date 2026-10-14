@@ -75,4 +75,55 @@ final class StoredZipArchiveTests: XCTestCase {
         let oversizedPath = String(repeating: "a", count: Int(UInt16.max) + 1)
         XCTAssertThrowsError(try StoredZipArchive.buildData(entries: [(path: oversizedPath, data: Data())]))
     }
+
+    func testExportEnumerationAndWriterPreservePhotoSet() throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+        let exportRoot = workspace
+            .appendingPathComponent("Property", isDirectory: true)
+            .appendingPathComponent("Session", isDirectory: true)
+        let originals = exportRoot.appendingPathComponent("Originals", isDirectory: true)
+        try fileManager.createDirectory(at: originals, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: exportRoot.appendingPathComponent("session.json"))
+        try Data("passed".utf8).write(to: exportRoot.appendingPathComponent("validation.txt"))
+
+        let photoCount = 24
+        let photoSize = 128 * 1024
+        for index in 0..<photoCount {
+            let photo = originals.appendingPathComponent(String(format: "photo-%02d.heic", index))
+            try Data(repeating: UInt8(index), count: photoSize).write(to: photo)
+        }
+
+        let archive = workspace.appendingPathComponent("export.zip")
+        var expectedPaths: Set<String> = ["session.json", "validation.txt", "Originals/"]
+        for index in 0..<photoCount {
+            expectedPaths.insert(String(format: "Originals/photo-%02d.heic", index))
+        }
+        let result = try SessionExportZip.package(
+            exportRoot: exportRoot,
+            expectedPaths: expectedPaths,
+            finalURL: archive,
+            errorDomain: "ScoutCapture.Export"
+        )
+        let paths = result.listedEntries
+        XCTAssertEqual(result.url, archive)
+        XCTAssertTrue(Set(expectedPaths.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
+            .isSubset(of: result.relativePaths))
+        XCTAssertTrue(paths.contains("Property/session.json"))
+        XCTAssertTrue(paths.contains("Property/validation.txt"))
+        XCTAssertEqual(paths.filter { $0.hasPrefix("Property/Originals/photo-") }.count, photoCount)
+
+        let input = try FileHandle(forReadingFrom: archive)
+        defer { try? input.close() }
+        let archiveEntries = try StoredZipArchive.entries(from: input)
+        for index in 0..<photoCount {
+            let path = String(format: "Property/Originals/photo-%02d.heic", index)
+            let entry = try XCTUnwrap(archiveEntries.first { $0.path == path })
+            XCTAssertEqual(entry.uncompressedSize, UInt32(photoSize))
+            try input.seek(toOffset: UInt64(entry.localHeaderOffset) + 30 + UInt64(path.utf8.count))
+            let bytes = try XCTUnwrap(input.read(upToCount: photoSize))
+            XCTAssertEqual(bytes, Data(repeating: UInt8(index), count: photoSize))
+        }
+    }
 }

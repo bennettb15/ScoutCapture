@@ -365,3 +365,60 @@ enum StoredZipArchive {
         withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
     }
 }
+
+/// Shared packaging and path checks for normal and pending session exports.
+enum SessionExportZip {
+    struct Result {
+        let url: URL
+        let listedEntries: [String]
+        let relativePaths: Set<String>
+    }
+
+    static func package(
+        exportRoot: URL,
+        expectedPaths: Set<String>,
+        finalURL: URL,
+        errorDomain: String,
+        fileManager: FileManager = .default
+    ) throws -> Result {
+        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
+        let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
+        if fileManager.fileExists(atPath: tempURL.path) {
+            try fileManager.removeItem(at: tempURL)
+        }
+        if fileManager.fileExists(atPath: finalURL.path) {
+            try fileManager.removeItem(at: finalURL)
+        }
+        try StoredZipArchive.writeFileArchive(entries: zipEntries, at: tempURL)
+        let tempExists = fileManager.fileExists(atPath: tempURL.path)
+        let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+        guard tempExists, tempSize > 0 else {
+            throw NSError(domain: errorDomain, code: 5, userInfo: [NSLocalizedDescriptionKey: "Temporary ZIP write failed."])
+        }
+
+        try fileManager.moveItem(at: tempURL, to: finalURL)
+        let finalExists = fileManager.fileExists(atPath: finalURL.path)
+        let finalSize = ((try? fileManager.attributesOfItem(atPath: finalURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+        guard finalExists, finalSize > 0 else {
+            throw NSError(domain: errorDomain, code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
+        }
+
+        let listedEntries = try StoredZipArchive.entryPaths(at: finalURL)
+        let zipRootFolderName = exportRoot.deletingLastPathComponent().lastPathComponent
+        let normalizedExpectedPaths = Set(expectedPaths.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
+        let actualPaths = Set(listedEntries.compactMap { path -> String? in
+            let normalized = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !normalized.isEmpty else { return nil }
+            if normalized == zipRootFolderName { return nil }
+            let prefix = "\(zipRootFolderName)/"
+            if normalized.hasPrefix(prefix) {
+                return String(normalized.dropFirst(prefix.count))
+            }
+            return normalized
+        })
+        guard normalizedExpectedPaths.isSubset(of: actualPaths) else {
+            throw NSError(domain: errorDomain, code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
+        }
+        return Result(url: finalURL, listedEntries: listedEntries, relativePaths: actualPaths)
+    }
+}
