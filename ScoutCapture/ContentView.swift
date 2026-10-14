@@ -14084,27 +14084,13 @@ extension ContentView {
         return formatter
     }()
 
-    private func sessionExportFilename(for asset: ReportAsset, index: Int) -> String {
-        let fallback = "photo-\(index).\(OriginalPhotoFormat.fileExtension)"
-        let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseName = URL(fileURLWithPath: original).lastPathComponent
-        let resolved = baseName.isEmpty ? fallback : baseName
-        return resolved.replacingOccurrences(of: "/", with: "-")
-    }
-
     private func sessionExportZipFilename() -> String {
         let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
-        let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeName = trimmedName.isEmpty
-            ? "ScoutCapture-Export"
-            : trimmedName
-                .replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: ":", with: "-")
-                .replacingOccurrences(of: "\n", with: " ")
-                .replacingOccurrences(of: "\t", with: " ")
-        let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
-        let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
-        return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
+        return SessionExportZip.standardFilename(
+            propertyName: propertyName,
+            propertyID: appState.selectedProperty?.id,
+            sessionID: appState.currentSession?.id
+        )
     }
 
     private func applyArmedIssueCaptureIfNeeded(with shot: Shot) -> Bool {
@@ -16924,27 +16910,13 @@ extension ContentView {
             return zipURL
         }
         
-        private func makeArchiveFilename(for asset: ReportAsset, index: Int) -> String {
-            let fallback = "photo-\(index).\(OriginalPhotoFormat.fileExtension)"
-            let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-            let baseName = URL(fileURLWithPath: original).lastPathComponent
-            let resolved = baseName.isEmpty ? fallback : baseName
-            return resolved.replacingOccurrences(of: "/", with: "-")
-        }
-        
         private func exportZipFilename() -> String {
             let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
-            let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let safeName = trimmedName.isEmpty
-                ? "ScoutCapture-Export"
-                : trimmedName
-                    .replacingOccurrences(of: "/", with: "-")
-                    .replacingOccurrences(of: ":", with: "-")
-                    .replacingOccurrences(of: "\n", with: " ")
-                    .replacingOccurrences(of: "\t", with: " ")
-            let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
-            let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
-            return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
+            return SessionExportZip.standardFilename(
+                propertyName: propertyName,
+                propertyID: appState.selectedProperty?.id,
+                sessionID: appState.currentSession?.id
+            )
         }
         
         private struct LibraryThumb: View {

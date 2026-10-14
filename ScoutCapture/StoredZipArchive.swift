@@ -374,6 +374,20 @@ enum SessionExportZip {
         let relativePaths: Set<String>
     }
 
+    static func standardFilename(propertyName: String, propertyID: UUID?, sessionID: UUID?) -> String {
+        let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = trimmedName.isEmpty
+            ? "ScoutCapture-Export"
+            : trimmedName
+                .replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\t", with: " ")
+        let propertyPrefix = String((propertyID?.uuidString ?? "unknown").prefix(8))
+        let sessionPrefix = String((sessionID?.uuidString ?? UUID().uuidString).prefix(8))
+        return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
+    }
+
     static func package(
         exportRoot: URL,
         expectedPaths: Set<String>,
