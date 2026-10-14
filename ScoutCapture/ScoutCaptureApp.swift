@@ -3690,16 +3690,6 @@ struct SessionHubView: View {
         )
         let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
         try FileManager.default.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
-        var expectedPaths = Set([
-            "session.json",
-            "validation.txt",
-            "sessions.csv",
-            "shots.csv",
-            "issues.csv",
-            "issue_history.csv",
-            "guided_rows.csv",
-            "Originals/"
-        ])
         let sessionMetadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
 #if DEBUG
         print("Pending export sessionStartedAt: \(sessionMetadata.startedAt)")
@@ -3715,30 +3705,14 @@ struct SessionHubView: View {
             print("Pending export reExportExpiresAt: \(reExportExpiresAt)")
         }
 #endif
-        for originalFile in validationArtifacts.originalFiles {
-            let attrs = try? FileManager.default.attributesOfItem(atPath: originalFile.sourceURL.path)
-            let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
-            try FileManager.default.copyItem(at: originalFile.sourceURL, to: destinationURL)
-            if let modifiedAt {
-                try? FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
-            }
-            expectedPaths.insert("Originals/\(originalFile.filename)")
-        }
-        progress?(.originals)
-        try validationArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
-        try validationArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
-        for csvFile in localStore.exportCSVFiles(for: validationArtifacts.metadata) {
-            try csvFile.data.write(to: exportRoot.appendingPathComponent(csvFile.filename), options: .atomic)
-        }
-        if !validationArtifacts.prewritePassed || !validationArtifacts.postwritePassed {
-            let message = String(data: validationArtifacts.validationData, encoding: .utf8) ?? "Export validation failed."
-            throw NSError(
-                domain: "ScoutCapture.PendingExport",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: "Export validation failed before ZIP creation.\n\n\(message)"]
-            )
-        }
+        let expectedPaths = try SessionExportZip.stageValidatedArtifacts(
+            validationArtifacts,
+            from: localStore,
+            at: exportRoot,
+            errorDomain: "ScoutCapture.PendingExport",
+            onOriginalsCopied: { progress?(.originals) }
+        )
+
 #if DEBUG
         print("EXPORT ROOT: \(exportRoot.path)")
         print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
@@ -3768,30 +3742,6 @@ struct SessionHubView: View {
 
 
 
-
-    private func exportFilename(for fileURL: URL, index: Int) -> String {
-        let fallback = "photo-\(index).jpg"
-        let original = fileURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = original.isEmpty ? fallback : normalizedContextFilename(original)
-        return String(format: "%04d-%@", index, base.replacingOccurrences(of: "/", with: "-"))
-    }
-
-    private func normalizedContextFilename(_ filename: String) -> String {
-        var output = filename
-        let replacements: [(String, String)] = [
-            ("North Elevation", "N"),
-            ("South Elevation", "S"),
-            ("East Elevation", "E"),
-            ("West Elevation", "W")
-        ]
-        for (source, target) in replacements {
-            output = output.replacingOccurrences(of: source, with: target, options: .caseInsensitive)
-        }
-        output = output.replacingOccurrences(of: "Elevation", with: "", options: .caseInsensitive)
-        output = output.replacingOccurrences(of: "__", with: "_")
-        output = output.replacingOccurrences(of: "  ", with: " ")
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private func exportZipFilename(for property: Property, session: Session) -> String {
         let safeProperty = sanitizedExportName(property.name, fallback: "ScoutCapture-Export")

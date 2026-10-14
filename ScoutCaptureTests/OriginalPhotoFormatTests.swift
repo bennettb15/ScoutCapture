@@ -195,5 +195,42 @@ final class OriginalPhotoFormatTests: XCTestCase {
         XCTAssertEqual(exports.count, 1)
         XCTAssertEqual(exports[0].filename, OriginalPhotoFormat.legacyHEICFilename(for: shotID))
         XCTAssertEqual(exports[0].sourceURL.path, legacyURL.path)
+
+        let modifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: legacyURL.path)
+        let exportRoot = storageRoot.appendingPathComponent("Export", isDirectory: true)
+        let exportedOriginals = exportRoot.appendingPathComponent("Originals", isDirectory: true)
+        try FileManager.default.createDirectory(at: exportedOriginals, withIntermediateDirectories: true)
+        let artifacts = LocalStore.ValidatedSessionExportArtifacts(
+            metadata: metadata,
+            sessionData: Data("session".utf8),
+            validationData: Data("passed".utf8),
+            originalFiles: exports,
+            prewritePassed: true,
+            postwritePassed: true
+        )
+        let copiedURL = exportedOriginals.appendingPathComponent(exports[0].filename)
+        var originalsProgressCount = 0
+        let expectedPaths = try SessionExportZip.stageValidatedArtifacts(
+            artifacts,
+            from: localStore,
+            at: exportRoot,
+            errorDomain: "ScoutCapture.Export",
+            onOriginalsCopied: {
+                originalsProgressCount += 1
+                XCTAssertTrue(FileManager.default.fileExists(atPath: copiedURL.path))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: exportRoot.appendingPathComponent("session.json").path))
+            }
+        )
+        XCTAssertEqual(originalsProgressCount, 1)
+        XCTAssertTrue(expectedPaths.contains("Originals/\(exports[0].filename)"))
+        XCTAssertEqual(try Data(contentsOf: copiedURL), Data("legacy-heic".utf8))
+        let copiedAttributes = try FileManager.default.attributesOfItem(atPath: copiedURL.path)
+        XCTAssertEqual(copiedAttributes[.modificationDate] as? Date, modifiedAt)
+        XCTAssertEqual(try Data(contentsOf: exportRoot.appendingPathComponent("session.json")), artifacts.sessionData)
+        XCTAssertEqual(try Data(contentsOf: exportRoot.appendingPathComponent("validation.txt")), artifacts.validationData)
+        for csvFile in localStore.exportCSVFiles(for: metadata) {
+            XCTAssertEqual(try Data(contentsOf: exportRoot.appendingPathComponent(csvFile.filename)), csvFile.data)
+        }
     }
 }

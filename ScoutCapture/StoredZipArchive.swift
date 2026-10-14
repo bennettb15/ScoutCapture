@@ -374,6 +374,52 @@ enum SessionExportZip {
         let relativePaths: Set<String>
     }
 
+    static func stageValidatedArtifacts(
+        _ artifacts: LocalStore.ValidatedSessionExportArtifacts,
+        from localStore: LocalStore,
+        at exportRoot: URL,
+        errorDomain: String,
+        fileManager: FileManager = .default,
+        onOriginalsCopied: () -> Void
+    ) throws -> Set<String> {
+        let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
+        var expectedPaths: Set<String> = [
+            "session.json",
+            "validation.txt",
+            "sessions.csv",
+            "shots.csv",
+            "issues.csv",
+            "issue_history.csv",
+            "guided_rows.csv",
+            "Originals/"
+        ]
+        for originalFile in artifacts.originalFiles {
+            let attrs = try? fileManager.attributesOfItem(atPath: originalFile.sourceURL.path)
+            let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
+            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
+            try fileManager.copyItem(at: originalFile.sourceURL, to: destinationURL)
+            if let modifiedAt {
+                try? fileManager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
+            }
+            expectedPaths.insert("Originals/\(originalFile.filename)")
+        }
+        onOriginalsCopied()
+        try artifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
+        try artifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
+        for csvFile in localStore.exportCSVFiles(for: artifacts.metadata) {
+            try csvFile.data.write(to: exportRoot.appendingPathComponent(csvFile.filename), options: .atomic)
+        }
+        if !artifacts.prewritePassed || !artifacts.postwritePassed {
+            let message = String(data: artifacts.validationData, encoding: .utf8) ?? "Export validation failed."
+            throw NSError(
+                domain: errorDomain,
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "Export validation failed before ZIP creation.\n\n\(message)"]
+            )
+        }
+        return expectedPaths
+    }
+
     static func standardFilename(propertyName: String, propertyID: UUID?, sessionID: UUID?) -> String {
         let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeName = trimmedName.isEmpty

@@ -12477,40 +12477,14 @@ extension ContentView {
         let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
         try fileManager.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
 
-        var expectedPaths = Set([
-            "session.json",
-            "validation.txt",
-            "sessions.csv",
-            "shots.csv",
-            "issues.csv",
-            "issue_history.csv",
-            "guided_rows.csv",
-            "Originals/"
-        ])
-        for originalFile in exportArtifacts.originalFiles {
-            let attrs = try? fileManager.attributesOfItem(atPath: originalFile.sourceURL.path)
-            let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
-            try fileManager.copyItem(at: originalFile.sourceURL, to: destinationURL)
-            if let modifiedAt {
-                try? fileManager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
-            }
-            expectedPaths.insert("Originals/\(originalFile.filename)")
-        }
-        progress?(.originals)
-        try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
-        try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
-        for csvFile in localStore.exportCSVFiles(for: exportArtifacts.metadata) {
-            try csvFile.data.write(to: exportRoot.appendingPathComponent(csvFile.filename), options: .atomic)
-        }
-        if !exportArtifacts.prewritePassed || !exportArtifacts.postwritePassed {
-            let message = String(data: exportArtifacts.validationData, encoding: .utf8) ?? "Export validation failed."
-            throw NSError(
-                domain: "ScoutCapture.Export",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: "Export validation failed before ZIP creation.\n\n\(message)"]
-            )
-        }
+        let expectedPaths = try SessionExportZip.stageValidatedArtifacts(
+            exportArtifacts,
+            from: localStore,
+            at: exportRoot,
+            errorDomain: "ScoutCapture.Export",
+            fileManager: fileManager,
+            onOriginalsCopied: { progress?(.originals) }
+        )
 
 #if DEBUG
         let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
