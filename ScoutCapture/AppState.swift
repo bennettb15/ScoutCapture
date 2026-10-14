@@ -10535,6 +10535,31 @@ final class AppState: ObservableObject {
     func ensureOperationalMediaAvailableForRequests(
         _ requests: [OperationalMediaHydrationRequest]
     ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: false)
+    }
+
+    func ensureGuidedHistoricalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: true)
+    }
+
+    func ensureGalleryMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: true)
+    }
+
+    func ensureFlaggedHistoricalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: true)
+    }
+
+    private func ensureMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest],
+        allowRelaxedRemoteLookupFallback: Bool
+    ) async -> Bool {
         let uniqueRequests = Array(Set(requests))
         guard !uniqueRequests.isEmpty else { return false }
 
@@ -10547,96 +10572,7 @@ final class AppState: ObservableObject {
                         propertyID: request.propertyID,
                         sessionID: request.sessionID,
                         shotID: request.shotID,
-                        relativePathOverride: request.relativePathOverride
-                    )
-                }
-            }
-
-            for await didStart in group {
-                if didStart {
-                    startedAny = true
-                }
-            }
-        }
-
-        return startedAny
-    }
-
-    func ensureGuidedHistoricalMediaAvailableForRequests(
-        _ requests: [OperationalMediaHydrationRequest]
-    ) async -> Bool {
-        let uniqueRequests = Array(Set(requests))
-        guard !uniqueRequests.isEmpty else { return false }
-
-        var startedAny = false
-        await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
-                group.addTask { [weak self] in
-                    guard let self else { return false }
-                    return await self.ensureGuidedHistoricalMediaAvailableIfNeeded(
-                        propertyID: request.propertyID,
-                        sessionID: request.sessionID,
-                        shotID: request.shotID,
-                        relativePathOverride: request.relativePathOverride
-                    )
-                }
-            }
-
-            for await didStart in group {
-                if didStart {
-                    startedAny = true
-                }
-            }
-        }
-
-        return startedAny
-    }
-
-    func ensureGalleryMediaAvailableForRequests(
-        _ requests: [OperationalMediaHydrationRequest]
-    ) async -> Bool {
-        let uniqueRequests = Array(Set(requests))
-        guard !uniqueRequests.isEmpty else { return false }
-
-        var startedAny = false
-        await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
-                group.addTask { [weak self] in
-                    guard let self else { return false }
-                    return await self.ensureGalleryMediaAvailableIfNeeded(
-                        propertyID: request.propertyID,
-                        sessionID: request.sessionID,
-                        shotID: request.shotID,
-                        relativePathOverride: request.relativePathOverride
-                    )
-                }
-            }
-
-            for await didStart in group {
-                if didStart {
-                    startedAny = true
-                }
-            }
-        }
-
-        return startedAny
-    }
-
-    func ensureFlaggedHistoricalMediaAvailableForRequests(
-        _ requests: [OperationalMediaHydrationRequest]
-    ) async -> Bool {
-        let uniqueRequests = Array(Set(requests))
-        guard !uniqueRequests.isEmpty else { return false }
-
-        var startedAny = false
-        await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
-                group.addTask { [weak self] in
-                    guard let self else { return false }
-                    return await self.ensureFlaggedHistoricalMediaAvailableIfNeeded(
-                        propertyID: request.propertyID,
-                        sessionID: request.sessionID,
-                        shotID: request.shotID,
+                        allowRelaxedRemoteLookupFallback: allowRelaxedRemoteLookupFallback,
                         relativePathOverride: request.relativePathOverride
                     )
                 }
@@ -10656,6 +10592,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         sessionID: UUID,
         shotID: UUID,
+        allowRelaxedRemoteLookupFallback: Bool = false,
         relativePathOverride: String? = nil
     ) async -> Bool {
         guard backendFeatureFlags.supabaseEnabled,
@@ -10672,84 +10609,7 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             sessionID: sessionID,
             shotID: shotID,
-            relativePathOverride: relativePathOverride
-        )
-        return true
-    }
-
-    private func ensureGuidedHistoricalMediaAvailableIfNeeded(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        relativePathOverride: String? = nil
-    ) async -> Bool {
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
-            relativePathOverride: relativePathOverride
-        )
-        return true
-    }
-
-    private func ensureGalleryMediaAvailableIfNeeded(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        relativePathOverride: String? = nil
-    ) async -> Bool {
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
-            relativePathOverride: relativePathOverride
-        )
-        return true
-    }
-
-    private func ensureFlaggedHistoricalMediaAvailableIfNeeded(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        relativePathOverride: String? = nil
-    ) async -> Bool {
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
+            allowRelaxedRemoteLookupFallback: allowRelaxedRemoteLookupFallback,
             relativePathOverride: relativePathOverride
         )
         return true
