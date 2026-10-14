@@ -5,6 +5,16 @@ enum StoredZipArchive {
     enum ArchiveError: Error {
         case exceedsZip32Limits
         case invalidArchive
+        case unsupportedArchive
+    }
+
+    struct Entry {
+        let path: String
+        let compressionMethod: UInt16
+        let crc32: UInt32
+        let compressedSize: UInt32
+        let uncompressedSize: UInt32
+        let localHeaderOffset: UInt32
     }
 
     static func buildData(entries: [(path: String, data: Data)]) throws -> Data {
@@ -247,15 +257,19 @@ enum StoredZipArchive {
     static func entryPaths(at url: URL) throws -> [String] {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
+        return try entries(from: input).map(\.path)
+    }
+
+    nonisolated static func entries(from input: FileHandle) throws -> [Entry] {
         let fileSize = try input.seekToEnd()
-        guard fileSize >= 22 else { throw ArchiveError.invalidArchive }
+        guard fileSize >= 22 else { throw ArchiveError.unsupportedArchive }
         let tailSize = min(fileSize, UInt64(UInt16.max) + 22)
         try input.seek(toOffset: fileSize - tailSize)
         let tail = [UInt8](try readExactly(Int(tailSize), from: input))
         guard let eocd = stride(from: tail.count - 22, through: 0, by: -1).first(where: {
             tail[$0] == 0x50 && tail[$0 + 1] == 0x4B && tail[$0 + 2] == 0x05 && tail[$0 + 3] == 0x06 &&
             $0 + 22 + int16(tail, at: $0 + 20) == tail.count
-        }) else { throw ArchiveError.invalidArchive }
+        }) else { throw ArchiveError.unsupportedArchive }
         let count = int16(tail, at: eocd + 10)
         let centralOffset = UInt64(int32(tail, at: eocd + 16))
         let centralSize = UInt64(int32(tail, at: eocd + 12))
@@ -265,8 +279,8 @@ enum StoredZipArchive {
         }
         try input.seek(toOffset: centralOffset)
         var cursor = centralOffset
-        var paths: [String] = []
-        paths.reserveCapacity(count)
+        var found: [Entry] = []
+        found.reserveCapacity(count)
         for _ in 0..<count {
             guard cursor + 46 <= centralEnd else { throw ArchiveError.invalidArchive }
             let header = [UInt8](try readExactly(46, from: input))
@@ -280,11 +294,19 @@ enum StoredZipArchive {
             guard let name = String(data: nameData, encoding: .utf8) else {
                 throw ArchiveError.invalidArchive
             }
-            paths.append(name)
+            found.append(Entry(
+                path: name,
+                compressionMethod: UInt16(int16(header, at: 10)),
+                crc32: UInt32(int32(header, at: 16)),
+                compressedSize: UInt32(int32(header, at: 20)),
+                uncompressedSize: UInt32(int32(header, at: 24)),
+                localHeaderOffset: UInt32(int32(header, at: 42))
+            ))
             try input.seek(toOffset: next)
             cursor = next
         }
-        return paths
+        guard cursor == centralEnd else { throw ArchiveError.invalidArchive }
+        return found
     }
 
     private static func readExactly(_ count: Int, from input: FileHandle) throws -> Data {
