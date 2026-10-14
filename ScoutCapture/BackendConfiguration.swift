@@ -433,21 +433,6 @@ struct BackendFeatureFlags {
         }
     }
 
-    private static func boolEnvironmentValue(
-        for key: String,
-        environment: [String: String]
-    ) -> Bool {
-        guard let rawValue = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
-            return false
-        }
-        switch rawValue {
-        case "1", "true", "yes", "on":
-            return true
-        default:
-            return false
-        }
-    }
-
     private static func uuidAllowlistValue(
         for key: String,
         environmentKey: String,

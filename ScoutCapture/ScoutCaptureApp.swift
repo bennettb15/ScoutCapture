@@ -15797,8 +15797,6 @@ private struct FastLaneIssueListSheet: View {
     let onClose: () -> Void
 
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
-    @State private var inlineToastText: String?
-    @State private var inlineToastToken: Int = 0
 
     private var isLandscape: Bool {
         lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
@@ -15862,23 +15860,6 @@ private struct FastLaneIssueListSheet: View {
                             .background(.thinMaterial)
                             .clipShape(Circle())
                             .padding(.top, 66)
-                    }
-                }
-                .overlay(alignment: .top) {
-                    if let inlineToastText {
-                        Text(inlineToastText)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .background(Color.black.opacity(0.72))
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                            )
-                            .padding(.top, 64)
-                            .transition(.opacity)
                     }
                 }
                 .toolbar(.hidden, for: .navigationBar)
@@ -15969,15 +15950,6 @@ private struct FastLaneIssueListSheet: View {
         }
     }
 
-    private func showInlineToast(_ text: String) {
-        inlineToastText = text
-        inlineToastToken += 1
-        let token = inlineToastToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            guard token == inlineToastToken else { return }
-            inlineToastText = nil
-        }
-    }
 }
 
 private struct FastLanePanelThumbnail: View {
