@@ -397,6 +397,11 @@ enum SessionExportZip {
     ) throws -> Result {
         let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
         let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
+        defer {
+            if fileManager.fileExists(atPath: tempURL.path) {
+                try? fileManager.removeItem(at: tempURL)
+            }
+        }
         if fileManager.fileExists(atPath: tempURL.path) {
             try fileManager.removeItem(at: tempURL)
         }
