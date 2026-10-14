@@ -37676,16 +37676,11 @@ final class AppState: ObservableObject {
         return fallbackFormatter.date(from: trimmed)
     }
 
-    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
+    private func loadLegacyMigrationLedgerForRun(
+        runID: UUID,
+        startedAt now: Date,
+        activeOrganizationID: UUID
+    ) throws -> LegacyMigrationPreflightLedger {
         var ledger: LegacyMigrationPreflightLedger
 
         do {
@@ -37726,6 +37721,14 @@ final class AppState: ObservableObject {
             )
         }
 
+        return ledger
+    }
+
+    private func beginLegacyMigrationRun(
+        ledger: inout LegacyMigrationPreflightLedger,
+        runID: UUID,
+        startedAt now: Date
+    ) throws {
         ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
         ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
             currentRunID: runID,
@@ -37736,6 +37739,60 @@ final class AppState: ObservableObject {
             lastErrorMessage: nil
         )
         try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func completeLegacyMigrationRun(
+        ledger: inout LegacyMigrationPreflightLedger
+    ) throws {
+        ledger.mutationRun.state = "completed"
+        ledger.mutationRun.completedAt = Date()
+        ledger.mutationRun.lastErrorCategory = nil
+        ledger.mutationRun.lastErrorMessage = nil
+        try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func recordLegacyMigrationRunFailure(
+        ledger: inout LegacyMigrationPreflightLedger,
+        runID: UUID,
+        error: Error,
+        fallbackCategory: String
+    ) {
+        if ledger.mutationRun.currentRunID == runID {
+            if ledger.mutationRun.lastErrorCategory == nil {
+                ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                    for: error,
+                    fallback: fallbackCategory
+                )
+            }
+            ledger.mutationRun.lastErrorMessage = error.localizedDescription
+            if ledger.mutationRun.state == "in_progress" {
+                let terminal = legacyMigrationStep2AIsTerminalError(error)
+                ledger.mutationRun.state = terminal
+                    ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                    : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+            }
+            ledger.mutationRun.completedAt = Date()
+            try? localStore.writeLegacyMigrationLedger(ledger)
+        }
+    }
+
+    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        var ledger = try loadLegacyMigrationLedgerForRun(
+            runID: runID,
+            startedAt: now,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let propertyIndexByID = Dictionary(uniqueKeysWithValues: ledger.properties.enumerated().map { ($0.element.localID, $0.offset) })
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
@@ -37989,11 +38046,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2AResult(
                 runID: runID,
@@ -38003,23 +38056,12 @@ final class AppState: ObservableObject {
                 verifiedSessionCount: ledger.sessions.filter { $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2a_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2a_failed"
+            )
             throw error
         }
     }
@@ -38034,56 +38076,13 @@ final class AppState: ObservableObject {
 
         let runID = UUID()
         let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
-
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
+        var ledger = try loadLegacyMigrationLedgerForRun(
+            runID: runID,
             startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
+            activeOrganizationID: activeOrganizationID
         )
-        try localStore.writeLegacyMigrationLedger(ledger)
+
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -38249,11 +38248,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice1Result(
                 runID: runID,
@@ -38262,23 +38257,12 @@ final class AppState: ObservableObject {
                 verifiedShotCount: ledger.shots.filter { $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice1_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice1_failed"
+            )
             throw error
         }
     }
@@ -38293,56 +38277,13 @@ final class AppState: ObservableObject {
 
         let runID = UUID()
         let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
-
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
+        var ledger = try loadLegacyMigrationLedgerForRun(
+            runID: runID,
             startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
+            activeOrganizationID: activeOrganizationID
         )
-        try localStore.writeLegacyMigrationLedger(ledger)
+
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -38480,11 +38421,7 @@ final class AppState: ObservableObject {
                 }
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice2AResult(
                 runID: runID,
@@ -38493,23 +38430,12 @@ final class AppState: ObservableObject {
                 uploadedMediaCount: ledger.media.filter { $0.mutation.state == .mediaUploadSucceeded || $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice2a_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice2a_failed"
+            )
             throw error
         }
     }
@@ -38524,56 +38450,13 @@ final class AppState: ObservableObject {
 
         let runID = UUID()
         let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
-
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
+        var ledger = try loadLegacyMigrationLedgerForRun(
+            runID: runID,
             startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
+            activeOrganizationID: activeOrganizationID
         )
-        try localStore.writeLegacyMigrationLedger(ledger)
+
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -38724,11 +38607,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice2BReadinessResult(
                 runID: runID,
@@ -38738,23 +38617,12 @@ final class AppState: ObservableObject {
                 readyForFinalizeCount: ledger.media.filter { $0.mutation.isReadyForFinalize }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice2b_readiness_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice2b_readiness_failed"
+            )
             throw error
         }
     }
@@ -38769,45 +38637,11 @@ final class AppState: ObservableObject {
 
         let runID = UUID()
         let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
+        var ledger = try loadLegacyMigrationLedgerForRun(
+            runID: runID,
+            startedAt: now,
+            activeOrganizationID: activeOrganizationID
+        )
 
         guard !hasInFlightSupabaseUploadOperations() else {
             ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
@@ -38822,16 +38656,7 @@ final class AppState: ObservableObject {
             throw LegacyMigrationStep2AError.verificationFailed("Finalize cannot run while live upload activity is in flight for this app.")
         }
 
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
-            startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
-        )
-        try localStore.writeLegacyMigrationLedger(ledger)
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -39094,11 +38919,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice2BFinalizeResult(
                 runID: runID,
@@ -39107,23 +38928,12 @@ final class AppState: ObservableObject {
                 verifiedMediaCount: ledger.media.filter { $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice2b_finalize_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice2b_finalize_failed"
+            )
             throw error
         }
     }
