@@ -39118,6 +39118,23 @@ final class AppState: ObservableObject {
         return category != "transient_transport_failure"
     }
 
+    private static let supabasePropertyStatusSelectColumns = """
+        property_id,
+        org_id,
+        status,
+        active_session_id,
+        draft_session_id,
+        pending_export_session_id,
+        last_exported_session_id,
+        owner_user_id,
+        owner_device_id,
+        heartbeat_at,
+        updated_at,
+        updated_by,
+        status_reason,
+        revision
+        """
+
     private static let supabaseShotStorageSelectColumns = """
                 id,
                 org_id,
@@ -44892,39 +44909,16 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let statuses: [PropertyStatusRecord] = try await client
-                .from("property_status")
-                .select(
-                    """
-                    property_id,
-                    org_id,
-                    status,
-                    active_session_id,
-                    draft_session_id,
-                    pending_export_session_id,
-                    last_exported_session_id,
-                    owner_user_id,
-                    owner_device_id,
-                    heartbeat_at,
-                    updated_at,
-                    updated_by,
-                    status_reason,
-                    revision
-                    """
-                )
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value
-            guard let status = statuses.first,
+            let propertyStatus = try await fetchFastRuntimeReportPropertyStatus(client: client, propertyID: propertyID)
+            guard let status = propertyStatus,
                   let sessionID = status.pendingExportSessionID else {
                 return makeFastRuntimeReportPackageDryRunBlockedResult(
                     startedAt: startedAt,
                     propertyID: propertyID,
                     sessionID: nil,
                     sessionType: sessionType,
-                    orgID: statuses.first?.orgID,
-                    propertyStatus: statuses.first?.status.rawValue,
+                    orgID: propertyStatus?.orgID,
+                    propertyStatus: propertyStatus?.status.rawValue,
                     reason: "property_status_missing_pending_export_session"
                 )
             }
@@ -45578,30 +45572,7 @@ final class AppState: ObservableObject {
                 .limit(1)
                 .execute()
                 .value
-            let statusRows: [PropertyStatusRecord] = try await client
-                .from("property_status")
-                .select(
-                    """
-                    property_id,
-                    org_id,
-                    status,
-                    active_session_id,
-                    draft_session_id,
-                    pending_export_session_id,
-                    last_exported_session_id,
-                    owner_user_id,
-                    owner_device_id,
-                    heartbeat_at,
-                    updated_at,
-                    updated_by,
-                    status_reason,
-                    revision
-                    """
-                )
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value
+            let propertyStatus = try await fetchFastRuntimeReportPropertyStatus(client: client, propertyID: propertyID)
             var shots = try await fetchFastRuntimeReportPackageShots(
                 client: client,
                 propertyID: propertyID,
@@ -45673,7 +45644,6 @@ final class AppState: ObservableObject {
                     reason: "session_row_missing"
                 )
             }
-            let propertyStatus = statusRows.first
             let resolvedOrgID = session.orgID
             if contextOrgID != nil, contextOrgID != resolvedOrgID {
                 warnings.append("context_org_id_mismatch")
@@ -46137,6 +46107,20 @@ final class AppState: ObservableObject {
             imageHeight: shot.imageHeight
         )
         return metadata
+    }
+
+    private func fetchFastRuntimeReportPropertyStatus(
+        client: SupabaseClient,
+        propertyID: UUID
+    ) async throws -> PropertyStatusRecord? {
+        let rows: [PropertyStatusRecord] = try await client
+            .from("property_status")
+            .select(Self.supabasePropertyStatusSelectColumns)
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value
+        return rows.first
     }
 
     private func fetchFastRuntimeReportPackageShots(
@@ -48722,24 +48706,7 @@ final class AppState: ObservableObject {
 
         return try await client
             .from("property_status")
-            .select(
-                """
-                property_id,
-                org_id,
-                status,
-                active_session_id,
-                draft_session_id,
-                pending_export_session_id,
-                last_exported_session_id,
-                owner_user_id,
-                owner_device_id,
-                heartbeat_at,
-                updated_at,
-                updated_by,
-                status_reason,
-                revision
-                """
-            )
+            .select(Self.supabasePropertyStatusSelectColumns)
             .eq("org_id", value: orgID.uuidString.lowercased())
             .in("property_id", values: uniquePropertyIDValues)
             .execute()
