@@ -1200,8 +1200,9 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .sheet(item: $pendingExportFile) { file in
-                HubSessionDocumentExportPicker(
+                SharedDocumentExportPicker(
                     fileURL: file.url,
+                    usesFormSheet: true,
                     onComplete: { didExport in
                         print("[DeliverResult] sessionID=\(file.sessionID.uuidString) success=\(didExport)")
                         if didExport {
@@ -5665,14 +5666,23 @@ private final class PropertyListTableCell: UITableViewCell {
     }
 }
 
-private struct HubSessionDocumentExportPicker: UIViewControllerRepresentable {
+struct SharedDocumentExportPicker: UIViewControllerRepresentable {
     let fileURL: URL
+    let usesFormSheet: Bool
     let onComplete: (Bool) -> Void
+
+    init(fileURL: URL, usesFormSheet: Bool = false, onComplete: @escaping (Bool) -> Void) {
+        self.fileURL = fileURL
+        self.usesFormSheet = usesFormSheet
+        self.onComplete = onComplete
+    }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
         picker.delegate = context.coordinator
-        picker.modalPresentationStyle = .formSheet
+        if usesFormSheet {
+            picker.modalPresentationStyle = .formSheet
+        }
         return picker
     }
 

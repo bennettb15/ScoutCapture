@@ -6449,7 +6449,7 @@ struct ContentView: View {
                 guidedChecklistSheetView
             }
             .sheet(item: $sessionExportFile) { file in
-                SessionDocumentExportPicker(
+                SharedDocumentExportPicker(
                     fileURL: file.url,
                     onComplete: { didExport in
                         if didExport {
@@ -15285,39 +15285,6 @@ extension ContentView {
         }
     }
 
-    private struct SessionDocumentExportPicker: UIViewControllerRepresentable {
-        let fileURL: URL
-        let onComplete: (Bool) -> Void
-
-        func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-            let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
-            picker.delegate = context.coordinator
-            return picker
-        }
-
-        func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
-
-        func makeCoordinator() -> Coordinator {
-            Coordinator(onComplete: onComplete)
-        }
-
-        final class Coordinator: NSObject, UIDocumentPickerDelegate {
-            let onComplete: (Bool) -> Void
-
-            init(onComplete: @escaping (Bool) -> Void) {
-                self.onComplete = onComplete
-            }
-
-            func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-                onComplete(!urls.isEmpty)
-            }
-
-            func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-                onComplete(false)
-            }
-        }
-    }
-
     // MARK: - Report Library Fullscreen (Grid)
     
     private struct ReportLibraryFullscreen: View {
@@ -15624,7 +15591,7 @@ extension ContentView {
                 ActivityShareSheet(activityItems: shareItems)
             }
             .sheet(item: $exportFile) { file in
-                DocumentExportPicker(
+                SharedDocumentExportPicker(
                     fileURL: file.url,
                     onComplete: { didExport in
                         if didExport {
@@ -16644,38 +16611,6 @@ extension ContentView {
             func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
         }
         
-        private struct DocumentExportPicker: UIViewControllerRepresentable {
-            let fileURL: URL
-            let onComplete: (Bool) -> Void
-
-            func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-                let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
-                picker.delegate = context.coordinator
-                return picker
-            }
-
-            func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
-            
-            func makeCoordinator() -> Coordinator {
-                Coordinator(onComplete: onComplete)
-            }
-            
-            final class Coordinator: NSObject, UIDocumentPickerDelegate {
-                let onComplete: (Bool) -> Void
-                
-                init(onComplete: @escaping (Bool) -> Void) {
-                    self.onComplete = onComplete
-                }
-                
-                func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-                    onComplete(!urls.isEmpty)
-                }
-                
-                func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-                    onComplete(false)
-                }
-            }
-        }
     }
 
     private struct OverFullScreenPresenter<Overlay: View>: UIViewControllerRepresentable {
