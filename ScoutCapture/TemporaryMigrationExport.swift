@@ -647,6 +647,7 @@ enum TemporaryMigrationImportManager {
     private struct ZipEntry {
         let path: String
         let compressionMethod: UInt16
+        let crc32: UInt32
         let compressedSize: UInt32
         let uncompressedSize: UInt32
         let localHeaderOffset: UInt32
@@ -677,6 +678,7 @@ enum TemporaryMigrationImportManager {
         from archiveURL: URL,
         fileManager: FileManager = .default,
         userDefaults: UserDefaults = .standard,
+        restoreRoots: (applicationSupport: URL, documents: URL)? = nil,
         onPhaseUpdate: @escaping @Sendable (String) -> Void = { _ in }
     ) throws -> UUID? {
         onPhaseUpdate("Opening migration zip...")
@@ -711,8 +713,19 @@ enum TemporaryMigrationImportManager {
             }
         }
 
-        let applicationSupportRoot = StorageRoot.prepareStorage()
-        let documentsRoot = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        // Verify every payload we will restore before clearing the current installation.
+        // This also catches truncated files and unsupported ZIP entries up front.
+        for entry in entries where entry.path == userDefaultsPath ||
+            entry.path.hasPrefix(applicationSupportPrefix) ||
+            entry.path.hasPrefix(documentsPrefix) {
+            try validateEntryPayload(entry, from: zipFile)
+            if entry.path == userDefaultsPath {
+                _ = try validatedUserDefaultsValues(from: extractData(for: entry, from: zipFile))
+            }
+        }
+
+        let applicationSupportRoot = restoreRoots?.applicationSupport ?? StorageRoot.prepareStorage()
+        let documentsRoot = restoreRoots?.documents ?? fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
 
         onPhaseUpdate("Clearing local ScoutCapture data...")
         try clearDirectoryContentsIfPresent(at: applicationSupportRoot, fileManager: fileManager)
@@ -799,10 +812,7 @@ enum TemporaryMigrationImportManager {
         from data: Data,
         userDefaults: UserDefaults
     ) throws -> RestoredDefaultsPayload {
-        guard let rootObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let values = rootObject["values"] as? [String: Any] else {
-            throw ImportError.invalidArchiveStructure
-        }
+        let values = try validatedUserDefaultsValues(from: data)
 
         for (key, value) in values where shouldRestoreUserDefaultsKey(key) {
             userDefaults.set(decodedUserDefaultsValue(value), forKey: key)
@@ -811,6 +821,14 @@ enum TemporaryMigrationImportManager {
 
         let selectedPropertyID = (values["scoutcapture.selectedPropertyID"] as? String).flatMap(UUID.init(uuidString:))
         return RestoredDefaultsPayload(selectedPropertyID: selectedPropertyID)
+    }
+
+    private nonisolated static func validatedUserDefaultsValues(from data: Data) throws -> [String: Any] {
+        guard let rootObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let values = rootObject["values"] as? [String: Any] else {
+            throw ImportError.invalidArchiveStructure
+        }
+        return values
     }
 
     private nonisolated static func shouldRestoreUserDefaultsKey(_ key: String) -> Bool {
@@ -841,6 +859,7 @@ enum TemporaryMigrationImportManager {
 
     private nonisolated static func loadEntries(from file: FileHandle) throws -> [ZipEntry] {
         let fileSize = try file.seekToEnd()
+        guard fileSize >= 22 else { throw ImportError.unsupportedArchive }
         let tailLength = Int(min(UInt64(66_000), fileSize))
         try file.seek(toOffset: fileSize - UInt64(tailLength))
         guard let tailData = try file.read(upToCount: tailLength) else {
@@ -853,12 +872,22 @@ enum TemporaryMigrationImportManager {
         }
 
         let eocdOffset = eocdRange.lowerBound
+        guard eocdOffset + 22 <= tailData.count else {
+            throw ImportError.invalidArchiveStructure
+        }
         let centralDirectorySize: UInt32 = readLittleEndian(at: eocdOffset + 12, in: tailData)
         let centralDirectoryOffset: UInt32 = readLittleEndian(at: eocdOffset + 16, in: tailData)
         let totalEntryCount = Int(readLittleEndian(at: eocdOffset + 10, in: tailData) as UInt16)
 
+        let centralEnd = UInt64(centralDirectoryOffset) + UInt64(centralDirectorySize)
+        let eocdFileOffset = fileSize - UInt64(tailLength) + UInt64(eocdOffset)
+        guard centralEnd <= eocdFileOffset else {
+            throw ImportError.invalidArchiveStructure
+        }
+
         try file.seek(toOffset: UInt64(centralDirectoryOffset))
-        guard let centralDirectoryData = try file.read(upToCount: Int(centralDirectorySize)) else {
+        guard let centralDirectoryData = try file.read(upToCount: Int(centralDirectorySize)),
+              centralDirectoryData.count == Int(centralDirectorySize) else {
             throw ImportError.invalidArchiveStructure
         }
 
@@ -872,6 +901,7 @@ enum TemporaryMigrationImportManager {
             }
 
             let compressionMethod: UInt16 = readLittleEndian(at: cursor + 10, in: centralDirectoryData)
+            let crc32: UInt32 = readLittleEndian(at: cursor + 16, in: centralDirectoryData)
             let compressedSize: UInt32 = readLittleEndian(at: cursor + 20, in: centralDirectoryData)
             let uncompressedSize: UInt32 = readLittleEndian(at: cursor + 24, in: centralDirectoryData)
             let fileNameLength = Int(readLittleEndian(at: cursor + 28, in: centralDirectoryData) as UInt16)
@@ -881,25 +911,77 @@ enum TemporaryMigrationImportManager {
 
             let nameStart = cursor + 46
             let nameEnd = nameStart + fileNameLength
-            guard nameEnd <= centralDirectoryData.count else {
+            let next = nameEnd + extraFieldLength + commentLength
+            guard next <= centralDirectoryData.count else {
                 throw ImportError.invalidArchiveStructure
             }
 
-            let path = String(decoding: centralDirectoryData[nameStart..<nameEnd], as: UTF8.self)
+            guard let path = String(data: centralDirectoryData[nameStart..<nameEnd], encoding: .utf8) else {
+                throw ImportError.invalidArchiveStructure
+            }
             entries.append(
                 ZipEntry(
                     path: path,
                     compressionMethod: compressionMethod,
+                    crc32: crc32,
                     compressedSize: compressedSize,
                     uncompressedSize: uncompressedSize,
                     localHeaderOffset: localHeaderOffset
                 )
             )
 
-            cursor = nameEnd + extraFieldLength + commentLength
+            cursor = next
         }
 
+        guard entries.count == totalEntryCount, cursor == centralDirectoryData.count else {
+            throw ImportError.invalidArchiveStructure
+        }
         return entries
+    }
+
+    private nonisolated static func validateEntryPayload(_ entry: ZipEntry, from file: FileHandle) throws {
+        guard entry.compressionMethod == 0 else {
+            throw ImportError.unsupportedCompression(entry.path)
+        }
+        guard entry.compressedSize == entry.uncompressedSize else {
+            throw ImportError.invalidArchiveStructure
+        }
+
+        let dataOffset = try entryDataOffset(entry, from: file)
+        let fileSize = try file.seekToEnd()
+        guard dataOffset <= fileSize,
+              UInt64(entry.compressedSize) <= fileSize - dataOffset else {
+            throw ImportError.invalidArchiveStructure
+        }
+        try file.seek(toOffset: dataOffset)
+
+        var remaining = UInt64(entry.compressedSize)
+        var checksum: UInt32 = 0xFFFF_FFFF
+        while remaining > 0 {
+            guard let chunk = try file.read(upToCount: Int(min(remaining, 64 * 1024))),
+                  !chunk.isEmpty else {
+                throw ImportError.invalidArchiveStructure
+            }
+            remaining -= UInt64(chunk.count)
+            checksum = StoredZipArchive.updatingCRC32(checksum, with: chunk)
+        }
+        guard (checksum ^ 0xFFFF_FFFF) == entry.crc32 else {
+            throw ImportError.invalidArchiveStructure
+        }
+    }
+
+    private nonisolated static func entryDataOffset(_ entry: ZipEntry, from file: FileHandle) throws -> UInt64 {
+        try file.seek(toOffset: UInt64(entry.localHeaderOffset))
+        guard let localHeader = try file.read(upToCount: 30), localHeader.count == 30 else {
+            throw ImportError.invalidArchiveStructure
+        }
+        let signature: UInt32 = readLittleEndian(at: 0, in: localHeader)
+        guard signature == 0x04034B50 else {
+            throw ImportError.invalidArchiveStructure
+        }
+        let fileNameLength = UInt64(readLittleEndian(at: 26, in: localHeader) as UInt16)
+        let extraFieldLength = UInt64(readLittleEndian(at: 28, in: localHeader) as UInt16)
+        return UInt64(entry.localHeaderOffset) + 30 + fileNameLength + extraFieldLength
     }
 
     private nonisolated static func extractEntry(
@@ -924,19 +1006,7 @@ enum TemporaryMigrationImportManager {
             throw ImportError.unsupportedCompression(entry.path)
         }
 
-        try file.seek(toOffset: UInt64(entry.localHeaderOffset))
-        guard let localHeader = try file.read(upToCount: 30), localHeader.count == 30 else {
-            throw ImportError.invalidArchiveStructure
-        }
-
-        let signature: UInt32 = readLittleEndian(at: 0, in: localHeader)
-        guard signature == 0x04034B50 else {
-            throw ImportError.invalidArchiveStructure
-        }
-
-        let fileNameLength = UInt64(readLittleEndian(at: 26, in: localHeader) as UInt16)
-        let extraFieldLength = UInt64(readLittleEndian(at: 28, in: localHeader) as UInt16)
-        let dataOffset = UInt64(entry.localHeaderOffset) + 30 + fileNameLength + extraFieldLength
+        let dataOffset = try entryDataOffset(entry, from: file)
 
         try file.seek(toOffset: dataOffset)
         guard let data = try file.read(upToCount: Int(entry.compressedSize)),

@@ -225,12 +225,7 @@ enum StoredZipArchive {
             guard let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty else { return false }
             size += UInt64(chunk.count)
             guard size <= UInt64(UInt32.max) else { throw ArchiveError.exceedsZip32Limits }
-            for byte in chunk {
-                crc ^= UInt32(byte)
-                for _ in 0..<8 {
-                    crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
-                }
-            }
+            crc = updatingCRC32(crc, with: chunk)
             return true
         }) {}
         return (crc ^ 0xFFFF_FFFF, UInt32(size))
@@ -323,15 +318,19 @@ enum StoredZipArchive {
                 UInt16(((year - 1980) << 9) | (month << 5) | day))
     }
 
-    private static func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
+    nonisolated static func updatingCRC32(_ checksum: UInt32, with data: Data) -> UInt32 {
+        var crc = checksum
         for byte in data {
             crc ^= UInt32(byte)
             for _ in 0..<8 {
                 crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
             }
         }
-        return crc ^ 0xFFFF_FFFF
+        return crc
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        updatingCRC32(0xFFFF_FFFF, with: data) ^ 0xFFFF_FFFF
     }
 
     private nonisolated static func appendUInt16LE(_ value: UInt16, to data: inout Data) {
