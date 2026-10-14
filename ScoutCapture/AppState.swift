@@ -17304,35 +17304,12 @@ final class AppState: ObservableObject {
         do {
             let rows = try await fetchSessionSnapshotRows(snapshotID: nil, propertyID: propertyID, sessionID: sessionID)
             guard let row = rows.sorted(by: Self.sessionSnapshotUploadRowSort).first else {
-                let result = SessionSnapshotRestoreDiagnosticsResult(
+                let result = makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
                     checkedAt: checkedAt,
                     propertyID: propertyID,
                     sessionID: sessionID,
-                    snapshotID: nil,
-                    result: .noSnapshotFound,
-                    failureReason: "snapshot row not found",
-                    rowFound: false,
-                    objectReadable: false,
-                    checksumVerified: false,
-                    byteSizeMatches: false,
-                    rowObjectVerified: false,
-                    parentRemoteVerified: false,
-                    snapshotSchemaVersion: nil,
-                    snapshotCreatedAt: nil,
-                    snapshotGeneratedAt: nil,
-                    localSessionExists: false,
-                    localSessionStatus: nil,
-                    localShotCount: nil,
-                    localIssueCount: nil,
-                    localGuidedCount: nil,
-                    snapshotShotCount: nil,
-                    snapshotIssueCount: nil,
-                    snapshotGuidedCount: nil,
-                    snapshotMediaManifestCount: nil,
-                    snapshotMissingLocalOriginalsCount: nil,
-                    snapshotSupabaseStorageMetadataCount: nil,
-                    freshness: "unknown",
-                    mediaRecoveryDiagnostics: .notChecked
+                    outcome: .noSnapshotFound,
+                    failureReason: "snapshot row not found"
                 )
                 recordSessionSnapshotRestoreDiagnostics(result)
                 return result
@@ -17406,39 +17383,55 @@ final class AppState: ObservableObject {
             recordSessionSnapshotRestoreDiagnostics(result)
             return result
         } catch {
-            let result = SessionSnapshotRestoreDiagnosticsResult(
+            let result = makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
                 checkedAt: checkedAt,
                 propertyID: propertyID,
                 sessionID: sessionID,
-                snapshotID: nil,
-                result: .unableToVerify,
-                failureReason: "unable to verify snapshot restore diagnostics",
-                rowFound: false,
-                objectReadable: false,
-                checksumVerified: false,
-                byteSizeMatches: false,
-                rowObjectVerified: false,
-                parentRemoteVerified: false,
-                snapshotSchemaVersion: nil,
-                snapshotCreatedAt: nil,
-                snapshotGeneratedAt: nil,
-                localSessionExists: false,
-                localSessionStatus: nil,
-                localShotCount: nil,
-                localIssueCount: nil,
-                localGuidedCount: nil,
-                snapshotShotCount: nil,
-                snapshotIssueCount: nil,
-                snapshotGuidedCount: nil,
-                snapshotMediaManifestCount: nil,
-                snapshotMissingLocalOriginalsCount: nil,
-                snapshotSupabaseStorageMetadataCount: nil,
-                freshness: "unknown",
-                mediaRecoveryDiagnostics: .notChecked
+                outcome: .unableToVerify,
+                failureReason: "unable to verify snapshot restore diagnostics"
             )
             recordSessionSnapshotRestoreDiagnostics(result)
             return result
         }
+    }
+
+    private func makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
+        checkedAt: Date,
+        propertyID: UUID?,
+        sessionID: UUID?,
+        outcome: SessionSnapshotRestoreDiagnosticOutcome,
+        failureReason: String
+    ) -> SessionSnapshotRestoreDiagnosticsResult {
+        SessionSnapshotRestoreDiagnosticsResult(
+            checkedAt: checkedAt,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotID: nil,
+            result: outcome,
+            failureReason: failureReason,
+            rowFound: false,
+            objectReadable: false,
+            checksumVerified: false,
+            byteSizeMatches: false,
+            rowObjectVerified: false,
+            parentRemoteVerified: false,
+            snapshotSchemaVersion: nil,
+            snapshotCreatedAt: nil,
+            snapshotGeneratedAt: nil,
+            localSessionExists: false,
+            localSessionStatus: nil,
+            localShotCount: nil,
+            localIssueCount: nil,
+            localGuidedCount: nil,
+            snapshotShotCount: nil,
+            snapshotIssueCount: nil,
+            snapshotGuidedCount: nil,
+            snapshotMediaManifestCount: nil,
+            snapshotMissingLocalOriginalsCount: nil,
+            snapshotSupabaseStorageMetadataCount: nil,
+            freshness: "unknown",
+            mediaRecoveryDiagnostics: .notChecked
+        )
     }
 
     @discardableResult
