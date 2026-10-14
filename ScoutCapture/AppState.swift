@@ -14778,12 +14778,25 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.checksumGenerationFailed
         }
 
-        let envelope = SessionSnapshotEnvelope(
+        let envelope = Self.makeSessionSnapshotEnvelope(
             id: sessionID,
+            payload: payload,
+            payloadData: payloadData
+        )
+        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private static func makeSessionSnapshotEnvelope(
+        id: UUID,
+        payload: SessionSnapshotPayloadForChecksum,
+        payloadData: Data
+    ) -> SessionSnapshotEnvelope {
+        SessionSnapshotEnvelope(
+            id: id,
             snapshotSchemaVersion: payload.snapshotSchemaVersion,
             sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
-            trigger: trigger,
-            generatedAt: generatedAt,
+            trigger: payload.trigger,
+            generatedAt: payload.generatedAt,
             appVersion: payload.appVersion,
             sourceDeviceID: payload.sourceDeviceID,
             orgID: payload.orgID,
@@ -14804,14 +14817,13 @@ final class AppState: ObservableObject {
             mediaManifestCount: payload.mediaManifestCount,
             missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
             supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
+            rawSessionJSON: payload.rawSessionJSON,
+            rawSessionJSONSHA256: payload.rawSessionJSONSHA256,
             snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: enrichedRawData.count,
+            rawSessionJSONByteCount: payload.rawSessionJSONByteCount,
             snapshotPayloadByteCount: payloadData.count,
-            mediaManifest: manifest
+            mediaManifest: payload.mediaManifest
         )
-        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
     }
 
     private func makeSessionSnapshotBuildResult(
@@ -45992,38 +46004,10 @@ final class AppState: ObservableObject {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
         let payloadData = try encoder.encode(payload)
-        let envelope = SessionSnapshotEnvelope(
+        let envelope = Self.makeSessionSnapshotEnvelope(
             id: sessionID,
-            snapshotSchemaVersion: payload.snapshotSchemaVersion,
-            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
-            trigger: payload.trigger,
-            generatedAt: payload.generatedAt,
-            appVersion: payload.appVersion,
-            sourceDeviceID: payload.sourceDeviceID,
-            orgID: payload.orgID,
-            propertyID: payload.propertyID,
-            sessionID: payload.sessionID,
-            sessionType: payload.sessionType,
-            status: payload.status,
-            isSealed: payload.isSealed,
-            exportedAt: payload.exportedAt,
-            firstDeliveredAt: payload.firstDeliveredAt,
-            reExportExpiresAt: payload.reExportExpiresAt,
-            actor: payload.actor,
-            capturedBy: payload.capturedBy,
-            uploadedBy: payload.uploadedBy,
-            shotCount: payload.shotCount,
-            issueCount: payload.issueCount,
-            guidedCount: payload.guidedCount,
-            mediaManifestCount: payload.mediaManifestCount,
-            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
-            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
-            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: rawData.count,
-            snapshotPayloadByteCount: payloadData.count,
-            mediaManifest: manifest
+            payload: payload,
+            payloadData: payloadData
         )
         return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
     }
