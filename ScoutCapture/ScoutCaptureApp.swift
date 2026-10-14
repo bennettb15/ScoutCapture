@@ -15053,7 +15053,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneDetailNoteOverlay: some View {
-        FastLaneDetailNoteModal(
+        DetailNoteModal(
             elevation: fastMetadataContext.elevation,
             detailType: fastMetadataContext.detailType,
             existingNote: fastMetadataContext.detailNote ?? "",
@@ -21481,7 +21481,7 @@ private struct FastLaneManageBuildingsSheet: View {
     }
 }
 
-private struct FastLaneDetailNoteModal: View {
+struct DetailNoteModal: View {
     let elevation: String
     let detailType: String
     let existingNote: String
