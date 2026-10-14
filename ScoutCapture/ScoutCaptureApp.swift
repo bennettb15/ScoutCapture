@@ -4817,7 +4817,7 @@ struct SessionHubView: View {
         if let sourceCGImage {
             print("[Stamp] before encode pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
         }
-        let image = normalizedPendingUprightCGImage(from: sourceData)
+        let image = normalizedScoutUprightCGImage(from: sourceData)
             ?? sourceCGImage
         guard let image else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
@@ -4836,7 +4836,7 @@ struct SessionHubView: View {
         exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
         exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
         exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifUserComment] = pendingStructuredComment(
+        exif[kCGImagePropertyExifUserComment] = scoutStructuredMetadataComment(
             captureTime: captureTime,
             metadataContext: metadataContext
         )
@@ -4862,7 +4862,7 @@ struct SessionHubView: View {
             mergedProps[kCGImagePropertyTIFFDictionary] = tiff
             var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
             iptc[kCGImagePropertyIPTCCaptionAbstract] = caption
-            iptc[kCGImagePropertyIPTCKeywords] = pendingKeywordList(metadataContext: metadataContext)
+            iptc[kCGImagePropertyIPTCKeywords] = scoutMetadataKeywords(metadataContext: metadataContext)
             mergedProps[kCGImagePropertyIPTCDictionary] = iptc
         }
 
@@ -4940,7 +4940,7 @@ struct SessionHubView: View {
             captureMode: shot.captureMode,
             lens: shot.lens,
             orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
-            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? pendingParseExifOrientationRaw(from: shot.orientation),
+            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseScoutExifOrientationRaw(from: shot.orientation),
             latitude: shot.latitude,
             longitude: shot.longitude,
             accuracyMeters: shot.accuracyMeters,
@@ -4949,81 +4949,6 @@ struct SessionHubView: View {
             deviceModel: UIDevice.current.model,
             schemaVersion: schemaVersion
         )
-    }
-
-    private func pendingParseExifOrientationRaw(from orientation: String?) -> UInt32? {
-        let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        if let direct = UInt32(trimmed), direct >= 1, direct <= 8 {
-            return direct
-        }
-        let prefix = "exif:"
-        if trimmed.lowercased().hasPrefix(prefix),
-           let value = UInt32(trimmed.dropFirst(prefix.count)),
-           value >= 1, value <= 8 {
-            return value
-        }
-        return nil
-    }
-
-    private func pendingStructuredComment(
-        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) -> String {
-        var pairs: [String] = []
-        func append(_ key: String, _ value: String?) {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                pairs.append("\(key)=\(trimmed)")
-            }
-        }
-        append("propertyID", metadataContext.propertyID?.uuidString)
-        append("propertyName", metadataContext.propertyName)
-        append("propertyAddress", metadataContext.propertyAddress)
-        append("sessionID", metadataContext.sessionID?.uuidString)
-        append("shotID", metadataContext.shotID?.uuidString)
-        append("shotKey", metadataContext.shotKey)
-        append("building", metadataContext.building)
-        append("elevation", metadataContext.elevation)
-        append("detailType", metadataContext.detailType)
-        append("angleIndex", metadataContext.angleIndex.map(String.init))
-        append("captureMode", metadataContext.captureMode)
-        append("lens", metadataContext.lens)
-        append("orientation", metadataContext.orientation)
-        append("trade", metadataContext.trade)
-        append("priority", metadataContext.priority)
-        append("captureDateLocal", captureTime.localDateTimeString)
-        append("captureDateISO8601", captureTime.iso8601WithOffset)
-        if let accuracy = metadataContext.accuracyMeters {
-            append("gpsAccuracyMeters", String(format: "%.3f", accuracy))
-        }
-        return pairs.joined(separator: ";")
-    }
-
-    private func pendingKeywordList(metadataContext: ReportLibraryModel.EmbeddedMetadataContext) -> [String] {
-        var keywords: [String] = ["SCOUT"]
-        let values = [
-            metadataContext.propertyName,
-            metadataContext.building,
-            metadataContext.elevation,
-            metadataContext.detailType,
-            metadataContext.trade,
-            metadataContext.priority
-        ]
-        for value in values {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                keywords.append(trimmed)
-            }
-        }
-        keywords.append(metadataContext.isGuided == true ? "Guided" : "Free")
-        if metadataContext.isFlagged == true {
-            keywords.append("Flagged")
-        }
-        if let angle = metadataContext.angleIndex {
-            keywords.append("Angle \(angle)")
-        }
-        return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
     }
 
     private func makePendingGPSDictionary(
@@ -5047,20 +4972,6 @@ struct SessionHubView: View {
     }
 
 
-
-    private func normalizedPendingUprightCGImage(from sourceData: Data) -> CGImage? {
-        guard let uiImage = UIImage(data: sourceData) else { return nil }
-        let size = uiImage.size
-        guard size.width > 0, size.height > 0 else { return nil }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        format.scale = 1
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            uiImage.draw(in: CGRect(origin: .zero, size: size))
-        }
-        return rendered.cgImage
-    }
 
     private func drawPendingStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
         guard !lines.isEmpty else { return image }
@@ -23917,6 +23828,99 @@ struct PropertySessionView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
+}
+
+@MainActor
+func parseScoutExifOrientationRaw(from orientation: String?) -> UInt32? {
+    let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !trimmed.isEmpty else { return nil }
+    if let direct = UInt32(trimmed), direct >= 1, direct <= 8 {
+        return direct
+    }
+    let prefix = "exif:"
+    if trimmed.lowercased().hasPrefix(prefix),
+       let value = UInt32(trimmed.dropFirst(prefix.count)),
+       value >= 1, value <= 8 {
+        return value
+    }
+    return nil
+}
+
+@MainActor
+func scoutStructuredMetadataComment(
+    captureTime: ReportLibraryModel.EmbeddedCaptureTime,
+    metadataContext: ReportLibraryModel.EmbeddedMetadataContext
+) -> String {
+    var pairs: [String] = []
+    func append(_ key: String, _ value: String?) {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            pairs.append("\(key)=\(trimmed)")
+        }
+    }
+    append("propertyID", metadataContext.propertyID?.uuidString)
+    append("propertyName", metadataContext.propertyName)
+    append("propertyAddress", metadataContext.propertyAddress)
+    append("sessionID", metadataContext.sessionID?.uuidString)
+    append("shotID", metadataContext.shotID?.uuidString)
+    append("shotKey", metadataContext.shotKey)
+    append("building", metadataContext.building)
+    append("elevation", metadataContext.elevation)
+    append("detailType", metadataContext.detailType)
+    append("angleIndex", metadataContext.angleIndex.map(String.init))
+    append("captureMode", metadataContext.captureMode)
+    append("lens", metadataContext.lens)
+    append("orientation", metadataContext.orientation)
+    append("trade", metadataContext.trade)
+    append("priority", metadataContext.priority)
+    append("captureDateLocal", captureTime.localDateTimeString)
+    append("captureDateISO8601", captureTime.iso8601WithOffset)
+    if let accuracy = metadataContext.accuracyMeters {
+        append("gpsAccuracyMeters", String(format: "%.3f", accuracy))
+    }
+    return pairs.joined(separator: ";")
+}
+
+@MainActor
+func scoutMetadataKeywords(metadataContext: ReportLibraryModel.EmbeddedMetadataContext) -> [String] {
+    var keywords: [String] = ["SCOUT"]
+    let values = [
+        metadataContext.propertyName,
+        metadataContext.building,
+        metadataContext.elevation,
+        metadataContext.detailType,
+        metadataContext.trade,
+        metadataContext.priority
+    ]
+    for value in values {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            keywords.append(trimmed)
+        }
+    }
+    keywords.append(metadataContext.isGuided == true ? "Guided" : "Free")
+    if metadataContext.isFlagged == true {
+        keywords.append("Flagged")
+    }
+    if let angle = metadataContext.angleIndex {
+        keywords.append("Angle \(angle)")
+    }
+    return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
+}
+
+@MainActor
+func normalizedScoutUprightCGImage(from sourceData: Data) -> CGImage? {
+    guard let uiImage = UIImage(data: sourceData) else { return nil }
+    let size = uiImage.size
+    guard size.width > 0, size.height > 0 else { return nil }
+
+    let format = UIGraphicsImageRendererFormat.default()
+    format.opaque = true
+    format.scale = 1
+    let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+        uiImage.draw(in: CGRect(origin: .zero, size: size))
+    }
+    return rendered.cgImage
 }
 
 @MainActor
