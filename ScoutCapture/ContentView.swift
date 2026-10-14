@@ -45,43 +45,6 @@ extension UIScreen {
 
 // MARK: - UIKit label button (native text rendering + reliable hit testing)
 
-private struct UIKitCircleTextButton: UIViewRepresentable {
-
-    let title: String
-    let isActive: Bool
-    let size: CGFloat
-    let action: () -> Void
-
-    func makeUIView(context: Context) -> UIButton {
-        let button = UIButton(type: .system)
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .medium)
-        button.titleLabel?.adjustsFontForContentSizeCategory = true
-        button.addTarget(context.coordinator, action: #selector(Coordinator.tapped), for: .touchUpInside)
-        button.backgroundColor = .clear
-        button.clipsToBounds = true
-        return button
-    }
-
-    func updateUIView(_ button: UIButton, context: Context) {
-        context.coordinator.action = action
-        button.setTitle(title, for: .normal)
-
-        let fg = isActive ? UIColor.black : UIColor(white: 1.0, alpha: 0.92)
-        button.setTitleColor(fg, for: .normal)
-
-        button.layer.cornerRadius = size / 2.0
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    final class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action }
-        @objc func tapped() { action() }
-    }
-}
 
 // MARK: - Camera-style glass circle (darker, liquid-glass rim)
 
@@ -421,44 +384,6 @@ final class ReportLibraryModel: ObservableObject {
         var schemaVersion: Int?
     }
 
-    static func stampedMetadataContext(
-        propertyID: UUID,
-        propertyName: String,
-        propertyAddress: String?,
-        sessionID: UUID,
-        shot: ShotMetadata,
-        schemaVersion: Int
-    ) -> EmbeddedMetadataContext {
-        EmbeddedMetadataContext(
-            propertyID: propertyID,
-            propertyName: propertyName,
-            propertyAddress: propertyAddress,
-            sessionID: sessionID,
-            shotID: shot.shotID,
-            shotKey: shot.shotKey,
-            building: shot.building,
-            elevation: shot.elevation,
-            detailType: shot.detailType,
-            angleIndex: shot.angleIndex,
-            trade: shot.trade,
-            priority: shot.priority,
-            isGuided: shot.isGuided,
-            isFlagged: shot.isFlagged,
-            issueStatus: shot.issueStatus,
-            detailNote: shot.noteText,
-            captureMode: shot.captureMode,
-            lens: shot.lens,
-            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
-            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseScoutExifOrientationRaw(from: shot.orientation),
-            latitude: shot.latitude,
-            longitude: shot.longitude,
-            accuracyMeters: shot.accuracyMeters,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            osVersion: UIDevice.current.systemVersion,
-            deviceModel: UIDevice.current.model,
-            schemaVersion: schemaVersion
-        )
-    }
 
     static func sourceExifOrientationRaw(from data: Data) -> UInt32? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -3627,20 +3552,6 @@ struct ContentView: View {
         }
     }
 
-    private static func priorityShortLabel(_ priority: String?) -> String {
-        switch normalizedPriority(priority) {
-        case "Critical":
-            return "C"
-        case "High":
-            return "H"
-        case "Medium":
-            return "M"
-        case "Low":
-            return "L"
-        default:
-            return ""
-        }
-    }
 
     @State private var currentCaptureIntent: CaptureIntent = .free
 
@@ -3688,10 +3599,7 @@ struct ContentView: View {
     
     @State private var debugEnabled: Bool = UserDefaults.standard.bool(forKey: "scout.debug.enabled.v1")
     
-    private func setDebugEnabled(_ enabled: Bool) {
-        debugEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "scout.debug.enabled.v1")
-    }
+
     
     @State private var showDetailOverlay: Bool = false
     @State private var draftDetailNote: String = ""
@@ -5138,26 +5046,6 @@ struct ContentView: View {
         return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
-    private func resolveGuidedReferencePathForDisplay(
-        propertyID: UUID,
-        guidedShot: GuidedShot,
-        currentSession: Session?,
-        baselineSessionID: UUID?
-    ) -> String? {
-        let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
-        var metadataCache: [UUID: SessionMetadata] = [:]
-        let resolved = resolveGuidedRetakeReferenceForDisplay(
-            propertyID: propertyID,
-            currentSession: currentSession,
-            baselineSessionID: baselineSessionID,
-            guidedShot: guidedShot,
-            orderedSessions: orderedSessions,
-            metadataCache: &metadataCache
-        )
-        guard resolved.source != .current else { return nil }
-        guard let path = resolved.path, resolved.exists else { return nil }
-        return path
-    }
 
     private struct ArmedReferenceViewerState: Identifiable {
         let id = UUID()
@@ -5178,16 +5066,6 @@ struct ContentView: View {
         case none
     }
 
-    private struct GuidedThumbResolution {
-        let sourceChosen: GuidedThumbSource
-        let chosenPath: String?
-        let referencePath: String?
-        let referenceExists: Bool
-        let originalPath: String?
-        let originalExists: Bool
-        let stampedPath: String?
-        let stampedExists: Bool
-    }
 
     private struct GuidedSessionThumbnailResolution {
         let source: GuidedThumbSource
@@ -5250,43 +5128,7 @@ struct ContentView: View {
         return formatter.string(from: date)
     }
 
-    private static func observationHistoryEventTitle(_ event: ObservationHistoryEvent) -> String {
-        switch event.kind {
-        case .created:
-            return "Created"
-        case .captured:
-            return "Captured"
-        case .retake:
-            return "Retake"
-        case .reclassified:
-            return "Reclassified"
-        case .resolved:
-            return "Resolved"
-        case .pendingReview:
-            return "Pending Review"
-        case .reopened:
-            return "Reopened"
-        case .reasonUpdated:
-            return "Reason Updated"
-        case .titleUpdated:
-            return "Title Updated"
-        }
-    }
 
-    private static func observationHistoryEventSummary(_ event: ObservationHistoryEvent) -> String? {
-        let before = event.beforeValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let after = event.afterValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !before.isEmpty && !after.isEmpty {
-            return "\(before) -> \(after)"
-        }
-        if !after.isEmpty {
-            return after
-        }
-        if !before.isEmpty {
-            return before
-        }
-        return nil
-    }
 
     private static func observationContextValue(building: String?, elevation: String?, detailType: String?) -> String? {
         let value = conciseContextLabel(building: building, elevation: elevation, detailType: detailType)
@@ -5368,80 +5210,6 @@ struct ContentView: View {
         try? fm.startDownloadingUbiquitousItem(at: url)
     }
 
-    private static func resolveGuidedThumbnail(
-        guidedShot: GuidedShot,
-        isCapturedInCurrentSession: Bool,
-        propertyHasBaseline: Bool
-    ) -> GuidedThumbResolution {
-        let fm = FileManager.default
-
-        let rawReferencePath = guidedShot.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let rawReferenceID = guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let referenceCandidates = [rawReferencePath, rawReferenceID].filter { !$0.isEmpty }
-        let firstExistingReference = referenceCandidates.first(where: { fm.fileExists(atPath: $0) })
-        let referencePath = firstExistingReference ?? referenceCandidates.first
-        let referenceExists = referencePath.map { fm.fileExists(atPath: $0) } ?? false
-
-        let rawShotPath = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let shotPath = rawShotPath.isEmpty ? nil : rawShotPath
-        let shotExt = shotPath.map { URL(fileURLWithPath: $0).pathExtension.lowercased() } ?? ""
-        let isStampedPath = shotExt == "jpg" || shotExt == "jpeg"
-        let stampedPath = isStampedPath ? shotPath : nil
-        let originalPath = isStampedPath ? nil : shotPath
-        let stampedExists = stampedPath.map { fm.fileExists(atPath: $0) } ?? false
-        let originalExists = originalPath.map { fm.fileExists(atPath: $0) } ?? false
-
-        if isCapturedInCurrentSession {
-            if stampedExists {
-                return GuidedThumbResolution(
-                    sourceChosen: .stamped,
-                    chosenPath: stampedPath,
-                    referencePath: referencePath,
-                    referenceExists: referenceExists,
-                    originalPath: originalPath,
-                    originalExists: originalExists,
-                    stampedPath: stampedPath,
-                    stampedExists: stampedExists
-                )
-            }
-            if originalExists {
-                return GuidedThumbResolution(
-                    sourceChosen: .original,
-                    chosenPath: originalPath,
-                    referencePath: referencePath,
-                    referenceExists: referenceExists,
-                    originalPath: originalPath,
-                    originalExists: originalExists,
-                    stampedPath: stampedPath,
-                    stampedExists: stampedExists
-                )
-            }
-        }
-
-        if propertyHasBaseline, referenceExists {
-            return GuidedThumbResolution(
-                sourceChosen: .reference,
-                chosenPath: referencePath,
-                referencePath: referencePath,
-                referenceExists: referenceExists,
-                originalPath: originalPath,
-                originalExists: originalExists,
-                stampedPath: stampedPath,
-                stampedExists: stampedExists
-            )
-        }
-
-        return GuidedThumbResolution(
-            sourceChosen: .none,
-            chosenPath: nil,
-            referencePath: referencePath,
-            referenceExists: referenceExists,
-            originalPath: originalPath,
-            originalExists: originalExists,
-            stampedPath: stampedPath,
-            stampedExists: stampedExists
-        )
-    }
 
     private static func resolveLegacyAssetPath(for identifier: String) -> String? {
         let fm = FileManager.default
@@ -5640,36 +5408,6 @@ struct ContentView: View {
         !isCaptureTargetArmed
     }
 
-    private func buildingSelectorOverlay() -> some View {
-        Button {
-            showLandscapeElevationMenu = false
-            showLandscapeDetailMenu = false
-            showLandscapeBuildingMenu.toggle()
-        } label: {
-            HStack(spacing: 6) {
-                Text(selectedBuilding)
-                    .font(.system(size: 12, weight: .semibold))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
-            }
-            .foregroundColor(.white.opacity(0.92))
-            .padding(.horizontal, 10)
-            .frame(height: 26)
-            .background(
-                ZStack {
-                    Color.black.opacity(0.55)
-                    Color.white.opacity(0.08)
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(isCaptureTargetArmed)
-    }
 
     private func elevationPillLabel() -> String {
         if locationMode == .interior { return "Interior" }
@@ -5849,67 +5587,9 @@ struct ContentView: View {
         }
     }
     
-    private func debugOverlayInline() -> some View {
-        Group {
-            if !debugEnabled {
-                EmptyView()
-            } else {
-                let actualDigits = camera.debugMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let targetClean = camera.debugTargetMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let actualText = actualDigits.isEmpty ? "--" : "\(actualDigits)MP"
-                
-                let targetCore = targetClean.hasPrefix("T") ? targetClean : ("T" + targetClean)
-                let targetText = (targetClean.isEmpty || targetClean == "T--") ? "T--" : "\(targetCore)MP"
-                
-                HStack(spacing: 6) {
-                    Text(actualText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.yellow)
-                    
-                    Text(targetText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.yellow.opacity(0.80))
-                }
-            }
-        }
-    }
+
     
-    private func debugOverlayStacked() -> some View {
-        Group {
-            if !debugEnabled {
-                EmptyView()
-            } else {
-                let actualDigits = camera.debugMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let targetClean = camera.debugTargetMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let actualText = actualDigits.isEmpty ? "--" : "\(actualDigits)MP"
-                
-                let targetCore = targetClean.hasPrefix("T") ? targetClean : ("T" + targetClean)
-                let targetText = (targetClean.isEmpty || targetClean == "T--") ? "T--" : "\(targetCore)MP"
-                
-                VStack(spacing: 2) {
-                    Text(actualText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.yellow)
-                    
-                    Text(targetText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.yellow.opacity(0.80))
-                }
-            }
-        }
-    }
+
     
     private func refreshBottomGlyphRotation() {
         if isSwappingCamera {
@@ -6115,10 +5795,6 @@ struct ContentView: View {
         let profile: CaptureProfile
     }
 
-    private enum ReportEditorMode {
-        case editCurrent
-        case newReport
-    }
 
     private func showHDToast(_ text: String, duration: Double = 2.0) {
         hdEnabledToastToken += 1
@@ -7333,24 +7009,6 @@ struct ContentView: View {
         return trimmed.isEmpty ? "Shot" : trimmed
     }
 
-    private func metadataFilterButton(size: CGFloat) -> some View {
-        Button {
-            guard isMetadataFilterAvailable else { return }
-            presentMetadataFilter()
-        } label: {
-            Circle()
-                .fill(Color.black.opacity(isMetadataFilterAvailable ? 0.48 : 0.30))
-                .frame(width: size, height: size)
-                .overlay(
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
-                        .foregroundColor(.white.opacity(isMetadataFilterAvailable ? 0.92 : 0.55))
-                )
-        }
-        .buttonStyle(.plain)
-        .frame(width: size, height: size)
-        .disabled(!isMetadataFilterAvailable)
-    }
 
     private func endSessionControl() -> some View {
         Button {
@@ -7614,12 +7272,6 @@ struct ContentView: View {
         .accessibilityLabel(captureProfile == .residential ? "Residential capture mode" : "Commercial capture mode")
     }
 
-    private func detailTypeSelectionBinding() -> Binding<String> {
-        Binding(
-            get: { detailTypesModel.selected(for: locationMode, profile: captureProfile) },
-            set: { detailTypesModel.setSelected($0, for: locationMode, profile: captureProfile) }
-        )
-    }
 
     private var tradePickerOptions: [String] {
         let current = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -8901,118 +8553,11 @@ extension ContentView {
     
     // MARK: - Lens toast control
     
-    private func showLensToastNow(_ text: String) {
-        lensToastToken += 1
-        let token = lensToastToken
-        
-        lensToastText = text
-        showLensToast = true
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            guard token == lensToastToken else { return }
-            showLensToast = false
-        }
-    }
+
     
     // MARK: - UI pieces
     
-    @ViewBuilder
-    private func landscapeDropdownStack() -> some View {
-        let controlH: CGFloat = 36
-        let controlW: CGFloat = 190
-        
-        let elevationLabel = elevationPillLabel()
-        let detailLabel = currentDetailType.isEmpty ? "Select" : currentDetailType
-        
-        VStack(alignment: .leading, spacing: 10) {
-            
-            // Elevation dropdown (compact) - custom (opens centered overlay)
-            Button {
-                showLandscapeBuildingMenu = false
-                // Only allow elevation picking in exterior mode
-                if locationMode == .interior {
-                    return
-                }
-                showLandscapeDetailMenu = false
-                showLandscapeElevationMenu.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(elevationLabel)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.95))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
 
-                    if shouldShowElevationAlignmentDot {
-                        Circle()
-                            .fill(isElevationHeadingAligned ? Color.green : Color.white)
-                            .frame(width: 8, height: 8)
-                            .allowsHitTesting(false)
-                    }
-                    
-                    Spacer(minLength: 0)
-                    
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.90))
-                }
-                .padding(.horizontal, 12)
-                .frame(width: controlW, height: controlH, alignment: .center)
-                .background(
-                    ZStack {
-                        Color.black.opacity(0.65)
-                        Color.white.opacity(0.08)
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(locationMode == .interior || isCaptureTargetArmed)
-            
-            // Detail type dropdown (compact) - custom (opens centered overlay)
-            Button {
-                showLandscapeBuildingMenu = false
-                showLandscapeElevationMenu = false
-                showLandscapeDetailMenu.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(detailLabel)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.95))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                    
-                    Spacer(minLength: 0)
-                    
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.90))
-                }
-                .padding(.horizontal, 12)
-                .frame(width: controlW, height: controlH, alignment: .center)
-                .background(
-                    ZStack {
-                        Color.black.opacity(0.65)
-                        Color.white.opacity(0.08)
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.22), lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(isCaptureTargetArmed)
-        }
-        .transaction { tx in
-            tx.animation = nil
-        }
-    }
     
     // MARK: - Centered custom overlays for landscape dropdowns
     
@@ -9630,14 +9175,6 @@ extension ContentView {
         return true
     }
 
-    private func performArmedReferenceRetake() {
-        if let guidedID = armedGuidedShotID,
-           let guided = guidedShots.first(where: { $0.id == guidedID }) {
-            armGuidedRetake(guided)
-            return
-        }
-        // Flagged captures are already armed for replacement; no extra mode switch needed.
-    }
 
     private func topLeftPreviewPlaceholders() -> some View {
         VStack(spacing: 2) {
@@ -9727,23 +9264,6 @@ extension ContentView {
         .frame(width: hitArea, height: hitArea)
     }
 
-    private func placeholderQuickButton(
-        systemName: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        let hitArea: CGFloat = 44
-        let symbolSize: CGFloat = 22
-        return Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: symbolSize, weight: .medium))
-                .foregroundColor(.white.opacity(0.75))
-                .rotationEffect(bottomGlyphRotationAngle)
-            .frame(width: hitArea, height: hitArea)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .frame(width: hitArea, height: hitArea)
-    }
 
     private func guidedCompassButton(action: @escaping () -> Void) -> some View {
         let hitArea: CGFloat = 44
@@ -10040,16 +9560,7 @@ extension ContentView {
         }
     }
     
-    private func directionSlider() -> some View {
-        let selection = Binding<ContentView.Direction>(
-            get: { ContentView.Direction.fromElevation(elevation) },
-            set: { elevation = $0.elevationValue }
-        )
-        
-        return DirectionSegmentedControl(selection: selection)
-            .frame(maxWidth: .infinity)
-            .frame(height: 56)
-    }
+
     
     private struct DirectionSegmentedControl: UIViewRepresentable {
         
@@ -10147,74 +9658,7 @@ extension ContentView {
     }
     
     
-    private func rightButtonsCluster() -> some View {
-        let r: CGFloat = 24
-        let gap: CGFloat = 14
-        let xOffset: CGFloat = (r + gap)
-        
-        func circleIconButton(
-            systemName: String,
-            selected: Bool,
-            showsFlaggedReasonGlyph: Bool = false,
-            badgeSystemName: String? = nil,
-            action: @escaping () -> Void
-        ) -> some View {
-            Button(action: action) {
-                ZStack {
-                    Circle()
-                        .fill(selected ? Color.white : Color.white.opacity(0.18))
-                        .frame(width: 52, height: 52)
 
-                    if showsFlaggedReasonGlyph {
-                        FlaggedReasonGlyph(
-                            size: 52,
-                            foregroundColor: selected ? .black : .white,
-                            markColor: selected ? .white : .black.opacity(0.86)
-                        )
-                    } else {
-                        Image(systemName: systemName)
-                            .font(.system(size: proportionalCircleGlyphSize(for: 52), weight: .medium))
-                            .foregroundColor(selected ? .black : .white)
-                    }
-
-                    if let badgeSystemName {
-                        Image(systemName: badgeSystemName)
-                            .font(.system(size: 10, weight: .black))
-                            .foregroundColor(selected ? .red : .white)
-                            .offset(x: 10, y: -10)
-                    }
-                }
-                .contentShape(Circle())
-                .frame(width: 52, height: 52)
-            }
-            .buttonStyle(.plain)
-        }
-        
-        let lastAsset = reportLibrary.assets.last
-        let isFlaggedNoteMode = armedUpdateObservationID != nil
-        
-        return ZStack {
-            circleIconButton(
-                systemName: "flag.fill",
-                selected: hasDetailNote || isFlaggedNoteMode,
-                showsFlaggedReasonGlyph: true
-            ) {
-                draftDetailNote = detailNote
-                showDetailOverlay = true
-            }
-            .disabled(armedUpdateObservationID != nil)
-            .offset(x: -xOffset, y: 0)
-            
-            RecentAlbumPreviewCircleButton(
-                lastAsset: lastAsset,
-                size: 52,
-                action: { showLibraryFullscreen = true },
-                cache: imageCache,
-                refreshToken: gridThumbnailRefreshToken
-            )
-            .offset(x: xOffset, y: 0)
-        }
-    }
     
     private func fireQuickButtonHaptic() {
         quickButtonHaptic.impactOccurred()
@@ -12162,90 +11606,7 @@ extension ContentView {
         }
     }
 
-    private func reassignGuidedShot(_ source: GuidedShot, to targetID: UUID) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        guard source.id != targetID else { return }
 
-        do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            guard let sourceIndex = allGuidedShots.firstIndex(where: { $0.id == source.id }),
-                  let targetIndex = allGuidedShots.firstIndex(where: { $0.id == targetID }) else { return }
-
-            let sourceShot = allGuidedShots[sourceIndex].shot
-            let sourceCompleted = allGuidedShots[sourceIndex].isCompleted
-            let sourceReferenceID = allGuidedShots[sourceIndex].referenceImageLocalIdentifier
-            let sourceReferencePath = allGuidedShots[sourceIndex].referenceImagePath
-            let now = Date()
-
-            allGuidedShots[targetIndex].shot = sourceShot
-            allGuidedShots[targetIndex].isCompleted = sourceCompleted
-            allGuidedShots[targetIndex].skipReason = nil
-            allGuidedShots[targetIndex].skipReasonNote = nil
-            allGuidedShots[targetIndex].skipSessionID = nil
-            if let sourceShot {
-                allGuidedShots[targetIndex].referenceImageLocalIdentifier = sourceShot.imageLocalIdentifier ?? sourceReferenceID
-                allGuidedShots[targetIndex].referenceImagePath = sourceShot.imageLocalIdentifier ?? sourceReferencePath
-            }
-            allGuidedShots[targetIndex].reassignedFromGuidedShotID = source.id
-            allGuidedShots[targetIndex].reassignedAt = now
-            allGuidedShots[targetIndex].reassignedInSessionID = sessionID
-
-            allGuidedShots[sourceIndex].shot = nil
-            allGuidedShots[sourceIndex].isCompleted = false
-            allGuidedShots[sourceIndex].skipReason = nil
-            allGuidedShots[sourceIndex].skipReasonNote = nil
-            allGuidedShots[sourceIndex].skipSessionID = nil
-            allGuidedShots[sourceIndex].reassignedToGuidedShotID = targetID
-            allGuidedShots[sourceIndex].reassignedAt = now
-            allGuidedShots[sourceIndex].reassignedInSessionID = sessionID
-
-            if armedGuidedShotID == source.id {
-                clearGuidedAndRetakeArming()
-                retakeContext = nil
-                currentCaptureIntent = .free
-                guidedReferenceAssetLocalID = nil
-                guidedReferenceThumbnail = nil
-                showGuidedAlignmentOverlay = false
-            }
-
-            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            refreshGuidedShots()
-            guidedThumbnailRefreshToken = UUID()
-            refreshSessionActionsSummaryIfVisible()
-        } catch {
-            print("Failed to reassign guided shot: \(error)")
-        }
-    }
-
-    private func updateGuidedShotLabel(_ guidedShot: GuidedShot, detailLabel: String) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        let trimmed = detailLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            guard let idx = allGuidedShots.firstIndex(where: { $0.id == guidedShot.id }) else { return }
-            allGuidedShots[idx].detailType = trimmed
-            let recomputed = Self.conciseContextLabel(
-                building: allGuidedShots[idx].building,
-                elevation: allGuidedShots[idx].targetElevation,
-                detailType: trimmed
-            )
-            allGuidedShots[idx].title = recomputed.isEmpty ? trimmed : recomputed
-            allGuidedShots[idx].labelEditedAt = Date()
-            allGuidedShots[idx].labelEditedInSessionID = sessionID
-
-            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            refreshGuidedShots()
-            refreshSessionActionsSummaryIfVisible()
-        } catch {
-            print("Failed to update guided label: \(error)")
-        }
-    }
 
     private func applyArmedGuidedShotIfNeeded(
         with shot: Shot,
@@ -12785,89 +12146,14 @@ extension ContentView {
         appState.materialDraftCaptureCount(for: session)
     }
 
-    private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {
-        guard let session = appState.currentSession else { return 0 }
-        let sessionID = session.id
-        return observations.filter { observation in
-            observation.status == .active &&
-            observation.createdAt < session.startedAt &&
-            observation.updatedInSessionID != sessionID
-        }.count
-    }
 
-    private func currentSessionPhotoCount(propertyID: UUID) -> Int {
-        guard let sessionID = appState.currentSession?.id else { return 0 }
-        let persisted = persistedGuidedSummary(propertyID: propertyID, sessionID: sessionID)
-        return persisted.metadataShotCount
-    }
 
-    private func persistedGuidedSummary(propertyID: UUID, sessionID: UUID) -> (remaining: Int, metadataShotCount: Int) {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
-            let fallbackGuided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-            let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
-            let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
-                propertyID: propertyID,
-                observations: activeFlaggedObservations
-            )
-            let visibleFallback = visibleGuidedShots(
-                from: fallbackGuided,
-                activeFlaggedObservations: activeFlaggedObservations,
-                suppressionEvidence: suppressionEvidence
-            )
-            let fallbackRemaining = visibleFallback.filter {
-                !isGuidedShotSkippedInCurrentSession($0) && !isShotCapturedInCurrentSession($0.shot)
-            }.count
-            return (fallbackRemaining, 0)
-        }
-
-        let capturedShotKeys = Set(metadata.shots.compactMap { shot -> String? in
-            guard shot.sessionID == sessionID else { return nil }
-            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !originalRelative.isEmpty else { return nil }
-            guard localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                relativePath: originalRelative
-            ) != nil else { return nil }
-            return shot.shotKey
-        })
-
-        let allGuided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-        let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
-        let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
-            propertyID: propertyID,
-            observations: activeFlaggedObservations
-        )
-        let guided = visibleGuidedShots(
-            from: allGuided,
-            activeFlaggedObservations: activeFlaggedObservations,
-            suppressionEvidence: suppressionEvidence
-        )
-        let remaining = guided.filter { guidedShot in
-            if isGuidedShotSkippedInCurrentSession(guidedShot) {
-                return false
-            }
-            let angle = max(1, guidedShot.angleIndex ?? 1)
-            let shotKey = ShotMetadata.makeShotKey(
-                building: guidedShot.building ?? "",
-                elevation: guidedShot.targetElevation ?? "",
-                detailType: guidedShot.detailType ?? "",
-                angleIndex: angle
-            )
-            return !capturedShotKeys.contains(shotKey)
-        }.count
-
-        return (remaining, capturedShotKeys.count)
-    }
 
     private func isGuidedShotSkippedInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
         guard let sessionID = appState.currentSession?.id else { return false }
         return guidedShot.skipReason != nil && guidedShot.skipSessionID == sessionID
     }
 
-    private func isGuidedShotHandledInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
-        isGuidedShotCapturedInCurrentSession(guidedShot.shot) || isGuidedShotSkippedInCurrentSession(guidedShot)
-    }
 
     private func capturedImageLocalIdentifierForCurrentSession(_ observation: Observation) -> String? {
         guard let currentSessionID = appState.currentSession?.id else { return nil }
@@ -13149,61 +12435,7 @@ extension ContentView {
         isEndingSession = false
     }
 
-    private func handleExportLaterAndExit(summary: SessionActionsSummary) {
-        guard summary.isExportLaterEnabled else {
-            isEndingSession = false
-            return
-        }
-        let alreadyEnding = isEndingSession
-        endingSessionProgressTitle = "Completing Session..."
-        isEndingSession = true
-        showSessionActionsSheet = false
 
-        let finish = {
-            appState.sealCurrentSessionForExportLater()
-            Task {
-                await appState.releaseCurrentSessionCoordinationLockIfOwned()
-                await MainActor.run {
-                    finishEndingSessionByExitingToHub()
-                    appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "export_later_exit", delay: 3.0)
-                }
-            }
-        }
-
-        if alreadyEnding {
-            finish()
-        } else {
-            DispatchQueue.main.async(execute: finish)
-        }
-    }
-
-    private func attemptExportLaterAndExit(summary: SessionActionsSummary) {
-        guard !isEndingSession else { return }
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else {
-            handleExportLaterAndExit(summary: summary)
-            return
-        }
-        guard !isCheckingSessionCompletionConflicts else { return }
-        endingSessionProgressTitle = "Completing Session..."
-        isEndingSession = true
-        isCheckingSessionCompletionConflicts = true
-        Task {
-            let review = await appState.preCompletionConflictReview(
-                propertyID: propertyID,
-                sessionID: sessionID
-            )
-            await MainActor.run {
-                isCheckingSessionCompletionConflicts = false
-                if let review {
-                    isEndingSession = false
-                    sessionCoordinationConflictReview = review
-                    return
-                }
-                handleExportLaterAndExit(summary: summary)
-            }
-        }
-    }
 
     private func sessionCoordinationConflictMessage(
         review: AppState.SessionCoordinationConflictReview
@@ -13214,49 +12446,7 @@ extension ContentView {
             .joined(separator: "\n")
     }
 
-    private func ensureGuidedReferencePaths(propertyID: UUID) {
-        do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            var didChange = false
 
-            for index in allGuidedShots.indices {
-                let existingPath = allGuidedShots[index].referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !existingPath.isEmpty { continue }
-
-                let localID = (allGuidedShots[index].referenceImageLocalIdentifier ??
-                               allGuidedShots[index].shot?.imageLocalIdentifier)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard !localID.isEmpty else { continue }
-                guard let imageData = originalImageData(for: localID) else { continue }
-                guard let path = writeGuidedReferenceImage(data: imageData, guidedShotID: allGuidedShots[index].id) else { continue }
-
-                allGuidedShots[index].referenceImagePath = path
-                if allGuidedShots[index].referenceImageLocalIdentifier == nil {
-                    allGuidedShots[index].referenceImageLocalIdentifier = localID
-                }
-                didChange = true
-            }
-
-            if didChange {
-                let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-                if appState.selectedPropertyID == propertyID {
-                    guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
-                    retiredGuidedShots = restorableRetiredGuidedShots(
-                        from: normalizedGuidedShots,
-                        propertyID: propertyID
-                    )
-                }
-            }
-        } catch {
-            // Keep export flow resilient if reference backfill fails.
-        }
-    }
-
-    private func originalImageData(for localIdentifier: String) -> Data? {
-        let trimmed = localIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return try? Data(contentsOf: URL(fileURLWithPath: trimmed))
-    }
 
     private func prepareSessionExportReferences() {
         _ = reportLibrary.assets.count
@@ -13373,221 +12563,7 @@ extension ContentView {
         return archive.url
     }
 
-    private func ensureSessionStampedJPEGs(
-        propertyID: UUID,
-        sessionID: UUID,
-        propertyAddress: String?,
-        assets: [ReportAsset]
-    ) throws -> [String: URL] {
-        let fileManager = FileManager.default
-        let originalsByName = Dictionary(uniqueKeysWithValues: assets.map { ($0.originalFilename, $0) })
-        var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        var didUpdateMetadata = false
-        var output: [String: URL] = [:]
-        let selectedPropertyName = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let propertyName = selectedPropertyName.isEmpty ? "Property" : selectedPropertyName
-        var reservedNames = Set(
-            ((try? fileManager.contentsOfDirectory(atPath: localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID).path)) ?? [])
-                .map { $0.lowercased() }
-        )
 
-        for index in metadata.shots.indices {
-            let shot = metadata.shots[index]
-            let originalName = shot.originalFilename
-            guard let asset = originalsByName[originalName] else { continue }
-
-            let existingStampedName = shot.stampedFilename?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let canonicalStampedName: String = {
-                let existingLeaf = URL(fileURLWithPath: existingStampedName).lastPathComponent
-                if !existingLeaf.isEmpty {
-                    let normalized = existingLeaf.lowercased().hasSuffix(".jpg")
-                        ? existingLeaf
-                        : "\(URL(fileURLWithPath: existingLeaf).deletingPathExtension().lastPathComponent).jpg"
-                    if !reservedNames.contains(normalized.lowercased()) {
-                        reservedNames.insert(normalized.lowercased())
-                        return normalized
-                    }
-                }
-                return ScoutStampPresentation.nextReadableFilename(
-                    shot: shot,
-                    reservedNames: &reservedNames
-                )
-            }()
-            if metadata.shots[index].stampedFilename != canonicalStampedName {
-                metadata.shots[index].stampedFilename = canonicalStampedName
-                didUpdateMetadata = true
-            }
-            let canonicalStampedRelative = "Stamped/\(canonicalStampedName)"
-            if metadata.shots[index].stampedRelativePath != canonicalStampedRelative {
-                metadata.shots[index].stampedRelativePath = canonicalStampedRelative
-                didUpdateMetadata = true
-            }
-            if (metadata.shots[index].imageWidth ?? 0) <= 0 || (metadata.shots[index].imageHeight ?? 0) <= 0 {
-                let sourceImage = UIImage(contentsOfFile: asset.fileURL.path)
-                if let sourceImage {
-                    metadata.shots[index].imageWidth = max(1, Int(sourceImage.size.width))
-                    metadata.shots[index].imageHeight = max(1, Int(sourceImage.size.height))
-                    didUpdateMetadata = true
-                }
-            }
-
-            let stampedURL = localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID)
-                .appendingPathComponent(canonicalStampedName, isDirectory: false)
-            let captureDate = metadata.shots[index].updatedAt
-            try writeScoutStampedJPEGIfMissing(
-                sourceURL: asset.fileURL,
-                destinationURL: stampedURL,
-                captureDate: captureDate,
-                overlayLines: ScoutStampPresentation.overlayLines(
-                    propertyName: propertyName,
-                    shot: metadata.shots[index],
-                    isBaselineSession: metadata.isBaselineSession
-                ),
-                metadataContext: ReportLibraryModel.stampedMetadataContext(
-                    propertyID: propertyID,
-                    propertyName: propertyName,
-                    propertyAddress: propertyAddress,
-                    sessionID: sessionID,
-                    shot: metadata.shots[index],
-                    schemaVersion: metadata.schemaVersion
-                ),
-                fileManager: fileManager,
-                errorDomain: "ScoutCapture.Stamp",
-                missingSourceDescription: "Missing source image for stamped export",
-                logMetadata: false,
-                drawOverlay: { image, lines in drawStampOverlay(on: image, lines: lines) }
-            )
-            let metadataRelative = metadata.shots[index].stampedRelativePath ?? "nil"
-            let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            let metadataURL = sessionFolder.appendingPathComponent(metadataRelative)
-            let metadataPathExists = fileManager.fileExists(atPath: metadataURL.path)
-            print("[Stamp] wrote stamped destination=\(stampedURL.path)")
-            print("[Stamp] metadata stampedRelativePath=\(metadataRelative)")
-            print("[Stamp] metadata resolved exists=\(metadataPathExists)")
-            output[originalName] = stampedURL
-        }
-
-        if didUpdateMetadata {
-            try localStore.saveSessionMetadataAtomically(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                metadata: metadata
-            )
-#if DEBUG
-            if let firstStamped = metadata.shots.first?.stampedRelativePath {
-                print("[Stamp] metadata stampedRelativePath sample=\(firstStamped)")
-            }
-#endif
-        }
-
-        return output
-    }
-
-    private func drawStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
-        guard !lines.isEmpty else { return image }
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return image }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        format.scale = 1
-        let size = CGSize(width: width, height: height)
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-            UIImage(cgImage: image).draw(in: CGRect(origin: .zero, size: size))
-
-            let shortEdge = CGFloat(min(width, height))
-            let sideInset = max(16, shortEdge * 0.025)
-            let bottomInset = max(16, shortEdge * 0.025)
-            let lineSpacing = max(2, shortEdge * 0.004)
-            let cornerRadius = max(8, shortEdge * 0.016)
-            let primarySize = max(14, shortEdge * 0.030)
-            let secondarySize = max(12, shortEdge * 0.024)
-
-            let styles: [(UIFont, UIColor)] = lines.enumerated().map { idx, _ in
-                (idx == 0 ? UIFont.systemFont(ofSize: primarySize, weight: .semibold)
-                          : UIFont.systemFont(ofSize: secondarySize, weight: .regular),
-                 .white)
-            }
-            let attributed: [NSAttributedString] = zip(lines, styles).map { pair, style in
-                NSAttributedString(
-                    string: pair,
-                    attributes: [
-                        .font: style.0,
-                        .foregroundColor: style.1
-                    ]
-                )
-            }
-
-            let maxTextWidth = size.width - (sideInset * 3)
-            let lineSizes = attributed.map { text in
-                text.boundingRect(
-                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    context: nil
-                ).integral.size
-            }
-
-            let textHeight = lineSizes.reduce(0) { $0 + $1.height } + (CGFloat(max(0, lineSizes.count - 1)) * lineSpacing)
-            let textWidth = min(maxTextWidth, lineSizes.map(\.width).max() ?? maxTextWidth)
-            let padX = max(8, shortEdge * 0.013)
-            let padY = max(5, shortEdge * 0.009)
-            let panelWidth = textWidth + (padX * 2)
-            let panelHeight = textHeight + (padY * 2)
-            let panelRect = CGRect(
-                x: sideInset,
-                y: size.height - bottomInset - panelHeight,
-                width: panelWidth,
-                height: panelHeight
-            )
-
-            let panelPath = UIBezierPath(roundedRect: panelRect, cornerRadius: cornerRadius)
-            UIColor.black.withAlphaComponent(0.58).setFill()
-            panelPath.fill()
-
-            var y = panelRect.minY + padY
-            for (idx, text) in attributed.enumerated() {
-                let drawRect = CGRect(
-                    x: panelRect.minX + padX,
-                    y: y,
-                    width: textWidth,
-                    height: lineSizes[idx].height
-                )
-                text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                y += lineSizes[idx].height + lineSpacing
-            }
-        }
-
-        return rendered.cgImage
-    }
-
-    private static let exportExifTimestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        return formatter
-    }()
-
-    private static let exportExifSubsecFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "SSS"
-        return formatter
-    }()
-
-    private static func exportExifOffsetString(for date: Date) -> String {
-        let seconds = TimeZone.current.secondsFromGMT(for: date)
-        let sign = seconds >= 0 ? "+" : "-"
-        let absolute = abs(seconds)
-        let hours = absolute / 3600
-        let minutes = (absolute % 3600) / 60
-        return String(format: "%@%02d:%02d", sign, hours, minutes)
-    }
 
     private func sessionExportZipFilename() -> String {
         let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
@@ -14107,116 +13083,8 @@ extension ContentView {
         return text.range(of: pattern, options: .regularExpression) != nil
     }
 
-    private func resolveObservationFromChecklist(_ observation: Observation) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
 
-        do {
-            let observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let existing = observations.first(where: { $0.id == observation.id }) else { return }
 
-            var updated = existing
-            updated.status = .pendingReview
-            updated.updatedInSessionID = sessionID
-            updated.resolvedInSessionID = sessionID
-            if updated.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
-            }
-            appendObservationHistoryEvent(
-                ObservationHistoryEvent(
-                    timestamp: Date(),
-                    sessionID: sessionID,
-                    kind: .pendingReview,
-                    beforeValue: "active",
-                    afterValue: Observation.Status.pendingReview.issueStatusValue,
-                    field: "status",
-                    shotID: updated.linkedShotID
-                ),
-                to: &updated
-            )
-
-            let persisted = try localStore.updateObservation(updated)
-            if let shotID = persisted.linkedShotID {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shotID,
-                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        activeCaptureKind: "follow_up_capture"
-                    )
-                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        shotID: shotID,
-                        reason: "flagged_issue_pending_review"
-                    )
-                } catch {
-                    // Keep checklist resolution resilient; the observation itself has already been saved.
-                }
-            }
-            showFlaggedActionToastNow("Issue submitted for review")
-            refreshActiveIssues()
-        } catch {
-            // Keep UI responsive if persistence fails.
-        }
-    }
-
-    private func reassignObservation(_ source: Observation, to targetID: UUID) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        guard source.id != targetID else { return }
-
-        do {
-            var observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let sourceIndex = observations.firstIndex(where: { $0.id == source.id }),
-                  let targetIndex = observations.firstIndex(where: { $0.id == targetID }) else { return }
-            guard let linkedShotID = observations[sourceIndex].linkedShotID,
-                  let movedShot = observations[sourceIndex].shots.first(where: { $0.id == linkedShotID }) else { return }
-
-            if observations[targetIndex].shots.contains(where: { $0.id == movedShot.id }) == false {
-                observations[targetIndex].shots.append(movedShot)
-            }
-            observations[targetIndex].linkedShotID = movedShot.id
-            observations[targetIndex].updatedInSessionID = sessionID
-
-            let remainingSourceShots = observations[sourceIndex].shots.filter { $0.id != movedShot.id }
-            observations[sourceIndex].linkedShotID = remainingSourceShots.last?.id
-            observations[sourceIndex].updatedInSessionID = sessionID
-
-            _ = try localStore.updateObservation(observations[targetIndex])
-            _ = try localStore.updateObservation(observations[sourceIndex])
-            showFlaggedActionToastNow("Issue photo reassigned")
-            refreshActiveIssues()
-        } catch {
-            // Keep UI responsive if persistence fails.
-        }
-    }
-
-    private func updateObservationLabel(_ observation: Observation, detailLabel: String) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        let trimmed = detailLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        do {
-            let observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let existing = observations.first(where: { $0.id == observation.id }) else { return }
-
-            var updated = existing
-            updated.detailType = trimmed
-            updated.updatedInSessionID = sessionID
-
-            _ = try localStore.updateObservation(updated)
-            refreshActiveIssues()
-        } catch {
-            // Keep UI responsive if persistence fails.
-        }
-    }
 
     private func showFlaggedActionToastNow(_ text: String) {
         flaggedActionToastToken += 1
@@ -15504,12 +14372,6 @@ extension ContentView {
             .buttonStyle(.plain)
         }
 
-        private func actionMenuDivider() -> some View {
-            Rectangle()
-                .fill(Color.white.opacity(0.12))
-                .frame(height: 1)
-                .padding(.horizontal, 12)
-        }
 
         @ViewBuilder
         private func bottomSelectionActions(bottomInset: CGFloat) -> some View {
@@ -16692,492 +15554,8 @@ extension ContentView {
         }
     }
 
-    private struct ReportMenuSheet: View {
-        let activeReportTitle: String
-        let onSwitchReport: () -> Void
-        let onNewReport: () -> Void
-        let onEditCurrent: () -> Void
 
-        var body: some View {
-            NavigationStack {
-                VStack(spacing: 18) {
-                    VStack(spacing: 6) {
-                        Text("Active Report")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Text(activeReportTitle)
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.70)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 18)
 
-                    reportActionRow(
-                        icon: "arrow.left.arrow.right",
-                        title: "Switch Report",
-                        action: onSwitchReport
-                    )
-
-                    reportActionRow(
-                        icon: "plus.circle",
-                        title: "New Report",
-                        action: onNewReport
-                    )
-
-                    reportActionRow(
-                        icon: "pencil",
-                        title: "Edit Current Report",
-                        action: onEditCurrent
-                    )
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .navigationTitle("Report")
-                .navigationBarTitleDisplayMode(.inline)
-            }
-        }
-
-        @ViewBuilder
-        private func reportActionRow(icon: String, title: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                HStack {
-                    Image(systemName: icon)
-                        .font(.system(size: 17, weight: .medium))
-                    Text(title)
-                        .font(.system(size: 18, weight: .medium))
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 54)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private struct ReportSwitcherSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-        @Environment(\.dismiss) private var dismiss
-        let activeReportTitle: String
-        let reports: [String]
-        let isLoading: Bool
-        let onRefresh: () -> Void
-        let onBack: () -> Void
-        let onSelectReport: (String) -> Void
-
-        var body: some View {
-            NavigationStack {
-                VStack(spacing: 0) {
-                    HStack(spacing: 10) {
-                        iconCapsuleButton(systemName: "chevron.left", action: onBack)
-
-                        Spacer(minLength: 0)
-
-                        HStack(spacing: 0) {
-                            Button(action: onRefresh) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 19, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 44, height: 42)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                dismiss()
-                            } label: {
-                                Text("Done")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 72, height: 42)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(theme.fill)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(theme.stroke, lineWidth: 1)
-                        )
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 12)
-                    .padding(.bottom, 4)
-
-                    Text("Switch Report")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 8)
-                        .padding(.bottom, 8)
-
-                    Group {
-                        if isLoading {
-                            VStack(spacing: 12) {
-                                ProgressView()
-                                Text("Loading reports...")
-                                    .font(.system(size: 15, weight: .medium))
-                                    .foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else if reports.isEmpty {
-                            VStack(spacing: 10) {
-                                Image(systemName: "tray")
-                                    .font(.system(size: 28, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                Text("No matching report albums found.")
-                                    .font(.system(size: 16, weight: .medium))
-                                Text("Only albums matching your report ID format are shown.")
-                                    .font(.system(size: 13, weight: .regular))
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding(.horizontal, 18)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            List(reports, id: \.self) { title in
-                                Button {
-                                    onSelectReport(title)
-                                } label: {
-                                    HStack(spacing: 12) {
-                                        Text(title)
-                                            .font(.system(size: 16, weight: .medium))
-                                            .foregroundColor(.primary)
-
-                                        Spacer(minLength: 0)
-
-                                        if title == activeReportTitle {
-                                            Text("Active")
-                                                .font(.system(size: 12, weight: .medium))
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 4)
-                                                .background(Color.green.opacity(0.16))
-                                                .foregroundColor(.green)
-                                                .clipShape(Capsule())
-                                        }
-                                    }
-                                    .padding(.vertical, 6)
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(title == activeReportTitle)
-                            }
-                            .listStyle(.insetGrouped)
-                        }
-                    }
-                }
-                .toolbar(.hidden, for: .navigationBar)
-            }
-        }
-
-        @ViewBuilder
-        private func iconCapsuleButton(systemName: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Image(systemName: systemName)
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(width: 44, height: 42)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.stroke, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-
-    }
-
-    private struct ReportIdEditorSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-        let mode: ReportEditorMode
-        let onCancel: () -> Void
-        let onSave: (String, Bool, Int, Int, Bool, Bool, Bool) -> Void
-
-        @State private var prefix: String
-        @State private var includeYear: Bool
-        @State private var yearText: String
-        @State private var sequenceText: String
-        @State private var prefixLocked: Bool
-        @State private var yearLocked: Bool
-        @State private var sequenceLocked: Bool
-
-        init(
-            mode: ReportEditorMode,
-            prefix: String,
-            includeYear: Bool,
-            year: Int,
-            sequence: Int,
-            prefixLocked: Bool,
-            yearLocked: Bool,
-            sequenceLocked: Bool,
-            onCancel: @escaping () -> Void,
-            onSave: @escaping (String, Bool, Int, Int, Bool, Bool, Bool) -> Void
-        ) {
-            self.mode = mode
-            self.onCancel = onCancel
-            self.onSave = onSave
-            _prefix = State(initialValue: prefix)
-            _includeYear = State(initialValue: includeYear)
-            _yearText = State(initialValue: String(year))
-            _sequenceText = State(initialValue: String(sequence))
-            _prefixLocked = State(initialValue: prefixLocked)
-            _yearLocked = State(initialValue: yearLocked)
-            _sequenceLocked = State(initialValue: sequenceLocked)
-        }
-
-        private var saveTitle: String {
-            switch mode {
-            case .editCurrent:
-                return "Save"
-            case .newReport:
-                return "Create"
-            }
-        }
-
-        private var normalizedPrefix: String {
-            let filtered = prefix.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-            return filtered.isEmpty ? "SC" : String(filtered.prefix(8))
-        }
-
-        private var normalizedYear: Int {
-            let parsed = Int(yearText) ?? Calendar.current.component(.year, from: Date())
-            return min(9999, max(2000, parsed))
-        }
-
-        private var normalizedSequence: Int {
-            let parsed = Int(sequenceText) ?? 0
-            return min(99999, max(0, parsed))
-        }
-
-        private var normalizedSequenceString: String {
-            if normalizedSequence < 100 {
-                return String(format: "%03d", normalizedSequence)
-            }
-            return String(normalizedSequence)
-        }
-
-        private var previewId: String {
-            if includeYear {
-                return "\(normalizedPrefix)-\(normalizedYear)-\(normalizedSequenceString)"
-            }
-            return "\(normalizedPrefix)-\(normalizedSequenceString)"
-        }
-
-        var body: some View {
-            NavigationStack {
-                VStack(spacing: 16) {
-                    HStack(spacing: 10) {
-                        iconCapsuleButton(systemName: "chevron.left") {
-                            onCancel()
-                        }
-
-                        Spacer(minLength: 0)
-
-                        textCapsuleButton(title: saveTitle) {
-                            onSave(
-                                normalizedPrefix,
-                                includeYear,
-                                normalizedYear,
-                                normalizedSequence,
-                                prefixLocked,
-                                yearLocked,
-                                sequenceLocked
-                            )
-                        }
-                    }
-                    .padding(.top, 12)
-
-                    VStack(spacing: 4) {
-                        Text("Preview")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Text(previewId)
-                            .font(.system(size: 30, weight: .medium))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.70)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 10)
-
-                    VStack(spacing: 12) {
-                        editorRow(
-                            label: "Prefix",
-                            value: $prefix,
-                            keyboard: .asciiCapable,
-                            isLocked: $prefixLocked
-                        )
-
-                        HStack(spacing: 10) {
-                            Text("Year")
-                                .font(.system(size: 16, weight: .medium))
-                                .frame(width: 120, alignment: .leading)
-
-                            Toggle("", isOn: $includeYear)
-                                .labelsHidden()
-                                .disabled(yearLocked)
-
-                            if includeYear {
-                                TextField("", text: $yearText)
-                                    .keyboardType(.numberPad)
-                                    .font(.system(size: 16, weight: .medium))
-                                    .disabled(yearLocked)
-                                    .padding(.horizontal, 10)
-                                    .frame(height: 40)
-                                    .background(Color(UIColor.tertiarySystemBackground))
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                            } else {
-                                Text("Off")
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.leading, 2)
-                            }
-
-                            lockButton(isLocked: $yearLocked)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(Color(UIColor.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-
-                        editorRow(
-                            label: "Report Number",
-                            value: $sequenceText,
-                            keyboard: .numberPad,
-                            isLocked: $sequenceLocked
-                        )
-                    }
-
-                    Text("Number supports 0 to 99999. Values under 100 display with 3 digits.")
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .toolbar(.hidden, for: .navigationBar)
-            }
-            .onChange(of: prefix) { _, newValue in
-                let filtered = newValue.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-                if filtered != newValue {
-                    prefix = filtered
-                }
-            }
-            .onChange(of: yearText) { _, newValue in
-                let filtered = newValue.filter(\.isNumber)
-                if filtered != newValue {
-                    yearText = filtered
-                }
-                if yearText.count > 4 {
-                    yearText = String(yearText.prefix(4))
-                }
-            }
-            .onChange(of: sequenceText) { _, newValue in
-                let filtered = newValue.filter(\.isNumber)
-                if filtered != newValue {
-                    sequenceText = filtered
-                }
-                if sequenceText.count > 5 {
-                    sequenceText = String(sequenceText.prefix(5))
-                }
-            }
-        }
-
-        @ViewBuilder
-        private func iconCapsuleButton(systemName: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Image(systemName: systemName)
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(width: 44, height: 42)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.stroke, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-
-        @ViewBuilder
-        private func textCapsuleButton(title: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(minHeight: 42)
-                    .padding(.horizontal, 14)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.stroke, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-
-        @ViewBuilder
-        private func editorRow(
-            label: String,
-            value: Binding<String>,
-            keyboard: UIKeyboardType,
-            isLocked: Binding<Bool>
-        ) -> some View {
-            HStack(spacing: 10) {
-                Text(label)
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 120, alignment: .leading)
-
-                TextField("", text: value)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled(true)
-                    .keyboardType(keyboard)
-                    .font(.system(size: 16, weight: .medium))
-                    .disabled(isLocked.wrappedValue)
-                    .padding(.horizontal, 10)
-                    .frame(height: 40)
-                    .background(Color(UIColor.tertiarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                lockButton(isLocked: isLocked)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color(UIColor.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-
-        @ViewBuilder
-        private func lockButton(isLocked: Binding<Bool>) -> some View {
-            Button {
-                isLocked.wrappedValue.toggle()
-            } label: {
-                Image(systemName: isLocked.wrappedValue ? "lock.fill" : "lock.open.fill")
-                    .font(.system(size: proportionalCircleGlyphSize(for: 36), weight: .medium))
-                    .foregroundColor(.white)
-                    .frame(width: 36, height: 36)
-                    .background(isLocked.wrappedValue ? Color.orange.opacity(0.9) : Color.blue.opacity(0.9))
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
 
     // MARK: - Quick Menu Sheet
     
@@ -17204,9 +15582,7 @@ extension ContentView {
         // Pass the target camera: true = front, false = rear
         let onCameraSwap: () -> Void
 
-        private var isPad: Bool {
-            UIDevice.current.userInterfaceIdiom == .pad
-        }
+
         
         var body: some View {
             GeometryReader { geo in

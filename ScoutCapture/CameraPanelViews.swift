@@ -999,64 +999,6 @@ struct GuidedChecklistOverlay: View {
     }
 }
 
-struct GuidedReassignSheet: View {
-    let source: GuidedShot
-    let candidates: [GuidedShot]
-    let onCancel: () -> Void
-    let onSelect: (UUID) -> Void
-
-    private func label(for guidedShot: GuidedShot) -> String {
-        let concise = ContentView.conciseContextLabel(
-            building: guidedShot.building,
-            elevation: guidedShot.targetElevation,
-            detailType: guidedShot.detailType
-        )
-        return concise.isEmpty ? guidedShot.title : concise
-    }
-
-    var body: some View {
-        NavigationStack {
-            List(candidates) { candidate in
-                Button {
-                    onSelect(candidate.id)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(label(for: candidate))
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundColor(.primary)
-                        Text("Angle \(max(1, candidate.angleIndex ?? 1))")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-            }
-            .navigationTitle("Reassign To")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel", action: onCancel)
-                }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Move photo association from")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Text(label(for: source))
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.primary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 6)
-                .background(Color(uiColor: .systemBackground))
-            }
-        }
-    }
-}
 
 struct RetiredGuidedChecklistRow: View {
     let guidedShot: GuidedShot
@@ -2071,50 +2013,6 @@ struct ActiveIssuesSheet: View {
         }
     }
 
-    private struct FlaggedReassignSheet: View {
-        let source: Observation
-        let candidates: [Observation]
-        let onCancel: () -> Void
-        let onSelect: (UUID) -> Void
-
-        private func label(for observation: Observation) -> String {
-            let concise = ContentView.conciseContextLabel(
-                building: observation.building,
-                elevation: observation.targetElevation,
-                detailType: observation.detailType
-            )
-            return concise.isEmpty ? (ContentView.observationCurrentReasonText(observation) ?? observation.statement) : concise
-        }
-
-        var body: some View {
-            NavigationStack {
-                List(candidates) { candidate in
-                    Button {
-                        onSelect(candidate.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(label(for: candidate))
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.primary)
-                            Text(ContentView.observationCurrentReasonText(candidate) ?? candidate.statement)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .navigationTitle("Reassign To")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Cancel", action: onCancel)
-                    }
-                }
-            }
-        }
-    }
 
     private struct FlaggedHistorySheet: View {
         @Environment(\.dismiss) private var dismiss

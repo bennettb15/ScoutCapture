@@ -937,9 +937,6 @@ final class CloudBackupManager: ObservableObject {
         }
     }
 
-    private func latestBackupFolderURL() -> URL? {
-        StorageRoot.cloudBackupRootURL()?.appendingPathComponent(Constants.latestFolderName, isDirectory: true)
-    }
 
     private var hasRestorableLatestBackup: Bool {
         restorableBackupFolderURL() != nil
@@ -1237,12 +1234,6 @@ final class CloudBackupManager: ObservableObject {
         try data.write(to: destinationURL, options: [.atomic])
     }
 
-    private func moveReplacingItem(at source: URL, to destination: URL) throws {
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
-        try fileManager.moveItem(at: source, to: destination)
-    }
 
     private func isWithinBackupsFolder(_ fileURL: URL, storageRoot: URL) -> Bool {
         let backupsRoot = storageRoot.appendingPathComponent("Backups", isDirectory: true).standardizedFileURL.path

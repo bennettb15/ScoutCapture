@@ -37,6 +37,8 @@ final class OriginalPhotoFormatTests: XCTestCase {
         return defaults
     }
 
+
+
     private func makeTempStorageRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCapture-OriginalPhotoFormat-\(UUID().uuidString)", isDirectory: true)
@@ -118,124 +120,7 @@ final class OriginalPhotoFormatTests: XCTestCase {
         XCTAssertTrue(UTType(type as String)?.conforms(to: .jpeg) == true)
     }
 
-    @MainActor
-    func testStampedJPEGPreservesCaptureMetadataAndInvokesSelectedOverlay() throws {
-        let propertyID = UUID()
-        let sessionID = UUID()
-        var shot = makeShot(
-            shotID: UUID(),
-            propertyID: propertyID,
-            sessionID: sessionID,
-            originalFilename: "original.jpg",
-            originalRelativePath: "Originals/original.jpg"
-        )
-        shot.latitude = 40.5
-        shot.longitude = -73.25
-        shot.accuracyMeters = 3.5
-        let context = ReportLibraryModel.stampedMetadataContext(
-            propertyID: propertyID,
-            propertyName: "Test Property",
-            propertyAddress: nil,
-            sessionID: sessionID,
-            shot: shot,
-            schemaVersion: 1
-        )
-        let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 6)).image { renderer in
-            UIColor.red.setFill()
-            renderer.fill(CGRect(x: 0, y: 0, width: 8, height: 6))
-        }
-        let sourceData = try XCTUnwrap(image.jpegData(compressionQuality: 0.92))
-        var overlayCalled = false
-        let stampedData = try encodeScoutStampedJPEG(
-            from: sourceData,
-            captureDate: Date(timeIntervalSince1970: 1_700_000_000),
-            overlayLines: ["Test Property", "North"],
-            metadataContext: context,
-            errorDomain: "ScoutCapture.Stamp",
-            missingSourceDescription: "Missing source image for stamped export",
-            logMetadata: false,
-            drawOverlay: { cgImage, lines in
-                overlayCalled = true
-                XCTAssertEqual(lines, ["Test Property", "North"])
-                return cgImage
-            }
-        )
 
-        XCTAssertTrue(overlayCalled)
-        let source = try XCTUnwrap(CGImageSourceCreateWithData(stampedData as CFData, nil))
-        let outputType = try XCTUnwrap(CGImageSourceGetType(source))
-        XCTAssertTrue(UTType(outputType as String)?.conforms(to: .jpeg) == true)
-        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
-        let exif = try XCTUnwrap(properties[kCGImagePropertyExifDictionary] as? [CFString: Any])
-        let gps = try XCTUnwrap(properties[kCGImagePropertyGPSDictionary] as? [CFString: Any])
-        XCTAssertNotNil(exif[kCGImagePropertyExifDateTimeOriginal])
-        XCTAssertEqual((properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue, 1)
-        XCTAssertEqual((gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue, 40.5)
-        XCTAssertEqual((gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue, 73.25)
-        XCTAssertEqual(gps[kCGImagePropertyGPSLongitudeRef] as? String, "W")
-        XCTAssertEqual((gps[kCGImagePropertyGPSHPositioningError] as? NSNumber)?.doubleValue, 3.5)
-        XCTAssertEqual(gps[kCGImagePropertyGPSDateStamp] as? String, "2023:11:14")
-        XCTAssertEqual(gps[kCGImagePropertyGPSTimeStamp] as? String, "22:13:20")
-
-        let storageRoot = try makeTempStorageRoot()
-        defer { try? FileManager.default.removeItem(at: storageRoot) }
-        let originalURL = storageRoot.appendingPathComponent("original.jpg")
-        let stampedURL = storageRoot.appendingPathComponent("Stamped/stamped.jpg")
-        try sourceData.write(to: originalURL)
-        let captureDate = Date(timeIntervalSince1970: 1_700_000_000)
-        func writeStampedFile() throws {
-            try writeScoutStampedJPEGIfMissing(
-                sourceURL: originalURL,
-                destinationURL: stampedURL,
-                captureDate: captureDate,
-                overlayLines: ["Test Property", "North"],
-                metadataContext: context,
-                fileManager: .default,
-                errorDomain: "ScoutCapture.Stamp",
-                missingSourceDescription: "Missing source image for stamped export",
-                logMetadata: false,
-                drawOverlay: { cgImage, _ in cgImage }
-            )
-        }
-        try writeStampedFile()
-        XCTAssertGreaterThan(try Data(contentsOf: stampedURL).count, 0)
-        let modifiedAt = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: stampedURL.path)[.modificationDate] as? Date)
-        XCTAssertEqual(modifiedAt.timeIntervalSince1970, captureDate.timeIntervalSince1970, accuracy: 1)
-        try FileManager.default.removeItem(at: originalURL)
-        try writeStampedFile() // A valid stamp is reused without rereading the source.
-    }
-
-    @MainActor
-    func testStampedPhotoNamesAndOverlayKeepReadableDetails() {
-        var shot = makeShot(
-            shotID: UUID(),
-            propertyID: UUID(),
-            sessionID: UUID(),
-            originalFilename: "original.jpg",
-            originalRelativePath: "Originals/original.jpg"
-        )
-        shot.building = "Roof / East"
-        shot.elevation = "North"
-        shot.detailType = "Overview"
-        shot.isFlagged = true
-        shot.noteText = "Needs review"
-        var reservedNames: Set<String> = []
-
-        let first = ScoutStampPresentation.nextReadableFilename(shot: shot, reservedNames: &reservedNames)
-        let second = ScoutStampPresentation.nextReadableFilename(shot: shot, reservedNames: &reservedNames)
-        XCTAssertTrue(first.hasPrefix("Roof__East_North_Overview_A1_"))
-        XCTAssertTrue(first.hasSuffix(".jpg"))
-        XCTAssertEqual(second, String(first.dropLast(4)) + "_01.jpg")
-
-        let lines = ScoutStampPresentation.overlayLines(
-            propertyName: " Test Property ",
-            shot: shot,
-            isBaselineSession: false
-        )
-        XCTAssertEqual(lines.first, "Test Property")
-        XCTAssertEqual(lines.last, "Needs review")
-        XCTAssertTrue(lines.contains("Roof / East | North | Overview | Angle 1"))
-    }
 
     @MainActor
     func testUploadFallbackUsesJPGAndExplicitHEICIsPreserved() throws {

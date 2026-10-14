@@ -6861,10 +6861,6 @@ final class LocalStore {
         return properties.first(where: { $0.id == propertyID })?.baselineSessionID == sessionID
     }
 
-    private func currentPropertyName(for propertyID: UUID) -> String {
-        let value = currentProperty(for: propertyID)?.name ?? ""
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private func currentProperty(for propertyID: UUID) -> Property? {
         let properties = (try? migratedPropertyAndOrganizationState().properties) ?? ((try? readPropertiesRaw()) ?? [])
