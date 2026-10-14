@@ -21,6 +21,39 @@ private func verboseLog(_ message: @autoclosure () -> String) {
     print(message())
 }
 
+#if DEBUG
+private func logExportSessionSourceDiagnostics(
+    _ localStore: LocalStore, _ propertyID: UUID, _ sessionID: UUID, _ sessionData: Data, _ exportRoot: URL
+) {
+    let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+    let exists = FileManager.default.fileExists(atPath: sourceURL.path)
+    let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+    print("Export session.json path source: \(sourceURL.path)")
+    print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
+    let raw = String(data: sessionData, encoding: .utf8) ?? ""
+    print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
+    print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
+    let debugDecoder = JSONDecoder()
+    debugDecoder.dateDecodingStrategy = .iso8601
+    if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
+       let first = decoded.shots.first {
+        print("Export sessionStartedAt: \(decoded.startedAt)")
+        print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
+        print("Export first shot shotKey: \(first.shotKey)")
+        print("Export first shot createdAt: \(first.createdAt)")
+        print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
+        print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+        if let delivered = decoded.firstDeliveredAt {
+            print("Export firstDeliveredAt: \(delivered)")
+        }
+        if let expires = decoded.reExportExpiresAt {
+            print("Export reExportExpiresAt: \(expires)")
+        }
+    }
+    print("EXPORT ROOT: \(exportRoot.path)")
+}
+#endif
+
 private func proportionalCircleGlyphSize(for diameter: CGFloat) -> CGFloat {
     min(30, max(18, (diameter * 0.5).rounded()))
 }
@@ -12300,32 +12333,9 @@ extension ContentView {
         )
 
 #if DEBUG
-        let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
-        let exists = FileManager.default.fileExists(atPath: sourceURL.path)
-        let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-        print("Export session.json path source: \(sourceURL.path)")
-        print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
-        let raw = String(data: exportArtifacts.sessionData, encoding: .utf8) ?? ""
-        print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
-        print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
-        let debugDecoder = JSONDecoder()
-        debugDecoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: exportArtifacts.sessionData),
-           let first = decoded.shots.first {
-            print("Export sessionStartedAt: \(decoded.startedAt)")
-            print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
-            print("Export first shot shotKey: \(first.shotKey)")
-            print("Export first shot createdAt: \(first.createdAt)")
-            print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
-            print("Export first shot originalRelativePath: \(first.originalRelativePath)")
-            if let delivered = decoded.firstDeliveredAt {
-                print("Export firstDeliveredAt: \(delivered)")
-            }
-            if let expires = decoded.reExportExpiresAt {
-                print("Export reExportExpiresAt: \(expires)")
-            }
-        }
-        print("EXPORT ROOT: \(exportRoot.path)")
+        logExportSessionSourceDiagnostics(
+            localStore, propertyID, sessionID, exportArtifacts.sessionData, exportRoot
+        )
         print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
         progress?(.sessionData)
@@ -14783,32 +14793,9 @@ extension ContentView {
             try fileManager.createDirectory(at: stampedRoot, withIntermediateDirectories: true)
 
 #if DEBUG
-            let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
-            let exists = FileManager.default.fileExists(atPath: sourceURL.path)
-            let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-            print("Export session.json path source: \(sourceURL.path)")
-            print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
-            let raw = String(data: exportArtifacts.sessionData, encoding: .utf8) ?? ""
-            print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
-            print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
-            let debugDecoder = JSONDecoder()
-            debugDecoder.dateDecodingStrategy = .iso8601
-            if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: exportArtifacts.sessionData),
-               let first = decoded.shots.first {
-                print("Export sessionStartedAt: \(decoded.startedAt)")
-                print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
-                print("Export first shot shotKey: \(first.shotKey)")
-                print("Export first shot createdAt: \(first.createdAt)")
-                print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
-                print("Export first shot originalRelativePath: \(first.originalRelativePath)")
-                if let delivered = decoded.firstDeliveredAt {
-                    print("Export firstDeliveredAt: \(delivered)")
-                }
-                if let expires = decoded.reExportExpiresAt {
-                    print("Export reExportExpiresAt: \(expires)")
-                }
-            }
-            print("EXPORT ROOT: \(exportRoot.path)")
+            logExportSessionSourceDiagnostics(
+                localStore, propertyID, sessionID, exportArtifacts.sessionData, exportRoot
+            )
 #endif
             try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
             try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
