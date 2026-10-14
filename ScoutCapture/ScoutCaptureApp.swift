@@ -4685,7 +4685,7 @@ struct SessionHubView: View {
                 .appendingPathComponent(shot.originalFilename, isDirectory: false)
             guard fileManager.fileExists(atPath: originalURL.path) else { continue }
 
-            let stampedName = nextReadablePendingStampedFilename(shot: shot, reservedNames: &reservedNames)
+            let stampedName = ScoutStampPresentation.nextReadableFilename(shot: shot, reservedNames: &reservedNames)
             if metadata.shots[index].stampedFilename != stampedName {
                 metadata.shots[index].stampedFilename = stampedName
                 didUpdateMetadata = true
@@ -4710,7 +4710,7 @@ struct SessionHubView: View {
                 sourceURL: originalURL,
                 destinationURL: stampedURL,
                 captureDate: shot.updatedAt,
-                overlayLines: pendingStampOverlayLines(
+                overlayLines: ScoutStampPresentation.overlayLines(
                     propertyName: propertyName,
                     shot: shot,
                     isBaselineSession: metadata.isBaselineSession
@@ -4844,79 +4844,6 @@ struct SessionHubView: View {
         let minutes = (absolute % 3600) / 60
         return String(format: "%@%02d:%02d", sign, hours, minutes)
     }
-
-    private func pendingStampOverlayLines(propertyName: String, shot: ShotMetadata, isBaselineSession: Bool) -> [String] {
-        let line1 = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let line2 = [
-            shot.building,
-            shot.elevation,
-            shot.detailType,
-            "Angle \(max(1, shot.angleIndex))"
-        ]
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-        .joined(separator: " | ")
-        let line3 = Self.pendingOverlayDateFormatter.string(from: shot.updatedAt)
-        let noteLine = (shot.noteText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let line4 = (shot.isFlagged && !noteLine.isEmpty) ? noteLine : ""
-        _ = isBaselineSession
-        return [line1, line2, line3, line4].filter { !$0.isEmpty }
-    }
-
-    private func nextReadablePendingStampedFilename(shot: ShotMetadata, reservedNames: inout Set<String>) -> String {
-        let base = readablePendingStampedBaseName(for: shot)
-        var candidate = "\(base).jpg"
-        var counter = 1
-        while reservedNames.contains(candidate.lowercased()) {
-            candidate = "\(base)_\(String(format: "%02d", counter)).jpg"
-            counter += 1
-        }
-        reservedNames.insert(candidate.lowercased())
-        return candidate
-    }
-
-    private func readablePendingStampedBaseName(for shot: ShotMetadata) -> String {
-        let datePart = Self.pendingFilenameDateFormatter.string(from: shot.updatedAt)
-        let parts = [
-            sanitizePendingStampFilenamePart(shot.building),
-            sanitizePendingStampFilenamePart(shot.elevation),
-            sanitizePendingStampFilenamePart(shot.detailType),
-            "A\(max(1, shot.angleIndex))",
-            datePart
-        ].filter { !$0.isEmpty }
-        let base = parts.joined(separator: "_")
-        return base.isEmpty ? shot.shotID.uuidString : base
-    }
-
-    private func sanitizePendingStampFilenamePart(_ raw: String) -> String {
-        let normalized = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "_")
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
-        let collapsed = String(scalars)
-            .replacingOccurrences(of: "__", with: "_")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
-        return String(collapsed.prefix(40))
-    }
-
-    private static let pendingFilenameDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter
-    }()
-
-    private static let pendingOverlayDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
-        return formatter
-    }()
 
     private func exportFilename(for fileURL: URL, index: Int) -> String {
         let fallback = "photo-\(index).jpg"
@@ -23594,6 +23521,79 @@ struct PropertySessionView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
+}
+
+@MainActor
+enum ScoutStampPresentation {
+    static func overlayLines(propertyName: String, shot: ShotMetadata, isBaselineSession: Bool) -> [String] {
+        let line1 = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = [shot.building, shot.elevation, shot.detailType, "Angle \(max(1, shot.angleIndex))"]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " | ")
+        let line3 = Self.overlayDateFormatter.string(from: shot.updatedAt)
+        let noteLine = (shot.noteText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let line4 = (shot.isFlagged && !noteLine.isEmpty) ? noteLine : ""
+
+        _ = isBaselineSession
+        return [line1, detail, line3, line4].filter { !$0.isEmpty }
+    }
+
+    static func nextReadableFilename(shot: ShotMetadata, reservedNames: inout Set<String>) -> String {
+        let base = readableBaseName(for: shot)
+        var candidate = "\(base).jpg"
+        var counter = 1
+        while reservedNames.contains(candidate.lowercased()) {
+            candidate = "\(base)_\(String(format: "%02d", counter)).jpg"
+            counter += 1
+        }
+        reservedNames.insert(candidate.lowercased())
+        return candidate
+    }
+
+    static func readableBaseName(for shot: ShotMetadata) -> String {
+        let datePart = Self.filenameDateFormatter.string(from: shot.updatedAt)
+        let anglePart = "A\(max(1, shot.angleIndex))"
+        let parts = [
+            sanitizePart(shot.building),
+            sanitizePart(shot.elevation),
+            sanitizePart(shot.detailType),
+            anglePart,
+            datePart
+        ].filter { !$0.isEmpty }
+        let joined = parts.joined(separator: "_")
+        return joined.isEmpty ? shot.shotID.uuidString : joined
+    }
+
+    private static func sanitizePart(_ raw: String) -> String {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "_")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let collapsed = String(scalars)
+            .replacingOccurrences(of: "__", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        return String(collapsed.prefix(40))
+    }
+
+    private static let filenameDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        return formatter
+    }()
+
+    private static let overlayDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
+        return formatter
+    }()
 }
 
 @MainActor

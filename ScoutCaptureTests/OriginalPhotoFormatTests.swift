@@ -206,6 +206,38 @@ final class OriginalPhotoFormatTests: XCTestCase {
     }
 
     @MainActor
+    func testStampedPhotoNamesAndOverlayKeepReadableDetails() {
+        var shot = makeShot(
+            shotID: UUID(),
+            propertyID: UUID(),
+            sessionID: UUID(),
+            originalFilename: "original.jpg",
+            originalRelativePath: "Originals/original.jpg"
+        )
+        shot.building = "Roof / East"
+        shot.elevation = "North"
+        shot.detailType = "Overview"
+        shot.isFlagged = true
+        shot.noteText = "Needs review"
+        var reservedNames: Set<String> = []
+
+        let first = ScoutStampPresentation.nextReadableFilename(shot: shot, reservedNames: &reservedNames)
+        let second = ScoutStampPresentation.nextReadableFilename(shot: shot, reservedNames: &reservedNames)
+        XCTAssertTrue(first.hasPrefix("Roof__East_North_Overview_A1_"))
+        XCTAssertTrue(first.hasSuffix(".jpg"))
+        XCTAssertEqual(second, String(first.dropLast(4)) + "_01.jpg")
+
+        let lines = ScoutStampPresentation.overlayLines(
+            propertyName: " Test Property ",
+            shot: shot,
+            isBaselineSession: false
+        )
+        XCTAssertEqual(lines.first, "Test Property")
+        XCTAssertEqual(lines.last, "Needs review")
+        XCTAssertTrue(lines.contains("Roof / East | North | Overview | Angle 1"))
+    }
+
+    @MainActor
     func testUploadFallbackUsesJPGAndExplicitHEICIsPreserved() throws {
         let appState = AppState(userDefaults: makeDefaults(), disableCloudBackupForTests: true)
         defer { appState.shutdown() }

@@ -10973,7 +10973,7 @@ extension ContentView {
             imageWidth: width,
             imageHeight: height
         )
-        let readableStampedName = "\(readableStampedBaseName(for: metadata)).jpg"
+        let readableStampedName = "\(ScoutStampPresentation.readableBaseName(for: metadata)).jpg"
         metadata.stampedFilename = readableStampedName
         metadata.stampedRelativePath = "Stamped/\(readableStampedName)"
 
@@ -13485,7 +13485,7 @@ extension ContentView {
                         return normalized
                     }
                 }
-                return nextReadableStampedFilename(
+                return ScoutStampPresentation.nextReadableFilename(
                     shot: shot,
                     reservedNames: &reservedNames
                 )
@@ -13515,7 +13515,7 @@ extension ContentView {
                 sourceURL: asset.fileURL,
                 destinationURL: stampedURL,
                 captureDate: captureDate,
-                overlayLines: stampOverlayLines(
+                overlayLines: ScoutStampPresentation.overlayLines(
                     propertyName: propertyName,
                     shot: metadata.shots[index],
                     isBaselineSession: metadata.isBaselineSession
@@ -13664,76 +13664,6 @@ extension ContentView {
         let minutes = (absolute % 3600) / 60
         return String(format: "%@%02d:%02d", sign, hours, minutes)
     }
-
-    private func stampOverlayLines(propertyName: String, shot: ShotMetadata, isBaselineSession: Bool) -> [String] {
-        let line1 = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = [shot.building, shot.elevation, shot.detailType, "Angle \(max(1, shot.angleIndex))"]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " | ")
-        let line3 = Self.exportOverlayDateFormatter.string(from: shot.updatedAt)
-        let noteLine = (shot.noteText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let line4 = (shot.isFlagged && !noteLine.isEmpty) ? noteLine : ""
-
-        _ = isBaselineSession
-        return [line1, detail, line3, line4].filter { !$0.isEmpty }
-    }
-
-    private func nextReadableStampedFilename(shot: ShotMetadata, reservedNames: inout Set<String>) -> String {
-        let base = readableStampedBaseName(for: shot)
-        var candidate = "\(base).jpg"
-        var counter = 1
-        while reservedNames.contains(candidate.lowercased()) {
-            candidate = "\(base)_\(String(format: "%02d", counter)).jpg"
-            counter += 1
-        }
-        reservedNames.insert(candidate.lowercased())
-        return candidate
-    }
-
-    private func readableStampedBaseName(for shot: ShotMetadata) -> String {
-        let datePart = Self.exportFilenameDateFormatter.string(from: shot.updatedAt)
-        let anglePart = "A\(max(1, shot.angleIndex))"
-        let parts = [
-            sanitizeStampFilenamePart(shot.building),
-            sanitizeStampFilenamePart(shot.elevation),
-            sanitizeStampFilenamePart(shot.detailType),
-            anglePart,
-            datePart
-        ].filter { !$0.isEmpty }
-        let joined = parts.joined(separator: "_")
-        return joined.isEmpty ? shot.shotID.uuidString : joined
-    }
-
-    private func sanitizeStampFilenamePart(_ raw: String) -> String {
-        let normalized = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "_")
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
-        let collapsed = String(scalars)
-            .replacingOccurrences(of: "__", with: "_")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
-        return String(collapsed.prefix(40))
-    }
-
-    private static let exportFilenameDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter
-    }()
-
-    private static let exportOverlayDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
-        return formatter
-    }()
 
     private func sessionExportZipFilename() -> String {
         let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
