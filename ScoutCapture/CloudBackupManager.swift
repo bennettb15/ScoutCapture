@@ -168,6 +168,32 @@ enum UserDefaultsJSONValueNormalizer {
             return String(describing: value)
         }
     }
+
+    nonisolated static func shouldRestoreKey(_ key: String) -> Bool {
+        key.hasPrefix("scout.") ||
+        key.hasPrefix("scoutcapture.") ||
+        key.hasPrefix("scout.captureProfile.property.")
+    }
+
+    nonisolated static func decodedValue(_ value: Any) -> Any? {
+        if let dictionary = value as? [String: Any],
+           let type = dictionary["type"] as? String,
+           type == "data",
+           let base64 = dictionary["base64"] as? String,
+           let data = Data(base64Encoded: base64) {
+            return data
+        }
+
+        if let array = value as? [Any] {
+            return array.compactMap { decodedValue($0) }
+        }
+
+        if let dictionary = value as? [String: Any] {
+            return dictionary.mapValues { decodedValue($0) as Any }
+        }
+
+        return value
+    }
 }
 
 final class CloudBackupManager: ObservableObject {
@@ -1464,7 +1490,7 @@ final class CloudBackupManager: ObservableObject {
 
     private func makeUserDefaultsExportData() throws -> Data {
         let rawDefaults = userDefaults.dictionaryRepresentation()
-        let filtered = rawDefaults.filter { shouldRestoreUserDefaultsKey($0.key) }
+        let filtered = rawDefaults.filter { UserDefaultsJSONValueNormalizer.shouldRestoreKey($0.key) }
         let payload: [String: Any] = [
             "exportedAt": ISO8601DateFormatter().string(from: Date()),
             "values": UserDefaultsJSONValueNormalizer.normalize(filtered)
@@ -1480,41 +1506,15 @@ final class CloudBackupManager: ObservableObject {
             ])
         }
 
-        for key in userDefaults.dictionaryRepresentation().keys where shouldRestoreUserDefaultsKey(key) {
+        for key in userDefaults.dictionaryRepresentation().keys where UserDefaultsJSONValueNormalizer.shouldRestoreKey(key) {
             userDefaults.removeObject(forKey: key)
         }
 
-        for (key, value) in values where shouldRestoreUserDefaultsKey(key) {
-            userDefaults.set(decodedUserDefaultsValue(value), forKey: key)
+        for (key, value) in values where UserDefaultsJSONValueNormalizer.shouldRestoreKey(key) {
+            userDefaults.set(UserDefaultsJSONValueNormalizer.decodedValue(value), forKey: key)
         }
         userDefaults.synchronize()
         return (values["scoutcapture.selectedPropertyID"] as? String).flatMap(UUID.init(uuidString:))
-    }
-
-    private func shouldRestoreUserDefaultsKey(_ key: String) -> Bool {
-        key.hasPrefix("scout.") ||
-        key.hasPrefix("scoutcapture.") ||
-        key.hasPrefix("scout.captureProfile.property.")
-    }
-
-    private func decodedUserDefaultsValue(_ value: Any) -> Any? {
-        if let dictionary = value as? [String: Any],
-           let type = dictionary["type"] as? String,
-           type == "data",
-           let base64 = dictionary["base64"] as? String,
-           let data = Data(base64Encoded: base64) {
-            return data
-        }
-
-        if let array = value as? [Any] {
-            return array.compactMap { decodedUserDefaultsValue($0) }
-        }
-
-        if let dictionary = value as? [String: Any] {
-            return dictionary.mapValues { decodedUserDefaultsValue($0) as Any }
-        }
-
-        return value
     }
 
     private func appVersionString() -> String {

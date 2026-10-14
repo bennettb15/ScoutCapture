@@ -763,7 +763,7 @@ enum TemporaryMigrationImportManager {
     }
 
     private nonisolated static func clearScoutUserDefaults(_ userDefaults: UserDefaults) {
-        for key in userDefaults.dictionaryRepresentation().keys where shouldRestoreUserDefaultsKey(key) {
+        for key in userDefaults.dictionaryRepresentation().keys where UserDefaultsJSONValueNormalizer.shouldRestoreKey(key) {
             userDefaults.removeObject(forKey: key)
         }
         userDefaults.synchronize()
@@ -775,8 +775,8 @@ enum TemporaryMigrationImportManager {
     ) throws -> RestoredDefaultsPayload {
         let values = try validatedUserDefaultsValues(from: data)
 
-        for (key, value) in values where shouldRestoreUserDefaultsKey(key) {
-            userDefaults.set(decodedUserDefaultsValue(value), forKey: key)
+        for (key, value) in values where UserDefaultsJSONValueNormalizer.shouldRestoreKey(key) {
+            userDefaults.set(UserDefaultsJSONValueNormalizer.decodedValue(value), forKey: key)
         }
         userDefaults.synchronize()
 
@@ -790,32 +790,6 @@ enum TemporaryMigrationImportManager {
             throw ImportError.invalidArchiveStructure
         }
         return values
-    }
-
-    private nonisolated static func shouldRestoreUserDefaultsKey(_ key: String) -> Bool {
-        key.hasPrefix("scout.") ||
-        key.hasPrefix("scoutcapture.") ||
-        key.hasPrefix("scout.captureProfile.property.")
-    }
-
-    private nonisolated static func decodedUserDefaultsValue(_ value: Any) -> Any? {
-        if let dictionary = value as? [String: Any],
-           let type = dictionary["type"] as? String,
-           type == "data",
-           let base64 = dictionary["base64"] as? String,
-           let data = Data(base64Encoded: base64) {
-            return data
-        }
-
-        if let array = value as? [Any] {
-            return array.compactMap { decodedUserDefaultsValue($0) }
-        }
-
-        if let dictionary = value as? [String: Any] {
-            return dictionary.mapValues { decodedUserDefaultsValue($0) as Any }
-        }
-
-        return value
     }
 
     private nonisolated static func loadEntries(from file: FileHandle) throws -> [ZipEntry] {
