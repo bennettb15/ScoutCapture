@@ -9621,7 +9621,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Org", snapshot.activeOrganizationID)
                     diagnosticRow("Overall Status", snapshot.overallStatus)
                     NavigationLink {
-                        DebugCanonicalReadinessSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Readiness Report",
+                            footerText: "Copies the sanitized canonical readiness report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Readiness Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -9680,7 +9684,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Not Export Complete Sessions", snapshot.notExportCompleteSessionCount)
                     diagnosticRow("Diagnostic-Only Rows", snapshot.diagnosticOnlyRowCount)
                     NavigationLink {
-                        DebugCompletenessGatesSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Completeness Report",
+                            footerText: "Copies the sanitized completeness gates report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Completeness Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -9726,7 +9734,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Checksum Pass", snapshot.checksumGenerationPassCount)
                     diagnosticRow("Checksum Fail", snapshot.checksumGenerationFailCount)
                     NavigationLink {
-                        DebugSessionSnapshotPreviewTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Snapshot Preview Report",
+                            footerText: "Copies the sanitized local-only snapshot preview report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                        )
                     } label: {
                         Text("View Copyable Snapshot Preview Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -9797,7 +9809,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow(AppState.ExportSealPreflightCategory.informationalOnly.visibleLabel, snapshot.informationalOnlyCount)
                     diagnosticRow(AppState.ExportSealPreflightCategory.unknownNeedsReview.visibleLabel, snapshot.unknownNeedsReviewCount)
                     NavigationLink {
-                        DebugExportSealPreflightSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Preflight Report",
+                            footerText: "Copies the sanitized advisory preflight report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Preflight Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -9828,7 +9844,11 @@ private struct DebugLocalDiagnosticsView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                     NavigationLink {
-                        DebugFutureEnforcementWarningsSnapshotTextView(snapshotText: snapshot.futureWarningsText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.futureWarningsText,
+                            title: "Future Warnings",
+                            footerText: "Copies the sanitized future enforcement warnings report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Warning Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -9917,7 +9937,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Inspected", snapshot.inspectedAt)
                     diagnosticRow("Policy Rows", snapshot.rowCount)
                     NavigationLink {
-                        DebugEnforcementPolicyMatrixSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Policy Matrix",
+                            footerText: "Copies the sanitized enforcement policy matrix as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Policy Matrix")
                             .font(.system(size: 14, weight: .semibold))
@@ -10027,7 +10051,12 @@ private struct DebugLocalDiagnosticsView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                     NavigationLink {
-                        DebugMediaRecoverySnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Media Snapshot",
+                            footerText: "Copies the sanitized media recovery snapshot as plain text only.",
+                            copyButtonTitle: "Copy Snapshot"
+                        )
                     } label: {
                         Text("View Copyable Snapshot")
                             .font(.system(size: 14, weight: .semibold))
@@ -10064,7 +10093,12 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Org", snapshot.activeOrganizationID)
                     diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
                     NavigationLink {
-                        DebugDivergenceAuditSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Audit Snapshot",
+                            footerText: "Copies the sanitized snapshot as plain text only.",
+                            copyButtonTitle: "Copy Snapshot"
+                        )
                     } label: {
                         Text("View Copyable Snapshot")
                             .font(.system(size: 14, weight: .semibold))
@@ -10098,7 +10132,11 @@ private struct DebugLocalDiagnosticsView: View {
                         diagnosticRow(classification.rawValue, count)
                     }
                     NavigationLink {
-                        DebugSyncDebtInspectionSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Debt Report",
+                            footerText: "Copies the sanitized sync debt report as plain text only."
+                        )
                     } label: {
                         Text("View Copyable Debt Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -10132,7 +10170,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Possible Hydration Candidate", snapshot.possibleHydrationCandidateCount)
                     diagnosticRow("Draft Caution", snapshot.draftCautionCount)
                     NavigationLink {
-                        DebugRemoteOnlySessionDetailSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Session Details",
+                            footerText: "Copies the sanitized remote-only session detail report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Remote-Only Detail Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -11518,202 +11560,6 @@ private struct DebugDivergenceAuditHistoricalGroupView: View {
     }
 }
 
-private struct DebugDivergenceAuditSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Snapshot") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized snapshot as plain text only.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Audit Snapshot")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugMediaRecoverySnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Snapshot") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized media recovery snapshot as plain text only.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Media Snapshot")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugSyncDebtInspectionSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized sync debt report as plain text only.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Debt Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugRemoteOnlySessionDetailSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized remote-only session detail report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Session Details")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugCanonicalReadinessSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized canonical readiness report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Readiness Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugCompletenessGatesSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized completeness gates report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Completeness Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugSessionSnapshotPreviewTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized local-only snapshot preview report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Snapshot Preview Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
 private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @ObservedObject var appState: AppState
     @State private var isUploadingSessionSnapshot: Bool = false
@@ -11860,7 +11706,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     diagnosticRow("Last Upload Error", uploadError)
                 }
                 NavigationLink {
-                    DebugSessionSnapshotUploadTextView(snapshotText: reportText)
+                    DebugCopyableReportTextView(snapshotText: reportText)
                 } label: {
                     Text("View Copyable Upload Report")
                         .font(.system(size: 14, weight: .semibold))
@@ -12200,7 +12046,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     diagnosticRow("Rollback Blockers", packageValidationReport.fullyRestoredRollback.blockers.isEmpty ? "none" : packageValidationReport.fullyRestoredRollback.blockers.joined(separator: ", "))
                     diagnosticRow("Snapshot ID", packageValidationReport.snapshotID?.uuidString ?? "none")
                     NavigationLink {
-                        DebugSessionSnapshotUploadTextView(
+                        DebugCopyableReportTextView(
                             snapshotText: packageValidationReport.combinedReportText,
                             title: "Package Validation",
                             footerText: "Copies the selected-session package validation reports as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
@@ -12524,7 +12370,7 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
 
         Section("Controlled Activation Evaluation Actions") {
             NavigationLink {
-                DebugSessionSnapshotUploadTextView(
+                DebugCopyableReportTextView(
                     snapshotText: AppState.canonicalReadRolloutReportText(
                         diagnostics,
                         operatorApproval: operatorApproval,
@@ -12603,7 +12449,7 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                     diagnosticRow("Pipeline Final Blocker", compactValue(selectedSessionValidationPipelineReport.finalBlocker ?? "none"))
                     diagnosticRow("Pipeline Next Action", selectedSessionValidationPipelineReport.recommendedNextAction)
                     NavigationLink {
-                        DebugSessionSnapshotUploadTextView(
+                        DebugCopyableReportTextView(
                             snapshotText: selectedSessionValidationPipelineReport.reportText,
                             title: "Validation Pipeline",
                             footerText: "Copies the selected-session validation pipeline report as plain text. It is diagnostic-only and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
@@ -12744,16 +12590,17 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     }
 }
 
-private struct DebugSessionSnapshotUploadTextView: View {
+private struct DebugCopyableReportTextView: View {
     let snapshotText: String
     var title: String = "Snapshot Upload Report"
     var footerText: String = "Copies the sanitized shadow-write upload report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+    var copyButtonTitle: String = "Copy Report"
     @State private var didCopySnapshot: Bool = false
 
     var body: some View {
         List {
             Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                Button(didCopySnapshot ? "Copied Plain Text" : copyButtonTitle) {
                     UIPasteboard.general.string = snapshotText
                     didCopySnapshot = true
                 }
@@ -12780,95 +12627,11 @@ private struct StageLazySessionSnapshotUploadTextView: View {
     let reportText: () -> String
 
     var body: some View {
-        DebugSessionSnapshotUploadTextView(
+        DebugCopyableReportTextView(
             snapshotText: reportText(),
             title: title,
             footerText: footerText
         )
-    }
-}
-
-private struct DebugExportSealPreflightSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized advisory preflight report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Preflight Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugFutureEnforcementWarningsSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized future enforcement warnings report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Future Warnings")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugEnforcementPolicyMatrixSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized enforcement policy matrix as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Policy Matrix")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
