@@ -13651,7 +13651,7 @@ extension ContentView {
         ) else {
             throw NSError(domain: "ScoutCapture.Stamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
         }
-        if let xmpMetadata = buildStampedXMPMetadata(
+        if let xmpMetadata = buildScoutXMPMetadata(
             source: source,
             captureTime: captureTime,
             metadataContext: metadataContext
@@ -13805,77 +13805,7 @@ extension ContentView {
         return gps
     }
 
-    private func buildStampedXMPMetadata(
-        source: CGImageSource,
-        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) -> CGMutableImageMetadata? {
-        let baseMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
-        let mutable = baseMetadata.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
-        var registrationError: Unmanaged<CFError>?
-        _ = CGImageMetadataRegisterNamespaceForPrefix(
-            mutable,
-            "https://scoutcapture.app/ns/1.0/" as CFString,
-            "scout" as CFString,
-            &registrationError
-        )
-        func setTag(_ path: String, _ value: String?) {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !trimmed.isEmpty else { return }
-            let components = path.split(separator: ":", maxSplits: 1).map(String.init)
-            guard components.count == 2 else { return }
-            let prefix = components[0]
-            let name = components[1]
-            let namespace: String
-            switch prefix {
-            case "xmp":
-                namespace = "http://ns.adobe.com/xap/1.0/"
-            case "scout":
-                namespace = "https://scoutcapture.app/ns/1.0/"
-            default:
-                return
-            }
-            guard let tag = CGImageMetadataTagCreate(
-                namespace as CFString,
-                prefix as CFString,
-                name as CFString,
-                .string,
-                trimmed as CFString
-            ) else {
-                return
-            }
-            CGImageMetadataSetTagWithPath(mutable, nil, path as CFString, tag)
-        }
-        setTag("xmp:CreateDate", captureTime.iso8601WithOffset)
-        setTag("xmp:ModifyDate", captureTime.iso8601WithOffset)
-        setTag("scout:propertyID", metadataContext.propertyID?.uuidString)
-        setTag("scout:propertyName", metadataContext.propertyName)
-        setTag("scout:propertyAddress", metadataContext.propertyAddress)
-        setTag("scout:sessionID", metadataContext.sessionID?.uuidString)
-        setTag("scout:shotID", metadataContext.shotID?.uuidString)
-        setTag("scout:shotKey", metadataContext.shotKey)
-        setTag("scout:building", metadataContext.building)
-        setTag("scout:elevation", metadataContext.elevation)
-        setTag("scout:detailType", metadataContext.detailType)
-        setTag("scout:angleIndex", metadataContext.angleIndex.map(String.init))
-        setTag("scout:isGuided", metadataContext.isGuided.map { $0 ? "true" : "false" })
-        setTag("scout:isFlagged", metadataContext.isFlagged.map { $0 ? "true" : "false" })
-        setTag("scout:captureMode", metadataContext.captureMode)
-        setTag("scout:lens", metadataContext.lens)
-        setTag("scout:orientation", metadataContext.orientation)
-        setTag("scout:appVersion", metadataContext.appVersion)
-        setTag("scout:osVersion", metadataContext.osVersion)
-        setTag("scout:deviceModel", metadataContext.deviceModel)
-        setTag("scout:schemaVersion", metadataContext.schemaVersion.map(String.init))
-        setTag("scout:issueStatus", metadataContext.issueStatus)
-        setTag("scout:issueNote", metadataContext.detailNote)
-        setTag("scout:trade", metadataContext.trade)
-        setTag("scout:priority", metadataContext.priority)
-        if let accuracy = metadataContext.accuracyMeters {
-            setTag("scout:gpsAccuracyMeters", String(format: "%.3f", accuracy))
-        }
-        return mutable
-    }
+
 
     private static let exportGPSDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
