@@ -60048,8 +60048,7 @@ final class AppState: ObservableObject {
     }
 
     private func loadAndNormalizeSessions(propertyID: UUID) -> [Session] {
-        let fetched = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
-        return Self.uniqueSessionsByID(fetched).sorted { $0.startedAt < $1.startedAt }
+        Self.loadAndNormalizeSessions(propertyID: propertyID, localStore: localStore)
     }
 
     private static func loadAndNormalizeSessions(propertyID: UUID, localStore: LocalStore) -> [Session] {
@@ -60551,10 +60550,11 @@ final class AppState: ObservableObject {
     }
 
     private func latestVisibleDraft(in sessions: [Session]) -> Session? {
-        sessions
-            .filter { reusableDraftSession($0) }
-            .sorted { $0.startedAt > $1.startedAt }
-            .first
+        Self.latestVisibleDraft(
+            in: sessions,
+            localStore: localStore,
+            cloudStatusBySessionID: sessionSnapshotCloudStatusBySessionID
+        )
     }
 
     private func canonicalDraftSession(for propertyID: UUID, requireCaptures: Bool) -> Session? {
@@ -60588,29 +60588,19 @@ final class AppState: ObservableObject {
     }
 
     private func reusableDraftSession(_ session: Session) -> Bool {
-        session.deletedAt == nil &&
-            session.status == .draft &&
-            !session.isSealed &&
-            !isFinalSession(session) &&
-            !sessionHasFinalLocalStateEvidence(session) &&
-            hasMaterialDraftCaptures(session)
+        Self.reusableDraftSession(
+            session,
+            localStore: localStore,
+            cloudStatusBySessionID: sessionSnapshotCloudStatusBySessionID
+        )
     }
 
     private func sessionHasFinalLocalStateEvidence(_ session: Session) -> Bool {
-        if Self.fastRuntimeCompletionWasRequested(propertyID: session.propertyID, sessionID: session.id) {
-            return true
-        }
-        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
-           SessionLifecyclePolicy.metadataIsFinal(metadata) {
-            return true
-        }
-        guard let status = sessionSnapshotCloudStatusBySessionID[session.id],
-              status.propertyID == session.propertyID,
-              status.state == .uploaded,
-              status.triggerSource == "completeCurrentSessionWithoutZIP" else {
-            return false
-        }
-        return true
+        Self.sessionHasFinalLocalStateEvidence(
+            session,
+            localStore: localStore,
+            cloudStatusBySessionID: sessionSnapshotCloudStatusBySessionID
+        )
     }
 
     private func persistedSessionIncludingDeleted(propertyID: UUID, sessionID: UUID) -> Session? {

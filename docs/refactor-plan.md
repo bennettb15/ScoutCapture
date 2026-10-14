@@ -52,6 +52,7 @@ The seven portal cases now have a code-path map: a status-only overlay advances 
 19. **Export failure cleanup.** The shared ZIP packager now removes its temporary archive if packaging fails before the final move. Successful export bytes and paths are unchanged.
 20. **Larger export integration check.** A temporary host harness compiled the repository's actual export enumeration and packaging sources, created 100 synthetic 2 MiB photos on Samsung, and verified all 100 archived paths and payloads in a 209,729,784-byte ZIP. The process stayed below 10 MiB of resident memory while writing. This validates packaging at a realistic size, but does not exercise the app UI or a real camera library.
 21. **Session lifecycle rule deduplication.** Static and instance paths now use `SessionLifecyclePolicy` for final-session detection, final metadata detection, and material capture counting. Both former text normalizers trimmed whitespace and treated empty values as absent; the shared rule preserves that behavior. Draft reuse, property-status, and coordination suites passed together: **127 tests with 0 failures**. The broader seven-class smoke gate also reran after this change: **211 tests with 0 failures**.
+22. **Shared draft decision path.** Instance draft lookup, reusable-draft checks, and final-state evidence now delegate to their existing static equivalents with the same local store and cloud-status cache. The focused draft reuse, property-status, and coordination run passed again: **127 tests with 0 failures**.
 
 ## Next steps, in order
 
