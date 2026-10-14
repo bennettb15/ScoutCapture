@@ -14876,134 +14876,42 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.sessionJSONIDMismatch
         }
 
-        let actor = sessionSnapshotActorIdentity(for: metadata)
-        let enrichedMetadata = Self.sessionSnapshotMetadata(metadata, stampedWith: actor)
-        let enrichedRawData = actor == nil ? rawData : try Self.encodeSessionSnapshotRawSessionJSON(enrichedMetadata)
-        let rawSessionJSON = String(data: enrichedRawData, encoding: .utf8) ?? enrichedRawData.base64EncodedString()
-        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: enrichedRawData)
-        let manifest = enrichedMetadata.shots.map { shot in
-            Self.makeSessionSnapshotMediaManifestItem(
-                for: shot,
-                propertyID: propertyID,
-                sessionID: session.id,
-                localStore: localStore
-            )
-        }
-        let missingOriginals = manifest.filter { !$0.localOriginalExists }.count
-        let storageMetadataCount = manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count
-        let payload = SessionSnapshotPayloadForChecksum(
-            snapshotSchemaVersion: 1,
-            sessionMetadataSchemaVersion: metadata.schemaVersion,
-            trigger: trigger,
-            generatedAt: generatedAt,
-            appVersion: Self.trimmedNonEmpty(metadata.appVersion),
-            sourceDeviceID: currentDeviceIdentifier(),
-            orgID: metadata.orgID,
+        return try buildSessionSnapshotPayload(
+            metadata: metadata,
+            rawData: rawData,
             propertyID: propertyID,
             sessionID: session.id,
-            sessionType: enrichedMetadata.sessionType,
-            status: metadata.status,
-            isSealed: metadata.isSealed,
-            exportedAt: metadata.exportedAt,
-            firstDeliveredAt: metadata.firstDeliveredAt,
-            reExportExpiresAt: metadata.reExportExpiresAt,
-            actor: actor,
-            capturedBy: actor,
-            uploadedBy: actor,
-            shotCount: enrichedMetadata.shots.count,
-            issueCount: enrichedMetadata.issues.count,
-            guidedCount: enrichedMetadata.guidedShots.count,
-            mediaManifestCount: manifest.count,
-            missingLocalOriginalsCount: missingOriginals,
-            supabaseStorageMetadataCount: storageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
-            rawSessionJSONByteCount: enrichedRawData.count,
-            mediaManifest: manifest
-        )
-
-        let payloadData: Data
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            payloadData = try encoder.encode(payload)
-        } catch {
-            throw SessionSnapshotPreviewError.checksumGenerationFailed
-        }
-
-        let envelope = SessionSnapshotEnvelope(
-            id: session.id,
-            snapshotSchemaVersion: payload.snapshotSchemaVersion,
-            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
-            trigger: trigger,
             generatedAt: generatedAt,
-            appVersion: payload.appVersion,
-            sourceDeviceID: payload.sourceDeviceID,
-            orgID: payload.orgID,
-            propertyID: payload.propertyID,
-            sessionID: payload.sessionID,
-            sessionType: payload.sessionType,
-            status: payload.status,
-            isSealed: payload.isSealed,
-            exportedAt: payload.exportedAt,
-            firstDeliveredAt: payload.firstDeliveredAt,
-            reExportExpiresAt: payload.reExportExpiresAt,
-            actor: payload.actor,
-            capturedBy: payload.capturedBy,
-            uploadedBy: payload.uploadedBy,
-            shotCount: payload.shotCount,
-            issueCount: payload.issueCount,
-            guidedCount: payload.guidedCount,
-            mediaManifestCount: payload.mediaManifestCount,
-            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
-            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
-            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: enrichedRawData.count,
-            snapshotPayloadByteCount: payloadData.count,
-            mediaManifest: manifest
-        )
-        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+            trigger: trigger,
+            sourceDeviceID: currentDeviceIdentifier()
+        ) { enrichedMetadata in
+            enrichedMetadata.shots.map { shot in
+                Self.makeSessionSnapshotMediaManifestItem(
+                    for: shot,
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    localStore: localStore
+                )
+            }
+        }
     }
 
-    private func makeSessionSnapshotBuildResult(
-        archivePath: String,
+    private func buildSessionSnapshotPayload(
+        metadata: SessionMetadata,
+        rawData: Data,
         propertyID: UUID,
         sessionID: UUID,
         generatedAt: Date,
         trigger: String,
-        sourceDeviceID: String?
+        sourceDeviceID: String?,
+        makeManifest: (SessionMetadata) -> [SessionSnapshotMediaManifestItem]
     ) throws -> SessionSnapshotBuildResult {
-        let archiveRoot = URL(fileURLWithPath: archivePath, isDirectory: true)
-        let payloadRoot = archiveRoot.appendingPathComponent("Payload", isDirectory: true)
-        let sessionJSONURL = payloadRoot.appendingPathComponent("session.json", isDirectory: false)
-        guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
-              let rawData = try? Data(contentsOf: sessionJSONURL) else {
-            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let metadata = try? decoder.decode(SessionMetadata.self, from: rawData) else {
-            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
-        }
-        guard metadata.propertyID == propertyID, metadata.sessionID == sessionID else {
-            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
-        }
-
         let actor = sessionSnapshotActorIdentity(for: metadata)
         let enrichedMetadata = Self.sessionSnapshotMetadata(metadata, stampedWith: actor)
         let enrichedRawData = actor == nil ? rawData : try Self.encodeSessionSnapshotRawSessionJSON(enrichedMetadata)
         let rawSessionJSON = String(data: enrichedRawData, encoding: .utf8) ?? enrichedRawData.base64EncodedString()
         let rawChecksum = Self.sessionSnapshotSHA256Hex(for: enrichedRawData)
-        let manifest = enrichedMetadata.shots.map { shot in
-            Self.makeSessionSnapshotMediaManifestItem(
-                forArchivedShot: shot,
-                payloadRoot: payloadRoot
-            )
-        }
+        let manifest = makeManifest(enrichedMetadata)
         let missingOriginals = manifest.filter { !$0.localOriginalExists }.count
         let storageMetadataCount = manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count
         let payload = SessionSnapshotPayloadForChecksum(
@@ -15081,6 +14989,49 @@ final class AppState: ObservableObject {
             mediaManifest: manifest
         )
         return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private func makeSessionSnapshotBuildResult(
+        archivePath: String,
+        propertyID: UUID,
+        sessionID: UUID,
+        generatedAt: Date,
+        trigger: String,
+        sourceDeviceID: String?
+    ) throws -> SessionSnapshotBuildResult {
+        let archiveRoot = URL(fileURLWithPath: archivePath, isDirectory: true)
+        let payloadRoot = archiveRoot.appendingPathComponent("Payload", isDirectory: true)
+        let sessionJSONURL = payloadRoot.appendingPathComponent("session.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
+              let rawData = try? Data(contentsOf: sessionJSONURL) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let metadata = try? decoder.decode(SessionMetadata.self, from: rawData) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+        guard metadata.propertyID == propertyID, metadata.sessionID == sessionID else {
+            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
+        }
+
+        return try buildSessionSnapshotPayload(
+            metadata: metadata,
+            rawData: rawData,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            generatedAt: generatedAt,
+            trigger: trigger,
+            sourceDeviceID: sourceDeviceID
+        ) { enrichedMetadata in
+            enrichedMetadata.shots.map { shot in
+                Self.makeSessionSnapshotMediaManifestItem(
+                    forArchivedShot: shot,
+                    payloadRoot: payloadRoot
+                )
+            }
+        }
     }
 
     private func makeSessionSnapshotUploadArtifacts(
