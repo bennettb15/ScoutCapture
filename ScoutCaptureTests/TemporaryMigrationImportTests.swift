@@ -143,12 +143,14 @@ final class TemporaryMigrationImportTests: XCTestCase {
                 "scoutcapture.refactor.importPreflight": "restored"
             ]
         ])
+        let multiChunkPayload = Data(repeating: 0x5A, count: 256 * 1024)
         let archiveURL = directory.appendingPathComponent("migration.zip")
         let archive = try StoredZipArchive.buildData(entries: [
             (path: "ScoutCapture_Migration/", data: Data()),
             (path: "ScoutCapture_Migration/userdefaults_export.json", data: preferences),
             (path: applicationSupportPrefix + "Profiles/One.json", data: Data("new-profile".utf8)),
-            (path: "ScoutCapture_Migration/Documents/notes.txt", data: Data("new-note".utf8))
+            (path: "ScoutCapture_Migration/Documents/notes.txt", data: Data("new-note".utf8)),
+            (path: "ScoutCapture_Migration/Documents/large.bin", data: multiChunkPayload)
         ])
         try archive.write(to: archiveURL)
 
@@ -164,6 +166,7 @@ final class TemporaryMigrationImportTests: XCTestCase {
             "new-profile"
         )
         XCTAssertEqual(try String(contentsOf: documents.appendingPathComponent("notes.txt"), encoding: .utf8), "new-note")
+        XCTAssertEqual(try Data(contentsOf: documents.appendingPathComponent("large.bin")), multiChunkPayload)
         XCTAssertFalse(fileManager.fileExists(atPath: applicationSupport.appendingPathComponent("stale.json").path))
         XCTAssertFalse(fileManager.fileExists(atPath: documents.appendingPathComponent("stale.txt").path))
     }

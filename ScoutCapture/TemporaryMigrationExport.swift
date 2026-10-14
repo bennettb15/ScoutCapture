@@ -940,6 +940,14 @@ enum TemporaryMigrationImportManager {
     }
 
     private nonisolated static func validateEntryPayload(_ entry: ZipEntry, from file: FileHandle) throws {
+        try readEntryPayload(entry, from: file) { _ in }
+    }
+
+    private nonisolated static func readEntryPayload(
+        _ entry: ZipEntry,
+        from file: FileHandle,
+        consume: (Data) throws -> Void
+    ) throws {
         guard entry.compressionMethod == 0 else {
             throw ImportError.unsupportedCompression(entry.path)
         }
@@ -964,6 +972,7 @@ enum TemporaryMigrationImportManager {
             }
             remaining -= UInt64(chunk.count)
             checksum = StoredZipArchive.updatingCRC32(checksum, with: chunk)
+            try consume(chunk)
         }
         guard (checksum ^ 0xFFFF_FFFF) == entry.crc32 else {
             throw ImportError.invalidArchiveStructure
@@ -990,31 +999,43 @@ enum TemporaryMigrationImportManager {
         to destinationURL: URL,
         fileManager: FileManager
     ) throws {
-        let data = try extractData(for: entry, from: file)
-        try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
+        let parent = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        let temporaryURL = parent.appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString).tmp")
+        guard fileManager.createFile(atPath: temporaryURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
         }
-        try data.write(to: destinationURL, options: [.atomic])
+        let output: FileHandle
+        do {
+            output = try FileHandle(forWritingTo: temporaryURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+        do {
+            try readEntryPayload(entry, from: file) { chunk in
+                try output.write(contentsOf: chunk)
+            }
+            try output.close()
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+        } catch {
+            try? output.close()
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
     }
 
     private nonisolated static func extractData(
         for entry: ZipEntry,
         from file: FileHandle
     ) throws -> Data {
-        guard entry.compressionMethod == 0 else {
-            throw ImportError.unsupportedCompression(entry.path)
+        var data = Data()
+        try readEntryPayload(entry, from: file) { chunk in
+            data.append(chunk)
         }
-
-        let dataOffset = try entryDataOffset(entry, from: file)
-
-        try file.seek(toOffset: dataOffset)
-        guard let data = try file.read(upToCount: Int(entry.compressedSize)),
-              data.count == Int(entry.compressedSize),
-              UInt32(data.count) == entry.uncompressedSize else {
-            throw ImportError.invalidArchiveStructure
-        }
-
         return data
     }
 }
