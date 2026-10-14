@@ -11452,7 +11452,7 @@ final class AppState: ObservableObject {
                 skippedBackoffCount += 1
                 return false
             }
-            return shouldReplayMutation(mutation, now: now)
+            return OfflineReplayPolicy.shouldReplay(mutation, now: now)
         }
         .sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt {
@@ -11460,7 +11460,10 @@ final class AppState: ObservableObject {
             }
             return lhs.id.uuidString < rhs.id.uuidString
         }
-        let replayLimit = automaticOfflineReplayAttemptLimit(for: source)
+        let replayLimit = OfflineReplayPolicy.automaticAttemptLimit(
+            for: source,
+            launchLimit: automaticLaunchOfflineReplayAttemptLimit
+        )
         let replayable: [LocalStore.QueuedMutation]
         let cappedReplayCount: Int
         if let replayLimit, replayableCandidates.count > replayLimit {
@@ -11629,7 +11632,7 @@ final class AppState: ObservableObject {
                 failedItem.attemptCount += 1
                 failedItem.lastAttemptAt = Date()
                 failedItem.nextAttemptAt = failedItem.lastAttemptAt?.addingTimeInterval(
-                    offlineReplayBackoffInterval(forAttemptCount: failedItem.attemptCount)
+                    OfflineReplayPolicy.backoffInterval(forAttemptCount: failedItem.attemptCount)
                 )
                 failedItem.lastError = error.localizedDescription
                 failedItem.status = .failed
@@ -12091,25 +12094,6 @@ final class AppState: ObservableObject {
         return true
     }
 
-    private func offlineReplayBackoffInterval(forAttemptCount attemptCount: Int) -> TimeInterval {
-        switch attemptCount {
-        case ...0:
-            return 0
-        case 1:
-            return 30
-        case 2:
-            return 120
-        case 3:
-            return 600
-        default:
-            return 1800
-        }
-    }
-
-    private func automaticOfflineReplayAttemptLimit(for source: String) -> Int? {
-        source.hasPrefix("launch") ? automaticLaunchOfflineReplayAttemptLimit : nil
-    }
-
     private func beginOfflineReplayRun() -> Bool {
         offlineReplayStateQueue.sync {
             if isOfflineReplayInFlight {
@@ -12123,20 +12107,6 @@ final class AppState: ObservableObject {
     private func endOfflineReplayRun() {
         let _: Void = offlineReplayStateQueue.sync {
             isOfflineReplayInFlight = false
-        }
-    }
-
-    private func shouldReplayMutation(_ mutation: LocalStore.QueuedMutation, now: Date) -> Bool {
-        if mutation.isAcknowledgedHistoricalDebt {
-            return false
-        }
-        switch mutation.status {
-        case .pending:
-            return true
-        case .failed:
-            return mutation.nextAttemptAt.map { now >= $0 } ?? true
-        case .inFlight, .completed:
-            return false
         }
     }
 
@@ -17338,7 +17308,7 @@ final class AppState: ObservableObject {
             failed.status = terminal ? .terminalFailed : .failed
             failed.lastError = terminal ? terminalSessionSnapshotUploadRetryReason(error) : sanitized
             failed.lastAttemptAt = now
-            failed.nextAttemptAt = terminal ? nil : now.addingTimeInterval(offlineReplayBackoffInterval(forAttemptCount: failed.attemptCount))
+            failed.nextAttemptAt = terminal ? nil : now.addingTimeInterval(OfflineReplayPolicy.backoffInterval(forAttemptCount: failed.attemptCount))
             failed.updatedAt = Date()
             try? localStore.updateSessionSnapshotUploadRetryWorkItem(failed)
             persistSessionSnapshotCloudStatus(

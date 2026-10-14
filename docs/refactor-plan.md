@@ -45,6 +45,7 @@ The full `Phase2C10OfflineReplayTests` class now passes **33 tests with 0 failur
 14. **Export filename cleanup.** Standard and fast export now use one ZIP filename rule with their existing property, session, and fallback inputs. Two private photo filename helpers with no call sites were removed. Pending export keeps its separate whitespace normalization rule.
 15. **First `AppState` split.** Snapshot upload and cloud status display models moved unchanged into `AppStateSnapshotStatusModels.swift`, reducing the main file by 173 lines. A byte-for-byte comparison and focused disabled-upload status tests confirm the definitions and visible status text are unchanged. Session lifecycle and synchronization policies remain in `AppState`.
 16. **Diagnostics model extraction.** Snapshot restore, media recovery, offline queue, and local diagnostics types moved unchanged into `AppStateDiagnosticsModels.swift`. A byte-for-byte comparison and four focused tests across those areas pass. This removes another large data-model block from `AppState`; behavior and storage paths remain in the original type.
+17. **Offline replay policy extraction.** Backoff timing, launch replay limits, and queued mutation eligibility moved unchanged from `AppState` into `OfflineReplayPolicy.swift`. The full 33-test offline replay class and two snapshot retry tests pass. This keeps the retry rules in one small, reviewable unit without changing the queue or its stored format.
 
 ## Next steps, in order
 
