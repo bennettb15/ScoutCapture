@@ -5099,27 +5099,6 @@ struct ContentView: View {
         }
     }
 
-    private static func normalizedContextFilename(_ filename: String) -> String {
-        var output = filename
-        let replacements: [(String, String)] = [
-            ("North Elevation", "N"),
-            ("South Elevation", "S"),
-            ("East Elevation", "E"),
-            ("West Elevation", "W"),
-            ("North", "N"),
-            ("South", "S"),
-            ("East", "E"),
-            ("West", "W")
-        ]
-        for (source, target) in replacements {
-            output = output.replacingOccurrences(of: source, with: target, options: .caseInsensitive)
-        }
-        output = output.replacingOccurrences(of: "Elevation", with: "", options: .caseInsensitive)
-        output = output.replacingOccurrences(of: "__", with: "_")
-        output = output.replacingOccurrences(of: "  ", with: " ")
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     static func reportAsset(from localIdentifier: String?) -> ReportAsset? {
         let trimmed = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return nil }
@@ -8740,95 +8719,6 @@ extension ContentView {
         .background(Color.black.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
-    private struct HDQuickButton: View {
-        let size: CGFloat
-        let isEnabled: Bool
-        let isOn: Bool
-        let onToggle: () -> Void
-        let onHaptic: () -> Void
-        
-        @State private var isPressed: Bool = false
-        @State private var isPopping: Bool = false
-        
-        private func triggerPop() {
-            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.62, blendDuration: 0.08)) {
-                isPopping = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.72, blendDuration: 0.08)) {
-                    isPopping = false
-                }
-            }
-        }
-        
-        var body: some View {
-            Button(action: {
-                guard isEnabled else { return }
-                onHaptic()
-                triggerPop()
-                onToggle()
-            }) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            isEnabled
-                            ? (isOn ? Color.blue : Color.white.opacity(0.14))
-                            : Color.white.opacity(0.08)
-                        )
-                        .frame(width: size, height: size)
-                    
-                    // Subtle glow ring when ON
-                    Circle()
-                        .stroke(
-                            isEnabled && isOn ? Color.white.opacity(0.70) : Color.clear,
-                            lineWidth: 2
-                        )
-                        .frame(width: size + 6, height: size + 6)
-                        .opacity(isOn ? 1.0 : 0.0)
-                    
-                    Text("HD")
-                        .font(.system(size: proportionalCircleTextSize(for: size), weight: .medium))
-                        .foregroundColor(
-                            isEnabled
-                            ? (isOn ? .white : .white.opacity(0.92))
-                            : .white.opacity(0.35)
-                        )
-                }
-                .frame(width: size, height: size)
-                .contentShape(Circle())
-                .scaleEffect(isPopping ? 1.12 : 1.0)
-                .pressScaleEffect(isPressed)
-            }
-            .buttonStyle(.plain)
-            .frame(width: size, height: size)
-            .disabled(!isEnabled)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in isPressed = true }
-                    .onEnded { _ in isPressed = false }
-            )
-        }
-    }
-    
-    private func hdQuickButton(size: CGFloat = 44) -> some View {
-        HDQuickButton(
-            size: size,
-            isEnabled: camera.hdSupported,
-            isOn: camera.effectiveHDEnabled,
-            onToggle: {
-                let wasOn = camera.effectiveHDEnabled
-                camera.manualHDEnabled.toggle()
-                let isOnNow = camera.effectiveHDEnabled
-                if !wasOn && isOnNow {
-                    showHDToast("HD Enabled for Detail Capture")
-                }
-            },
-            onHaptic: {
-                fireHDButtonHaptic()
-            }
-        )
-    }
-
     private struct FlaggedReasonGlyph: View {
         let size: CGFloat
         let foregroundColor: Color
@@ -9613,11 +9503,6 @@ extension ContentView {
         quickButtonHaptic.prepare()
     }
     
-    private func fireHDButtonHaptic() {
-        quickButtonHaptic.impactOccurred()
-        quickButtonHaptic.prepare()
-    }
-
     private func capture() {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let isFlaggedCaptureIntent: Bool = {
@@ -16109,50 +15994,6 @@ extension ContentView {
             isLevel = false
         }
     }
-    // MARK: - Glyph Rotation Motion Model
-    
-    private final class GlyphRotationMotionModel: ObservableObject {
-        
-        @Published var angleDegrees: Double = 0
-        
-        private let manager = CMMotionManager()
-        
-        // Low pass smoothing to match Apple camera feel
-        private var filtered: Double = 0
-        private let alpha: Double = 0.18
-        
-        func start() {
-            guard manager.isDeviceMotionAvailable else { return }
-            
-            manager.deviceMotionUpdateInterval = 1.0 / 60.0
-            manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-                guard let self else { return }
-                guard let m = motion else { return }
-                
-                let g = m.gravity
-                
-                // Map gravity to a continuous angle in portrait coordinate space.
-                // Portrait upright yields 0.
-                // Rotate device left yields about +90 for glyphs.
-                // Rotate device right yields about -90 for glyphs.
-                let rawRad = atan2(g.x, -g.y)
-                let rawDeg = rawRad * 180.0 / Double.pi
-                
-                // Invert so glyphs rotate opposite the physical roll.
-                var target = -rawDeg
-                
-                // Keep it in a stable range so it does not flip.
-                if target > 90 { target = 90 }
-                if target < -90 { target = -90 }
-                
-                filtered = (alpha * target) + ((1.0 - alpha) * filtered)
-                angleDegrees = filtered
-            }
-        }
-        
-        func stop() {
-            manager.stopDeviceMotionUpdates()
-        }
-    }
+
 }
 //Testing batch uploads
