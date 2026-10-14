@@ -50196,6 +50196,32 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    private func fetchValidatedRemotePropertyRefreshPayload(
+        organizationID: UUID,
+        userID: UUID?,
+        contextGeneration: UInt64
+    ) async throws -> PropertyRefreshPayload {
+        let localBackingCount = backingPropertyCount(for: organizationID)
+        let records = try await fetchRemotePropertyList(activeOrganizationID: organizationID)
+        let validated = try validateRemotePropertyResponse(
+            records: records,
+            localCacheCount: localBackingCount,
+            activeOrganizationID: organizationID
+        )
+        guard isCurrentAuthenticatedAccessContext(
+            userID: userID,
+            organizationID: organizationID,
+            generation: contextGeneration
+        ) else {
+            throw RemotePropertyFetchError.missingActiveOrganization
+        }
+        return try makeRemotePropertyRefreshPayload(
+            validatedRecords: validated,
+            requestedOrganizationID: organizationID
+        )
+    }
+
+    @MainActor
     private func performForegroundRemotePropertyRefresh(
         activeSessionCheckpointTrigger: String? = nil
     ) async -> Bool {
@@ -50223,23 +50249,10 @@ final class AppState: ObservableObject {
         )
 
         do {
-            let localBackingCount = backingPropertyCount(for: requestedOrganizationID)
-            let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
-            let validated = try validateRemotePropertyResponse(
-                records: records,
-                localCacheCount: localBackingCount,
-                activeOrganizationID: requestedOrganizationID
-            )
-            guard isCurrentAuthenticatedAccessContext(
-                userID: requestedUserID,
+            let payload = try await fetchValidatedRemotePropertyRefreshPayload(
                 organizationID: requestedOrganizationID,
-                generation: requestedContextGeneration
-            ) else {
-                throw RemotePropertyFetchError.missingActiveOrganization
-            }
-            let payload = try makeRemotePropertyRefreshPayload(
-                validatedRecords: validated,
-                requestedOrganizationID: requestedOrganizationID
+                userID: requestedUserID,
+                contextGeneration: requestedContextGeneration
             )
             guard isCurrentAuthenticatedAccessContext(
                 userID: requestedUserID,
@@ -50360,23 +50373,10 @@ final class AppState: ObservableObject {
         )
 
         do {
-            let localBackingCount = backingPropertyCount(for: requestedOrganizationID)
-            let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
-            let validated = try validateRemotePropertyResponse(
-                records: records,
-                localCacheCount: localBackingCount,
-                activeOrganizationID: requestedOrganizationID
-            )
-            guard isCurrentAuthenticatedAccessContext(
-                userID: requestedUserID,
+            let payload = try await fetchValidatedRemotePropertyRefreshPayload(
                 organizationID: requestedOrganizationID,
-                generation: requestedContextGeneration
-            ) else {
-                throw RemotePropertyFetchError.missingActiveOrganization
-            }
-            let payload = try makeRemotePropertyRefreshPayload(
-                validatedRecords: validated,
-                requestedOrganizationID: requestedOrganizationID
+                userID: requestedUserID,
+                contextGeneration: requestedContextGeneration
             )
             guard isCurrentAuthenticatedAccessContext(
                 userID: requestedUserID,
