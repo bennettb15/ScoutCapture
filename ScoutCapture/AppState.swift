@@ -37388,7 +37388,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
+    private func loadLegacyMigrationRunContext() throws -> (
+        client: SupabaseClient,
+        activeOrganizationID: UUID,
+        runID: UUID,
+        startedAt: Date,
+        ledger: LegacyMigrationPreflightLedger
+    ) {
         guard let client = supabaseClient else {
             throw LegacyMigrationStep2AError.missingSupabaseClient
         }
@@ -37398,11 +37404,17 @@ final class AppState: ObservableObject {
 
         let runID = UUID()
         let now = Date()
-        var ledger = try loadLegacyMigrationLedgerForRun(
+        let ledger = try loadLegacyMigrationLedgerForRun(
             runID: runID,
             startedAt: now,
             activeOrganizationID: activeOrganizationID
         )
+        return (client, activeOrganizationID, runID, now, ledger)
+    }
+
+    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
         try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
@@ -37679,20 +37691,8 @@ final class AppState: ObservableObject {
     }
 
     func runLegacyMigrationStep2BSlice1() async throws -> LegacyMigrationStep2BSlice1Result {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
-        var ledger = try loadLegacyMigrationLedgerForRun(
-            runID: runID,
-            startedAt: now,
-            activeOrganizationID: activeOrganizationID
-        )
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
         try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
@@ -37880,20 +37880,8 @@ final class AppState: ObservableObject {
     }
 
     func runLegacyMigrationStep2BSlice2A() async throws -> LegacyMigrationStep2BSlice2AResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
-        var ledger = try loadLegacyMigrationLedgerForRun(
-            runID: runID,
-            startedAt: now,
-            activeOrganizationID: activeOrganizationID
-        )
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
         try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
@@ -38053,20 +38041,8 @@ final class AppState: ObservableObject {
     }
 
     func runLegacyMigrationStep2BSlice2BReadiness() async throws -> LegacyMigrationStep2BSlice2BReadinessResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
-        var ledger = try loadLegacyMigrationLedgerForRun(
-            runID: runID,
-            startedAt: now,
-            activeOrganizationID: activeOrganizationID
-        )
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
         try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
@@ -38240,20 +38216,8 @@ final class AppState: ObservableObject {
     }
 
     func runLegacyMigrationStep2BSlice2BFinalize() async throws -> LegacyMigrationStep2BSlice2BFinalizeResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
-        var ledger = try loadLegacyMigrationLedgerForRun(
-            runID: runID,
-            startedAt: now,
-            activeOrganizationID: activeOrganizationID
-        )
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
         guard !hasInFlightSupabaseUploadOperations() else {
             ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
