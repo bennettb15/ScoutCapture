@@ -6756,28 +6756,7 @@ final class LocalStore {
     }
 
     private func referencedPathsStillUsedByOtherProperties(excluding propertyID: UUID, allProperties: [Property]) throws -> Set<String> {
-        var referencedPaths = Set<String>()
-
-        for otherPropertyID in allProperties.map(\.id) where otherPropertyID != propertyID {
-            let guided = try readGuidedShots(propertyID: otherPropertyID)
-            let observations = try readObservations(propertyID: otherPropertyID)
-
-            for path in guided.compactMap(\.referenceImagePath) {
-                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    referencedPaths.insert(trimmed)
-                }
-            }
-
-            for path in observations.flatMap({ $0.guidedShots.compactMap(\.referenceImagePath) }) {
-                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    referencedPaths.insert(trimmed)
-                }
-            }
-        }
-
-        return referencedPaths
+        try referencedPaths(for: allProperties.filter { $0.id != propertyID })
     }
 
     private func referencedPaths(for properties: [Property]) throws -> Set<String> {

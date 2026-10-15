@@ -2716,4 +2716,25 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
             )
         )
     }
+
+    func testDeletingPropertyKeepsSharedGuidedReferenceUntilLastOwnerIsDeleted() throws {
+        let root = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let organization = try store.createOrganization(Organization(name: "Reference Test"))
+        let first = try store.createProperty(Property(orgId: organization.id, name: "First"))
+        let second = try store.createProperty(Property(orgId: organization.id, name: "Second"))
+        let referenceDirectory = store.guidedReferencesDirectoryURL()
+        try FileManager.default.createDirectory(at: referenceDirectory, withIntermediateDirectories: true)
+        let referenceURL = referenceDirectory.appendingPathComponent("shared-reference.jpg")
+        try Data([1, 2, 3]).write(to: referenceURL)
+
+        try store.saveGuidedShots([makeGuidedShot(referenceImagePath: referenceURL.path)], propertyID: first.id)
+        try store.saveGuidedShots([makeGuidedShot(referenceImagePath: referenceURL.path)], propertyID: second.id)
+
+        try store.deleteProperty(id: first.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: referenceURL.path))
+        try store.deleteProperty(id: second.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: referenceURL.path))
+    }
 }
