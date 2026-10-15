@@ -2251,7 +2251,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
     }
 
     func testLightweightEntryStatusOverrideReturnsClaimResult() async throws {
-        let fixture = try makeCutoverFixture()
+        let fixture = try makeCutoverFixture(shadowWriteEnabled: true)
         let targetSessionID = UUID()
         fixture.appState._debugSetLightweightPropertyEntryStatusOverrideForTests { propertyID, sessionID, deviceID in
             XCTAssertEqual(propertyID, fixture.property.id)

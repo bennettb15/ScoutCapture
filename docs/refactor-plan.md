@@ -149,6 +149,8 @@ The local shot and lifecycle classes now pass **77 tests with 0 failures** after
 
 82. **Shared active-issue display order.** The four issue-list sorts in the camera view now use one comparison of creation time, update time, and UUID string. Both active and resolution-required filters stay at their original call sites, and both deferred and full thumbnail paths keep their existing behavior. This removes **22 production Swift lines**. The iOS Simulator build passes.
 
+83. **Correct lightweight-entry test setup.** The hosted smoke run executed **276 tests** and found three failed assertions in one test: its fixture disabled shadow writes while the test expected the lightweight entry override to run. The entry function's shadow-write guard is unchanged from Build 19. Enabling shadow writes for that test only makes the focused simulator test pass; no production code or server behavior changed. Rerun the hosted smoke gate on this correction.
+
 ## Next steps, in order
 
 1. **Restore a trustworthy test baseline.** The expanded nine-class smoke gate passes **270 tests with 0 failures**, including all 53 portal cases and the six guided durability cases. Group and reproduce the remaining prechange failures outside this gate, identify shared simulator or test-data contamination, and establish a full-suite gate. Do not attribute existing failures to the refactor.
