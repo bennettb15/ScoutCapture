@@ -743,6 +743,53 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(badge.showPendingExport)
     }
 
+    func testStaleOccupancyWithVerifiedRemoteDraftStaysLockedOnOtherInstall() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: "build-19-device",
+            heartbeatAt: Date().addingTimeInterval(-45 * 60)
+        )
+        fixture.appState._debugMarkLinkedDraftSessionVerifiedForTests(sessionID)
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+        XCTAssertTrue(fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)?.isBlocked == true)
+    }
+
+    func testStaleOccupancyLinkedToRemoteDraftBlocksTapWithoutClaimRPC() async throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: sessionID,
+            ownerDeviceID: "build-19-device",
+            heartbeatAt: Date().addingTimeInterval(-45 * 60)
+        )
+        fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in [record] }
+        fixture.appState._debugSetLinkedDraftSessionFetchOverrideForTests { _, _ in [sessionID] }
+        fixture.appState._debugSetLightweightPropertyEntryStatusOverrideForTests { _, _, _ in
+            XCTFail("A linked draft must block before the mutating entry RPC")
+            throw NSError(domain: "unexpected_entry_rpc", code: 1)
+        }
+
+        let decision = await fixture.appState.evaluateFreshPropertyTapEntryPreflight(
+            propertyID: fixture.property.id,
+            context: "test_linked_remote_draft"
+        )
+
+        XCTAssertTrue(decision?.isBlocked == true)
+        XCTAssertEqual(decision?.reason, "occupied_owned_by_other_actor")
+        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+    }
+
     func testStaleClaimableEntryStatusDoesNotBlock() throws {
         let fixture = try makeCutoverFixture()
         let status = AppState.LightweightPropertyEntryStatus(

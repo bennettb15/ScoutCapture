@@ -6354,6 +6354,9 @@ final class AppState: ObservableObject {
             refreshPropertyRowStatusChipCache()
         }
     }
+    @Published private var verifiedRemoteDraftSessionIDs: Set<UUID> = [] {
+        didSet { refreshPropertyRowLockBadgeCache() }
+    }
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
@@ -7087,6 +7090,7 @@ final class AppState: ObservableObject {
     private var propertyDeletePreflightRefreshOverride: PropertyDeletePreflightRefreshOverride?
     private var propertySessionOccupancyPersistOverride: PropertySessionOccupancyPersistOverride?
     private var propertyStatusFetchOverride: PropertyStatusFetchOverride?
+    private var linkedDraftSessionFetchOverride: ((UUID, [PropertyStatusRecord]) async throws -> Set<UUID>)?
     private var lightweightPropertyEntryStatusOverride: LightweightPropertyEntryStatusOverride?
     private var sessionSoftDeleteRPCOverride: SessionSoftDeleteRPCOverride?
     private var sessionSoftDeleteRefreshOverride: SessionSoftDeleteRefreshOverride?
@@ -8045,6 +8049,16 @@ final class AppState: ObservableObject {
         locallyLockedPropertyIDs.insert(propertyID)
     }
 
+    func _debugMarkLinkedDraftSessionVerifiedForTests(_ sessionID: UUID) {
+        verifiedRemoteDraftSessionIDs.insert(sessionID)
+    }
+
+    func _debugSetLinkedDraftSessionFetchOverrideForTests(
+        _ override: ((UUID, [PropertyStatusRecord]) async throws -> Set<UUID>)?
+    ) {
+        linkedDraftSessionFetchOverride = override
+    }
+
     func _debugRunForegroundCacheRefreshForTests(reason: String = "test_foreground_cache_refresh") {
         refreshVisiblePropertySessionCachesFromLocalStore(reason: reason)
         reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
@@ -8210,6 +8224,7 @@ final class AppState: ObservableObject {
         if !locallyLockedPropertyIDs.isEmpty {
             locallyLockedPropertyIDs.removeAll()
         }
+        verifiedRemoteDraftSessionIDs.removeAll()
         if !propertySessionOccupancyByPropertyID.isEmpty {
             propertySessionOccupancyByPropertyID = [:]
         }
@@ -39905,6 +39920,10 @@ final class AppState: ObservableObject {
                 orgID: activeOrganizationID,
                 propertyIDs: propertyIDs
             )
+            await refreshLinkedDraftSessionVerification(
+                orgID: activeOrganizationID,
+                records: rows
+            )
             let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
             var nextCache = propertyStatusByPropertyID
             for propertyID in propertyIDs {
@@ -41308,6 +41327,30 @@ final class AppState: ObservableObject {
                 return nil
             }
 
+            if freshRecord.status == .occupied,
+               Self.propertyStatusOccupiedIsStale(freshRecord),
+               let activeSessionID = freshRecord.activeSessionID {
+                guard let activeOrganizationID else {
+                    return missingPropertyStatusEntryPreflightDecision(
+                        source: "linked_session_unverified",
+                        reason: "missing_organization_context"
+                    )
+                }
+                do {
+                    let draftIDs = try await fetchLinkedDraftSessionIDs(
+                        orgID: activeOrganizationID,
+                        records: [freshRecord]
+                    )
+                    verifiedRemoteDraftSessionIDs.remove(activeSessionID)
+                    verifiedRemoteDraftSessionIDs.formUnion(draftIDs)
+                } catch {
+                    return missingPropertyStatusEntryPreflightDecision(
+                        source: "linked_session_unverified",
+                        reason: "stale_occupied_session_read_failed"
+                    )
+                }
+            }
+
             var nextCache = propertyStatusByPropertyID
             nextCache[propertyID] = freshRecord
             propertyStatusByPropertyID = nextCache
@@ -41339,6 +41382,15 @@ final class AppState: ObservableObject {
             return resolvedDecision
         } catch {
             if let cachedRecord = propertyStatusByPropertyID[propertyID] {
+                if cachedRecord.status == .occupied,
+                   Self.propertyStatusOccupiedIsStale(cachedRecord),
+                   let activeSessionID = cachedRecord.activeSessionID,
+                   !verifiedRemoteDraftSessionIDs.contains(activeSessionID) {
+                    return missingPropertyStatusEntryPreflightDecision(
+                        source: "linked_session_unverified",
+                        reason: "fresh_status_read_failed"
+                    )
+                }
                 let cachedDecision = makePropertyStatusEntryPreflightDecision(
                     propertyID: propertyID,
                     record: cachedRecord
@@ -47999,7 +48051,8 @@ final class AppState: ObservableObject {
                 block: nil
             )
         case .occupied:
-            if isStalePropertyStatusOccupied(record) {
+            if isStalePropertyStatusOccupied(record),
+               record.activeSessionID.map({ verifiedRemoteDraftSessionIDs.contains($0) }) != true {
                 print(
                     "[PropertyStatusEntry] " +
                     "property_status_occupied_stale_recovery=\(ownedByCurrentActor ? "owned_reclaimable" : "claimable_via_rpc") " +
@@ -48703,6 +48756,80 @@ final class AppState: ObservableObject {
         ).first
     }
 
+    private struct LinkedDraftSessionRecord: Decodable {
+        let id: UUID
+        let status: String
+        let isSealed: Bool?
+        let completedAt: String?
+        let firstDeliveredAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, status
+            case isSealed = "is_sealed"
+            case completedAt = "completed_at"
+            case firstDeliveredAt = "first_delivered_at"
+        }
+
+        var isUnfinishedDraft: Bool {
+            status == "draft" && isSealed != true && completedAt == nil && firstDeliveredAt == nil
+        }
+    }
+
+    private func fetchLinkedDraftSessionIDs(
+        orgID: UUID,
+        records: [PropertyStatusRecord]
+    ) async throws -> Set<UUID> {
+        let sessionIDs = Array(Set(records.compactMap { record -> UUID? in
+            guard record.status == .occupied,
+                  Self.propertyStatusOccupiedIsStale(record) else { return nil }
+            return record.activeSessionID
+        }))
+        guard !sessionIDs.isEmpty else { return [] }
+#if DEBUG
+        if let linkedDraftSessionFetchOverride {
+            return try await linkedDraftSessionFetchOverride(orgID, records)
+        }
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return Set(sessionIDs.filter { sessionID in
+                guard let record = sessionCoordinationDebugRemoteRecords[sessionID] else { return false }
+                return record.status == "draft" && record.isSealed != true &&
+                    record.completedAt == nil && record.firstDeliveredAt == nil
+            })
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+        let rows: [LinkedDraftSessionRecord] = try await client
+            .from("sessions")
+            .select("id, status, is_sealed, completed_at, first_delivered_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .in("id", values: sessionIDs.map { $0.uuidString.lowercased() })
+            .is("deleted_at", value: nil)
+            .execute()
+            .value
+        return Set(rows.filter { $0.isUnfinishedDraft }.map(\.id))
+    }
+
+    @MainActor
+    private func refreshLinkedDraftSessionVerification(
+        orgID: UUID,
+        records: [PropertyStatusRecord]
+    ) async {
+        let linkedIDs = Set(records.compactMap { record -> UUID? in
+            guard record.status == .occupied else { return nil }
+            return record.activeSessionID
+        })
+        guard !linkedIDs.isEmpty else { return }
+        do {
+            let draftIDs = try await fetchLinkedDraftSessionIDs(orgID: orgID, records: records)
+            verifiedRemoteDraftSessionIDs.subtract(linkedIDs)
+            verifiedRemoteDraftSessionIDs.formUnion(draftIDs)
+        } catch {
+            print("[PropertyStatusEntry] linked_session_read_failed")
+        }
+    }
+
     private func fetchPropertyStatusRecords(
         orgID: UUID,
         propertyIDs: [UUID]
@@ -48861,6 +48988,7 @@ final class AppState: ObservableObject {
                 orgID: orgID,
                 propertyIDs: requestedPropertyIDs
             )
+            await refreshLinkedDraftSessionVerification(orgID: orgID, records: rows)
             let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
             let completedAt = Date()
             let elapsedMs = Int(completedAt.timeIntervalSince(start) * 1000)
@@ -49262,6 +49390,18 @@ final class AppState: ObservableObject {
                 pendingExportCountIncluded: false,
                 entryBlocked: false,
                 deleteEligible: true
+            )
+        }
+        if record.status == .occupied,
+           let activeSessionID = record.activeSessionID,
+           verifiedRemoteDraftSessionIDs.contains(activeSessionID),
+           normalizedSupabaseText(record.ownerDeviceID) != currentDeviceID {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .locked,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: true,
+                deleteEligible: false
             )
         }
         if locallyLockedPropertyIDs.contains(propertyID),
