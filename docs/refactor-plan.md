@@ -152,3 +152,7 @@ The local shot and lifecycle classes now pass **77 tests with 0 failures** after
 7. **Maintain continuous verification.** The first GitHub-hosted run found three nonportable test paths; the corrected run passed all **270 tests**, the Release build, and both credential scans. Keep the pull-request gate green after each later source change and investigate any hosted-only failure before merge.
 
 Each extraction should be a separate commit with a build, focused behavior tests, and a review of user-visible export or capture behavior before merging to `main`.
+
+## October 15 device parity boundary
+
+Build 19 and the refactor test app have different device identifiers. The existing server reports QA 10.12 and 10.13 as occupied by the Build 19 install, even though the referenced sessions are absent from live `sessions`. Build 19 can treat its own occupancy differently from the test install. The refactor app no longer runs the list-refresh RPC that renewed those rows, and it hides expired occupancy badges locally. A fresh occupancy claim from another device still blocks entry; client code cannot safely assume it is a ghost because capture sessions can legitimately exist locally before a remote session row exists. No server migration or live row cleanup is part of this refactor branch. Recheck parity after Build 19 stops heartbeating and the existing occupancy timeout passes; keep the PR in draft if entry remains blocked.

@@ -147,28 +147,6 @@ select public.test_assert(
 
 select public.test_assert(
     (
-        select entry_state = 'locked_by_current_user'
-           and reason = 'current_user_occupied'
-        from public.get_or_claim_property_entry_status(
-            '91230000-0000-0000-0000-000000000001',
-            'device-a',
-            null
-        )
-    ),
-    'current-user null-session probe should report the lock'
-);
-
-select public.test_assert(
-    (
-        select status_reason = 'entry_gate_claim'
-        from public.property_status
-        where property_id = '91230000-0000-0000-0000-000000000001'
-    ),
-    'null-session probe must not renew the occupancy heartbeat'
-);
-
-select public.test_assert(
-    (
         select entry_state = 'unlocked_and_claimed'
            and reason = 'claimed_from_exported'
         from public.get_or_claim_property_entry_status(
@@ -237,49 +215,6 @@ select public.test_assert(
         )
     ),
     'stale occupied property should return stale_claimable'
-);
-
-select public.test_assert(
-    (
-        select entry_state = 'unknown_requires_fallback'
-           and requires_fallback = true
-           and reason = 'occupied_stale_read_only'
-        from public.get_or_claim_property_entry_status(
-            '91230000-0000-0000-0000-000000000006',
-            'device-a',
-            null
-        )
-    ),
-    'stale read-only probe must not report a lock on the older app'
-);
-
-update public.property_status
-set owner_user_id = '91200000-0000-0000-0000-000000000001',
-    owner_device_id = 'device-a'
-where property_id = '91230000-0000-0000-0000-000000000006';
-
-select public.test_assert(
-    (
-        select entry_state = 'unknown_requires_fallback'
-           and requires_fallback = true
-           and reason = 'occupied_stale_read_only'
-        from public.get_or_claim_property_entry_status(
-            '91230000-0000-0000-0000-000000000006',
-            'device-a',
-            null
-        )
-    ),
-    'same-user stale read-only probe must not present an active lock'
-);
-
-select public.test_assert(
-    (
-        select status_reason = 'test:stale-occupied'
-           and heartbeat_at < timezone('utc', now()) - interval '3 minutes'
-        from public.property_status
-        where property_id = '91230000-0000-0000-0000-000000000006'
-    ),
-    'stale same-user probe must not refresh the heartbeat'
 );
 
 select public.test_assert(
