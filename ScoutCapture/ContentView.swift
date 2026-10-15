@@ -12861,6 +12861,16 @@ extension ContentView {
         return true
     }
 
+    private func observationDisplayOrder(_ lhs: Observation, _ rhs: Observation) -> Bool {
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt < rhs.updatedAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
     private func refreshActiveIssues() {
         guard let propertyID = currentSessionScopedPropertyID else {
             activeObservations = []
@@ -12892,26 +12902,10 @@ extension ContentView {
                             currentSessionStart: activeSessionStart
                         )
                     }
-                    .sorted { lhs, rhs in
-                        if lhs.createdAt != rhs.createdAt {
-                            return lhs.createdAt < rhs.createdAt
-                        }
-                        if lhs.updatedAt != rhs.updatedAt {
-                            return lhs.updatedAt < rhs.updatedAt
-                        }
-                        return lhs.id.uuidString < rhs.id.uuidString
-                    }
+                    .sorted(by: observationDisplayOrder)
                 resolutionRequiredObservations = observations
                     .filter { $0.status == .resolutionRequired }
-                    .sorted { lhs, rhs in
-                        if lhs.createdAt != rhs.createdAt {
-                            return lhs.createdAt < rhs.createdAt
-                        }
-                        if lhs.updatedAt != rhs.updatedAt {
-                            return lhs.updatedAt < rhs.updatedAt
-                        }
-                        return lhs.id.uuidString < rhs.id.uuidString
-                    }
+                    .sorted(by: observationDisplayOrder)
             } catch {
                 activeObservations = []
                 resolutionRequiredObservations = []
@@ -12952,27 +12946,11 @@ extension ContentView {
                         currentSessionStart: currentSessionStart
                     )
                 }
-                .sorted { lhs, rhs in
-                    if lhs.createdAt != rhs.createdAt {
-                        return lhs.createdAt < rhs.createdAt
-                    }
-                    if lhs.updatedAt != rhs.updatedAt {
-                        return lhs.updatedAt < rhs.updatedAt
-                    }
-                    return lhs.id.uuidString < rhs.id.uuidString
-                }
+                .sorted(by: observationDisplayOrder)
 
             resolutionRequiredObservations = observations
                 .filter { $0.status == .resolutionRequired }
-                .sorted { lhs, rhs in
-                    if lhs.createdAt != rhs.createdAt {
-                        return lhs.createdAt < rhs.createdAt
-                    }
-                    if lhs.updatedAt != rhs.updatedAt {
-                        return lhs.updatedAt < rhs.updatedAt
-                    }
-                    return lhs.id.uuidString < rhs.id.uuidString
-                }
+                .sorted(by: observationDisplayOrder)
 
             var resolvedMap: [UUID: String] = [:]
             var referenceMap: [UUID: String] = [:]
