@@ -124,8 +124,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
     }
 
     func testFlaggedGuidedCaptureKeepsOnePhotoAndCreatesAnActiveIssue() async throws {
-        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
-        let root = externalRoot.appendingPathComponent("FlaggedGuidedCapture-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlaggedGuidedCapture-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalStore(testStorageRootURL: root)
         let org = try store.createOrganization(Organization(name: "Test Organization"))
@@ -208,8 +208,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
     }
 
     func testReclassifyingCapturedGuidedShotKeepsOnePhotoAndCompletedChecklistRow() async throws {
-        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
-        let root = externalRoot.appendingPathComponent("GuidedReclassification-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GuidedReclassification-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalStore(testStorageRootURL: root)
         let org = try store.createOrganization(Organization(name: "Test Organization"))
@@ -277,8 +277,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
     }
 
     func testReclassifyingCapturedFlaggedIssueKeepsOnePhotoAndItsIssueLink() async throws {
-        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
-        let root = externalRoot.appendingPathComponent("FlaggedReclassification-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlaggedReclassification-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalStore(testStorageRootURL: root)
         let org = try store.createOrganization(Organization(name: "Test Organization"))
