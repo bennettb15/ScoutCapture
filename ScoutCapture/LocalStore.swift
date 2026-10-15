@@ -5057,6 +5057,37 @@ final class LocalStore {
         }
     }
 
+    private func referenceIssueShotsByIssueID(from metadata: SessionMetadata) -> [UUID: [ShotMetadata]] {
+        let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
+            partial[issue.issueID] = issue
+        }
+        return Dictionary(grouping: metadata.shots.filter { shot in
+            guard let issueID = shot.issueID else { return false }
+            let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
+            let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+            let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+            return shot.isFlagged ||
+                issueStatus == "resolved" ||
+                issueStatus == "pending_review" ||
+                shotStatus == "resolved" ||
+                shotStatus == "pending_review" ||
+                captureKind == "resolved_capture"
+        }) { shot in
+            shot.issueID!
+        }
+    }
+
+    private func referenceShotPath(for shot: ShotMetadata, in sessionFolder: URL) -> String {
+        let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if relative.isEmpty {
+            return sessionFolder
+                .appendingPathComponent("Originals", isDirectory: true)
+                .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                .path
+        }
+        return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
+    }
+
     private func syncPropertyStoresFromRestoredSessionMetadata(
         metadata: SessionMetadata,
         propertyID: UUID,
@@ -5071,39 +5102,12 @@ final class LocalStore {
         try writeGuidedShots(normalizedGuided, propertyID: propertyID)
 
         let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-        let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
-            partial[issue.issueID] = issue
-        }
-        let issueShotsByIssueID = Dictionary(grouping: metadata.shots.filter { shot in
-            guard let issueID = shot.issueID else { return false }
-            let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
-            let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-            let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
-            return shot.isFlagged ||
-                issueStatus == "resolved" ||
-                issueStatus == "pending_review" ||
-                shotStatus == "resolved" ||
-                shotStatus == "pending_review" ||
-                captureKind == "resolved_capture"
-        }) { shot in
-            shot.issueID!
-        }
+        let issueShotsByIssueID = referenceIssueShotsByIssueID(from: metadata)
 
         // Authoritative restore: property-level observation store is replaced by snapshot-derived issues.
         let existingObservations = (try? readObservations(propertyID: propertyID)) ?? []
         let existingObservationsByID = Dictionary(uniqueKeysWithValues: existingObservations.map { ($0.id, $0) })
         var mergedByID: [UUID: Observation] = [:]
-
-        func shotPath(for shot: ShotMetadata) -> String {
-            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            if relative.isEmpty {
-                return sessionFolder
-                    .appendingPathComponent("Originals", isDirectory: true)
-                    .appendingPathComponent(shot.originalFilename, isDirectory: false)
-                    .path
-            }
-            return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
-        }
 
         func buildObservation(issue: IssueMetadata, fallbackSessionID: UUID) -> Observation {
             let issueShots = issueShotsByIssueID[issue.issueID] ?? []
@@ -5128,7 +5132,7 @@ final class LocalStore {
                     Shot(
                         id: shot.shotID,
                         capturedAt: shot.createdAt,
-                        imageLocalIdentifier: shotPath(for: shot),
+                        imageLocalIdentifier: referenceShotPath(for: shot, in: sessionFolder),
                         note: shot.noteText
                     )
             }
@@ -5171,7 +5175,7 @@ final class LocalStore {
                 statement: trimmedNonEmpty(issue.detailNote) ?? "",
                 status: status,
                 linkedShotID: linkedShot,
-                resolutionPhotoRef: resolvedMetaShot.map(shotPath(for:)) ?? existing?.resolutionPhotoRef,
+                resolutionPhotoRef: resolvedMetaShot.map { referenceShotPath(for: $0, in: sessionFolder) } ?? existing?.resolutionPhotoRef,
                 resolutionStatement: nil,
                 updatedInSessionID: effectiveSessionID,
                 resolvedInSessionID: status == .resolved || status == .pendingReview ? effectiveSessionID : nil,
@@ -5236,23 +5240,7 @@ final class LocalStore {
         try performFileIOSync {
             try ensurePropertyExists(propertyID)
             let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
-                partial[issue.issueID] = issue
-            }
-            let issueShotsByIssueID = Dictionary(grouping: metadata.shots.filter { shot in
-                guard let issueID = shot.issueID else { return false }
-                let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
-                let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-                let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
-                return shot.isFlagged ||
-                    issueStatus == "resolved" ||
-                    issueStatus == "pending_review" ||
-                    shotStatus == "resolved" ||
-                    shotStatus == "pending_review" ||
-                    captureKind == "resolved_capture"
-            }) { shot in
-                shot.issueID!
-            }
+            let issueShotsByIssueID = referenceIssueShotsByIssueID(from: metadata)
             let resolvedIssueIDs = Set(metadata.issues.compactMap { issue -> UUID? in
                 trimmedNonEmpty(issue.issueStatus)?.lowercased() == "resolved" ? issue.issueID : nil
             })
@@ -5261,17 +5249,6 @@ final class LocalStore {
 
             var observations = try readObservations(propertyID: propertyID)
             var observationsByID = Dictionary(uniqueKeysWithValues: observations.map { ($0.id, $0) })
-
-            func shotPath(for shot: ShotMetadata) -> String {
-                let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-                if relative.isEmpty {
-                    return sessionFolder
-                        .appendingPathComponent("Originals", isDirectory: true)
-                        .appendingPathComponent(shot.originalFilename, isDirectory: false)
-                        .path
-                }
-                return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
-            }
 
             var didMutate = false
             for issueID in candidateIssueIDs {
@@ -5298,7 +5275,7 @@ final class LocalStore {
                     Shot(
                         id: shot.shotID,
                         capturedAt: shot.createdAt,
-                        imageLocalIdentifier: shotPath(for: shot),
+                        imageLocalIdentifier: referenceShotPath(for: shot, in: sessionFolder),
                         note: shot.noteText
                     )
                 }
@@ -5346,7 +5323,7 @@ final class LocalStore {
                     ? (issue?.lastCaptureSessionId ?? sessionID)
                     : nil
                 if let resolvedShot {
-                    next.resolutionPhotoRef = shotPath(for: resolvedShot)
+                    next.resolutionPhotoRef = referenceShotPath(for: resolvedShot, in: sessionFolder)
                 }
                 next.building = latestShot?.building ?? next.building
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
