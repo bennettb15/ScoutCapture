@@ -140,7 +140,10 @@ begin
 
     if existing.status = 'occupied' then
         if is_existing_stale then
-            entry_state := 'stale_claimable';
+            entry_state := case
+                when target_session_id is null then 'unknown_requires_fallback'
+                else 'stale_claimable'
+            end;
             property_id := target_property_id;
             lock_session_id := existing.active_session_id;
             locked_by_user_id := existing.owner_user_id;
@@ -150,8 +153,11 @@ begin
             updated_at := existing.updated_at;
             server_timestamp := now_utc;
             lock_age_seconds := extract(epoch from now_utc - coalesce(existing.heartbeat_at, existing.updated_at))::integer;
-            requires_fallback := false;
-            reason := 'occupied_stale_claimable';
+            requires_fallback := target_session_id is null;
+            reason := case
+                when target_session_id is null then 'occupied_stale_read_only'
+                else 'occupied_stale_claimable'
+            end;
             return next;
             return;
         end if;
@@ -267,7 +273,7 @@ end;
 $$;
 
 comment on function public.get_or_claim_property_entry_status(uuid, text, uuid) is
-    'Atomic property-entry gate; null-session probes do not write, and expired occupied rows are claimable regardless of actor.';
+    'Atomic property-entry gate; null-session probes do not write or present expired occupancy as an active lock.';
 
 revoke all on function public.get_or_claim_property_entry_status(uuid, text, uuid) from public, anon;
 grant execute on function public.get_or_claim_property_entry_status(uuid, text, uuid) to authenticated;

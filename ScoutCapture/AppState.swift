@@ -46519,6 +46519,7 @@ final class AppState: ObservableObject {
     ) -> FastRuntimeDraftSummary? {
         guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
               summary.photoCount > 0,
+              !isFinalSession(persistedSessionIncludingDeleted(propertyID: propertyID, sessionID: summary.sessionID)),
               !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID) else {
             return nil
         }
@@ -46613,8 +46614,77 @@ final class AppState: ObservableObject {
         )
     }
 
+    @MainActor
+    func verifiedFastRuntimeDraftResumeState(for propertyID: UUID) async -> FastRuntimeDraftResumeState? {
+        guard let resume = fastRuntimeDraftResumeState(for: propertyID),
+              let summary = resume.summary else { return nil }
+        guard let orgID = summary.orgID else { return resume }
+        do {
+            guard let remote = try await fetchRemoteSessionCoordinationRecord(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: summary.sessionID
+            ) else { return resume }
+            guard isFinalRemoteSessionState(
+                status: remote.status,
+                completedAt: remote.completedAt,
+                exportedAt: remote.exportedAt,
+                isSealed: remote.isSealed,
+                firstDeliveredAt: remote.firstDeliveredAt
+            ) else { return resume }
+
+            applyRemoteFinalSessionStatesFromLockRecords([
+                RemotePropertySessionLockRecord(
+                    id: remote.id,
+                    orgID: remote.orgID,
+                    propertyID: remote.propertyID,
+                    status: remote.status,
+                    completedAt: remote.completedAt,
+                    exportedAt: remote.exportedAt,
+                    isSealed: remote.isSealed,
+                    firstDeliveredAt: remote.firstDeliveredAt,
+                    lockedByUserID: remote.lockedByUserID,
+                    lockedByDeviceID: remote.lockedByDeviceID,
+                    lockedAt: remote.lockedAt
+                )
+            ], reason: "fast_runtime_draft_remote_final")
+            guard let local = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID))?
+                .first(where: { $0.id == summary.sessionID }),
+                  isFinalSession(local) else {
+                return FastRuntimeDraftResumeState(
+                    propertyID: propertyID,
+                    propertyName: resume.propertyName,
+                    summary: summary,
+                    context: nil,
+                    storageRoot: resume.storageRoot,
+                    errorMessage: "This session is completed in the cloud, but its local draft could not be updated. Please try again."
+                )
+            }
+            if fastRuntimeDraftsByPropertyID[propertyID]?.sessionID == summary.sessionID {
+                var nextDrafts = fastRuntimeDraftsByPropertyID
+                nextDrafts.removeValue(forKey: propertyID)
+                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                fastRuntimeDraftsByPropertyID = nextDrafts
+            }
+            return nil
+        } catch {
+            recordDiagnosticsError(error)
+            return FastRuntimeDraftResumeState(
+                propertyID: propertyID,
+                propertyName: resume.propertyName,
+                summary: summary,
+                context: nil,
+                storageRoot: resume.storageRoot,
+                errorMessage: "Could not verify whether this saved session is still active. Please try again."
+            )
+        }
+    }
+
     private func recoverUnindexedStableFastRuntimeDraft(propertyID: UUID, orgID: UUID) -> FastRuntimeDraftSummary? {
         do {
+            let finalSessionIDs = Set(((try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? [])
+                .filter { isFinalSession($0) }
+                .map(\.id))
             let propertyRoot = try Self.fastRuntimeDraftsRootURL()
                 .appendingPathComponent("Drafts", isDirectory: true)
                 .appendingPathComponent(propertyID.uuidString, isDirectory: true)
@@ -46635,6 +46705,7 @@ final class AppState: ObservableObject {
                       context.propertyID == propertyID,
                       context.orgID == orgID,
                       context.status == .draft,
+                      !finalSessionIDs.contains(context.sessionID),
                       !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: context.sessionID),
                       fastRuntimeContextIsOwnedByCurrentActor(
                         ownerUserID: context.ownerUserID,

@@ -3113,7 +3113,8 @@ struct SessionHubView: View {
     private func continueAcceptedPropertyTap(
         _ property: Property,
         tapToken: Int,
-        didFreshEntryPreflight: Bool = false
+        didFreshEntryPreflight: Bool = false,
+        verifiedFastDraftResumeState: AppState.FastRuntimeDraftResumeState? = nil
     ) {
         if !didFreshEntryPreflight {
             Task { @MainActor in
@@ -3136,10 +3137,13 @@ struct SessionHubView: View {
                     return
                 }
 
+                let resumeState = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
+                guard tapToken == propertyTapToken else { return }
                 continueAcceptedPropertyTap(
                     property,
                     tapToken: tapToken,
-                    didFreshEntryPreflight: true
+                    didFreshEntryPreflight: true,
+                    verifiedFastDraftResumeState: resumeState
                 )
             }
             return
@@ -3147,7 +3151,7 @@ struct SessionHubView: View {
 
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
-        let fastDraftResumeState = appState.fastRuntimeDraftResumeState(for: property.id)
+        let fastDraftResumeState = verifiedFastDraftResumeState
         let hasPendingExport = badgeModel.showPendingExport
         let hasDraft = badgeModel.showDraft
         let isFastLaneUploading = appState.isFastRuntimeCompletionUploading(propertyID: property.id)
@@ -3478,7 +3482,7 @@ struct SessionHubView: View {
             if !fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType),
                result.entryState == .lockedByCurrentUser,
                result.isCurrentDeviceOccupiedClaim {
-                if let resumeState = appState.fastRuntimeDraftResumeState(for: property.id),
+                if let resumeState = await appState.verifiedFastRuntimeDraftResumeState(for: property.id),
                    resumeState.canResume,
                    let context = resumeState.context,
                    let storageRoot = resumeState.storageRoot,

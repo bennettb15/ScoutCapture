@@ -121,6 +121,52 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         let selectedDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(for: property.id))
         XCTAssertEqual(selectedDraft.context?.sessionID, newerSessionID)
         XCTAssertEqual(selectedDraft.summary?.photoCount, 1)
+        appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: newerSessionID,
+                orgID: org.id,
+                propertyID: property.id,
+                lockedByUserID: nil,
+                lockedByDeviceID: deviceID,
+                lockedAt: nil,
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date(),
+                status: Session.Status.draft.rawValue,
+                isSealed: false
+            )
+        )
+        let verifiedLocalDraft = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
+        XCTAssertEqual(verifiedLocalDraft?.context?.sessionID, newerSessionID)
+
+        let deliveredAt = Date()
+        appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: newerSessionID,
+                orgID: org.id,
+                propertyID: property.id,
+                lockedByUserID: nil,
+                lockedByDeviceID: nil,
+                lockedAt: nil,
+                coordinationTier1Snapshot: nil,
+                updatedAt: deliveredAt,
+                status: Session.Status.completed.rawValue,
+                completedAt: deliveredAt,
+                exportedAt: deliveredAt,
+                isSealed: true,
+                firstDeliveredAt: deliveredAt
+            )
+        )
+
+        let verifiedResume = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
+        XCTAssertNil(verifiedResume)
+        let finalSession = try XCTUnwrap(store.fetchSessions(propertyID: property.id)
+            .first { $0.id == newerSessionID })
+        XCTAssertEqual(finalSession.status, .completed)
+        XCTAssertTrue(finalSession.isSealed)
+        XCTAssertNotNil(finalSession.firstDeliveredAt)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newerOriginal.path))
+        XCTAssertNil(appState.fastRuntimeDraftResumeState(for: property.id))
+        XCTAssertNotEqual(appState.preferredPropertyEntrySessionID(for: property.id), newerSessionID)
     }
 
     func testFlaggedGuidedCaptureKeepsOnePhotoAndCreatesAnActiveIssue() async throws {

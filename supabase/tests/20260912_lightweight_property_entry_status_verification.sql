@@ -239,6 +239,20 @@ select public.test_assert(
     'stale occupied property should return stale_claimable'
 );
 
+select public.test_assert(
+    (
+        select entry_state = 'unknown_requires_fallback'
+           and requires_fallback = true
+           and reason = 'occupied_stale_read_only'
+        from public.get_or_claim_property_entry_status(
+            '91230000-0000-0000-0000-000000000006',
+            'device-a',
+            null
+        )
+    ),
+    'stale read-only probe must not report a lock on the older app'
+);
+
 update public.property_status
 set owner_user_id = '91200000-0000-0000-0000-000000000001',
     owner_device_id = 'device-a'
@@ -246,15 +260,16 @@ where property_id = '91230000-0000-0000-0000-000000000006';
 
 select public.test_assert(
     (
-        select entry_state = 'stale_claimable'
-           and reason = 'occupied_stale_claimable'
+        select entry_state = 'unknown_requires_fallback'
+           and requires_fallback = true
+           and reason = 'occupied_stale_read_only'
         from public.get_or_claim_property_entry_status(
             '91230000-0000-0000-0000-000000000006',
             'device-a',
             null
         )
     ),
-    'same-user stale occupancy must remain claimable'
+    'same-user stale read-only probe must not present an active lock'
 );
 
 select public.test_assert(
