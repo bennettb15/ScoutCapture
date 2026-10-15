@@ -145,6 +145,8 @@ The local shot and lifecycle classes now pass **77 tests with 0 failures** after
 
 80. **Shared skipped offline replay result.** Not-ready, already-running, and queue-read-failure exits now use one result builder that preserves zero counts, the normalized in-flight count when present, and the single diagnostics write. This removes **23 production Swift lines**. Three focused offline replay tests pass.
 
+81. **Shared Settings and Activity header.** The two sheets now use one title and Done-button view with the same colors, spacing, and parent dismissal callbacks. `ScoutCaptureApp.swift` fell from **20,549 to 20,520 lines** (29 fewer production Swift lines). The iOS Simulator build passes.
+
 ## Next steps, in order
 
 1. **Restore a trustworthy test baseline.** The expanded nine-class smoke gate passes **270 tests with 0 failures**, including all 53 portal cases and the six guided durability cases. Group and reproduce the remaining prechange failures outside this gate, identify shared simulator or test-data contamination, and establish a full-suite gate. Do not attribute existing failures to the refactor.

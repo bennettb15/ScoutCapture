@@ -27,6 +27,39 @@ private extension ColorScheme {
     }
 }
 
+private struct ScoutSheetHeader: View {
+    let title: String
+    let onDone: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(.primary)
+
+            Spacer(minLength: 0)
+
+            Button("Done", action: onDone)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(colorScheme.scoutSheetButtonLabel)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(colorScheme.scoutSheetButtonFill(darkOpacity: 0.65))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(colorScheme.scoutSheetButtonStroke, lineWidth: 1)
+            )
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 2)
+    }
+}
+
 private extension View {
     func scoutDiagnosticResultCard(fill: Color, stroke: Color) -> some View {
         self
@@ -2192,43 +2225,12 @@ struct SessionHubView: View {
         let onOpenCloudBackup: (() -> Void)?
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
         private let showDeveloperSection: Bool = false
-
-        private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
-
-        private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
-
-        private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
         var body: some View {
             NavigationStack {
                 VStack(spacing: 0) {
-                    HStack {
-                        Text("Settings")
-                            .font(.system(size: 28, weight: .bold))
-                            .foregroundStyle(.primary)
-
-                        Spacer(minLength: 0)
-
-                        Button("Done") {
-                            dismiss()
-                        }
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(buttonLabel)
-                        .padding(.horizontal, 14)
-                        .frame(height: 36)
-                        .background(buttonFill)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(buttonStroke, lineWidth: 1)
-                        )
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 2)
+                    ScoutSheetHeader(title: "Settings", onDone: { dismiss() })
 
                     List {
                         if appState.requiresAuthentication {
@@ -2418,46 +2420,15 @@ struct SessionHubView: View {
     private struct ActivityFeedView: View {
         @EnvironmentObject private var appState: AppState
         @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
         let orgID: UUID
 
         @State private var items: [AppState.ActivityFeedItem] = []
         @State private var isLoading: Bool = true
         @State private var errorMessage: String?
 
-        private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
-
-        private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
-
-        private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
-
         var body: some View {
             VStack(spacing: 0) {
-                HStack {
-                    Text("Activity")
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(.primary)
-
-                    Spacer(minLength: 0)
-
-                    Button("Done") {
-                        dismiss()
-                    }
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(buttonLabel)
-                    .padding(.horizontal, 14)
-                    .frame(height: 36)
-                    .background(buttonFill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(buttonStroke, lineWidth: 1)
-                    )
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 2)
+                ScoutSheetHeader(title: "Activity", onDone: { dismiss() })
 
                 List {
                     if isLoading {
