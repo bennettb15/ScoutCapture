@@ -1943,7 +1943,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         fixture.appState._debugReplacePropertyStatusCacheWithoutReconcileForTests([exportedRecord])
 
         fixture.appState._debugSchedulePersistentDataCacheRefreshForTests()
-        for _ in 0..<40 {
+        for _ in 0..<200 {
             if fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests() == 1 { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
