@@ -317,7 +317,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftCountSource(), "property_status")
     }
 
-    func testPropertyStatusOwnerDraftSameUserDifferentDeviceStillOwns() throws {
+    func testPropertyStatusSameUserDifferentDeviceDraftRemainsLocked() throws {
         let fixture = try makeCutoverFixture()
         let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
         fixture.appState._debugRefreshPropertiesLocallyForTests()
@@ -334,14 +334,14 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
-        XCTAssertTrue(badge.showDraft)
-        XCTAssertFalse(badge.showLock)
-        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertTrue(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
 
         let preflight = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
-        XCTAssertEqual(preflight?.decision, "allow")
-        XCTAssertEqual(preflight?.reason, "draft_owned_by_current_actor")
-        XCTAssertNil(preflight?.block)
+        XCTAssertEqual(preflight?.decision, "block")
+        XCTAssertEqual(preflight?.reason, "draft_owned_by_other_actor")
+        XCTAssertNotNil(preflight?.block)
     }
 
     func testPropertyStatusOwnerDraftForKnownEmptyLocalSessionDoesNotShowDraftBadge() throws {
@@ -472,7 +472,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
 
         XCTAssertTrue(badge.showPendingExport)
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertEqual(entry?.decision, "block")
         XCTAssertEqual(entry?.reason, "pending_export_owned_by_other_actor")
         XCTAssertEqual(entry?.block?.blockContext, "pending_export")
@@ -514,7 +514,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         XCTAssertEqual(block.blockContext, "pending_export")
         XCTAssertEqual(block.ownerDescription, "owner@example.com")
-        XCTAssertEqual(message, "Locked by: owner@example.com\nPending since: Aug 19, 9:15 AM")
+        XCTAssertEqual(message, "Locked by: owner@example.com")
     }
 
     func testRemotePendingExportLockDetailUsesUpdatedByOwnerEmailWhenOwnerFieldsAreCleared() async throws {
@@ -551,7 +551,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let message = AppState.sessionEntryBlockMessage(for: block) { _ in "Aug 19, 9:15 AM" }
 
         XCTAssertEqual(block.ownerDescription, "device-a@example.com")
-        XCTAssertEqual(message, "Locked by: device-a@example.com\nPending since: Aug 19, 9:15 AM")
+        XCTAssertEqual(message, "Locked by: device-a@example.com")
     }
 
     func testRemotePendingExportLockDetailFallsBackWhenOwnerEmailMissing() async throws {
@@ -578,7 +578,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(block.ownerDescription, "another user")
         XCTAssertFalse(message.contains(ownerID.uuidString))
         XCTAssertFalse(message.contains("device-a-origin"))
-        XCTAssertEqual(message, "Locked by: another user\nPending since: Aug 19, 9:15 AM")
+        XCTAssertEqual(message, "Locked by: another user")
     }
 
     func testPendingExportWithClearedOwnerFieldsRemainsAccessibleOnOriginatingDevicePackage() throws {
@@ -638,7 +638,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
 
         XCTAssertTrue(badge.showPendingExport)
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertEqual(entry?.decision, "block")
         XCTAssertEqual(entry?.reason, "pending_export_owned_by_other_actor")
         XCTAssertFalse(fixture.appState.isPendingDelivery(session))
@@ -734,12 +734,80 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         )
 
         fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+        fixture.appState._debugMarkPropertyLocallyLockedForTests(fixture.property.id)
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
         XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showPendingExport)
+    }
+
+    func testStaleOccupancyWithVerifiedRemoteDraftStaysLockedOnOtherInstall() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: "build-19-device",
+            heartbeatAt: Date().addingTimeInterval(-45 * 60)
+        )
+        fixture.appState._debugMarkLinkedDraftSessionVerifiedForTests(sessionID)
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+        XCTAssertTrue(fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)?.isBlocked == true)
+    }
+
+    func testStaleOccupancyLinkedToRemoteDraftBlocksTapWithoutClaimRPC() async throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: sessionID,
+            ownerDeviceID: "build-19-device",
+            heartbeatAt: Date().addingTimeInterval(-45 * 60)
+        )
+        fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in [record] }
+        fixture.appState._debugSetLinkedDraftSessionFetchOverrideForTests { _, _ in [sessionID] }
+        fixture.appState._debugSetLightweightPropertyEntryStatusOverrideForTests { _, _, _ in
+            XCTFail("A linked draft must block before the mutating entry RPC")
+            throw NSError(domain: "unexpected_entry_rpc", code: 1)
+        }
+
+        let decision = await fixture.appState.evaluateFreshPropertyTapEntryPreflight(
+            propertyID: fixture.property.id,
+            context: "test_linked_remote_draft"
+        )
+
+        XCTAssertTrue(decision?.isBlocked == true)
+        XCTAssertEqual(decision?.reason, "occupied_owned_by_other_actor")
+        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+    }
+
+    func testStaleClaimableEntryStatusDoesNotBlock() throws {
+        let fixture = try makeCutoverFixture()
+        let status = AppState.LightweightPropertyEntryStatus(
+            entryState: .staleClaimable,
+            propertyID: fixture.property.id,
+            lockSessionID: UUID(),
+            lockedByUserID: UUID(),
+            lockedByEmail: nil,
+            lockedByDeviceID: "other-device",
+            lockedAt: Date().addingTimeInterval(-4 * 60),
+            updatedAt: Date().addingTimeInterval(-4 * 60),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 240,
+            requiresFallback: false,
+            reason: "occupied_stale_claimable"
+        )
+
+        XCTAssertNil(fixture.appState.sessionEntryBlock(for: status))
     }
 
     func testOldDraftPropertyStatusStillShowsLockedBadgeForNonOwner() throws {
@@ -779,7 +847,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertTrue(badge.showPendingExport)
     }
@@ -1141,7 +1209,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(evaluation.decision?.block?.blockContext, "missing_property_status")
         XCTAssertFalse(evaluation.skipCachedPropertyStatusPreflight)
         XCTAssertEqual(evaluation.source, "property_status_missing")
-        XCTAssertEqual(evaluation.reason, "missing_property_status_row")
+        XCTAssertEqual(evaluation.reason, "fresh_read_missing_row")
 
         fixture.appState.selectProperty(id: fixture.property.id)
         let session = fixture.appState.startSession()
@@ -1225,6 +1293,78 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                 propertyID: fixture.property.id
             )
         )
+    }
+
+    func testBackingOutBeforeSessionTypeReleasesOnlyThisInstallsClaim() async throws {
+        let fixture = try makeCutoverFixture(shadowWriteEnabled: true)
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = try XCTUnwrap(
+            fixture.appState.startSession(skipPropertyStatusPreflight: true)
+        )
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        let occupiedRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: session.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        let idleRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .idle,
+            heartbeatAt: nil
+        )
+        var didCallRelease = false
+        fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in
+            [didCallRelease ? idleRecord : occupiedRecord]
+        }
+        fixture.appState._debugSetPropertyStatusShadowWriteOverrideForTests { transition, _, _, _, _ in
+            transition != "release"
+        }
+
+        let failedRelease = await fixture.appState.cancelUnstartedSessionTypeSelection(propertyID: fixture.property.id)
+        XCTAssertFalse(failedRelease)
+        XCTAssertEqual(fixture.appState.currentSession?.id, session.id)
+
+        fixture.appState._debugSetPropertyStatusShadowWriteOverrideForTests { transition, propertyID, _, _, _ in
+            if transition == "release" {
+                XCTAssertEqual(propertyID, fixture.property.id)
+                didCallRelease = true
+            }
+            return true
+        }
+        let didRelease = await fixture.appState.cancelUnstartedSessionTypeSelection(propertyID: fixture.property.id)
+        XCTAssertTrue(didRelease)
+        XCTAssertTrue(didCallRelease)
+        XCTAssertNil(fixture.appState.currentSession)
+    }
+
+    func testBackingOutDoesNotReleaseOtherInstallsClaim() async throws {
+        let fixture = try makeCutoverFixture(shadowWriteEnabled: true)
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let otherInstallRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: "other-install"
+        )
+        fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in [otherInstallRecord] }
+        var didCallRelease = false
+        fixture.appState._debugSetPropertyStatusShadowWriteOverrideForTests { transition, _, _, _, _ in
+            if transition == "release" { didCallRelease = true }
+            return true
+        }
+
+        let didLeave = await fixture.appState.cancelUnstartedSessionTypeSelection(propertyID: fixture.property.id)
+        XCTAssertTrue(didLeave)
+        XCTAssertFalse(didCallRelease)
+        XCTAssertNil(fixture.appState.currentSession)
     }
 
     func testNoPhotoDraftCannotFastPresentFromCachedStatus() throws {
@@ -1317,7 +1457,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
     }
 
-    func testDraftPromotionLocalCacheUpdateAcceptsSameUserDifferentDeviceDraft() throws {
+    func testDraftPromotionLocalCacheUpdateRejectsSameUserDifferentDeviceDraft() throws {
         let fixture = try makeCutoverFixture()
         let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
         fixture.appState._debugRefreshPropertiesLocallyForTests()
@@ -1340,13 +1480,10 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-        XCTAssertEqual(cached?.status, .draft)
-        XCTAssertEqual(cached?.draftSessionID, sessionID)
-        XCTAssertEqual(cached?.ownerUserID, fixture.userID)
-        XCTAssertEqual(cached?.ownerDeviceID, "old-device")
-        XCTAssertTrue(badge.showDraft)
+        XCTAssertNil(cached)
+        XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showLock)
-        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
     func testClaimReturnedOccupiedUpdatesLocalPropertyStatusCache() throws {
@@ -1469,7 +1606,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
-    func testNoZIPNoOpReleaseReturnedRemoteDraftWithoutLocalSessionIsTreatedAsIdle() throws {
+    func testNoZIPNoOpReleaseReturnedRemoteDraftWithoutLocalSessionPresentsAsIdle() throws {
         let fixture = try makeCutoverFixture()
         let completedSession = try seedCapturedPendingExportSession(
             propertyID: fixture.property.id,
@@ -1502,9 +1639,9 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
-        XCTAssertEqual(cached?.status, .idle)
-        XCTAssertNil(cached?.activeSessionID)
-        XCTAssertNil(cached?.draftSessionID)
+        XCTAssertEqual(cached?.status, .draft)
+        XCTAssertEqual(cached?.activeSessionID, remoteOnlyDraftSessionID)
+        XCTAssertEqual(cached?.draftSessionID, remoteOnlyDraftSessionID)
         XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showPendingExport)
@@ -1512,7 +1649,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
-    func testNoZIPStaleZeroPhotoReleaseDraftStatusDoesNotShowDraftBadge() throws {
+    func testNoZIPStaleZeroPhotoReleaseDoesNotBypassOtherDeviceLock() throws {
         let fixture = try makeCutoverFixture()
         let completedSession = try seedCapturedPendingExportSession(
             propertyID: fixture.property.id,
@@ -1541,10 +1678,10 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
         XCTAssertFalse(badge.showDraft)
-        XCTAssertFalse(badge.showLock)
+        XCTAssertTrue(badge.showLock)
         XCTAssertFalse(badge.showPendingExport)
-        XCTAssertEqual(entry?.decision, "allow")
-        XCTAssertEqual(entry?.reason, "draft_without_material_local_session")
+        XCTAssertEqual(entry?.decision, "block")
+        XCTAssertEqual(entry?.reason, "draft_owned_by_other_actor")
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
@@ -1719,7 +1856,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             lastExportedSessionID: session.id
         )
         fixture.appState._debugReplacePropertyStatusCacheForTests([pendingRecord])
-        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+        XCTAssertFalse(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
         XCTAssertEqual(
             fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)?.block?.blockContext,
             "pending_export"
@@ -1806,7 +1943,10 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         fixture.appState._debugReplacePropertyStatusCacheWithoutReconcileForTests([exportedRecord])
 
         fixture.appState._debugSchedulePersistentDataCacheRefreshForTests()
-        await yieldMainActor(times: 6)
+        for _ in 0..<200 {
+            if fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests() == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
 
         let writesAfterConvergence = fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests()
         let refreshed = try XCTUnwrap(deliveredSession(session.id, propertyID: fixture.property.id, localStore: fixture.localStore))
@@ -1814,7 +1954,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertNotNil(refreshed.firstDeliveredAt)
 
         fixture.appState._debugSchedulePersistentDataCacheRefreshForTests()
-        await yieldMainActor(times: 6)
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertEqual(fixture.appState._debugDeliveredSessionStateReconciliationWriteCountForTests(), writesAfterConvergence)
     }
@@ -1995,7 +2135,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let decision = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
 
         XCTAssertEqual(decision?.decision, "block")
-        XCTAssertEqual(decision?.block?.ownerDescription, "Morgan Owner on device owner-de")
+        XCTAssertEqual(decision?.block?.ownerDescription, "Morgan Owner • device owner-de")
     }
 
     func testPropertyStatusEntryBlockUsesShortFriendlyFallbackOwnerDescription() throws {
@@ -2016,7 +2156,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(decision?.decision, "block")
         XCTAssertEqual(
             decision?.block?.ownerDescription,
-            "another signed-in user (11111111) on device aaaaaaaa"
+            "another signed-in user (11111111) • device aaaaaaaa"
         )
         XCTAssertFalse(decision?.block?.ownerDescription.contains(ownerID.uuidString) ?? true)
     }
@@ -2048,7 +2188,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                     blockContext: "occupied"
                 )
             ),
-            "Property is currently occupied by owner@example.com."
+            "Locked by: owner@example.com"
         )
         XCTAssertEqual(
             AppState.sessionEntryBlockMessage(
@@ -2058,7 +2198,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                     blockContext: "draft"
                 )
             ),
-            "A draft is in progress by owner@example.com."
+            "Draft in progress by: owner@example.com"
         )
         XCTAssertEqual(
             AppState.sessionEntryBlockMessage(
@@ -2069,7 +2209,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                 ),
                 lockedAtFormatter: { _ in "Aug 19, 9:15 AM" }
             ),
-            "Locked by: owner@example.com\nPending since: Aug 19, 9:15 AM"
+            "Locked by: owner@example.com"
         )
         XCTAssertEqual(
             AppState.sessionEntryBlockMessage(
@@ -2111,7 +2251,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
     }
 
     func testLightweightEntryStatusOverrideReturnsClaimResult() async throws {
-        let fixture = try makeCutoverFixture()
+        let fixture = try makeCutoverFixture(shadowWriteEnabled: true)
         let targetSessionID = UUID()
         fixture.appState._debugSetLightweightPropertyEntryStatusOverrideForTests { propertyID, sessionID, deviceID in
             XCTAssertEqual(propertyID, fixture.property.id)
@@ -2249,11 +2389,12 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let property: Property
     }
 
-    private func makeCutoverFixture() throws -> CutoverFixture {
+    private func makeCutoverFixture(shadowWriteEnabled: Bool = false) throws -> CutoverFixture {
         let suiteName = "Phase2C27FZ4PropertyStatusCutover-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
         defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(shadowWriteEnabled, forKey: "shadow_write_enabled")
         defaults.set(true, forKey: "session_coordination_enabled")
 
         let storageRoot = FileManager.default.temporaryDirectory
@@ -2267,6 +2408,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             Property(orgId: orgID, folderId: "status-cutover", name: "Status Cutover", address: "1 Status Way")
         )
         let appState = AppState(localStore: localStore, userDefaults: defaults, disableCloudBackupForTests: true)
+        appState.stopAuthenticationObservation()
         appState._debugSetOrganizationContextForTests(
             memberships: [
                 ActiveOrganizationMembership(id: orgID, name: "Status Cutover Org", role: "owner")

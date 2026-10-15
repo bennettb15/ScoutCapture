@@ -6,6 +6,74 @@
 import SwiftUI
 import UIKit
 
+extension UIDeviceOrientation {
+    var scoutCaptureIsLandscape: Bool {
+        self == .landscapeLeft || self == .landscapeRight
+    }
+
+    var scoutCaptureRotationDegrees: Double {
+        switch self {
+        case .landscapeLeft: return 90
+        case .landscapeRight: return -90
+        default: return 0
+        }
+    }
+
+    func scoutCaptureStableOrientation(includingUpsideDown: Bool = false) -> UIDeviceOrientation? {
+        switch self {
+        case .portrait, .landscapeLeft, .landscapeRight: return self
+        case .portraitUpsideDown where includingUpsideDown: return self
+        default: return nil
+        }
+    }
+}
+
+private struct FastLaneChecklistThumbnail: View {
+    let image: UIImage?
+    let isLoading: Bool
+    let isCaptured: Bool
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if isLoading {
+                ZStack {
+                    Color.white.opacity(0.08)
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white.opacity(0.9))
+                        .scaleEffect(0.8)
+                }
+            } else {
+                ZStack {
+                    Color.white.opacity(0.08)
+                    Image(systemName: "photo")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .frame(width: 56, height: 56)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .overlay(alignment: .topTrailing) {
+            if isCaptured {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                    .padding(4)
+            }
+        }
+    }
+}
+
 // Extracted production camera panel views. Keep behavior in sync with ContentView call sites.
 
 private let isCameraPanelVerboseConsoleLoggingEnabled = false
@@ -423,20 +491,9 @@ struct GuidedChecklistOverlay: View {
         let viewerToken: Int
     }
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     var body: some View {
         GeometryReader { geo in
@@ -899,16 +956,7 @@ struct GuidedChecklistOverlay: View {
 
     private func refreshOrientation() {
         let o = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
+        let newValue = o.scoutCaptureStableOrientation()
 
         guard let newValue else { return }
         guard newValue != lastValidOrientation else { return }
@@ -999,64 +1047,6 @@ struct GuidedChecklistOverlay: View {
     }
 }
 
-struct GuidedReassignSheet: View {
-    let source: GuidedShot
-    let candidates: [GuidedShot]
-    let onCancel: () -> Void
-    let onSelect: (UUID) -> Void
-
-    private func label(for guidedShot: GuidedShot) -> String {
-        let concise = ContentView.conciseContextLabel(
-            building: guidedShot.building,
-            elevation: guidedShot.targetElevation,
-            detailType: guidedShot.detailType
-        )
-        return concise.isEmpty ? guidedShot.title : concise
-    }
-
-    var body: some View {
-        NavigationStack {
-            List(candidates) { candidate in
-                Button {
-                    onSelect(candidate.id)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(label(for: candidate))
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundColor(.primary)
-                        Text("Angle \(max(1, candidate.angleIndex ?? 1))")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-            }
-            .navigationTitle("Reassign To")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel", action: onCancel)
-                }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Move photo association from")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Text(label(for: source))
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.primary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 6)
-                .background(Color(uiColor: .systemBackground))
-            }
-        }
-    }
-}
 
 struct RetiredGuidedChecklistRow: View {
     let guidedShot: GuidedShot
@@ -1439,43 +1429,11 @@ struct GuidedChecklistRow: View {
     }
 
     private var thumbnailView: some View {
-        Group {
-            if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else if isThumbnailLoading {
-                ZStack {
-                    Color.white.opacity(0.08)
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(.white.opacity(0.9))
-                        .scaleEffect(0.8)
-                }
-            } else {
-                ZStack {
-                    Color.white.opacity(0.08)
-                    Image(systemName: "photo")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-            }
-        }
-        .frame(width: 56, height: 56)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        FastLaneChecklistThumbnail(
+            image: thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)),
+            isLoading: isThumbnailLoading,
+            isCaptured: status == .captured
         )
-        .overlay(alignment: .topTrailing) {
-            if status == .captured {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white)
-                    .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
-                    .padding(4)
-            }
-        }
     }
 
     private var textView: some View {
@@ -1702,20 +1660,9 @@ struct ActiveIssuesSheet: View {
         let metadataSessionID: UUID?
     }
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     private var issueIDSignature: String {
         observations
@@ -2071,50 +2018,6 @@ struct ActiveIssuesSheet: View {
         }
     }
 
-    private struct FlaggedReassignSheet: View {
-        let source: Observation
-        let candidates: [Observation]
-        let onCancel: () -> Void
-        let onSelect: (UUID) -> Void
-
-        private func label(for observation: Observation) -> String {
-            let concise = ContentView.conciseContextLabel(
-                building: observation.building,
-                elevation: observation.targetElevation,
-                detailType: observation.detailType
-            )
-            return concise.isEmpty ? (ContentView.observationCurrentReasonText(observation) ?? observation.statement) : concise
-        }
-
-        var body: some View {
-            NavigationStack {
-                List(candidates) { candidate in
-                    Button {
-                        onSelect(candidate.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(label(for: candidate))
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.primary)
-                            Text(ContentView.observationCurrentReasonText(candidate) ?? candidate.statement)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .navigationTitle("Reassign To")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Cancel", action: onCancel)
-                    }
-                }
-            }
-        }
-    }
 
     private struct FlaggedHistorySheet: View {
         @Environment(\.dismiss) private var dismiss
@@ -2836,43 +2739,11 @@ struct ActiveIssuesSheet: View {
         }
 
         private var thumbnailView: some View {
-            Group {
-                if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else if isThumbnailLoading {
-                    ZStack {
-                        Color.white.opacity(0.08)
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .tint(.white.opacity(0.9))
-                            .scaleEffect(0.8)
-                    }
-                } else {
-                    ZStack {
-                        Color.white.opacity(0.08)
-                        Image(systemName: "photo")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            .frame(width: 56, height: 56)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            FastLaneChecklistThumbnail(
+                image: thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)),
+                isLoading: isThumbnailLoading,
+                isCaptured: hasCapturedImage
             )
-            .overlay(alignment: .topTrailing) {
-                if hasCapturedImage {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
-                        .padding(4)
-                }
-            }
         }
 
         private func loadThumbnailIfNeeded() {
@@ -2959,16 +2830,7 @@ struct ActiveIssuesSheet: View {
 
     private func refreshOrientation() {
         let o = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
+        let newValue = o.scoutCaptureStableOrientation()
 
         guard let newValue else { return }
         guard newValue != lastValidOrientation else { return }

@@ -21,6 +21,39 @@ private func verboseLog(_ message: @autoclosure () -> String) {
     print(message())
 }
 
+#if DEBUG
+private func logExportSessionSourceDiagnostics(
+    _ localStore: LocalStore, _ propertyID: UUID, _ sessionID: UUID, _ sessionData: Data, _ exportRoot: URL
+) {
+    let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+    let exists = FileManager.default.fileExists(atPath: sourceURL.path)
+    let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+    print("Export session.json path source: \(sourceURL.path)")
+    print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
+    let raw = String(data: sessionData, encoding: .utf8) ?? ""
+    print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
+    print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
+    let debugDecoder = JSONDecoder()
+    debugDecoder.dateDecodingStrategy = .iso8601
+    if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
+       let first = decoded.shots.first {
+        print("Export sessionStartedAt: \(decoded.startedAt)")
+        print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
+        print("Export first shot shotKey: \(first.shotKey)")
+        print("Export first shot createdAt: \(first.createdAt)")
+        print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
+        print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+        if let delivered = decoded.firstDeliveredAt {
+            print("Export firstDeliveredAt: \(delivered)")
+        }
+        if let expires = decoded.reExportExpiresAt {
+            print("Export reExportExpiresAt: \(expires)")
+        }
+    }
+    print("EXPORT ROOT: \(exportRoot.path)")
+}
+#endif
+
 private func proportionalCircleGlyphSize(for diameter: CGFloat) -> CGFloat {
     min(30, max(18, (diameter * 0.5).rounded()))
 }
@@ -45,43 +78,6 @@ extension UIScreen {
 
 // MARK: - UIKit label button (native text rendering + reliable hit testing)
 
-private struct UIKitCircleTextButton: UIViewRepresentable {
-
-    let title: String
-    let isActive: Bool
-    let size: CGFloat
-    let action: () -> Void
-
-    func makeUIView(context: Context) -> UIButton {
-        let button = UIButton(type: .system)
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .medium)
-        button.titleLabel?.adjustsFontForContentSizeCategory = true
-        button.addTarget(context.coordinator, action: #selector(Coordinator.tapped), for: .touchUpInside)
-        button.backgroundColor = .clear
-        button.clipsToBounds = true
-        return button
-    }
-
-    func updateUIView(_ button: UIButton, context: Context) {
-        context.coordinator.action = action
-        button.setTitle(title, for: .normal)
-
-        let fg = isActive ? UIColor.black : UIColor(white: 1.0, alpha: 0.92)
-        button.setTitleColor(fg, for: .normal)
-
-        button.layer.cornerRadius = size / 2.0
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    final class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action }
-        @objc func tapped() { action() }
-    }
-}
 
 // MARK: - Camera-style glass circle (darker, liquid-glass rim)
 
@@ -420,6 +416,7 @@ final class ReportLibraryModel: ObservableObject {
         var deviceModel: String?
         var schemaVersion: Int?
     }
+
 
     static func sourceExifOrientationRaw(from data: Data) -> UInt32? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -1801,20 +1798,9 @@ struct ReportPhotoViewer: View {
     // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     private func refreshOrientation() {
         let o = UIDevice.current.orientation
@@ -1827,16 +1813,7 @@ struct ReportPhotoViewer: View {
             return
         }
 
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
+        let newValue = o.scoutCaptureStableOrientation()
 
         guard let newValue else { return }
         guard newValue != lastValidOrientation else { return }
@@ -3344,386 +3321,6 @@ private struct FullImage: View {
     }
 }
 
-// MARK: - Detail Types Model (persisted per mode)
-
-final class DetailTypesModel: ObservableObject {
-
-    struct DetailTypeItem: Identifiable, Codable, Equatable {
-        var id: UUID = UUID()
-        var name: String
-    }
-
-    @Published var residentialInteriorTypes: [DetailTypeItem] = []
-    @Published var residentialExteriorTypes: [DetailTypeItem] = []
-    @Published var commercialInteriorTypes: [DetailTypeItem] = []
-    @Published var commercialExteriorTypes: [DetailTypeItem] = []
-
-    @Published var selectedResidentialInterior: String = ""
-    @Published var selectedResidentialExterior: String = ""
-    @Published var selectedCommercialInterior: String = ""
-    @Published var selectedCommercialExterior: String = ""
-
-    private let residentialInteriorTypesKey = "scout.detailTypes.residential.interior.list.v1"
-    private let residentialExteriorTypesKey = "scout.detailTypes.residential.exterior.list.v1"
-    private let commercialInteriorTypesKey = "scout.detailTypes.commercial.interior.list.v1"
-    private let commercialExteriorTypesKey = "scout.detailTypes.commercial.exterior.list.v1"
-
-    private let selectedResidentialInteriorKey = "scout.detailTypes.residential.interior.selected.v1"
-    private let selectedResidentialExteriorKey = "scout.detailTypes.residential.exterior.selected.v1"
-    private let selectedCommercialInteriorKey = "scout.detailTypes.commercial.interior.selected.v1"
-    private let selectedCommercialExteriorKey = "scout.detailTypes.commercial.exterior.selected.v1"
-
-    private let legacyResidentialInteriorTypesKey = "scout.detailTypes.interior.list.v4"
-    private let legacyResidentialExteriorTypesKey = "scout.detailTypes.exterior.list.v4"
-    private let legacySelectedResidentialInteriorKey = "scout.detailTypes.interior.selected.v4"
-    private let legacySelectedResidentialExteriorKey = "scout.detailTypes.exterior.selected.v4"
-
-    private let legacyInteriorTypesKey = "scout.detailTypes.interior.list.v2"
-    private let legacyExteriorTypesKey = "scout.detailTypes.exterior.list.v2"
-    private let legacySelectedInteriorKey = "scout.detailTypes.interior.selected.v2"
-    private let legacySelectedExteriorKey = "scout.detailTypes.exterior.selected.v2"
-
-    private var pendingPersist: DispatchWorkItem?
-    private let persistDebounceSeconds: Double = 0.22
-
-    private let defaultResidentialInteriorTypes: [String] = [
-        "Overview",
-        "Entry / Foyer",
-        "Living Room",
-        "Sitting room",
-        "Kitchen",
-        "Guest kitchen",
-        "Dining Area",
-        "Primary Bedroom",
-        "Primary bath",
-        "Bedroom 2",
-        "Bedroom 3",
-        "Bedroom 4",
-        "Bedroom 5",
-        "Bathroom",
-        "Half bath",
-        "Guest bathroom",
-        "Hallway",
-        "Stairs",
-        "Basement stairs",
-        "Secondary stairs",
-        "Laundry",
-        "Garage",
-        "Mechanical / HVAC",
-        "Storage"
-    ]
-
-    private let defaultResidentialExteriorTypes: [String] = [
-        "Overview",
-        "Elevation",
-        "Entry / Porch",
-        "Window",
-        "Roofline",
-        "Cladding / Siding",
-        "Driveway / Garage",
-        "Backyard / Patio",
-        "Landscaping",
-        "Fence / Gate",
-        "Utility / HVAC",
-        "Pool / Outdoor Amenities",
-        "Sidewalk",
-        "Exterior Stairs / Ramp",
-        "Downspout",
-        "Chimney",
-        "Foundation"
-    ]
-
-    private let defaultCommercialExteriorTypes: [String] = [
-        "Overview",
-        "Elevation",
-        "Entry",
-        "Storefront",
-        "Loading Dock",
-        "Parking Area",
-        "Site Circulation",
-        "Signage",
-        "Window / Glazing",
-        "Roofline",
-        "Cladding / Facade",
-        "Canopy / Awning",
-        "Exterior Stairs / Ramp",
-        "Trash / Service Area",
-        "Fence / Gate",
-        "Utility / HVAC",
-        "Mechanical Equipment",
-        "Landscape / Hardscape",
-        "Downspout",
-        "Foundation"
-    ]
-
-    private let defaultCommercialInteriorTypes: [String] = [
-        "Overview",
-        "Lobby / Reception",
-        "Corridor",
-        "Stairs",
-        "Elevator",
-        "Office",
-        "Conference Room",
-        "Open Workspace",
-        "Break Room / Kitchenette",
-        "Restroom",
-        "Storage",
-        "Electrical Room",
-        "Mechanical Room",
-        "IT / Server Room",
-        "Janitorial / Service Room",
-        "Retail Floor",
-        "Suite Entry",
-        "Leasing / Amenity Area"
-    ]
-
-    init() {
-        load()
-        normalizeDefaultsIfNeeded()
-        addNewResidentialInteriorPresetsIfNeeded()
-        persistAll()
-    }
-
-    private func addNewResidentialInteriorPresetsIfNeeded() {
-        let migrationKey = "scout.detailTypes.residential.interior.additions.2026-10-09"
-        if !UserDefaults.standard.bool(forKey: migrationKey) {
-            let additions = ["Sitting room", "Guest kitchen", "Primary bath", "Half bath", "Guest bathroom", "Basement stairs", "Secondary stairs"]
-            for name in additions where !residentialInteriorTypes.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-                residentialInteriorTypes.append(DetailTypeItem(name: name))
-            }
-            UserDefaults.standard.set(true, forKey: migrationKey)
-        }
-
-        let orderKey = "scout.detailTypes.residential.interior.additions.order.2026-10-09"
-        guard !UserDefaults.standard.bool(forKey: orderKey) else { return }
-        let placements = [
-            ("Sitting room", "Living Room"),
-            ("Guest kitchen", "Kitchen"),
-            ("Primary bath", "Primary Bedroom"),
-            ("Half bath", "Bathroom"),
-            ("Guest bathroom", "Half bath"),
-            ("Basement stairs", "Stairs"),
-            ("Secondary stairs", "Basement stairs")
-        ]
-        for (name, anchor) in placements {
-            guard let index = residentialInteriorTypes.firstIndex(where: { $0.name == name }),
-                  let anchorIndex = residentialInteriorTypes.firstIndex(where: { $0.name == anchor }) else { continue }
-            let item = residentialInteriorTypes.remove(at: index)
-            residentialInteriorTypes.insert(item, at: min(anchorIndex + (index < anchorIndex ? 0 : 1), residentialInteriorTypes.count))
-        }
-        UserDefaults.standard.set(true, forKey: orderKey)
-    }
-
-    func types(for mode: ContentView.LocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes
-        case (.residential, .exterior): residentialExteriorTypes
-        case (.commercial, .interior): commercialInteriorTypes
-        case (.commercial, .exterior): commercialExteriorTypes
-        }
-    }
-
-    func selected(for mode: ContentView.LocationMode, profile: CaptureProfile) -> String {
-        switch (profile, mode) {
-        case (.residential, .interior): selectedResidentialInterior
-        case (.residential, .exterior): selectedResidentialExterior
-        case (.commercial, .interior): selectedCommercialInterior
-        case (.commercial, .exterior): selectedCommercialExterior
-        }
-    }
-
-    func setSelected(_ value: String, for mode: ContentView.LocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior): selectedResidentialInterior = value
-        case (.residential, .exterior): selectedResidentialExterior = value
-        case (.commercial, .interior): selectedCommercialInterior = value
-        case (.commercial, .exterior): selectedCommercialExterior = value
-        }
-        persistSelected()
-    }
-
-    func resetSelectionsToOverview(for profile: CaptureProfile) {
-        let interiorOverview = types(for: .interior, profile: profile).first { $0.name == "Overview" }?.name
-            ?? types(for: .interior, profile: profile).first?.name
-            ?? ""
-        let exteriorOverview = types(for: .exterior, profile: profile).first { $0.name == "Overview" }?.name
-            ?? types(for: .exterior, profile: profile).first?.name
-            ?? ""
-        setSelected(interiorOverview, for: .interior, profile: profile)
-        setSelected(exteriorOverview, for: .exterior, profile: profile)
-    }
-
-    @discardableResult
-    func insertBlankItem(for mode: ContentView.LocationMode, profile: CaptureProfile) -> UUID {
-        let newItem = DetailTypeItem(name: "")
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes.append(newItem)
-        case (.residential, .exterior): residentialExteriorTypes.append(newItem)
-        case (.commercial, .interior): commercialInteriorTypes.append(newItem)
-        case (.commercial, .exterior): commercialExteriorTypes.append(newItem)
-        }
-        persistAll()
-        return newItem.id
-    }
-
-    func updateItem(_ value: String, id: UUID, for mode: ContentView.LocationMode, profile: CaptureProfile) {
-        let cleaned = value.trimmingCharacters(in: .newlines)
-
-        switch (profile, mode) {
-        case (.residential, .interior):
-            guard let idx = residentialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            residentialInteriorTypes[idx].name = cleaned
-        case (.residential, .exterior):
-            guard let idx = residentialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            residentialExteriorTypes[idx].name = cleaned
-        case (.commercial, .interior):
-            guard let idx = commercialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            commercialInteriorTypes[idx].name = cleaned
-        case (.commercial, .exterior):
-            guard let idx = commercialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            commercialExteriorTypes[idx].name = cleaned
-        }
-
-        normalizeDefaultsIfNeeded()
-        persistAll()
-    }
-
-    func delete(at offsets: IndexSet, for mode: ContentView.LocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior):
-            let deleting = offsets.compactMap { residentialInteriorTypes.indices.contains($0) ? residentialInteriorTypes[$0].name : nil }
-            residentialInteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedResidentialInterior) { selectedResidentialInterior = residentialInteriorTypes.first?.name ?? "" }
-        case (.residential, .exterior):
-            let deleting = offsets.compactMap { residentialExteriorTypes.indices.contains($0) ? residentialExteriorTypes[$0].name : nil }
-            residentialExteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedResidentialExterior) { selectedResidentialExterior = residentialExteriorTypes.first?.name ?? "" }
-        case (.commercial, .interior):
-            let deleting = offsets.compactMap { commercialInteriorTypes.indices.contains($0) ? commercialInteriorTypes[$0].name : nil }
-            commercialInteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedCommercialInterior) { selectedCommercialInterior = commercialInteriorTypes.first?.name ?? "" }
-        case (.commercial, .exterior):
-            let deleting = offsets.compactMap { commercialExteriorTypes.indices.contains($0) ? commercialExteriorTypes[$0].name : nil }
-            commercialExteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedCommercialExterior) { selectedCommercialExterior = commercialExteriorTypes.first?.name ?? "" }
-        }
-        normalizeDefaultsIfNeeded()
-        persistAll()
-    }
-
-    func move(from source: IndexSet, to destination: Int, for mode: ContentView.LocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.residential, .exterior): residentialExteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.commercial, .interior): commercialInteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.commercial, .exterior): commercialExteriorTypes.move(fromOffsets: source, toOffset: destination)
-        }
-        schedulePersist()
-    }
-
-    private func schedulePersist() {
-        pendingPersist?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.normalizeDefaultsIfNeeded()
-            self.persistAll()
-        }
-        pendingPersist = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceSeconds, execute: work)
-    }
-
-    private func load() {
-        residentialInteriorTypes = loadItems(
-            key: residentialInteriorTypesKey,
-            legacyKeys: [legacyResidentialInteriorTypesKey, legacyInteriorTypesKey]
-        )
-        residentialExteriorTypes = loadItems(
-            key: residentialExteriorTypesKey,
-            legacyKeys: [legacyResidentialExteriorTypesKey, legacyExteriorTypesKey]
-        )
-        commercialInteriorTypes = loadItems(key: commercialInteriorTypesKey, legacyKeys: [])
-        commercialExteriorTypes = loadItems(key: commercialExteriorTypesKey, legacyKeys: [])
-
-        selectedResidentialInterior = UserDefaults.standard.string(forKey: selectedResidentialInteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialInteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedInteriorKey)
-            ?? ""
-
-        selectedResidentialExterior = UserDefaults.standard.string(forKey: selectedResidentialExteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialExteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedExteriorKey)
-            ?? ""
-
-        selectedCommercialInterior = UserDefaults.standard.string(forKey: selectedCommercialInteriorKey)
-            ?? ""
-
-        selectedCommercialExterior = UserDefaults.standard.string(forKey: selectedCommercialExteriorKey)
-            ?? ""
-    }
-
-    private func persistAll() {
-        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
-        saveItems(residentialExteriorTypes, key: residentialExteriorTypesKey)
-        saveItems(commercialInteriorTypes, key: commercialInteriorTypesKey)
-        saveItems(commercialExteriorTypes, key: commercialExteriorTypesKey)
-        persistSelected()
-    }
-
-    private func persistSelected() {
-        UserDefaults.standard.set(selectedResidentialInterior, forKey: selectedResidentialInteriorKey)
-        UserDefaults.standard.set(selectedResidentialExterior, forKey: selectedResidentialExteriorKey)
-        UserDefaults.standard.set(selectedCommercialInterior, forKey: selectedCommercialInteriorKey)
-        UserDefaults.standard.set(selectedCommercialExterior, forKey: selectedCommercialExteriorKey)
-    }
-
-    private func normalizeDefaultsIfNeeded() {
-        if residentialInteriorTypes.isEmpty { residentialInteriorTypes = defaultResidentialInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if residentialExteriorTypes.isEmpty { residentialExteriorTypes = defaultResidentialExteriorTypes.map { DetailTypeItem(name: $0) } }
-        if commercialInteriorTypes.isEmpty { commercialInteriorTypes = defaultCommercialInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if commercialExteriorTypes.isEmpty { commercialExteriorTypes = defaultCommercialExteriorTypes.map { DetailTypeItem(name: $0) } }
-
-        if selectedResidentialInterior.isEmpty { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? (residentialInteriorTypes.first?.name ?? "") }
-        if selectedResidentialExterior.isEmpty { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? (residentialExteriorTypes.first?.name ?? "") }
-        if selectedCommercialInterior.isEmpty { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? (commercialInteriorTypes.first?.name ?? "") }
-        if selectedCommercialExterior.isEmpty { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? (commercialExteriorTypes.first?.name ?? "") }
-
-        if !residentialInteriorTypes.contains(where: { $0.name == selectedResidentialInterior }) { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? (residentialInteriorTypes.first?.name ?? "") }
-        if !residentialExteriorTypes.contains(where: { $0.name == selectedResidentialExterior }) { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? (residentialExteriorTypes.first?.name ?? "") }
-        if !commercialInteriorTypes.contains(where: { $0.name == selectedCommercialInterior }) { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? (commercialInteriorTypes.first?.name ?? "") }
-        if !commercialExteriorTypes.contains(where: { $0.name == selectedCommercialExterior }) { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? (commercialExteriorTypes.first?.name ?? "") }
-    }
-
-    private func firstNonEmpty(from list: [DetailTypeItem]) -> String? {
-        list.first(where: { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.name
-    }
-
-    private func loadItems(key: String, legacyKeys: [String]) -> [DetailTypeItem] {
-        if let data = UserDefaults.standard.data(forKey: key),
-           let decoded = try? JSONDecoder().decode([DetailTypeItem].self, from: data) {
-            return decoded
-        }
-
-        for legacyKey in legacyKeys {
-            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
-               let decodedItems = try? JSONDecoder().decode([DetailTypeItem].self, from: legacyData) {
-                return decodedItems
-            }
-
-            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
-               let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
-                return decodedStrings.map { DetailTypeItem(name: $0) }
-            }
-        }
-
-        return []
-    }
-
-    private func saveItems(_ items: [DetailTypeItem], key: String) {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        UserDefaults.standard.set(data, forKey: key)
-    }
-}
-
 // MARK: - ContentView
 
 struct ContentView: View {
@@ -3739,7 +3336,7 @@ struct ContentView: View {
     
     @StateObject private var camera: CameraManager
     @StateObject private var levelModel = LevelMotionModel()
-    @StateObject private var detailTypesModel = DetailTypesModel()
+    @StateObject private var detailTypesModel = DetailTypesModel.shared
     @StateObject private var locationManager = LocationManager()
     
     @StateObject private var reportLibrary = ReportLibraryModel()
@@ -3968,20 +3565,6 @@ struct ContentView: View {
         }
     }
 
-    private static func priorityShortLabel(_ priority: String?) -> String {
-        switch normalizedPriority(priority) {
-        case "Critical":
-            return "C"
-        case "High":
-            return "H"
-        case "Medium":
-            return "M"
-        case "Low":
-            return "L"
-        default:
-            return ""
-        }
-    }
 
     @State private var currentCaptureIntent: CaptureIntent = .free
 
@@ -4029,10 +3612,7 @@ struct ContentView: View {
     
     @State private var debugEnabled: Bool = UserDefaults.standard.bool(forKey: "scout.debug.enabled.v1")
     
-    private func setDebugEnabled(_ enabled: Bool) {
-        debugEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "scout.debug.enabled.v1")
-    }
+
     
     @State private var showDetailOverlay: Bool = false
     @State private var draftDetailNote: String = ""
@@ -4425,7 +4005,7 @@ struct ContentView: View {
         return loaded
     }
 
-    private func guidedHistoricalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
+    private func historicalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
         let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !existing.isEmpty {
             return [existing]
@@ -4440,7 +4020,7 @@ struct ContentView: View {
         return ["Originals/\(originalFilename)"]
     }
 
-    private func guidedHistoricalResolvedSessionImagePath(
+    private func historicalResolvedSessionImagePath(
         for shot: ShotMetadata,
         propertyID: UUID,
         sessionID: UUID
@@ -4455,7 +4035,7 @@ struct ContentView: View {
             return resolved
         }
 
-        let fallbackRelativePaths = guidedHistoricalRelativePathCandidates(for: shot)
+        let fallbackRelativePaths = historicalRelativePathCandidates(for: shot)
         guard let primaryFallbackRelativePath = fallbackRelativePaths.first, !primaryFallbackRelativePath.isEmpty else {
             return resolved
         }
@@ -4512,7 +4092,7 @@ struct ContentView: View {
 
             let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let resolved = guidedHistoricalResolvedSessionImagePath(
+                let resolved = historicalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
@@ -4603,7 +4183,7 @@ struct ContentView: View {
 
             let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let resolved = guidedHistoricalResolvedSessionImagePath(
+                let resolved = historicalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
@@ -4982,58 +4562,6 @@ struct ContentView: View {
             .first
     }
 
-    private func flaggedHistoricalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
-        let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !existing.isEmpty {
-            return [existing]
-        }
-        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-        if originalFilename.isEmpty {
-            return [
-                "Originals/\(OriginalPhotoFormat.defaultFilename(for: shot.shotID))",
-                "Originals/\(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID))"
-            ]
-        }
-        return ["Originals/\(originalFilename)"]
-    }
-
-    private func flaggedResolvedSessionImagePath(
-        for shot: ShotMetadata,
-        propertyID: UUID,
-        sessionID: UUID
-    ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
-        let resolved = resolvedSessionImagePath(
-            for: shot,
-            propertyID: propertyID,
-            sessionID: sessionID,
-            suppressAutoHydration: true
-        )
-        if resolved.absolutePath != nil || !resolved.relativePath.isEmpty {
-            return resolved
-        }
-
-        let fallbackRelativePaths = flaggedHistoricalRelativePathCandidates(for: shot)
-        guard let primaryFallbackRelativePath = fallbackRelativePaths.first, !primaryFallbackRelativePath.isEmpty else {
-            return resolved
-        }
-
-        for fallbackRelativePath in fallbackRelativePaths {
-            if let originalURL = localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                relativePath: fallbackRelativePath
-            ) {
-                return (originalURL.path, "original_derived", fallbackRelativePath, true)
-            }
-        }
-
-        let derivedPath = localStore
-            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            .appendingPathComponent(primaryFallbackRelativePath, isDirectory: false)
-            .path
-        return (derivedPath, "original_derived", primaryFallbackRelativePath, false)
-    }
-
     private func flaggedResolutionCandidate(
         propertyID: UUID,
         sessionID: UUID,
@@ -5041,7 +4569,7 @@ struct ContentView: View {
         match: (shot: ShotMetadata, matchBy: String)?
     ) -> FlaggedShotResolutionCandidate? {
         guard let match else { return nil }
-        let resolved = flaggedResolvedSessionImagePath(
+        let resolved = historicalResolvedSessionImagePath(
             for: match.shot,
             propertyID: propertyID,
             sessionID: sessionID
@@ -5479,26 +5007,6 @@ struct ContentView: View {
         return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
-    private func resolveGuidedReferencePathForDisplay(
-        propertyID: UUID,
-        guidedShot: GuidedShot,
-        currentSession: Session?,
-        baselineSessionID: UUID?
-    ) -> String? {
-        let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
-        var metadataCache: [UUID: SessionMetadata] = [:]
-        let resolved = resolveGuidedRetakeReferenceForDisplay(
-            propertyID: propertyID,
-            currentSession: currentSession,
-            baselineSessionID: baselineSessionID,
-            guidedShot: guidedShot,
-            orderedSessions: orderedSessions,
-            metadataCache: &metadataCache
-        )
-        guard resolved.source != .current else { return nil }
-        guard let path = resolved.path, resolved.exists else { return nil }
-        return path
-    }
 
     private struct ArmedReferenceViewerState: Identifiable {
         let id = UUID()
@@ -5519,16 +5027,6 @@ struct ContentView: View {
         case none
     }
 
-    private struct GuidedThumbResolution {
-        let sourceChosen: GuidedThumbSource
-        let chosenPath: String?
-        let referencePath: String?
-        let referenceExists: Bool
-        let originalPath: String?
-        let originalExists: Bool
-        let stampedPath: String?
-        let stampedExists: Bool
-    }
 
     private struct GuidedSessionThumbnailResolution {
         let source: GuidedThumbSource
@@ -5591,43 +5089,7 @@ struct ContentView: View {
         return formatter.string(from: date)
     }
 
-    private static func observationHistoryEventTitle(_ event: ObservationHistoryEvent) -> String {
-        switch event.kind {
-        case .created:
-            return "Created"
-        case .captured:
-            return "Captured"
-        case .retake:
-            return "Retake"
-        case .reclassified:
-            return "Reclassified"
-        case .resolved:
-            return "Resolved"
-        case .pendingReview:
-            return "Pending Review"
-        case .reopened:
-            return "Reopened"
-        case .reasonUpdated:
-            return "Reason Updated"
-        case .titleUpdated:
-            return "Title Updated"
-        }
-    }
 
-    private static func observationHistoryEventSummary(_ event: ObservationHistoryEvent) -> String? {
-        let before = event.beforeValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let after = event.afterValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !before.isEmpty && !after.isEmpty {
-            return "\(before) -> \(after)"
-        }
-        if !after.isEmpty {
-            return after
-        }
-        if !before.isEmpty {
-            return before
-        }
-        return nil
-    }
 
     private static func observationContextValue(building: String?, elevation: String?, detailType: String?) -> String? {
         let value = conciseContextLabel(building: building, elevation: elevation, detailType: detailType)
@@ -5648,27 +5110,6 @@ struct ContentView: View {
         } else {
             observation.shots.append(shot)
         }
-    }
-
-    private static func normalizedContextFilename(_ filename: String) -> String {
-        var output = filename
-        let replacements: [(String, String)] = [
-            ("North Elevation", "N"),
-            ("South Elevation", "S"),
-            ("East Elevation", "E"),
-            ("West Elevation", "W"),
-            ("North", "N"),
-            ("South", "S"),
-            ("East", "E"),
-            ("West", "W")
-        ]
-        for (source, target) in replacements {
-            output = output.replacingOccurrences(of: source, with: target, options: .caseInsensitive)
-        }
-        output = output.replacingOccurrences(of: "Elevation", with: "", options: .caseInsensitive)
-        output = output.replacingOccurrences(of: "__", with: "_")
-        output = output.replacingOccurrences(of: "  ", with: " ")
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func reportAsset(from localIdentifier: String?) -> ReportAsset? {
@@ -5709,80 +5150,6 @@ struct ContentView: View {
         try? fm.startDownloadingUbiquitousItem(at: url)
     }
 
-    private static func resolveGuidedThumbnail(
-        guidedShot: GuidedShot,
-        isCapturedInCurrentSession: Bool,
-        propertyHasBaseline: Bool
-    ) -> GuidedThumbResolution {
-        let fm = FileManager.default
-
-        let rawReferencePath = guidedShot.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let rawReferenceID = guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let referenceCandidates = [rawReferencePath, rawReferenceID].filter { !$0.isEmpty }
-        let firstExistingReference = referenceCandidates.first(where: { fm.fileExists(atPath: $0) })
-        let referencePath = firstExistingReference ?? referenceCandidates.first
-        let referenceExists = referencePath.map { fm.fileExists(atPath: $0) } ?? false
-
-        let rawShotPath = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let shotPath = rawShotPath.isEmpty ? nil : rawShotPath
-        let shotExt = shotPath.map { URL(fileURLWithPath: $0).pathExtension.lowercased() } ?? ""
-        let isStampedPath = shotExt == "jpg" || shotExt == "jpeg"
-        let stampedPath = isStampedPath ? shotPath : nil
-        let originalPath = isStampedPath ? nil : shotPath
-        let stampedExists = stampedPath.map { fm.fileExists(atPath: $0) } ?? false
-        let originalExists = originalPath.map { fm.fileExists(atPath: $0) } ?? false
-
-        if isCapturedInCurrentSession {
-            if stampedExists {
-                return GuidedThumbResolution(
-                    sourceChosen: .stamped,
-                    chosenPath: stampedPath,
-                    referencePath: referencePath,
-                    referenceExists: referenceExists,
-                    originalPath: originalPath,
-                    originalExists: originalExists,
-                    stampedPath: stampedPath,
-                    stampedExists: stampedExists
-                )
-            }
-            if originalExists {
-                return GuidedThumbResolution(
-                    sourceChosen: .original,
-                    chosenPath: originalPath,
-                    referencePath: referencePath,
-                    referenceExists: referenceExists,
-                    originalPath: originalPath,
-                    originalExists: originalExists,
-                    stampedPath: stampedPath,
-                    stampedExists: stampedExists
-                )
-            }
-        }
-
-        if propertyHasBaseline, referenceExists {
-            return GuidedThumbResolution(
-                sourceChosen: .reference,
-                chosenPath: referencePath,
-                referencePath: referencePath,
-                referenceExists: referenceExists,
-                originalPath: originalPath,
-                originalExists: originalExists,
-                stampedPath: stampedPath,
-                stampedExists: stampedExists
-            )
-        }
-
-        return GuidedThumbResolution(
-            sourceChosen: .none,
-            chosenPath: nil,
-            referencePath: referencePath,
-            referenceExists: referenceExists,
-            originalPath: originalPath,
-            originalExists: originalExists,
-            stampedPath: stampedPath,
-            stampedExists: stampedExists
-        )
-    }
 
     private static func resolveLegacyAssetPath(for identifier: String) -> String? {
         let fm = FileManager.default
@@ -5981,36 +5348,6 @@ struct ContentView: View {
         !isCaptureTargetArmed
     }
 
-    private func buildingSelectorOverlay() -> some View {
-        Button {
-            showLandscapeElevationMenu = false
-            showLandscapeDetailMenu = false
-            showLandscapeBuildingMenu.toggle()
-        } label: {
-            HStack(spacing: 6) {
-                Text(selectedBuilding)
-                    .font(.system(size: 12, weight: .semibold))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
-            }
-            .foregroundColor(.white.opacity(0.92))
-            .padding(.horizontal, 10)
-            .frame(height: 26)
-            .background(
-                ZStack {
-                    Color.black.opacity(0.55)
-                    Color.white.opacity(0.08)
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(isCaptureTargetArmed)
-    }
 
     private func elevationPillLabel() -> String {
         if locationMode == .interior { return "Interior" }
@@ -6190,67 +5527,9 @@ struct ContentView: View {
         }
     }
     
-    private func debugOverlayInline() -> some View {
-        Group {
-            if !debugEnabled {
-                EmptyView()
-            } else {
-                let actualDigits = camera.debugMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let targetClean = camera.debugTargetMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let actualText = actualDigits.isEmpty ? "--" : "\(actualDigits)MP"
-                
-                let targetCore = targetClean.hasPrefix("T") ? targetClean : ("T" + targetClean)
-                let targetText = (targetClean.isEmpty || targetClean == "T--") ? "T--" : "\(targetCore)MP"
-                
-                HStack(spacing: 6) {
-                    Text(actualText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.yellow)
-                    
-                    Text(targetText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.yellow.opacity(0.80))
-                }
-            }
-        }
-    }
+
     
-    private func debugOverlayStacked() -> some View {
-        Group {
-            if !debugEnabled {
-                EmptyView()
-            } else {
-                let actualDigits = camera.debugMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let targetClean = camera.debugTargetMegapixelLabel
-                    .replacingOccurrences(of: "MP", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                let actualText = actualDigits.isEmpty ? "--" : "\(actualDigits)MP"
-                
-                let targetCore = targetClean.hasPrefix("T") ? targetClean : ("T" + targetClean)
-                let targetText = (targetClean.isEmpty || targetClean == "T--") ? "T--" : "\(targetCore)MP"
-                
-                VStack(spacing: 2) {
-                    Text(actualText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.yellow)
-                    
-                    Text(targetText)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.yellow.opacity(0.80))
-                }
-            }
-        }
-    }
+
     
     private func refreshBottomGlyphRotation() {
         if isSwappingCamera {
@@ -6456,10 +5735,6 @@ struct ContentView: View {
         let profile: CaptureProfile
     }
 
-    private enum ReportEditorMode {
-        case editCurrent
-        case newReport
-    }
 
     private func showHDToast(_ text: String, duration: Double = 2.0) {
         hdEnabledToastToken += 1
@@ -6790,7 +6065,7 @@ struct ContentView: View {
                 guidedChecklistSheetView
             }
             .sheet(item: $sessionExportFile) { file in
-                SessionDocumentExportPicker(
+                SharedDocumentExportPicker(
                     fileURL: file.url,
                     onComplete: { didExport in
                         if didExport {
@@ -7674,24 +6949,6 @@ struct ContentView: View {
         return trimmed.isEmpty ? "Shot" : trimmed
     }
 
-    private func metadataFilterButton(size: CGFloat) -> some View {
-        Button {
-            guard isMetadataFilterAvailable else { return }
-            presentMetadataFilter()
-        } label: {
-            Circle()
-                .fill(Color.black.opacity(isMetadataFilterAvailable ? 0.48 : 0.30))
-                .frame(width: size, height: size)
-                .overlay(
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
-                        .foregroundColor(.white.opacity(isMetadataFilterAvailable ? 0.92 : 0.55))
-                )
-        }
-        .buttonStyle(.plain)
-        .frame(width: size, height: size)
-        .disabled(!isMetadataFilterAvailable)
-    }
 
     private func endSessionControl() -> some View {
         Button {
@@ -7955,12 +7212,6 @@ struct ContentView: View {
         .accessibilityLabel(captureProfile == .residential ? "Residential capture mode" : "Commercial capture mode")
     }
 
-    private func detailTypeSelectionBinding() -> Binding<String> {
-        Binding(
-            get: { detailTypesModel.selected(for: locationMode, profile: captureProfile) },
-            set: { detailTypesModel.setSelected($0, for: locationMode, profile: captureProfile) }
-        )
-    }
 
     private var tradePickerOptions: [String] {
         let current = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -8192,84 +7443,8 @@ struct ContentView: View {
         }
     }
 
-    private struct MetadataSelectionListView: View {
-        let title: String
-        let options: [(title: String, value: String)]
-        let selectedValue: String
-        let onSelect: (String) -> Void
-
-        @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-
-        var body: some View {
-            List(options, id: \.value) { option in
-                Button {
-                    dismiss()
-                    DispatchQueue.main.async {
-                        onSelect(option.value)
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Text(option.title)
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundColor(.primary)
-                            .lineLimit(2)
-
-                        Spacer(minLength: 0)
-
-                        if selectedValue == option.value {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(.blue)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .listStyle(.insetGrouped)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack(spacing: 12) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundColor(theme.label)
-                            .frame(width: 44, height: 44)
-                            .background(theme.fill)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(theme.stroke, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    Text(title)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    Color.clear.frame(width: 44, height: 44)
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
-                .background(Color(uiColor: .systemGroupedBackground))
-            }
-        }
-    }
-
     private func metadataSelectionDestination(context: MetadataSelectionContext) -> some View {
-        MetadataSelectionListView(
+        SharedMetadataSelectionListView(
             title: context.title,
             options: selectionOptions(for: context.kind),
             selectedValue: currentMetadataSelectionValue(for: context.kind),
@@ -8592,60 +7767,15 @@ struct ContentView: View {
             }
 
             if showNotSavedToast {
-                Text("Save failed: \(notSavedToastReason)")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast("Save failed: \(notSavedToastReason)")
             }
 
             if showNoFlaggedIssuesToast {
-                Text("No active flagged issues")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast("No active flagged issues")
             }
 
             if showFlaggedActionToast {
-                Text(flaggedActionToastText)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast(flaggedActionToastText)
             }
 
             if armedUpdateObservationID != nil &&
@@ -8683,22 +7813,7 @@ struct ContentView: View {
             }
 
             if showResolutionModeToast {
-                Text("Resolution mode active. Capture a resolution photo.")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast("Resolution mode active. Capture a resolution photo.")
             }
 
             if showFlaggedActionPrimaryChoice {
@@ -9318,118 +8433,11 @@ extension ContentView {
     
     // MARK: - Lens toast control
     
-    private func showLensToastNow(_ text: String) {
-        lensToastToken += 1
-        let token = lensToastToken
-        
-        lensToastText = text
-        showLensToast = true
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            guard token == lensToastToken else { return }
-            showLensToast = false
-        }
-    }
+
     
     // MARK: - UI pieces
     
-    @ViewBuilder
-    private func landscapeDropdownStack() -> some View {
-        let controlH: CGFloat = 36
-        let controlW: CGFloat = 190
-        
-        let elevationLabel = elevationPillLabel()
-        let detailLabel = currentDetailType.isEmpty ? "Select" : currentDetailType
-        
-        VStack(alignment: .leading, spacing: 10) {
-            
-            // Elevation dropdown (compact) - custom (opens centered overlay)
-            Button {
-                showLandscapeBuildingMenu = false
-                // Only allow elevation picking in exterior mode
-                if locationMode == .interior {
-                    return
-                }
-                showLandscapeDetailMenu = false
-                showLandscapeElevationMenu.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(elevationLabel)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.95))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
 
-                    if shouldShowElevationAlignmentDot {
-                        Circle()
-                            .fill(isElevationHeadingAligned ? Color.green : Color.white)
-                            .frame(width: 8, height: 8)
-                            .allowsHitTesting(false)
-                    }
-                    
-                    Spacer(minLength: 0)
-                    
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.90))
-                }
-                .padding(.horizontal, 12)
-                .frame(width: controlW, height: controlH, alignment: .center)
-                .background(
-                    ZStack {
-                        Color.black.opacity(0.65)
-                        Color.white.opacity(0.08)
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(locationMode == .interior || isCaptureTargetArmed)
-            
-            // Detail type dropdown (compact) - custom (opens centered overlay)
-            Button {
-                showLandscapeBuildingMenu = false
-                showLandscapeElevationMenu = false
-                showLandscapeDetailMenu.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(detailLabel)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.95))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                    
-                    Spacer(minLength: 0)
-                    
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.90))
-                }
-                .padding(.horizontal, 12)
-                .frame(width: controlW, height: controlH, alignment: .center)
-                .background(
-                    ZStack {
-                        Color.black.opacity(0.65)
-                        Color.white.opacity(0.08)
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.22), lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(isCaptureTargetArmed)
-        }
-        .transaction { tx in
-            tx.animation = nil
-        }
-    }
     
     // MARK: - Centered custom overlays for landscape dropdowns
     
@@ -9645,6 +8653,25 @@ extension ContentView {
             .frame(height: 1)
             .padding(.horizontal, 12)
     }
+
+    private func centeredCameraToast(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding(.top, usesLandscapeChrome ? 44 : 0)
+            .rotationEffect(bottomGlyphRotationAngle)
+            .allowsHitTesting(false)
+            .zIndex(25)
+    }
     
     private func toastPill(text: String, priority: String? = nil) -> some View {
         let normalizedPriority = Self.normalizedPriority(priority)
@@ -9664,95 +8691,6 @@ extension ContentView {
         .background(Color.black.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
-    private struct HDQuickButton: View {
-        let size: CGFloat
-        let isEnabled: Bool
-        let isOn: Bool
-        let onToggle: () -> Void
-        let onHaptic: () -> Void
-        
-        @State private var isPressed: Bool = false
-        @State private var isPopping: Bool = false
-        
-        private func triggerPop() {
-            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.62, blendDuration: 0.08)) {
-                isPopping = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.72, blendDuration: 0.08)) {
-                    isPopping = false
-                }
-            }
-        }
-        
-        var body: some View {
-            Button(action: {
-                guard isEnabled else { return }
-                onHaptic()
-                triggerPop()
-                onToggle()
-            }) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            isEnabled
-                            ? (isOn ? Color.blue : Color.white.opacity(0.14))
-                            : Color.white.opacity(0.08)
-                        )
-                        .frame(width: size, height: size)
-                    
-                    // Subtle glow ring when ON
-                    Circle()
-                        .stroke(
-                            isEnabled && isOn ? Color.white.opacity(0.70) : Color.clear,
-                            lineWidth: 2
-                        )
-                        .frame(width: size + 6, height: size + 6)
-                        .opacity(isOn ? 1.0 : 0.0)
-                    
-                    Text("HD")
-                        .font(.system(size: proportionalCircleTextSize(for: size), weight: .medium))
-                        .foregroundColor(
-                            isEnabled
-                            ? (isOn ? .white : .white.opacity(0.92))
-                            : .white.opacity(0.35)
-                        )
-                }
-                .frame(width: size, height: size)
-                .contentShape(Circle())
-                .scaleEffect(isPopping ? 1.12 : 1.0)
-                .pressScaleEffect(isPressed)
-            }
-            .buttonStyle(.plain)
-            .frame(width: size, height: size)
-            .disabled(!isEnabled)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in isPressed = true }
-                    .onEnded { _ in isPressed = false }
-            )
-        }
-    }
-    
-    private func hdQuickButton(size: CGFloat = 44) -> some View {
-        HDQuickButton(
-            size: size,
-            isEnabled: camera.hdSupported,
-            isOn: camera.effectiveHDEnabled,
-            onToggle: {
-                let wasOn = camera.effectiveHDEnabled
-                camera.manualHDEnabled.toggle()
-                let isOnNow = camera.effectiveHDEnabled
-                if !wasOn && isOnNow {
-                    showHDToast("HD Enabled for Detail Capture")
-                }
-            },
-            onHaptic: {
-                fireHDButtonHaptic()
-            }
-        )
-    }
-
     private struct FlaggedReasonGlyph: View {
         let size: CGFloat
         let foregroundColor: Color
@@ -9902,7 +8840,7 @@ extension ContentView {
     @ViewBuilder
     private func armedReferenceActionOverlay() -> some View {
         let items = [
-            SharedActionMenuItem(
+            CaptureActionMenuItem(
                 title: "View Reference Image",
                 isEnabled: armedReferenceImageLocalIdentifier(isCaptured: false) != nil,
                 action: {
@@ -9910,7 +8848,7 @@ extension ContentView {
                     showArmedReferenceImage(isCaptured: false)
                 }
             ),
-            SharedActionMenuItem(
+            CaptureActionMenuItem(
                 title: "View Captured Image",
                 isEnabled: armedReferenceImageLocalIdentifier(isCaptured: true) != nil,
                 action: {
@@ -9920,10 +8858,11 @@ extension ContentView {
             )
         ]
 
-        SharedActionMenuOverlay(
+        CaptureActionMenuOverlay(
             rotation: bottomGlyphRotationAngle,
             items: items,
-            onDismiss: { showArmedReferenceMenu = false }
+            onDismiss: { showArmedReferenceMenu = false },
+            cornerStyle: .circular
         )
     }
 
@@ -10046,14 +8985,6 @@ extension ContentView {
         return true
     }
 
-    private func performArmedReferenceRetake() {
-        if let guidedID = armedGuidedShotID,
-           let guided = guidedShots.first(where: { $0.id == guidedID }) {
-            armGuidedRetake(guided)
-            return
-        }
-        // Flagged captures are already armed for replacement; no extra mode switch needed.
-    }
 
     private func topLeftPreviewPlaceholders() -> some View {
         VStack(spacing: 2) {
@@ -10143,23 +9074,6 @@ extension ContentView {
         .frame(width: hitArea, height: hitArea)
     }
 
-    private func placeholderQuickButton(
-        systemName: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        let hitArea: CGFloat = 44
-        let symbolSize: CGFloat = 22
-        return Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: symbolSize, weight: .medium))
-                .foregroundColor(.white.opacity(0.75))
-                .rotationEffect(bottomGlyphRotationAngle)
-            .frame(width: hitArea, height: hitArea)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .frame(width: hitArea, height: hitArea)
-    }
 
     private func guidedCompassButton(action: @escaping () -> Void) -> some View {
         let hitArea: CGFloat = 44
@@ -10456,16 +9370,7 @@ extension ContentView {
         }
     }
     
-    private func directionSlider() -> some View {
-        let selection = Binding<ContentView.Direction>(
-            get: { ContentView.Direction.fromElevation(elevation) },
-            set: { elevation = $0.elevationValue }
-        )
-        
-        return DirectionSegmentedControl(selection: selection)
-            .frame(maxWidth: .infinity)
-            .frame(height: 56)
-    }
+
     
     private struct DirectionSegmentedControl: UIViewRepresentable {
         
@@ -10563,85 +9468,13 @@ extension ContentView {
     }
     
     
-    private func rightButtonsCluster() -> some View {
-        let r: CGFloat = 24
-        let gap: CGFloat = 14
-        let xOffset: CGFloat = (r + gap)
-        
-        func circleIconButton(
-            systemName: String,
-            selected: Bool,
-            showsFlaggedReasonGlyph: Bool = false,
-            badgeSystemName: String? = nil,
-            action: @escaping () -> Void
-        ) -> some View {
-            Button(action: action) {
-                ZStack {
-                    Circle()
-                        .fill(selected ? Color.white : Color.white.opacity(0.18))
-                        .frame(width: 52, height: 52)
 
-                    if showsFlaggedReasonGlyph {
-                        FlaggedReasonGlyph(
-                            size: 52,
-                            foregroundColor: selected ? .black : .white,
-                            markColor: selected ? .white : .black.opacity(0.86)
-                        )
-                    } else {
-                        Image(systemName: systemName)
-                            .font(.system(size: proportionalCircleGlyphSize(for: 52), weight: .medium))
-                            .foregroundColor(selected ? .black : .white)
-                    }
-
-                    if let badgeSystemName {
-                        Image(systemName: badgeSystemName)
-                            .font(.system(size: 10, weight: .black))
-                            .foregroundColor(selected ? .red : .white)
-                            .offset(x: 10, y: -10)
-                    }
-                }
-                .contentShape(Circle())
-                .frame(width: 52, height: 52)
-            }
-            .buttonStyle(.plain)
-        }
-        
-        let lastAsset = reportLibrary.assets.last
-        let isFlaggedNoteMode = armedUpdateObservationID != nil
-        
-        return ZStack {
-            circleIconButton(
-                systemName: "flag.fill",
-                selected: hasDetailNote || isFlaggedNoteMode,
-                showsFlaggedReasonGlyph: true
-            ) {
-                draftDetailNote = detailNote
-                showDetailOverlay = true
-            }
-            .disabled(armedUpdateObservationID != nil)
-            .offset(x: -xOffset, y: 0)
-            
-            RecentAlbumPreviewCircleButton(
-                lastAsset: lastAsset,
-                size: 52,
-                action: { showLibraryFullscreen = true },
-                cache: imageCache,
-                refreshToken: gridThumbnailRefreshToken
-            )
-            .offset(x: xOffset, y: 0)
-        }
-    }
     
     private func fireQuickButtonHaptic() {
         quickButtonHaptic.impactOccurred()
         quickButtonHaptic.prepare()
     }
     
-    private func fireHDButtonHaptic() {
-        quickButtonHaptic.impactOccurred()
-        quickButtonHaptic.prepare()
-    }
-
     private func capture() {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let isFlaggedCaptureIntent: Bool = {
@@ -11313,7 +10146,7 @@ extension ContentView {
             imageWidth: width,
             imageHeight: height
         )
-        let readableStampedName = "\(readableStampedBaseName(for: metadata)).jpg"
+        let readableStampedName = "\(ScoutStampPresentation.readableBaseName(for: metadata)).jpg"
         metadata.stampedFilename = readableStampedName
         metadata.stampedRelativePath = "Stamped/\(readableStampedName)"
 
@@ -12578,90 +11411,7 @@ extension ContentView {
         }
     }
 
-    private func reassignGuidedShot(_ source: GuidedShot, to targetID: UUID) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        guard source.id != targetID else { return }
 
-        do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            guard let sourceIndex = allGuidedShots.firstIndex(where: { $0.id == source.id }),
-                  let targetIndex = allGuidedShots.firstIndex(where: { $0.id == targetID }) else { return }
-
-            let sourceShot = allGuidedShots[sourceIndex].shot
-            let sourceCompleted = allGuidedShots[sourceIndex].isCompleted
-            let sourceReferenceID = allGuidedShots[sourceIndex].referenceImageLocalIdentifier
-            let sourceReferencePath = allGuidedShots[sourceIndex].referenceImagePath
-            let now = Date()
-
-            allGuidedShots[targetIndex].shot = sourceShot
-            allGuidedShots[targetIndex].isCompleted = sourceCompleted
-            allGuidedShots[targetIndex].skipReason = nil
-            allGuidedShots[targetIndex].skipReasonNote = nil
-            allGuidedShots[targetIndex].skipSessionID = nil
-            if let sourceShot {
-                allGuidedShots[targetIndex].referenceImageLocalIdentifier = sourceShot.imageLocalIdentifier ?? sourceReferenceID
-                allGuidedShots[targetIndex].referenceImagePath = sourceShot.imageLocalIdentifier ?? sourceReferencePath
-            }
-            allGuidedShots[targetIndex].reassignedFromGuidedShotID = source.id
-            allGuidedShots[targetIndex].reassignedAt = now
-            allGuidedShots[targetIndex].reassignedInSessionID = sessionID
-
-            allGuidedShots[sourceIndex].shot = nil
-            allGuidedShots[sourceIndex].isCompleted = false
-            allGuidedShots[sourceIndex].skipReason = nil
-            allGuidedShots[sourceIndex].skipReasonNote = nil
-            allGuidedShots[sourceIndex].skipSessionID = nil
-            allGuidedShots[sourceIndex].reassignedToGuidedShotID = targetID
-            allGuidedShots[sourceIndex].reassignedAt = now
-            allGuidedShots[sourceIndex].reassignedInSessionID = sessionID
-
-            if armedGuidedShotID == source.id {
-                clearGuidedAndRetakeArming()
-                retakeContext = nil
-                currentCaptureIntent = .free
-                guidedReferenceAssetLocalID = nil
-                guidedReferenceThumbnail = nil
-                showGuidedAlignmentOverlay = false
-            }
-
-            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            refreshGuidedShots()
-            guidedThumbnailRefreshToken = UUID()
-            refreshSessionActionsSummaryIfVisible()
-        } catch {
-            print("Failed to reassign guided shot: \(error)")
-        }
-    }
-
-    private func updateGuidedShotLabel(_ guidedShot: GuidedShot, detailLabel: String) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        let trimmed = detailLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            guard let idx = allGuidedShots.firstIndex(where: { $0.id == guidedShot.id }) else { return }
-            allGuidedShots[idx].detailType = trimmed
-            let recomputed = Self.conciseContextLabel(
-                building: allGuidedShots[idx].building,
-                elevation: allGuidedShots[idx].targetElevation,
-                detailType: trimmed
-            )
-            allGuidedShots[idx].title = recomputed.isEmpty ? trimmed : recomputed
-            allGuidedShots[idx].labelEditedAt = Date()
-            allGuidedShots[idx].labelEditedInSessionID = sessionID
-
-            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            refreshGuidedShots()
-            refreshSessionActionsSummaryIfVisible()
-        } catch {
-            print("Failed to update guided label: \(error)")
-        }
-    }
 
     private func applyArmedGuidedShotIfNeeded(
         with shot: Shot,
@@ -13201,89 +11951,14 @@ extension ContentView {
         appState.materialDraftCaptureCount(for: session)
     }
 
-    private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {
-        guard let session = appState.currentSession else { return 0 }
-        let sessionID = session.id
-        return observations.filter { observation in
-            observation.status == .active &&
-            observation.createdAt < session.startedAt &&
-            observation.updatedInSessionID != sessionID
-        }.count
-    }
 
-    private func currentSessionPhotoCount(propertyID: UUID) -> Int {
-        guard let sessionID = appState.currentSession?.id else { return 0 }
-        let persisted = persistedGuidedSummary(propertyID: propertyID, sessionID: sessionID)
-        return persisted.metadataShotCount
-    }
 
-    private func persistedGuidedSummary(propertyID: UUID, sessionID: UUID) -> (remaining: Int, metadataShotCount: Int) {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
-            let fallbackGuided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-            let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
-            let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
-                propertyID: propertyID,
-                observations: activeFlaggedObservations
-            )
-            let visibleFallback = visibleGuidedShots(
-                from: fallbackGuided,
-                activeFlaggedObservations: activeFlaggedObservations,
-                suppressionEvidence: suppressionEvidence
-            )
-            let fallbackRemaining = visibleFallback.filter {
-                !isGuidedShotSkippedInCurrentSession($0) && !isShotCapturedInCurrentSession($0.shot)
-            }.count
-            return (fallbackRemaining, 0)
-        }
-
-        let capturedShotKeys = Set(metadata.shots.compactMap { shot -> String? in
-            guard shot.sessionID == sessionID else { return nil }
-            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !originalRelative.isEmpty else { return nil }
-            guard localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                relativePath: originalRelative
-            ) != nil else { return nil }
-            return shot.shotKey
-        })
-
-        let allGuided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-        let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
-        let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
-            propertyID: propertyID,
-            observations: activeFlaggedObservations
-        )
-        let guided = visibleGuidedShots(
-            from: allGuided,
-            activeFlaggedObservations: activeFlaggedObservations,
-            suppressionEvidence: suppressionEvidence
-        )
-        let remaining = guided.filter { guidedShot in
-            if isGuidedShotSkippedInCurrentSession(guidedShot) {
-                return false
-            }
-            let angle = max(1, guidedShot.angleIndex ?? 1)
-            let shotKey = ShotMetadata.makeShotKey(
-                building: guidedShot.building ?? "",
-                elevation: guidedShot.targetElevation ?? "",
-                detailType: guidedShot.detailType ?? "",
-                angleIndex: angle
-            )
-            return !capturedShotKeys.contains(shotKey)
-        }.count
-
-        return (remaining, capturedShotKeys.count)
-    }
 
     private func isGuidedShotSkippedInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
         guard let sessionID = appState.currentSession?.id else { return false }
         return guidedShot.skipReason != nil && guidedShot.skipSessionID == sessionID
     }
 
-    private func isGuidedShotHandledInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
-        isGuidedShotCapturedInCurrentSession(guidedShot.shot) || isGuidedShotSkippedInCurrentSession(guidedShot)
-    }
 
     private func capturedImageLocalIdentifierForCurrentSession(_ observation: Observation) -> String? {
         guard let currentSessionID = appState.currentSession?.id else { return nil }
@@ -13565,61 +12240,7 @@ extension ContentView {
         isEndingSession = false
     }
 
-    private func handleExportLaterAndExit(summary: SessionActionsSummary) {
-        guard summary.isExportLaterEnabled else {
-            isEndingSession = false
-            return
-        }
-        let alreadyEnding = isEndingSession
-        endingSessionProgressTitle = "Completing Session..."
-        isEndingSession = true
-        showSessionActionsSheet = false
 
-        let finish = {
-            appState.sealCurrentSessionForExportLater()
-            Task {
-                await appState.releaseCurrentSessionCoordinationLockIfOwned()
-                await MainActor.run {
-                    finishEndingSessionByExitingToHub()
-                    appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "export_later_exit", delay: 3.0)
-                }
-            }
-        }
-
-        if alreadyEnding {
-            finish()
-        } else {
-            DispatchQueue.main.async(execute: finish)
-        }
-    }
-
-    private func attemptExportLaterAndExit(summary: SessionActionsSummary) {
-        guard !isEndingSession else { return }
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else {
-            handleExportLaterAndExit(summary: summary)
-            return
-        }
-        guard !isCheckingSessionCompletionConflicts else { return }
-        endingSessionProgressTitle = "Completing Session..."
-        isEndingSession = true
-        isCheckingSessionCompletionConflicts = true
-        Task {
-            let review = await appState.preCompletionConflictReview(
-                propertyID: propertyID,
-                sessionID: sessionID
-            )
-            await MainActor.run {
-                isCheckingSessionCompletionConflicts = false
-                if let review {
-                    isEndingSession = false
-                    sessionCoordinationConflictReview = review
-                    return
-                }
-                handleExportLaterAndExit(summary: summary)
-            }
-        }
-    }
 
     private func sessionCoordinationConflictMessage(
         review: AppState.SessionCoordinationConflictReview
@@ -13630,49 +12251,7 @@ extension ContentView {
             .joined(separator: "\n")
     }
 
-    private func ensureGuidedReferencePaths(propertyID: UUID) {
-        do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            var didChange = false
 
-            for index in allGuidedShots.indices {
-                let existingPath = allGuidedShots[index].referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !existingPath.isEmpty { continue }
-
-                let localID = (allGuidedShots[index].referenceImageLocalIdentifier ??
-                               allGuidedShots[index].shot?.imageLocalIdentifier)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard !localID.isEmpty else { continue }
-                guard let imageData = originalImageData(for: localID) else { continue }
-                guard let path = writeGuidedReferenceImage(data: imageData, guidedShotID: allGuidedShots[index].id) else { continue }
-
-                allGuidedShots[index].referenceImagePath = path
-                if allGuidedShots[index].referenceImageLocalIdentifier == nil {
-                    allGuidedShots[index].referenceImageLocalIdentifier = localID
-                }
-                didChange = true
-            }
-
-            if didChange {
-                let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-                if appState.selectedPropertyID == propertyID {
-                    guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
-                    retiredGuidedShots = restorableRetiredGuidedShots(
-                        from: normalizedGuidedShots,
-                        propertyID: propertyID
-                    )
-                }
-            }
-        } catch {
-            // Keep export flow resilient if reference backfill fails.
-        }
-    }
-
-    private func originalImageData(for localIdentifier: String) -> Data? {
-        let trimmed = localIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return try? Data(contentsOf: URL(fileURLWithPath: trimmed))
-    }
 
     private func prepareSessionExportReferences() {
         _ = reportLibrary.assets.count
@@ -13703,1019 +12282,52 @@ extension ContentView {
         let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
         try fileManager.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
 
-        var expectedPaths = Set([
-            "session.json",
-            "validation.txt",
-            "sessions.csv",
-            "shots.csv",
-            "issues.csv",
-            "issue_history.csv",
-            "guided_rows.csv",
-            "Originals/"
-        ])
-        for originalFile in exportArtifacts.originalFiles {
-            let data = try Data(contentsOf: originalFile.sourceURL)
-            let attrs = try? fileManager.attributesOfItem(atPath: originalFile.sourceURL.path)
-            let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
-            try data.write(to: destinationURL, options: .atomic)
-            if let modifiedAt {
-                try? fileManager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
-            }
-            expectedPaths.insert("Originals/\(originalFile.filename)")
-        }
-        progress?(.originals)
-        try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
-        try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
-        for csvFile in localStore.exportCSVFiles(for: exportArtifacts.metadata) {
-            try csvFile.data.write(to: exportRoot.appendingPathComponent(csvFile.filename), options: .atomic)
-        }
-        if !exportArtifacts.prewritePassed || !exportArtifacts.postwritePassed {
-            let message = String(data: exportArtifacts.validationData, encoding: .utf8) ?? "Export validation failed."
-            throw NSError(
-                domain: "ScoutCapture.Export",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: "Export validation failed before ZIP creation.\n\n\(message)"]
-            )
-        }
+        let expectedPaths = try SessionExportZip.stageValidatedArtifacts(
+            exportArtifacts,
+            from: localStore,
+            at: exportRoot,
+            errorDomain: "ScoutCapture.Export",
+            fileManager: fileManager,
+            onOriginalsCopied: { progress?(.originals) }
+        )
 
 #if DEBUG
-        let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
-        let exists = FileManager.default.fileExists(atPath: sourceURL.path)
-        let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-        print("Export session.json path source: \(sourceURL.path)")
-        print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
-        let raw = String(data: exportArtifacts.sessionData, encoding: .utf8) ?? ""
-        print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
-        print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
-        let debugDecoder = JSONDecoder()
-        debugDecoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: exportArtifacts.sessionData),
-           let first = decoded.shots.first {
-            print("Export sessionStartedAt: \(decoded.startedAt)")
-            print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
-            print("Export first shot shotKey: \(first.shotKey)")
-            print("Export first shot createdAt: \(first.createdAt)")
-            print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
-            print("Export first shot originalRelativePath: \(first.originalRelativePath)")
-            if let delivered = decoded.firstDeliveredAt {
-                print("Export firstDeliveredAt: \(delivered)")
-            }
-            if let expires = decoded.reExportExpiresAt {
-                print("Export reExportExpiresAt: \(expires)")
-            }
-        }
-        print("EXPORT ROOT: \(exportRoot.path)")
+        logExportSessionSourceDiagnostics(
+            localStore, propertyID, sessionID, exportArtifacts.sessionData, exportRoot
+        )
         print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
         progress?(.sessionData)
 
-        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
-        let zipData = buildSessionExportZipData(entries: zipEntries)
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
-        let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
+        let archive = try SessionExportZip.package(
+            exportRoot: exportRoot,
+            expectedPaths: expectedPaths,
+            finalURL: finalURL,
+            errorDomain: "ScoutCapture.Export",
+            fileManager: fileManager
+        )
 #if DEBUG
-        print("Export ZIP temp path: \(tempURL.path)")
-        print("Export ZIP final path: \(finalURL.path)")
-#endif
-        if fileManager.fileExists(atPath: tempURL.path) {
-            try fileManager.removeItem(at: tempURL)
-        }
-        if fileManager.fileExists(atPath: finalURL.path) {
-            try fileManager.removeItem(at: finalURL)
-        }
-        try zipData.write(to: tempURL, options: [.atomic])
-        let tempExists = fileManager.fileExists(atPath: tempURL.path)
-        let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("Export ZIP temp exists: \(tempExists ? "YES" : "NO"), bytes: \(tempSize)")
-#endif
-        guard tempExists, tempSize > 0 else {
-            throw NSError(domain: "ScoutCapture.Export", code: 5, userInfo: [NSLocalizedDescriptionKey: "Temporary ZIP write failed."])
-        }
-
-        try fileManager.moveItem(at: tempURL, to: finalURL)
-        let finalExists = fileManager.fileExists(atPath: finalURL.path)
-        let finalSize = ((try? fileManager.attributesOfItem(atPath: finalURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("Export ZIP final exists: \(finalExists ? "YES" : "NO"), bytes: \(finalSize)")
-#endif
-        guard finalExists, finalSize > 0 else {
-            throw NSError(domain: "ScoutCapture.Export", code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
-        }
-
-        let listedEntries = try listSessionExportZipEntryPaths(at: finalURL)
-#if DEBUG
-        let preview = Array(listedEntries.prefix(12))
-        print("Export ZIP entries count: \(listedEntries.count)")
-        print("Export ZIP entries preview: \(preview)")
-#endif
-        let zipRootFolderName = exportRoot.deletingLastPathComponent().lastPathComponent
-        let normalizedExpectedPaths = Set(expectedPaths.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
-        let actualPaths = Set(listedEntries.compactMap { path -> String? in
-            let normalized = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !normalized.isEmpty else { return nil }
-            if normalized == zipRootFolderName { return nil }
-            let prefix = "\(zipRootFolderName)/"
-            if normalized.hasPrefix(prefix) {
-                return String(normalized.dropFirst(prefix.count))
-            }
-            return normalized
-        })
-        guard normalizedExpectedPaths.isSubset(of: actualPaths) else {
-            throw NSError(domain: "ScoutCapture.Export", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
-        }
-#if DEBUG
-        guard actualPaths.contains("session.json"), actualPaths.contains("validation.txt") else {
+        print("Export ZIP entries count: \(archive.listedEntries.count)")
+        print("Export ZIP entries preview: \(Array(archive.listedEntries.prefix(12)))")
+        guard archive.relativePaths.contains("session.json"), archive.relativePaths.contains("validation.txt") else {
             assertionFailure("Export ZIP root missing session.json or validation.txt")
             throw NSError(domain: "ScoutCapture.Export", code: 10, userInfo: [NSLocalizedDescriptionKey: "ZIP root missing validation artifacts."])
         }
 #endif
         progress?(.zipReady)
-        return finalURL
+        return archive.url
     }
 
-    private func ensureSessionStampedJPEGs(
-        propertyID: UUID,
-        sessionID: UUID,
-        propertyAddress: String?,
-        assets: [ReportAsset]
-    ) throws -> [String: URL] {
-        let fileManager = FileManager.default
-        let originalsByName = Dictionary(uniqueKeysWithValues: assets.map { ($0.originalFilename, $0) })
-        var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        var didUpdateMetadata = false
-        var output: [String: URL] = [:]
-        let selectedPropertyName = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let propertyName = selectedPropertyName.isEmpty ? "Property" : selectedPropertyName
-        var reservedNames = Set(
-            ((try? fileManager.contentsOfDirectory(atPath: localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID).path)) ?? [])
-                .map { $0.lowercased() }
-        )
 
-        for index in metadata.shots.indices {
-            let shot = metadata.shots[index]
-            let originalName = shot.originalFilename
-            guard let asset = originalsByName[originalName] else { continue }
-
-            let existingStampedName = shot.stampedFilename?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let canonicalStampedName: String = {
-                let existingLeaf = URL(fileURLWithPath: existingStampedName).lastPathComponent
-                if !existingLeaf.isEmpty {
-                    let normalized = existingLeaf.lowercased().hasSuffix(".jpg")
-                        ? existingLeaf
-                        : "\(URL(fileURLWithPath: existingLeaf).deletingPathExtension().lastPathComponent).jpg"
-                    if !reservedNames.contains(normalized.lowercased()) {
-                        reservedNames.insert(normalized.lowercased())
-                        return normalized
-                    }
-                }
-                return nextReadableStampedFilename(
-                    shot: shot,
-                    reservedNames: &reservedNames
-                )
-            }()
-            if metadata.shots[index].stampedFilename != canonicalStampedName {
-                metadata.shots[index].stampedFilename = canonicalStampedName
-                didUpdateMetadata = true
-            }
-            let canonicalStampedRelative = "Stamped/\(canonicalStampedName)"
-            if metadata.shots[index].stampedRelativePath != canonicalStampedRelative {
-                metadata.shots[index].stampedRelativePath = canonicalStampedRelative
-                didUpdateMetadata = true
-            }
-            if (metadata.shots[index].imageWidth ?? 0) <= 0 || (metadata.shots[index].imageHeight ?? 0) <= 0 {
-                let sourceImage = UIImage(contentsOfFile: asset.fileURL.path)
-                if let sourceImage {
-                    metadata.shots[index].imageWidth = max(1, Int(sourceImage.size.width))
-                    metadata.shots[index].imageHeight = max(1, Int(sourceImage.size.height))
-                    didUpdateMetadata = true
-                }
-            }
-
-            let stampedURL = localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID)
-                .appendingPathComponent(canonicalStampedName, isDirectory: false)
-            let captureDate = metadata.shots[index].updatedAt
-            try createStampedJPEGIfMissing(
-                sourceURL: asset.fileURL,
-                destinationURL: stampedURL,
-                captureDate: captureDate,
-                overlayLines: stampOverlayLines(
-                    propertyName: propertyName,
-                    shot: metadata.shots[index],
-                    isBaselineSession: metadata.isBaselineSession
-                ),
-                metadataContext: stampedMetadataContext(
-                    propertyID: propertyID,
-                    sessionID: sessionID,
-                    shot: metadata.shots[index],
-                    propertyName: propertyName,
-                    propertyAddress: propertyAddress,
-                    schemaVersion: metadata.schemaVersion
-                ),
-                fileManager: fileManager
-            )
-            let metadataRelative = metadata.shots[index].stampedRelativePath ?? "nil"
-            let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            let metadataURL = sessionFolder.appendingPathComponent(metadataRelative)
-            let metadataPathExists = fileManager.fileExists(atPath: metadataURL.path)
-            print("[Stamp] wrote stamped destination=\(stampedURL.path)")
-            print("[Stamp] metadata stampedRelativePath=\(metadataRelative)")
-            print("[Stamp] metadata resolved exists=\(metadataPathExists)")
-            output[originalName] = stampedURL
-        }
-
-        if didUpdateMetadata {
-            try localStore.saveSessionMetadataAtomically(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                metadata: metadata
-            )
-#if DEBUG
-            if let firstStamped = metadata.shots.first?.stampedRelativePath {
-                print("[Stamp] metadata stampedRelativePath sample=\(firstStamped)")
-            }
-#endif
-        }
-
-        return output
-    }
-
-    private func createStampedJPEGIfMissing(
-        sourceURL: URL,
-        destinationURL: URL,
-        captureDate: Date,
-        overlayLines: [String],
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext,
-        fileManager: FileManager
-    ) throws {
-        if fileManager.fileExists(atPath: destinationURL.path),
-           ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0 > 0 {
-            return
-        }
-
-        let parentDir = destinationURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        let sourceData = try Data(contentsOf: sourceURL)
-        let stampedData = try encodeStampedJPEGForExport(
-            from: sourceData,
-            captureDate: captureDate,
-            overlayLines: overlayLines,
-            metadataContext: metadataContext
-        )
-        try stampedData.write(to: destinationURL, options: [.atomic])
-
-        let exists = fileManager.fileExists(atPath: destinationURL.path)
-        let size = ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("[Stamp] destination=\(destinationURL.path) utType=\(UTType.jpeg.identifier) bytes=\(size)")
-#endif
-        guard exists, size > 0 else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Stamped JPEG write failed"])
-        }
-
-        try fileManager.setAttributes(
-            [
-                .creationDate: captureDate,
-                .modificationDate: captureDate
-            ],
-            ofItemAtPath: destinationURL.path
-        )
-#if DEBUG
-        if let attrs = try? fileManager.attributesOfItem(atPath: destinationURL.path) {
-            let created = attrs[.creationDate] as? Date
-            let modified = attrs[.modificationDate] as? Date
-            print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
-        }
-        if let source = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
-           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-            let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
-            let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
-            let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
-            print("[Stamp] readback pixelWidth=\(width) pixelHeight=\(height) orientation=\(orientation)")
-        }
-#endif
-    }
-
-    private func encodeStampedJPEGForExport(
-        from sourceData: Data,
-        captureDate: Date,
-        overlayLines: [String],
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) throws -> Data {
-        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
-        }
-
-        let sourceCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
-        let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
-        let capturedOrientationRaw = metadataContext.capturedExifOrientationRaw
-        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
-        print("[Stamp] orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)")
-        if let sourceCGImage {
-            print("[Stamp] before encode pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
-        }
-        let image = normalizedUprightCGImage(from: sourceData)
-            ?? sourceCGImage
-        guard let image else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
-        }
-        print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
-        var mergedProps = sourceProps
-        mergedProps.removeValue(forKey: kCGImagePropertyGPSDictionary)
-        var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-        var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
-
-        let captureTime = ReportLibraryModel.EmbeddedCaptureTime(captureDate: captureDate)
-        exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
-        exif[kCGImagePropertyExifDateTimeDigitized] = captureTime.localDateTimeString
-        exif[kCGImagePropertyExifSubsecTimeOriginal] = captureTime.subsecString
-        exif[kCGImagePropertyExifSubsecTimeDigitized] = captureTime.subsecString
-        exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifUserComment] = scoutStructuredStampComment(captureTime: captureTime, metadataContext: metadataContext)
-        tiff[kCGImagePropertyTIFFDateTime] = captureTime.localDateTimeString
-        mergedProps[kCGImagePropertyExifDictionary] = exif
-        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-        mergedProps[kCGImagePropertyOrientation] = 1
-        tiff[kCGImagePropertyTIFFOrientation] = 1
-        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-        mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
-        print("[Stamp] orientation writeTag exif/tiff=1")
-        if let gps = makeStampedGPSDictionary(
-            latitude: metadataContext.latitude,
-            longitude: metadataContext.longitude,
-            accuracyMeters: metadataContext.accuracyMeters,
-            captureDate: captureDate
-        ) {
-            mergedProps[kCGImagePropertyGPSDictionary] = gps
-        }
-        let caption = overlayLines.joined(separator: "\n")
-        if !caption.isEmpty {
-            tiff[kCGImagePropertyTIFFImageDescription] = caption
-            mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-            var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
-            iptc[kCGImagePropertyIPTCCaptionAbstract] = caption
-            iptc[kCGImagePropertyIPTCKeywords] = stampedKeywordList(metadataContext: metadataContext)
-            mergedProps[kCGImagePropertyIPTCDictionary] = iptc
-        }
-
-        let stampedCGImage = drawStampOverlay(
-            on: image,
-            lines: overlayLines
-        ) ?? image
-
-        let destinationData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            destinationData,
-            UTType.jpeg.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
-        }
-        if let xmpMetadata = buildStampedXMPMetadata(
-            source: source,
-            captureTime: captureTime,
-            metadataContext: metadataContext
-        ) {
-            CGImageDestinationAddImageAndMetadata(
-                destination,
-                stampedCGImage,
-                xmpMetadata,
-                mergedProps as CFDictionary
-            )
-        } else {
-            CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
-        }
-        guard CGImageDestinationFinalize(destination) else {
-            throw NSError(domain: "ScoutCapture.Stamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
-        }
-        return destinationData as Data
-    }
-
-    private func stampedMetadataContext(
-        propertyID: UUID,
-        sessionID: UUID,
-        shot: ShotMetadata,
-        propertyName: String,
-        propertyAddress: String?,
-        schemaVersion: Int
-    ) -> ReportLibraryModel.EmbeddedMetadataContext {
-        ReportLibraryModel.EmbeddedMetadataContext(
-            propertyID: propertyID,
-            propertyName: propertyName,
-            propertyAddress: propertyAddress,
-            sessionID: sessionID,
-            shotID: shot.shotID,
-            shotKey: shot.shotKey,
-            building: shot.building,
-            elevation: shot.elevation,
-            detailType: shot.detailType,
-            angleIndex: shot.angleIndex,
-            trade: shot.trade,
-            priority: shot.priority,
-            isGuided: shot.isGuided,
-            isFlagged: shot.isFlagged,
-            issueStatus: shot.issueStatus,
-            detailNote: shot.noteText,
-            captureMode: shot.captureMode,
-            lens: shot.lens,
-            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
-            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseExifOrientationRaw(from: shot.orientation),
-            latitude: shot.latitude,
-            longitude: shot.longitude,
-            accuracyMeters: shot.accuracyMeters,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            osVersion: UIDevice.current.systemVersion,
-            deviceModel: UIDevice.current.model,
-            schemaVersion: schemaVersion
-        )
-    }
-
-    private func parseExifOrientationRaw(from orientation: String?) -> UInt32? {
-        let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        if let direct = UInt32(trimmed), direct >= 1, direct <= 8 {
-            return direct
-        }
-        let prefix = "exif:"
-        if trimmed.lowercased().hasPrefix(prefix),
-           let value = UInt32(trimmed.dropFirst(prefix.count)),
-           value >= 1, value <= 8 {
-            return value
-        }
-        return nil
-    }
-
-    private func scoutStructuredStampComment(
-        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) -> String {
-        var pairs: [String] = []
-        func append(_ key: String, _ value: String?) {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                pairs.append("\(key)=\(trimmed)")
-            }
-        }
-        append("propertyID", metadataContext.propertyID?.uuidString)
-        append("propertyName", metadataContext.propertyName)
-        append("propertyAddress", metadataContext.propertyAddress)
-        append("sessionID", metadataContext.sessionID?.uuidString)
-        append("shotID", metadataContext.shotID?.uuidString)
-        append("shotKey", metadataContext.shotKey)
-        append("building", metadataContext.building)
-        append("elevation", metadataContext.elevation)
-        append("detailType", metadataContext.detailType)
-        append("angleIndex", metadataContext.angleIndex.map(String.init))
-        append("captureMode", metadataContext.captureMode)
-        append("lens", metadataContext.lens)
-        append("orientation", metadataContext.orientation)
-        append("trade", metadataContext.trade)
-        append("priority", metadataContext.priority)
-        append("captureDateLocal", captureTime.localDateTimeString)
-        append("captureDateISO8601", captureTime.iso8601WithOffset)
-        if let accuracy = metadataContext.accuracyMeters {
-            append("gpsAccuracyMeters", String(format: "%.3f", accuracy))
-        }
-        return pairs.joined(separator: ";")
-    }
-
-    private func stampedKeywordList(metadataContext: ReportLibraryModel.EmbeddedMetadataContext) -> [String] {
-        var keywords: [String] = ["SCOUT"]
-        let values = [
-            metadataContext.propertyName,
-            metadataContext.building,
-            metadataContext.elevation,
-            metadataContext.detailType,
-            metadataContext.trade,
-            metadataContext.priority
-        ]
-        for value in values {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                keywords.append(trimmed)
-            }
-        }
-        keywords.append(metadataContext.isGuided == true ? "Guided" : "Free")
-        if metadataContext.isFlagged == true {
-            keywords.append("Flagged")
-        }
-        if let angle = metadataContext.angleIndex {
-            keywords.append("Angle \(angle)")
-        }
-        return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
-    }
-
-    private func makeStampedGPSDictionary(
-        latitude: Double?,
-        longitude: Double?,
-        accuracyMeters: Double?,
-        captureDate: Date
-    ) -> [CFString: Any]? {
-        guard let latitude, let longitude else { return nil }
-        var gps: [CFString: Any] = [:]
-        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
-        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
-        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
-        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
-        gps[kCGImagePropertyGPSDateStamp] = Self.exportGPSDateFormatter.string(from: captureDate)
-        gps[kCGImagePropertyGPSTimeStamp] = Self.exportGPSTimeFormatter.string(from: captureDate)
-        if let accuracyMeters, accuracyMeters >= 0 {
-            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
-        }
-        return gps
-    }
-
-    private func buildStampedXMPMetadata(
-        source: CGImageSource,
-        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) -> CGMutableImageMetadata? {
-        let baseMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
-        let mutable = baseMetadata.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
-        var registrationError: Unmanaged<CFError>?
-        _ = CGImageMetadataRegisterNamespaceForPrefix(
-            mutable,
-            "https://scoutcapture.app/ns/1.0/" as CFString,
-            "scout" as CFString,
-            &registrationError
-        )
-        func setTag(_ path: String, _ value: String?) {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !trimmed.isEmpty else { return }
-            let components = path.split(separator: ":", maxSplits: 1).map(String.init)
-            guard components.count == 2 else { return }
-            let prefix = components[0]
-            let name = components[1]
-            let namespace: String
-            switch prefix {
-            case "xmp":
-                namespace = "http://ns.adobe.com/xap/1.0/"
-            case "scout":
-                namespace = "https://scoutcapture.app/ns/1.0/"
-            default:
-                return
-            }
-            guard let tag = CGImageMetadataTagCreate(
-                namespace as CFString,
-                prefix as CFString,
-                name as CFString,
-                .string,
-                trimmed as CFString
-            ) else {
-                return
-            }
-            CGImageMetadataSetTagWithPath(mutable, nil, path as CFString, tag)
-        }
-        setTag("xmp:CreateDate", captureTime.iso8601WithOffset)
-        setTag("xmp:ModifyDate", captureTime.iso8601WithOffset)
-        setTag("scout:propertyID", metadataContext.propertyID?.uuidString)
-        setTag("scout:propertyName", metadataContext.propertyName)
-        setTag("scout:propertyAddress", metadataContext.propertyAddress)
-        setTag("scout:sessionID", metadataContext.sessionID?.uuidString)
-        setTag("scout:shotID", metadataContext.shotID?.uuidString)
-        setTag("scout:shotKey", metadataContext.shotKey)
-        setTag("scout:building", metadataContext.building)
-        setTag("scout:elevation", metadataContext.elevation)
-        setTag("scout:detailType", metadataContext.detailType)
-        setTag("scout:angleIndex", metadataContext.angleIndex.map(String.init))
-        setTag("scout:isGuided", metadataContext.isGuided.map { $0 ? "true" : "false" })
-        setTag("scout:isFlagged", metadataContext.isFlagged.map { $0 ? "true" : "false" })
-        setTag("scout:captureMode", metadataContext.captureMode)
-        setTag("scout:lens", metadataContext.lens)
-        setTag("scout:orientation", metadataContext.orientation)
-        setTag("scout:appVersion", metadataContext.appVersion)
-        setTag("scout:osVersion", metadataContext.osVersion)
-        setTag("scout:deviceModel", metadataContext.deviceModel)
-        setTag("scout:schemaVersion", metadataContext.schemaVersion.map(String.init))
-        setTag("scout:issueStatus", metadataContext.issueStatus)
-        setTag("scout:issueNote", metadataContext.detailNote)
-        setTag("scout:trade", metadataContext.trade)
-        setTag("scout:priority", metadataContext.priority)
-        if let accuracy = metadataContext.accuracyMeters {
-            setTag("scout:gpsAccuracyMeters", String(format: "%.3f", accuracy))
-        }
-        return mutable
-    }
-
-    private static let exportGPSDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy:MM:dd"
-        return formatter
-    }()
-
-    private static let exportGPSTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
-
-    private func normalizedUprightCGImage(from sourceData: Data) -> CGImage? {
-        guard let uiImage = UIImage(data: sourceData) else { return nil }
-        let size = uiImage.size
-        guard size.width > 0, size.height > 0 else { return nil }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        format.scale = 1
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            uiImage.draw(in: CGRect(origin: .zero, size: size))
-        }
-        return rendered.cgImage
-    }
-
-    private func drawStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
-        guard !lines.isEmpty else { return image }
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return image }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        format.scale = 1
-        let size = CGSize(width: width, height: height)
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-            UIImage(cgImage: image).draw(in: CGRect(origin: .zero, size: size))
-
-            let shortEdge = CGFloat(min(width, height))
-            let sideInset = max(16, shortEdge * 0.025)
-            let bottomInset = max(16, shortEdge * 0.025)
-            let lineSpacing = max(2, shortEdge * 0.004)
-            let cornerRadius = max(8, shortEdge * 0.016)
-            let primarySize = max(14, shortEdge * 0.030)
-            let secondarySize = max(12, shortEdge * 0.024)
-
-            let styles: [(UIFont, UIColor)] = lines.enumerated().map { idx, _ in
-                (idx == 0 ? UIFont.systemFont(ofSize: primarySize, weight: .semibold)
-                          : UIFont.systemFont(ofSize: secondarySize, weight: .regular),
-                 .white)
-            }
-            let attributed: [NSAttributedString] = zip(lines, styles).map { pair, style in
-                NSAttributedString(
-                    string: pair,
-                    attributes: [
-                        .font: style.0,
-                        .foregroundColor: style.1
-                    ]
-                )
-            }
-
-            let maxTextWidth = size.width - (sideInset * 3)
-            let lineSizes = attributed.map { text in
-                text.boundingRect(
-                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    context: nil
-                ).integral.size
-            }
-
-            let textHeight = lineSizes.reduce(0) { $0 + $1.height } + (CGFloat(max(0, lineSizes.count - 1)) * lineSpacing)
-            let textWidth = min(maxTextWidth, lineSizes.map(\.width).max() ?? maxTextWidth)
-            let padX = max(8, shortEdge * 0.013)
-            let padY = max(5, shortEdge * 0.009)
-            let panelWidth = textWidth + (padX * 2)
-            let panelHeight = textHeight + (padY * 2)
-            let panelRect = CGRect(
-                x: sideInset,
-                y: size.height - bottomInset - panelHeight,
-                width: panelWidth,
-                height: panelHeight
-            )
-
-            let panelPath = UIBezierPath(roundedRect: panelRect, cornerRadius: cornerRadius)
-            UIColor.black.withAlphaComponent(0.58).setFill()
-            panelPath.fill()
-
-            var y = panelRect.minY + padY
-            for (idx, text) in attributed.enumerated() {
-                let drawRect = CGRect(
-                    x: panelRect.minX + padX,
-                    y: y,
-                    width: textWidth,
-                    height: lineSizes[idx].height
-                )
-                text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                y += lineSizes[idx].height + lineSpacing
-            }
-        }
-
-        return rendered.cgImage
-    }
-
-    private static let exportExifTimestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        return formatter
-    }()
-
-    private static let exportExifSubsecFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "SSS"
-        return formatter
-    }()
-
-    private static func exportExifOffsetString(for date: Date) -> String {
-        let seconds = TimeZone.current.secondsFromGMT(for: date)
-        let sign = seconds >= 0 ? "+" : "-"
-        let absolute = abs(seconds)
-        let hours = absolute / 3600
-        let minutes = (absolute % 3600) / 60
-        return String(format: "%@%02d:%02d", sign, hours, minutes)
-    }
-
-    private func stampOverlayLines(propertyName: String, shot: ShotMetadata, isBaselineSession: Bool) -> [String] {
-        let line1 = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = [shot.building, shot.elevation, shot.detailType, "Angle \(max(1, shot.angleIndex))"]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " | ")
-        let line3 = Self.exportOverlayDateFormatter.string(from: shot.updatedAt)
-        let noteLine = (shot.noteText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let line4 = (shot.isFlagged && !noteLine.isEmpty) ? noteLine : ""
-
-        _ = isBaselineSession
-        return [line1, detail, line3, line4].filter { !$0.isEmpty }
-    }
-
-    private func nextReadableStampedFilename(shot: ShotMetadata, reservedNames: inout Set<String>) -> String {
-        let base = readableStampedBaseName(for: shot)
-        var candidate = "\(base).jpg"
-        var counter = 1
-        while reservedNames.contains(candidate.lowercased()) {
-            candidate = "\(base)_\(String(format: "%02d", counter)).jpg"
-            counter += 1
-        }
-        reservedNames.insert(candidate.lowercased())
-        return candidate
-    }
-
-    private func readableStampedBaseName(for shot: ShotMetadata) -> String {
-        let datePart = Self.exportFilenameDateFormatter.string(from: shot.updatedAt)
-        let anglePart = "A\(max(1, shot.angleIndex))"
-        let parts = [
-            sanitizeStampFilenamePart(shot.building),
-            sanitizeStampFilenamePart(shot.elevation),
-            sanitizeStampFilenamePart(shot.detailType),
-            anglePart,
-            datePart
-        ].filter { !$0.isEmpty }
-        let joined = parts.joined(separator: "_")
-        return joined.isEmpty ? shot.shotID.uuidString : joined
-    }
-
-    private func sanitizeStampFilenamePart(_ raw: String) -> String {
-        let normalized = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "_")
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
-        let collapsed = String(scalars)
-            .replacingOccurrences(of: "__", with: "_")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
-        return String(collapsed.prefix(40))
-    }
-
-    private static let exportFilenameDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter
-    }()
-
-    private static let exportOverlayDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
-        return formatter
-    }()
-
-    private func sessionExportFilename(for asset: ReportAsset, index: Int) -> String {
-        let fallback = "photo-\(index).\(OriginalPhotoFormat.fileExtension)"
-        let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseName = URL(fileURLWithPath: original).lastPathComponent
-        let resolved = baseName.isEmpty ? fallback : baseName
-        return resolved.replacingOccurrences(of: "/", with: "-")
-    }
 
     private func sessionExportZipFilename() -> String {
         let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
-        let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeName = trimmedName.isEmpty
-            ? "ScoutCapture-Export"
-            : trimmedName
-                .replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: ":", with: "-")
-                .replacingOccurrences(of: "\n", with: " ")
-                .replacingOccurrences(of: "\t", with: " ")
-        let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
-        let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
-        return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
-    }
-
-    private func buildSessionExportZipData(entries: [(path: String, data: Data, modifiedAt: Date?)]) -> Data {
-        struct CentralRecord {
-            let pathData: Data
-            let crc32: UInt32
-            let size: UInt32
-            let localHeaderOffset: UInt32
-            let dosTime: UInt16
-            let dosDate: UInt16
-        }
-
-        var zip = Data()
-        var centralRecords: [CentralRecord] = []
-        centralRecords.reserveCapacity(entries.count)
-
-        for entry in entries {
-            let pathData = Data(entry.path.utf8)
-            let crc = sessionExportCRC32(entry.data)
-            let size = UInt32(entry.data.count)
-            let localHeaderOffset = UInt32(zip.count)
-            let (dosTime, dosDate) = dosDateTimeForSessionExport(entry.modifiedAt ?? Date())
-
-            appendUInt32LEForSessionExport(0x04034B50, to: &zip)
-            appendUInt16LEForSessionExport(20, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(dosTime, to: &zip)
-            appendUInt16LEForSessionExport(dosDate, to: &zip)
-            appendUInt32LEForSessionExport(crc, to: &zip)
-            appendUInt32LEForSessionExport(size, to: &zip)
-            appendUInt32LEForSessionExport(size, to: &zip)
-            appendUInt16LEForSessionExport(UInt16(pathData.count), to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            zip.append(pathData)
-            zip.append(entry.data)
-
-            centralRecords.append(
-                CentralRecord(
-                    pathData: pathData,
-                    crc32: crc,
-                    size: size,
-                    localHeaderOffset: localHeaderOffset,
-                    dosTime: dosTime,
-                    dosDate: dosDate
-                )
-            )
-        }
-
-        let centralDirectoryOffset = UInt32(zip.count)
-
-        for record in centralRecords {
-            appendUInt32LEForSessionExport(0x02014B50, to: &zip)
-            appendUInt16LEForSessionExport(20, to: &zip)
-            appendUInt16LEForSessionExport(20, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(record.dosTime, to: &zip)
-            appendUInt16LEForSessionExport(record.dosDate, to: &zip)
-            appendUInt32LEForSessionExport(record.crc32, to: &zip)
-            appendUInt32LEForSessionExport(record.size, to: &zip)
-            appendUInt32LEForSessionExport(record.size, to: &zip)
-            appendUInt16LEForSessionExport(UInt16(record.pathData.count), to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt32LEForSessionExport(0, to: &zip)
-            appendUInt32LEForSessionExport(record.localHeaderOffset, to: &zip)
-            zip.append(record.pathData)
-        }
-
-        let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
-        let count = UInt16(centralRecords.count)
-
-        appendUInt32LEForSessionExport(0x06054B50, to: &zip)
-        appendUInt16LEForSessionExport(0, to: &zip)
-        appendUInt16LEForSessionExport(0, to: &zip)
-        appendUInt16LEForSessionExport(count, to: &zip)
-        appendUInt16LEForSessionExport(count, to: &zip)
-        appendUInt32LEForSessionExport(centralDirectorySize, to: &zip)
-        appendUInt32LEForSessionExport(centralDirectoryOffset, to: &zip)
-        appendUInt16LEForSessionExport(0, to: &zip)
-
-        return zip
-    }
-
-    private func dosDateTimeForSessionExport(_ date: Date) -> (UInt16, UInt16) {
-        let calendar = Calendar(identifier: .gregorian)
-        let comps = calendar.dateComponents(in: TimeZone.current, from: date)
-        let year = min(max(comps.year ?? 1980, 1980), 2107)
-        let month = min(max(comps.month ?? 1, 1), 12)
-        let day = min(max(comps.day ?? 1, 1), 31)
-        let hour = min(max(comps.hour ?? 0, 0), 23)
-        let minute = min(max(comps.minute ?? 0, 0), 59)
-        let second = min(max(comps.second ?? 0, 0), 59)
-
-        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
-        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
-        return (dosTime, dosDate)
-    }
-
-    private func listSessionExportZipEntryPaths(at url: URL) throws -> [String] {
-        let data = try Data(contentsOf: url)
-        let bytes = [UInt8](data)
-        let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
-        guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
-            var i = idx
-            while i >= 0 {
-                if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
-                if i == 0 { break }
-                i -= 1
-            }
-            return nil
-        }) else {
-            throw NSError(domain: "ScoutCapture.Export", code: 8, userInfo: [NSLocalizedDescriptionKey: "EOCD not found."])
-        }
-
-        func u16(_ offset: Int) -> Int {
-            Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
-        }
-        func u32(_ offset: Int) -> Int {
-            Int(bytes[offset]) |
-            (Int(bytes[offset + 1]) << 8) |
-            (Int(bytes[offset + 2]) << 16) |
-            (Int(bytes[offset + 3]) << 24)
-        }
-
-        guard eocdIndex + 22 <= bytes.count else {
-            throw NSError(domain: "ScoutCapture.Export", code: 9, userInfo: [NSLocalizedDescriptionKey: "EOCD truncated."])
-        }
-
-        let totalEntries = u16(eocdIndex + 10)
-        let centralOffset = u32(eocdIndex + 16)
-        var cursor = centralOffset
-        var paths: [String] = []
-        paths.reserveCapacity(totalEntries)
-
-        while paths.count < totalEntries, cursor + 46 <= bytes.count {
-            guard cursor + 3 < bytes.count,
-                  bytes[cursor] == 0x50, bytes[cursor + 1] == 0x4B, bytes[cursor + 2] == 0x01, bytes[cursor + 3] == 0x02 else {
-                break
-            }
-            let nameLength = u16(cursor + 28)
-            let extraLength = u16(cursor + 30)
-            let commentLength = u16(cursor + 32)
-            let nameStart = cursor + 46
-            let nameEnd = nameStart + nameLength
-            guard nameEnd <= bytes.count else { break }
-            let nameBytes = Array(bytes[nameStart..<nameEnd])
-            let name = String(bytes: nameBytes, encoding: .utf8) ?? ""
-            paths.append(name)
-            cursor = nameEnd + extraLength + commentLength
-        }
-
-        return paths
-    }
-
-    private func sessionExportCRC32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >>= 1
-                }
-            }
-        }
-        return crc ^ 0xFFFF_FFFF
-    }
-
-    private func appendUInt16LEForSessionExport(_ value: UInt16, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { bytes in
-            data.append(contentsOf: bytes)
-        }
-    }
-
-    private func appendUInt32LEForSessionExport(_ value: UInt32, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { bytes in
-            data.append(contentsOf: bytes)
-        }
+        return SessionExportZip.standardFilename(
+            propertyName: propertyName,
+            propertyID: appState.selectedProperty?.id,
+            sessionID: appState.currentSession?.id
+        )
     }
 
     private func applyArmedIssueCaptureIfNeeded(with shot: Shot) -> Bool {
@@ -15227,116 +12839,8 @@ extension ContentView {
         return text.range(of: pattern, options: .regularExpression) != nil
     }
 
-    private func resolveObservationFromChecklist(_ observation: Observation) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
 
-        do {
-            let observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let existing = observations.first(where: { $0.id == observation.id }) else { return }
 
-            var updated = existing
-            updated.status = .pendingReview
-            updated.updatedInSessionID = sessionID
-            updated.resolvedInSessionID = sessionID
-            if updated.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
-            }
-            appendObservationHistoryEvent(
-                ObservationHistoryEvent(
-                    timestamp: Date(),
-                    sessionID: sessionID,
-                    kind: .pendingReview,
-                    beforeValue: "active",
-                    afterValue: Observation.Status.pendingReview.issueStatusValue,
-                    field: "status",
-                    shotID: updated.linkedShotID
-                ),
-                to: &updated
-            )
-
-            let persisted = try localStore.updateObservation(updated)
-            if let shotID = persisted.linkedShotID {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shotID,
-                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        activeCaptureKind: "follow_up_capture"
-                    )
-                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        shotID: shotID,
-                        reason: "flagged_issue_pending_review"
-                    )
-                } catch {
-                    // Keep checklist resolution resilient; the observation itself has already been saved.
-                }
-            }
-            showFlaggedActionToastNow("Issue submitted for review")
-            refreshActiveIssues()
-        } catch {
-            // Keep UI responsive if persistence fails.
-        }
-    }
-
-    private func reassignObservation(_ source: Observation, to targetID: UUID) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        guard source.id != targetID else { return }
-
-        do {
-            var observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let sourceIndex = observations.firstIndex(where: { $0.id == source.id }),
-                  let targetIndex = observations.firstIndex(where: { $0.id == targetID }) else { return }
-            guard let linkedShotID = observations[sourceIndex].linkedShotID,
-                  let movedShot = observations[sourceIndex].shots.first(where: { $0.id == linkedShotID }) else { return }
-
-            if observations[targetIndex].shots.contains(where: { $0.id == movedShot.id }) == false {
-                observations[targetIndex].shots.append(movedShot)
-            }
-            observations[targetIndex].linkedShotID = movedShot.id
-            observations[targetIndex].updatedInSessionID = sessionID
-
-            let remainingSourceShots = observations[sourceIndex].shots.filter { $0.id != movedShot.id }
-            observations[sourceIndex].linkedShotID = remainingSourceShots.last?.id
-            observations[sourceIndex].updatedInSessionID = sessionID
-
-            _ = try localStore.updateObservation(observations[targetIndex])
-            _ = try localStore.updateObservation(observations[sourceIndex])
-            showFlaggedActionToastNow("Issue photo reassigned")
-            refreshActiveIssues()
-        } catch {
-            // Keep UI responsive if persistence fails.
-        }
-    }
-
-    private func updateObservationLabel(_ observation: Observation, detailLabel: String) {
-        guard let captureTarget = appState.activeCaptureTarget() else { return }
-        let propertyID = captureTarget.propertyID
-        let sessionID = captureTarget.sessionID
-        let trimmed = detailLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        do {
-            let observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let existing = observations.first(where: { $0.id == observation.id }) else { return }
-
-            var updated = existing
-            updated.detailType = trimmed
-            updated.updatedInSessionID = sessionID
-
-            _ = try localStore.updateObservation(updated)
-            refreshActiveIssues()
-        } catch {
-            // Keep UI responsive if persistence fails.
-        }
-    }
 
     private func showFlaggedActionToastNow(_ text: String) {
         flaggedActionToastToken += 1
@@ -15355,6 +12859,16 @@ extension ContentView {
         resolutionCapturedPhotoRef = shot.imageLocalIdentifier
         resolutionCapturedImage = UIImage(data: data)
         return true
+    }
+
+    private func observationDisplayOrder(_ lhs: Observation, _ rhs: Observation) -> Bool {
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt < rhs.updatedAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     private func refreshActiveIssues() {
@@ -15388,26 +12902,10 @@ extension ContentView {
                             currentSessionStart: activeSessionStart
                         )
                     }
-                    .sorted { lhs, rhs in
-                        if lhs.createdAt != rhs.createdAt {
-                            return lhs.createdAt < rhs.createdAt
-                        }
-                        if lhs.updatedAt != rhs.updatedAt {
-                            return lhs.updatedAt < rhs.updatedAt
-                        }
-                        return lhs.id.uuidString < rhs.id.uuidString
-                    }
+                    .sorted(by: observationDisplayOrder)
                 resolutionRequiredObservations = observations
                     .filter { $0.status == .resolutionRequired }
-                    .sorted { lhs, rhs in
-                        if lhs.createdAt != rhs.createdAt {
-                            return lhs.createdAt < rhs.createdAt
-                        }
-                        if lhs.updatedAt != rhs.updatedAt {
-                            return lhs.updatedAt < rhs.updatedAt
-                        }
-                        return lhs.id.uuidString < rhs.id.uuidString
-                    }
+                    .sorted(by: observationDisplayOrder)
             } catch {
                 activeObservations = []
                 resolutionRequiredObservations = []
@@ -15448,27 +12946,11 @@ extension ContentView {
                         currentSessionStart: currentSessionStart
                     )
                 }
-                .sorted { lhs, rhs in
-                    if lhs.createdAt != rhs.createdAt {
-                        return lhs.createdAt < rhs.createdAt
-                    }
-                    if lhs.updatedAt != rhs.updatedAt {
-                        return lhs.updatedAt < rhs.updatedAt
-                    }
-                    return lhs.id.uuidString < rhs.id.uuidString
-                }
+                .sorted(by: observationDisplayOrder)
 
             resolutionRequiredObservations = observations
                 .filter { $0.status == .resolutionRequired }
-                .sorted { lhs, rhs in
-                    if lhs.createdAt != rhs.createdAt {
-                        return lhs.createdAt < rhs.createdAt
-                    }
-                    if lhs.updatedAt != rhs.updatedAt {
-                        return lhs.updatedAt < rhs.updatedAt
-                    }
-                    return lhs.id.uuidString < rhs.id.uuidString
-                }
+                .sorted(by: observationDisplayOrder)
 
             var resolvedMap: [UUID: String] = [:]
             var referenceMap: [UUID: String] = [:]
@@ -15912,7 +13394,6 @@ extension ContentView {
     
     
     private struct SessionActionsSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
         let summary: SessionActionsSummary
         let isPreparingExport: Bool
         let isEndingSession: Bool
@@ -15921,118 +13402,22 @@ extension ContentView {
         let onSaveDraftAndExit: () -> Void
         let onExportNow: () -> Void
 
-        private var neutralFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
-
-        private var neutralStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
-
-        private var neutralLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
-
         var body: some View {
-            GeometryReader { geo in
-                let constrainedHeight = geo.size.height < 620
-
-                ZStack {
-                    Color.black.opacity(0.52)
-                        .ignoresSafeArea()
-                        .onTapGesture { }
-
-                    VStack {
-                        Spacer(minLength: 0)
-
-                        VStack(spacing: 14) {
-                            Text("Session Actions")
-                                .font(.system(size: 24, weight: .bold))
-                                .foregroundColor(.white)
-
-                            VStack(spacing: 8) {
-                                summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
-                                if !summary.isPunchlistVisit {
-                                    summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                            )
-
-                            if constrainedHeight {
-                                ScrollView(.vertical, showsIndicators: true) {
-                                    actionButtonsStack
-                                }
-                                .frame(maxHeight: geo.size.height * 0.38)
-                            } else {
-                                actionButtonsStack
-                            }
-                        }
-                        .padding(18)
-                        .frame(width: min(max(310, geo.size.width * 0.84), 470))
-                        .background(Color.black.opacity(0.82))
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.white.opacity(0.20), lineWidth: 1)
-                        )
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 16)
-                }
-            }
-        }
-
-        @ViewBuilder
-        private func summaryRow(title: String, value: Int) -> some View {
-            HStack {
-                Text(title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.white.opacity(0.92))
-                Spacer(minLength: 0)
-                Text("\(value)")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white)
-            }
-        }
-
-        @ViewBuilder
-        private var actionButtonsStack: some View {
-            VStack(spacing: 10) {
-                actionButton(
-                    title: "Resume",
-                    role: .primary,
-                    isEnabled: !isPreparingExport && !isEndingSession,
-                    action: onResume
-                )
-                actionButton(
-                    title: summary.exitActionTitle,
-                    role: .secondary,
-                    isEnabled: !isPreparingExport && !isEndingSession,
-                    action: onSaveDraftAndExit
-                )
-                actionButton(
-                    title: isEndingSession ? endingTitle : summary.exportActionTitle,
-                    role: .tertiary,
-                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
-                    action: onExportNow
-                )
-
-                if !summary.isExportActionEnabled {
-                    Text(disabledHintText)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.72))
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 2)
-                }
-            }
+            SessionActionsPanel(
+                flaggedRemainingCount: summary.flaggedRemainingCount,
+                guidedRemainingCount: summary.guidedRemainingCount,
+                isPunchlistVisit: summary.isPunchlistVisit,
+                exitActionTitle: summary.exitActionTitle,
+                completeActionTitle: summary.exportActionTitle,
+                isEndingSession: isEndingSession,
+                endingTitle: endingTitle,
+                isActionEnabled: !isPreparingExport && !isEndingSession,
+                isCompleteEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
+                disabledReason: summary.isExportActionEnabled ? nil : disabledHintText,
+                onResume: onResume,
+                onSaveDraftAndExit: onSaveDraftAndExit,
+                onComplete: onExportNow
+            )
         }
 
         private var disabledHintText: String {
@@ -16052,68 +13437,6 @@ extension ContentView {
                 return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
-        }
-
-        private enum ActionRole {
-            case primary
-            case secondary
-            case tertiary
-        }
-
-        @ViewBuilder
-        private func actionButton(
-            title: String,
-            role: ActionRole,
-            isEnabled: Bool,
-            action: @escaping () -> Void
-        ) -> some View {
-            let fill: Color = {
-                switch role {
-                case .primary:
-                    return .blue
-                case .secondary:
-                    return neutralFill
-                case .tertiary:
-                    return .white
-                }
-            }()
-            let stroke: Color = {
-                switch role {
-                case .primary:
-                    return .blue.opacity(0.85)
-                case .secondary:
-                    return neutralStroke
-                case .tertiary:
-                    return Color.red.opacity(0.30)
-                }
-            }()
-            let label: Color = {
-                switch role {
-                case .primary:
-                    return .white
-                case .secondary:
-                    return neutralLabel
-                case .tertiary:
-                    return .red.opacity(0.88)
-                }
-            }()
-
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(isEnabled ? label : label.opacity(0.45))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 46)
-                    .background(isEnabled ? fill : fill.opacity(0.45))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
-                    )
-            }
-            .opacity(isEnabled ? 1.0 : 0.72)
-            .buttonStyle(.plain)
-            .disabled(!isEnabled)
         }
     }
 
@@ -16267,39 +13590,6 @@ extension ContentView {
         }
     }
 
-    private struct SessionDocumentExportPicker: UIViewControllerRepresentable {
-        let fileURL: URL
-        let onComplete: (Bool) -> Void
-
-        func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-            let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
-            picker.delegate = context.coordinator
-            return picker
-        }
-
-        func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
-
-        func makeCoordinator() -> Coordinator {
-            Coordinator(onComplete: onComplete)
-        }
-
-        final class Coordinator: NSObject, UIDocumentPickerDelegate {
-            let onComplete: (Bool) -> Void
-
-            init(onComplete: @escaping (Bool) -> Void) {
-                self.onComplete = onComplete
-            }
-
-            func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-                onComplete(!urls.isEmpty)
-            }
-
-            func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-                onComplete(false)
-            }
-        }
-    }
-
     // MARK: - Report Library Fullscreen (Grid)
     
     private struct ReportLibraryFullscreen: View {
@@ -16317,25 +13607,14 @@ extension ContentView {
         // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
         
-        private var isLandscape: Bool {
-            lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-        }
+        private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
         private var headerPropertyName: String {
             let trimmed = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return trimmed.isEmpty ? "No Property Selected" : trimmed
         }
         
-        private var rotationDegrees: Double {
-            switch lastValidOrientation {
-            case .landscapeLeft:
-                return 90
-            case .landscapeRight:
-                return -90
-            default:
-                return 0
-            }
-        }
+        private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
         
         private func refreshOrientation() {
             let o = UIDevice.current.orientation
@@ -16343,16 +13622,7 @@ extension ContentView {
             // Accept only portrait (upright) and the two landscapes.
             // Explicitly ignore portraitUpsideDown so the UI does not snap back to portrait when the phone is inverted.
             // Also ignore transitional/invalid states (faceUp, faceDown, unknown).
-            let newValue: UIDeviceOrientation? = {
-                switch o {
-                case .portrait:
-                    return .portrait
-                case .landscapeLeft, .landscapeRight:
-                    return o
-                default:
-                    return nil
-                }
-            }()
+            let newValue = o.scoutCaptureStableOrientation()
             
             guard let newValue else { return }
             guard newValue != lastValidOrientation else { return }
@@ -16606,7 +13876,7 @@ extension ContentView {
                 ActivityShareSheet(activityItems: shareItems)
             }
             .sheet(item: $exportFile) { file in
-                DocumentExportPicker(
+                SharedDocumentExportPicker(
                     fileURL: file.url,
                     onComplete: { didExport in
                         if didExport {
@@ -16816,12 +14086,6 @@ extension ContentView {
             .buttonStyle(.plain)
         }
 
-        private func actionMenuDivider() -> some View {
-            Rectangle()
-                .fill(Color.white.opacity(0.12))
-                .frame(height: 1)
-                .padding(.horizontal, 12)
-        }
 
         @ViewBuilder
         private func bottomSelectionActions(bottomInset: CGFloat) -> some View {
@@ -17466,32 +14730,9 @@ extension ContentView {
             try fileManager.createDirectory(at: stampedRoot, withIntermediateDirectories: true)
 
 #if DEBUG
-            let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
-            let exists = FileManager.default.fileExists(atPath: sourceURL.path)
-            let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-            print("Export session.json path source: \(sourceURL.path)")
-            print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
-            let raw = String(data: exportArtifacts.sessionData, encoding: .utf8) ?? ""
-            print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
-            print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
-            let debugDecoder = JSONDecoder()
-            debugDecoder.dateDecodingStrategy = .iso8601
-            if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: exportArtifacts.sessionData),
-               let first = decoded.shots.first {
-                print("Export sessionStartedAt: \(decoded.startedAt)")
-                print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
-                print("Export first shot shotKey: \(first.shotKey)")
-                print("Export first shot createdAt: \(first.createdAt)")
-                print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
-                print("Export first shot originalRelativePath: \(first.originalRelativePath)")
-                if let delivered = decoded.firstDeliveredAt {
-                    print("Export firstDeliveredAt: \(delivered)")
-                }
-                if let expires = decoded.reExportExpiresAt {
-                    print("Export reExportExpiresAt: \(expires)")
-                }
-            }
-            print("EXPORT ROOT: \(exportRoot.path)")
+            logExportSessionSourceDiagnostics(
+                localStore, propertyID, sessionID, exportArtifacts.sessionData, exportRoot
+            )
 #endif
             try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
             try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
@@ -17508,27 +14749,25 @@ extension ContentView {
             }
             
             for originalFile in exportArtifacts.originalFiles {
-                let imageData = try Data(contentsOf: originalFile.sourceURL)
-                try imageData.write(to: originalsRoot.appendingPathComponent(originalFile.filename), options: .atomic)
-                try imageData.write(to: stampedRoot.appendingPathComponent(originalFile.filename), options: .atomic)
+                try fileManager.copyItem(at: originalFile.sourceURL, to: originalsRoot.appendingPathComponent(originalFile.filename))
+                try fileManager.copyItem(at: originalFile.sourceURL, to: stampedRoot.appendingPathComponent(originalFile.filename))
             }
 #if DEBUG
             print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
-            
-            let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data) }
-            let zipData = buildZipData(entries: zipEntries)
+
+            let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
             let zipURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename())
             if fileManager.fileExists(atPath: zipURL.path) {
                 try fileManager.removeItem(at: zipURL)
             }
-            try zipData.write(to: zipURL, options: .atomic)
-            
+            try StoredZipArchive.writeFileArchive(entries: zipEntries, at: zipURL, timestamped: false)
+
             if !fileManager.fileExists(atPath: zipURL.path) {
                 throw ExportError.zipCreationFailed
             }
 #if DEBUG
-            let zipPaths = Set(try listZipEntryPaths(at: zipURL))
+            let zipPaths = Set(try StoredZipArchive.entryPaths(at: zipURL))
             guard zipPaths.contains("session.json"), zipPaths.contains("validation.txt") else {
                 assertionFailure("Export ZIP root missing session.json or validation.txt")
                 throw ExportError.zipCreationFailed
@@ -17537,190 +14776,13 @@ extension ContentView {
             return zipURL
         }
         
-        private func makeArchiveFilename(for asset: ReportAsset, index: Int) -> String {
-            let fallback = "photo-\(index).\(OriginalPhotoFormat.fileExtension)"
-            let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-            let baseName = URL(fileURLWithPath: original).lastPathComponent
-            let resolved = baseName.isEmpty ? fallback : baseName
-            return resolved.replacingOccurrences(of: "/", with: "-")
-        }
-        
         private func exportZipFilename() -> String {
             let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
-            let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let safeName = trimmedName.isEmpty
-                ? "ScoutCapture-Export"
-                : trimmedName
-                    .replacingOccurrences(of: "/", with: "-")
-                    .replacingOccurrences(of: ":", with: "-")
-                    .replacingOccurrences(of: "\n", with: " ")
-                    .replacingOccurrences(of: "\t", with: " ")
-            let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
-            let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
-            return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
-        }
-        
-        private func buildZipData(entries: [(path: String, data: Data)]) -> Data {
-            struct CentralRecord {
-                let pathData: Data
-                let crc32: UInt32
-                let size: UInt32
-                let localHeaderOffset: UInt32
-            }
-            
-            var zip = Data()
-            var centralRecords: [CentralRecord] = []
-            centralRecords.reserveCapacity(entries.count)
-            
-            for entry in entries {
-                let pathData = Data(entry.path.utf8)
-                let crc = crc32(entry.data)
-                let size = UInt32(entry.data.count)
-                let localHeaderOffset = UInt32(zip.count)
-                
-                appendUInt32LE(0x04034B50, to: &zip)
-                appendUInt16LE(20, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt32LE(crc, to: &zip)
-                appendUInt32LE(size, to: &zip)
-                appendUInt32LE(size, to: &zip)
-                appendUInt16LE(UInt16(pathData.count), to: &zip)
-                appendUInt16LE(0, to: &zip)
-                zip.append(pathData)
-                zip.append(entry.data)
-                
-                centralRecords.append(
-                    CentralRecord(
-                        pathData: pathData,
-                        crc32: crc,
-                        size: size,
-                        localHeaderOffset: localHeaderOffset
-                    )
-                )
-            }
-            
-            let centralDirectoryOffset = UInt32(zip.count)
-            
-            for record in centralRecords {
-                appendUInt32LE(0x02014B50, to: &zip)
-                appendUInt16LE(20, to: &zip)
-                appendUInt16LE(20, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt32LE(record.crc32, to: &zip)
-                appendUInt32LE(record.size, to: &zip)
-                appendUInt32LE(record.size, to: &zip)
-                appendUInt16LE(UInt16(record.pathData.count), to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt16LE(0, to: &zip)
-                appendUInt32LE(0, to: &zip)
-                appendUInt32LE(record.localHeaderOffset, to: &zip)
-                zip.append(record.pathData)
-            }
-            
-            let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
-            let count = UInt16(centralRecords.count)
-            
-            appendUInt32LE(0x06054B50, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(count, to: &zip)
-            appendUInt16LE(count, to: &zip)
-            appendUInt32LE(centralDirectorySize, to: &zip)
-            appendUInt32LE(centralDirectoryOffset, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            
-            return zip
-        }
-
-        private func listZipEntryPaths(at url: URL) throws -> [String] {
-            let data = try Data(contentsOf: url)
-            let bytes = [UInt8](data)
-            let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
-            guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
-                var i = idx
-                while i >= 0 {
-                    if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
-                    if i == 0 { break }
-                    i -= 1
-                }
-                return nil
-            }) else {
-                throw ExportError.zipCreationFailed
-            }
-
-            func u16(_ offset: Int) -> Int {
-                Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
-            }
-            func u32(_ offset: Int) -> Int {
-                Int(bytes[offset]) |
-                (Int(bytes[offset + 1]) << 8) |
-                (Int(bytes[offset + 2]) << 16) |
-                (Int(bytes[offset + 3]) << 24)
-            }
-
-            guard eocdIndex + 22 <= bytes.count else {
-                throw ExportError.zipCreationFailed
-            }
-
-            let totalEntries = u16(eocdIndex + 10)
-            let centralDirectoryOffset = u32(eocdIndex + 16)
-            var cursor = centralDirectoryOffset
-            var paths: [String] = []
-            paths.reserveCapacity(totalEntries)
-
-            for _ in 0..<totalEntries {
-                guard cursor + 46 <= bytes.count else { break }
-                let signature = u32(cursor)
-                guard signature == 0x02014B50 else { break }
-                let nameLength = u16(cursor + 28)
-                let extraLength = u16(cursor + 30)
-                let commentLength = u16(cursor + 32)
-                let nameStart = cursor + 46
-                let nameEnd = nameStart + nameLength
-                guard nameEnd <= bytes.count else { break }
-                let path = String(decoding: bytes[nameStart..<nameEnd], as: UTF8.self)
-                paths.append(path)
-                cursor = nameEnd + extraLength + commentLength
-            }
-
-            return paths
-        }
-        
-        private func crc32(_ data: Data) -> UInt32 {
-            var crc: UInt32 = 0xFFFF_FFFF
-            for byte in data {
-                crc ^= UInt32(byte)
-                for _ in 0..<8 {
-                    if (crc & 1) == 1 {
-                        crc = (crc >> 1) ^ 0xEDB8_8320
-                    } else {
-                        crc >>= 1
-                    }
-                }
-            }
-            return crc ^ 0xFFFF_FFFF
-        }
-        
-        private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
-            var v = value.littleEndian
-            withUnsafeBytes(of: &v) { rawBuffer in
-                data.append(contentsOf: rawBuffer)
-            }
-        }
-        
-        private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
-            var v = value.littleEndian
-            withUnsafeBytes(of: &v) { rawBuffer in
-                data.append(contentsOf: rawBuffer)
-            }
+            return SessionExportZip.standardFilename(
+                propertyName: propertyName,
+                propertyID: appState.selectedProperty?.id,
+                sessionID: appState.currentSession?.id
+            )
         }
         
         private struct LibraryThumb: View {
@@ -17805,295 +14867,6 @@ extension ContentView {
             func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
         }
         
-        private struct DocumentExportPicker: UIViewControllerRepresentable {
-            let fileURL: URL
-            let onComplete: (Bool) -> Void
-
-            func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-                let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
-                picker.delegate = context.coordinator
-                return picker
-            }
-
-            func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
-            
-            func makeCoordinator() -> Coordinator {
-                Coordinator(onComplete: onComplete)
-            }
-            
-            final class Coordinator: NSObject, UIDocumentPickerDelegate {
-                let onComplete: (Bool) -> Void
-                
-                init(onComplete: @escaping (Bool) -> Void) {
-                    self.onComplete = onComplete
-                }
-                
-                func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-                    onComplete(!urls.isEmpty)
-                }
-                
-                func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-                    onComplete(false)
-                }
-            }
-        }
-    }
-
-    // MARK: - Detail Note Modal (rotates + landscape keyboard)
-    
-    
-    
-    
-    private struct DetailNoteModal: View {
-        
-        let elevation: String
-        let detailType: String
-        let existingNote: String
-        let isNoteEditable: Bool
-        let tradeOptions: [String]
-        let priorityOptions: [String]
-        @Binding var selectedTrade: String
-        @Binding var selectedPriority: String
-        
-        let onCancel: () -> Void
-        let onSave: (String) -> Void
-        
-        @State private var draft: String
-        @FocusState private var isFocused: Bool
-        
-        init(
-            elevation: String,
-            detailType: String,
-            existingNote: String,
-            isNoteEditable: Bool,
-            tradeOptions: [String],
-            priorityOptions: [String],
-            selectedTrade: Binding<String>,
-            selectedPriority: Binding<String>,
-            onCancel: @escaping () -> Void,
-            onSave: @escaping (String) -> Void
-        ) {
-            self.elevation = elevation
-            self.detailType = detailType
-            self.existingNote = existingNote
-            self.isNoteEditable = isNoteEditable
-            self.tradeOptions = tradeOptions
-            self.priorityOptions = priorityOptions
-            self._selectedTrade = selectedTrade
-            self._selectedPriority = selectedPriority
-            self.onCancel = onCancel
-            self.onSave = onSave
-            _draft = State(initialValue: existingNote)
-        }
-        
-        private var hasExistingNote: Bool {
-            !existingNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-
-        private var trimmedDraft: String {
-            draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        private var needsPrioritySelection: Bool {
-            !trimmedDraft.isEmpty
-        }
-
-        private var hasValidPriority: Bool {
-            !ContentView.normalizedPriority(selectedPriority).isEmpty
-        }
-
-        private var canSave: Bool {
-            !needsPrioritySelection || hasValidPriority
-        }
-
-        private var fixedModalLift: CGFloat {
-            isNoteEditable ? 128 : 0
-        }
-        
-        var body: some View {
-            ZStack {
-                Color.black.opacity(0.55)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        isFocused = false
-                        onCancel()
-                    }
-                
-                VStack(spacing: 12) {
-                    Text("\(elevation)  \(detailType)")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.92))
-                        .lineLimit(1)
-                    
-                    ZStack(alignment: .trailing) {
-                        TextField("Enter detail note", text: $draft)
-                            .textInputAutocapitalization(.sentences)
-                            .autocorrectionDisabled(false)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 12)
-                            .padding(.trailing, draft.isEmpty ? 12 : 34)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .foregroundColor(.primary)
-                            .focused($isFocused)
-                            .disabled(!isNoteEditable)
-                            .submitLabel(.done)
-                            .onSubmit {
-                                guard canSave else { return }
-                                onSave(trimmedDraft)
-                            }
-                        
-                        if !draft.isEmpty && isNoteEditable {
-                            Button { draft = "" } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .padding(.trailing, 10)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-
-                    HStack(spacing: 10) {
-                        Text("Priority")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Menu {
-                            ForEach(priorityOptions, id: \.self) { option in
-                                Button(option) {
-                                    selectedPriority = option
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                let normalizedPriority = ContentView.normalizedPriority(selectedPriority)
-                                if !normalizedPriority.isEmpty {
-                                    Circle()
-                                        .fill(ContentView.priorityColor(normalizedPriority))
-                                        .frame(width: 10, height: 10)
-                                }
-                                Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
-                                    .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.72))
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 42)
-                            .background(Color.white.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    HStack(spacing: 10) {
-                        Text("Trade")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Menu {
-                            Button("None") {
-                                selectedTrade = ""
-                            }
-                            ForEach(tradeOptions, id: \.self) { option in
-                                Button(option) {
-                                    selectedTrade = option
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text(selectedTrade.isEmpty ? "Optional" : selectedTrade)
-                                    .foregroundColor(.white.opacity(selectedTrade.isEmpty ? 0.75 : 0.95))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.72))
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 42)
-                            .background(Color.white.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if needsPrioritySelection && !hasValidPriority {
-                        Text("Priority is required for flagged items.")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.red.opacity(0.95))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    
-                    HStack(spacing: 10) {
-                        Button(action: {
-                            isFocused = false
-                            onCancel()
-                        }) {
-                            Text("Cancel")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundColor(.white.opacity(0.90))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(Color.white.opacity(0.10))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
-                        .contentShape(Rectangle())
-                        
-                        Button(action: {
-                            isFocused = false
-                            guard canSave else { return }
-                            onSave(trimmedDraft)
-                        }) {
-                            Text(hasExistingNote ? "Update" : "Save")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundColor(canSave ? .black : .black.opacity(0.45))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(Color.white.opacity(canSave ? 0.92 : 0.35))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.black.opacity(0.10), lineWidth: 1)
-                        )
-                        .contentShape(Rectangle())
-                        .disabled(!canSave)
-                    }
-                }
-                .padding(16)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
-                .padding(.horizontal, 18)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .offset(y: -fixedModalLift)
-            }
-            .onAppear {
-                // Focus immediately
-                isFocused = isNoteEditable
-            }
-            // Keep the popup centered. Do not let SwiftUI move the layout to avoid the keyboard.
-            .ignoresSafeArea(.keyboard, edges: .bottom)
-        }
     }
 
     private struct OverFullScreenPresenter<Overlay: View>: UIViewControllerRepresentable {
@@ -18161,88 +14934,6 @@ extension ContentView {
                 stroke: Color.white.opacity(0.28),
                 label: Color.white
             )
-        }
-    }
-
-    private struct SharedActionMenuItem: Identifiable {
-        let id = UUID()
-        let title: String
-        var isEnabled: Bool = true
-        let action: () -> Void
-    }
-
-    private struct SharedActionMenuOverlay: View {
-        let rotation: Angle
-        let items: [SharedActionMenuItem]
-        let onDismiss: () -> Void
-
-        var body: some View {
-            ZStack {
-                Color.black.opacity(0.55)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        onDismiss()
-                    }
-
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("Actions")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.92))
-                        Spacer(minLength: 0)
-                        Button("Done") {
-                            onDismiss()
-                        }
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.92))
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.20))
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            Button(action: item.action) {
-                                HStack(spacing: 10) {
-                                    Text(item.title)
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundColor(.white.opacity(0.95))
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.78)
-                                    Spacer(minLength: 0)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 12)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!item.isEnabled)
-                            .opacity(item.isEnabled ? 1.0 : 0.45)
-
-                            if index != items.count - 1 {
-                                Rectangle()
-                                    .fill(Color.white.opacity(0.12))
-                                    .frame(height: 1)
-                                    .padding(.horizontal, 12)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 6)
-                }
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
-                .padding(.horizontal, 20)
-                .frame(maxWidth: 360)
-                .rotationEffect(rotation)
-            }
         }
     }
 
@@ -18510,12 +15201,8 @@ extension ContentView {
         }
 
         private func refreshOrientation() {
-            let orientation = UIDevice.current.orientation
-            switch orientation {
-            case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            if let orientation = UIDevice.current.orientation.scoutCaptureStableOrientation(includingUpsideDown: true) {
                 lastValidOrientation = orientation
-            default:
-                break
             }
         }
 
@@ -18554,492 +15241,8 @@ extension ContentView {
         }
     }
 
-    private struct ReportMenuSheet: View {
-        let activeReportTitle: String
-        let onSwitchReport: () -> Void
-        let onNewReport: () -> Void
-        let onEditCurrent: () -> Void
 
-        var body: some View {
-            NavigationStack {
-                VStack(spacing: 18) {
-                    VStack(spacing: 6) {
-                        Text("Active Report")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Text(activeReportTitle)
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.70)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 18)
 
-                    reportActionRow(
-                        icon: "arrow.left.arrow.right",
-                        title: "Switch Report",
-                        action: onSwitchReport
-                    )
-
-                    reportActionRow(
-                        icon: "plus.circle",
-                        title: "New Report",
-                        action: onNewReport
-                    )
-
-                    reportActionRow(
-                        icon: "pencil",
-                        title: "Edit Current Report",
-                        action: onEditCurrent
-                    )
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .navigationTitle("Report")
-                .navigationBarTitleDisplayMode(.inline)
-            }
-        }
-
-        @ViewBuilder
-        private func reportActionRow(icon: String, title: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                HStack {
-                    Image(systemName: icon)
-                        .font(.system(size: 17, weight: .medium))
-                    Text(title)
-                        .font(.system(size: 18, weight: .medium))
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 54)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private struct ReportSwitcherSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-        @Environment(\.dismiss) private var dismiss
-        let activeReportTitle: String
-        let reports: [String]
-        let isLoading: Bool
-        let onRefresh: () -> Void
-        let onBack: () -> Void
-        let onSelectReport: (String) -> Void
-
-        var body: some View {
-            NavigationStack {
-                VStack(spacing: 0) {
-                    HStack(spacing: 10) {
-                        iconCapsuleButton(systemName: "chevron.left", action: onBack)
-
-                        Spacer(minLength: 0)
-
-                        HStack(spacing: 0) {
-                            Button(action: onRefresh) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 19, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 44, height: 42)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                dismiss()
-                            } label: {
-                                Text("Done")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 72, height: 42)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(theme.fill)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(theme.stroke, lineWidth: 1)
-                        )
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 12)
-                    .padding(.bottom, 4)
-
-                    Text("Switch Report")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 8)
-                        .padding(.bottom, 8)
-
-                    Group {
-                        if isLoading {
-                            VStack(spacing: 12) {
-                                ProgressView()
-                                Text("Loading reports...")
-                                    .font(.system(size: 15, weight: .medium))
-                                    .foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else if reports.isEmpty {
-                            VStack(spacing: 10) {
-                                Image(systemName: "tray")
-                                    .font(.system(size: 28, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                Text("No matching report albums found.")
-                                    .font(.system(size: 16, weight: .medium))
-                                Text("Only albums matching your report ID format are shown.")
-                                    .font(.system(size: 13, weight: .regular))
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding(.horizontal, 18)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            List(reports, id: \.self) { title in
-                                Button {
-                                    onSelectReport(title)
-                                } label: {
-                                    HStack(spacing: 12) {
-                                        Text(title)
-                                            .font(.system(size: 16, weight: .medium))
-                                            .foregroundColor(.primary)
-
-                                        Spacer(minLength: 0)
-
-                                        if title == activeReportTitle {
-                                            Text("Active")
-                                                .font(.system(size: 12, weight: .medium))
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 4)
-                                                .background(Color.green.opacity(0.16))
-                                                .foregroundColor(.green)
-                                                .clipShape(Capsule())
-                                        }
-                                    }
-                                    .padding(.vertical, 6)
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(title == activeReportTitle)
-                            }
-                            .listStyle(.insetGrouped)
-                        }
-                    }
-                }
-                .toolbar(.hidden, for: .navigationBar)
-            }
-        }
-
-        @ViewBuilder
-        private func iconCapsuleButton(systemName: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Image(systemName: systemName)
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(width: 44, height: 42)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.stroke, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-
-    }
-
-    private struct ReportIdEditorSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-        let mode: ReportEditorMode
-        let onCancel: () -> Void
-        let onSave: (String, Bool, Int, Int, Bool, Bool, Bool) -> Void
-
-        @State private var prefix: String
-        @State private var includeYear: Bool
-        @State private var yearText: String
-        @State private var sequenceText: String
-        @State private var prefixLocked: Bool
-        @State private var yearLocked: Bool
-        @State private var sequenceLocked: Bool
-
-        init(
-            mode: ReportEditorMode,
-            prefix: String,
-            includeYear: Bool,
-            year: Int,
-            sequence: Int,
-            prefixLocked: Bool,
-            yearLocked: Bool,
-            sequenceLocked: Bool,
-            onCancel: @escaping () -> Void,
-            onSave: @escaping (String, Bool, Int, Int, Bool, Bool, Bool) -> Void
-        ) {
-            self.mode = mode
-            self.onCancel = onCancel
-            self.onSave = onSave
-            _prefix = State(initialValue: prefix)
-            _includeYear = State(initialValue: includeYear)
-            _yearText = State(initialValue: String(year))
-            _sequenceText = State(initialValue: String(sequence))
-            _prefixLocked = State(initialValue: prefixLocked)
-            _yearLocked = State(initialValue: yearLocked)
-            _sequenceLocked = State(initialValue: sequenceLocked)
-        }
-
-        private var saveTitle: String {
-            switch mode {
-            case .editCurrent:
-                return "Save"
-            case .newReport:
-                return "Create"
-            }
-        }
-
-        private var normalizedPrefix: String {
-            let filtered = prefix.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-            return filtered.isEmpty ? "SC" : String(filtered.prefix(8))
-        }
-
-        private var normalizedYear: Int {
-            let parsed = Int(yearText) ?? Calendar.current.component(.year, from: Date())
-            return min(9999, max(2000, parsed))
-        }
-
-        private var normalizedSequence: Int {
-            let parsed = Int(sequenceText) ?? 0
-            return min(99999, max(0, parsed))
-        }
-
-        private var normalizedSequenceString: String {
-            if normalizedSequence < 100 {
-                return String(format: "%03d", normalizedSequence)
-            }
-            return String(normalizedSequence)
-        }
-
-        private var previewId: String {
-            if includeYear {
-                return "\(normalizedPrefix)-\(normalizedYear)-\(normalizedSequenceString)"
-            }
-            return "\(normalizedPrefix)-\(normalizedSequenceString)"
-        }
-
-        var body: some View {
-            NavigationStack {
-                VStack(spacing: 16) {
-                    HStack(spacing: 10) {
-                        iconCapsuleButton(systemName: "chevron.left") {
-                            onCancel()
-                        }
-
-                        Spacer(minLength: 0)
-
-                        textCapsuleButton(title: saveTitle) {
-                            onSave(
-                                normalizedPrefix,
-                                includeYear,
-                                normalizedYear,
-                                normalizedSequence,
-                                prefixLocked,
-                                yearLocked,
-                                sequenceLocked
-                            )
-                        }
-                    }
-                    .padding(.top, 12)
-
-                    VStack(spacing: 4) {
-                        Text("Preview")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Text(previewId)
-                            .font(.system(size: 30, weight: .medium))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.70)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 10)
-
-                    VStack(spacing: 12) {
-                        editorRow(
-                            label: "Prefix",
-                            value: $prefix,
-                            keyboard: .asciiCapable,
-                            isLocked: $prefixLocked
-                        )
-
-                        HStack(spacing: 10) {
-                            Text("Year")
-                                .font(.system(size: 16, weight: .medium))
-                                .frame(width: 120, alignment: .leading)
-
-                            Toggle("", isOn: $includeYear)
-                                .labelsHidden()
-                                .disabled(yearLocked)
-
-                            if includeYear {
-                                TextField("", text: $yearText)
-                                    .keyboardType(.numberPad)
-                                    .font(.system(size: 16, weight: .medium))
-                                    .disabled(yearLocked)
-                                    .padding(.horizontal, 10)
-                                    .frame(height: 40)
-                                    .background(Color(UIColor.tertiarySystemBackground))
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                            } else {
-                                Text("Off")
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.leading, 2)
-                            }
-
-                            lockButton(isLocked: $yearLocked)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(Color(UIColor.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-
-                        editorRow(
-                            label: "Report Number",
-                            value: $sequenceText,
-                            keyboard: .numberPad,
-                            isLocked: $sequenceLocked
-                        )
-                    }
-
-                    Text("Number supports 0 to 99999. Values under 100 display with 3 digits.")
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .toolbar(.hidden, for: .navigationBar)
-            }
-            .onChange(of: prefix) { _, newValue in
-                let filtered = newValue.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-                if filtered != newValue {
-                    prefix = filtered
-                }
-            }
-            .onChange(of: yearText) { _, newValue in
-                let filtered = newValue.filter(\.isNumber)
-                if filtered != newValue {
-                    yearText = filtered
-                }
-                if yearText.count > 4 {
-                    yearText = String(yearText.prefix(4))
-                }
-            }
-            .onChange(of: sequenceText) { _, newValue in
-                let filtered = newValue.filter(\.isNumber)
-                if filtered != newValue {
-                    sequenceText = filtered
-                }
-                if sequenceText.count > 5 {
-                    sequenceText = String(sequenceText.prefix(5))
-                }
-            }
-        }
-
-        @ViewBuilder
-        private func iconCapsuleButton(systemName: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Image(systemName: systemName)
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(width: 44, height: 42)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.stroke, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-
-        @ViewBuilder
-        private func textCapsuleButton(title: String, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(minHeight: 42)
-                    .padding(.horizontal, 14)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.stroke, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-
-        @ViewBuilder
-        private func editorRow(
-            label: String,
-            value: Binding<String>,
-            keyboard: UIKeyboardType,
-            isLocked: Binding<Bool>
-        ) -> some View {
-            HStack(spacing: 10) {
-                Text(label)
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 120, alignment: .leading)
-
-                TextField("", text: value)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled(true)
-                    .keyboardType(keyboard)
-                    .font(.system(size: 16, weight: .medium))
-                    .disabled(isLocked.wrappedValue)
-                    .padding(.horizontal, 10)
-                    .frame(height: 40)
-                    .background(Color(UIColor.tertiarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                lockButton(isLocked: isLocked)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color(UIColor.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-
-        @ViewBuilder
-        private func lockButton(isLocked: Binding<Bool>) -> some View {
-            Button {
-                isLocked.wrappedValue.toggle()
-            } label: {
-                Image(systemName: isLocked.wrappedValue ? "lock.fill" : "lock.open.fill")
-                    .font(.system(size: proportionalCircleGlyphSize(for: 36), weight: .medium))
-                    .foregroundColor(.white)
-                    .frame(width: 36, height: 36)
-                    .background(isLocked.wrappedValue ? Color.orange.opacity(0.9) : Color.blue.opacity(0.9))
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
 
     // MARK: - Quick Menu Sheet
     
@@ -19066,9 +15269,7 @@ extension ContentView {
         // Pass the target camera: true = front, false = rear
         let onCameraSwap: () -> Void
 
-        private var isPad: Bool {
-            UIDevice.current.userInterfaceIdiom == .pad
-        }
+
         
         var body: some View {
             GeometryReader { geo in
@@ -19219,22 +15420,26 @@ extension ContentView {
         }
     }
 
-    private struct ManageTradesSheet: View {
+    private struct ManageOptionValuesSheet: View {
+        let title: String
+        let fieldTitle: String
+        let newOptionTitle: String
+        let displayName: (String) -> String
+        @Binding var options: [String]
+        @Binding var selectedValue: String
+        let onClose: () -> Void
+        let onPersist: (inout [String], inout String) -> Void
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
         @State private var editModeState: EditMode = .inactive
         @FocusState private var focusedIndex: Int?
-
-        @Binding var options: [String]
-        @Binding var selectedTrade: String
-        let onClose: () -> Void
 
         var body: some View {
             NavigationStack {
                 List {
                     ForEach(Array(options.indices), id: \.self) { index in
                         if editModeState == .active {
-                            TextField("Trade", text: Binding(
+                            TextField(fieldTitle, text: Binding(
                                 get: {
                                     guard options.indices.contains(index) else { return "" }
                                     return options[index]
@@ -19249,7 +15454,7 @@ extension ContentView {
                         } else {
                             let option = options[index]
                             HStack(spacing: 10) {
-                                Text(option)
+                                Text(displayName(option))
                                     .font(.system(size: 16, weight: .medium))
                                     .foregroundColor(.primary)
                                     .lineLimit(1)
@@ -19288,7 +15493,7 @@ extension ContentView {
 
                         Spacer(minLength: 0)
 
-                        Text("Trades")
+                        Text(title)
                             .font(.system(size: 18, weight: .medium))
                             .foregroundColor(theme.label)
                             .lineLimit(1)
@@ -19298,7 +15503,7 @@ extension ContentView {
                         HStack(spacing: 0) {
                             Button {
                                 if editModeState != .active { editModeState = .active }
-                                options.append("New Trade")
+                                options.append(newOptionTitle)
                                 focusedIndex = max(0, options.count - 1)
                             } label: {
                                 Image(systemName: "plus")
@@ -19346,6 +15551,32 @@ extension ContentView {
                     .padding(.bottom, 4)
                 }
                 .onDisappear {
+                    onPersist(&options, &selectedValue)
+                }
+            }
+        }
+    }
+
+    struct ManageTradesSheet: View {
+        @Binding var options: [String]
+        @Binding var selectedTrade: String
+        let onClose: () -> Void
+        var onPersist: ((inout [String], inout String) -> Void)? = nil
+
+        var body: some View {
+            ManageOptionValuesSheet(
+                title: "Trades",
+                fieldTitle: "Trade",
+                newOptionTitle: "New Trade",
+                displayName: { $0 },
+                options: $options,
+                selectedValue: $selectedTrade,
+                onClose: onClose,
+                onPersist: { options, selectedTrade in
+                    if let onPersist {
+                        onPersist(&options, &selectedTrade)
+                        return
+                    }
                     let cleaned = ContentView.canonicalTradeOptions(options, selectedTrade: selectedTrade)
                     options = cleaned.isEmpty ? ContentView.defaultTradeOptions : cleaned
                     if !selectedTrade.isEmpty {
@@ -19359,140 +15590,32 @@ extension ContentView {
                         selectedTrade = ""
                     }
                 }
-            }
+            )
         }
     }
 
     struct ManageBuildingsSheet: View {
-        @Environment(\.colorScheme) private var colorScheme
-        private var theme: SheetControlTheme { .forScheme(colorScheme) }
-        @Environment(\.editMode) private var editMode
-
         @Binding var options: [String]
         @Binding var selectedBuilding: String
         let buildingCodeForOption: (String) -> String
         let buildingFullLabelForOption: (String) -> String
         let onClose: () -> Void
-        @State private var editModeState: EditMode = .inactive
-        @FocusState private var focusedIndex: Int?
+        var onPersist: ((inout [String], inout String) -> Void)? = nil
 
         var body: some View {
-            NavigationStack {
-                List {
-                    ForEach(Array(options.indices), id: \.self) { index in
-                        if editModeState == .active {
-                            TextField("Building", text: Binding(
-                                get: {
-                                    guard options.indices.contains(index) else { return "" }
-                                    return options[index]
-                                },
-                                set: { newValue in
-                                    guard options.indices.contains(index) else { return }
-                                    options[index] = newValue
-                                }
-                            ))
-                            .focused($focusedIndex, equals: index)
-                            .submitLabel(.done)
-                        } else {
-                            let option = options[index]
-                            HStack(spacing: 10) {
-                                Text(buildingFullLabelForOption(option))
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundColor(.primary)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
-
-                                Spacer(minLength: 0)
-                            }
-                        }
+            ManageOptionValuesSheet(
+                title: "Buildings",
+                fieldTitle: "Building",
+                newOptionTitle: "New Building",
+                displayName: buildingFullLabelForOption,
+                options: $options,
+                selectedValue: $selectedBuilding,
+                onClose: onClose,
+                onPersist: { options, selectedBuilding in
+                    if let onPersist {
+                        onPersist(&options, &selectedBuilding)
+                        return
                     }
-                    .onDelete { offsets in
-                        options.remove(atOffsets: offsets)
-                    }
-                    .onMove { source, destination in
-                        options.move(fromOffsets: source, toOffset: destination)
-                    }
-                }
-                .listStyle(.insetGrouped)
-                .environment(\.editMode, $editModeState)
-                .toolbar(.hidden, for: .navigationBar)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    HStack(spacing: 10) {
-                        Button(action: onClose) {
-                            Text("Done")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundColor(theme.label)
-                                .frame(minHeight: 42)
-                                .padding(.horizontal, 14)
-                                .background(theme.fill)
-                                .clipShape(Capsule())
-                                .overlay(
-                                    Capsule()
-                                        .stroke(theme.stroke, lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-
-                        Spacer(minLength: 0)
-
-                        Text("Buildings")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(theme.label)
-                            .lineLimit(1)
-
-                        Spacer(minLength: 0)
-
-                        HStack(spacing: 0) {
-                            Button {
-                                if editModeState != .active { editModeState = .active }
-                                options.append("New Building")
-                                focusedIndex = max(0, options.count - 1)
-                            } label: {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 17, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 44, height: 42)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                if editModeState == .active {
-                                    editModeState = .inactive
-                                    focusedIndex = nil
-                                } else {
-                                    editModeState = .active
-                                }
-                            } label: {
-                                Group {
-                                    if editModeState == .active {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 17, weight: .medium))
-                                    } else {
-                                        Text("Edit")
-                                            .font(.system(size: 17, weight: .medium))
-                                    }
-                                }
-                                .foregroundColor(theme.label)
-                                .frame(width: 72, height: 42)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(theme.fill)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(theme.stroke, lineWidth: 1)
-                        )
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 14)
-                    .padding(.bottom, 4)
-                }
-                .onDisappear {
                     let cleaned = options
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { !$0.isEmpty }
@@ -19504,10 +15627,10 @@ extension ContentView {
                         selectedBuilding = selectedCode
                     }
                 }
-            }
+            )
         }
     }
-    
+
     private struct QuickMenuButton: View {
         let glyphRotationAngle: Angle
         let icon: String
@@ -19751,50 +15874,6 @@ extension ContentView {
             isLevel = false
         }
     }
-    // MARK: - Glyph Rotation Motion Model
-    
-    private final class GlyphRotationMotionModel: ObservableObject {
-        
-        @Published var angleDegrees: Double = 0
-        
-        private let manager = CMMotionManager()
-        
-        // Low pass smoothing to match Apple camera feel
-        private var filtered: Double = 0
-        private let alpha: Double = 0.18
-        
-        func start() {
-            guard manager.isDeviceMotionAvailable else { return }
-            
-            manager.deviceMotionUpdateInterval = 1.0 / 60.0
-            manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-                guard let self else { return }
-                guard let m = motion else { return }
-                
-                let g = m.gravity
-                
-                // Map gravity to a continuous angle in portrait coordinate space.
-                // Portrait upright yields 0.
-                // Rotate device left yields about +90 for glyphs.
-                // Rotate device right yields about -90 for glyphs.
-                let rawRad = atan2(g.x, -g.y)
-                let rawDeg = rawRad * 180.0 / Double.pi
-                
-                // Invert so glyphs rotate opposite the physical roll.
-                var target = -rawDeg
-                
-                // Keep it in a stable range so it does not flip.
-                if target > 90 { target = 90 }
-                if target < -90 { target = -90 }
-                
-                filtered = (alpha * target) + ((1.0 - alpha) * filtered)
-                angleDegrees = filtered
-            }
-        }
-        
-        func stop() {
-            manager.stopDeviceMotionUpdates()
-        }
-    }
+
 }
 //Testing batch uploads

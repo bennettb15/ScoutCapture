@@ -732,12 +732,6 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
         .frame(height: bottomBarH)
     }
 
-    private func hdQuickButton(size: CGFloat) -> some View {
-        Color.clear
-            .frame(width: size, height: size)
-            .accessibilityHidden(true)
-    }
-
     private func detailNoteQuickButton(size: CGFloat) -> some View {
         Button(action: actions.onDetailNoteTapped) {
             let activeColor: Color = {

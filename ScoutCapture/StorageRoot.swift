@@ -3,7 +3,7 @@ import Foundation
 enum StorageRoot {
     struct ExportZipEntry {
         let path: String
-        let data: Data
+        let fileURL: URL?
         let modifiedAt: Date?
     }
 
@@ -314,7 +314,7 @@ enum StorageRoot {
                 entries.append(
                     ExportZipEntry(
                         path: "\(relativePath)/",
-                        data: Data(),
+                        fileURL: nil,
                         modifiedAt: values.contentModificationDate ?? values.creationDate
                     )
                 )
@@ -323,7 +323,7 @@ enum StorageRoot {
                 entries.append(
                     ExportZipEntry(
                         path: relativePath,
-                        data: try Data(contentsOf: child),
+                        fileURL: child,
                         modifiedAt: values.contentModificationDate ?? values.creationDate
                     )
                 )

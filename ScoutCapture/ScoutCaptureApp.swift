@@ -13,6 +13,90 @@ import ImageIO
 import UniformTypeIdentifiers
 import CoreMotion
 
+private extension ColorScheme {
+    func scoutSheetButtonFill(darkOpacity: Double) -> Color {
+        self == .light ? Color.white.opacity(0.90) : Color.black.opacity(darkOpacity)
+    }
+
+    var scoutSheetButtonStroke: Color {
+        self == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+    }
+
+    var scoutSheetButtonLabel: Color {
+        self == .light ? Color.black.opacity(0.88) : .white
+    }
+}
+
+private struct ScoutSheetHeader: View {
+    let title: String
+    let onDone: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(.primary)
+
+            Spacer(minLength: 0)
+
+            Button("Done", action: onDone)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(colorScheme.scoutSheetButtonLabel)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(colorScheme.scoutSheetButtonFill(darkOpacity: 0.65))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(colorScheme.scoutSheetButtonStroke, lineWidth: 1)
+            )
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 2)
+    }
+}
+
+private extension View {
+    func scoutDiagnosticResultCard(fill: Color, stroke: Color) -> some View {
+        self
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(stroke, lineWidth: 1)
+            )
+    }
+}
+
+private func standardCapsuleButton(
+    title: String,
+    isEnabled: Bool,
+    fill: Color,
+    stroke: Color,
+    label: Color,
+    action: @escaping () -> Void
+) -> some View {
+    Button(action: action) {
+        Text(title)
+            .font(.system(size: 17, weight: .medium))
+            .foregroundColor(isEnabled ? label : label.opacity(0.45))
+            .frame(minHeight: 42)
+            .padding(.horizontal, 14)
+            .background(fill)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(stroke, lineWidth: 1)
+            )
+    }
+}
+
 private let isVerboseConsoleLoggingEnabled = false
 
 @inline(__always)
@@ -280,17 +364,11 @@ private struct CloudBackupSheet: View {
     @State private var localStorageBreakdown: StorageRoot.LocalStorageBreakdownResult?
     @State private var localStorageBreakdownErrorMessage: String? = nil
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     var body: some View {
         NavigationStack {
@@ -969,17 +1047,11 @@ struct SessionHubView: View {
         case zipReady
     }
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.85)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.85) }
     
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
     
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
     
     private var headerPrimaryLabel: Color {
         colorScheme == .light ? .black : .white
@@ -1200,8 +1272,9 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .sheet(item: $pendingExportFile) { file in
-                HubSessionDocumentExportPicker(
+                SharedDocumentExportPicker(
                     fileURL: file.url,
+                    usesFormSheet: true,
                     onComplete: { didExport in
                         print("[DeliverResult] sessionID=\(file.sessionID.uuidString) success=\(didExport)")
                         if didExport {
@@ -1481,10 +1554,6 @@ struct SessionHubView: View {
         }
         Task {
             await appState.refreshPropertiesAwaitingForegroundRefresh()
-            await appState.refreshLightweightPropertyEntryLocks(
-                propertyIDs: filteredActiveProperties.map(\.id),
-                reason: "manual_home_refresh"
-            )
         }
     }
 
@@ -1579,86 +1648,7 @@ struct SessionHubView: View {
         .redacted(reason: .placeholder)
     }
 
-    @ViewBuilder
-    private func diagnosticPropertyRow(
-        _ property: Property,
-        hasDraft: Bool,
-        subtitleLine: String?,
-        cloudGlyph: AppState.PropertyRowCloudGlyphState?
-    ) -> some View {
-        if diagnosticMinimalHomeRows {
-            minimalPropertyRow(
-                property,
-                hasDraft: hasDraft,
-                subtitleLine: subtitleLine,
-                cloudGlyph: cloudGlyph
-            )
-        } else {
-            propertyRow(property)
-        }
-    }
 
-    private func minimalPropertyRow(
-        _ property: Property,
-        hasDraft: Bool,
-        subtitleLine: String?,
-        cloudGlyph: AppState.PropertyRowCloudGlyphState?
-    ) -> some View {
-        let addressLine = propertyAddressLine(property) ?? property.address
-        let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
-        let pendingUploadCount = uploadProgressLabel == nil
-            ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
-
-        return Button {
-            handlePropertyTap(property)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    propertyRowTitleText(
-                        property.name,
-                        cloudGlyph: cloudGlyph
-                    )
-                        .font(.system(size: 18, weight: .semibold))
-                        .lineLimit(1)
-
-                    if let subtitleLine,
-                       !subtitleLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(subtitleLine)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-
-                    if let addressLine,
-                       !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(addressLine)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                if hasDraft {
-                    chipLabel("Draft", tint: .orange)
-                }
-                if let uploadProgressLabel {
-                    chipLabel(uploadProgressLabel, tint: uploadProgressLabel.hasPrefix("Uploading") ? .blue : .orange)
-                } else if pendingUploadCount > 0 {
-                    chipLabel("\(pendingUploadCount) to upload", tint: .orange)
-                }
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 10)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .opacity(pressedPropertyID == property.id ? 0.70 : 1.0)
-        .animation(.easeOut(duration: 0.10), value: pressedPropertyID)
-    }
 
     private func propertyTableSections(showArchivedSection: Bool) -> [PropertyListTableSection] {
         let rowDraftBadges = appState.propertyRowDraftBadgeByPropertyID
@@ -1740,204 +1730,10 @@ struct SessionHubView: View {
         }
     }
 
-    @ViewBuilder
-    private func propertyRowStatusChip(_ state: AppState.PropertyRowStatusChipState) -> some View {
-        Text(state == .uploading ? "Uploading" : "Pending Export")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(.blue)
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
-    }
 
-    private func propertyRowTitleText(
-        _ title: String,
-        cloudGlyph: AppState.PropertyRowCloudGlyphState?
-    ) -> Text {
-        guard let cloudGlyph else {
-            return Text(title).foregroundColor(.primary)
-        }
-        return Text(title).foregroundColor(.primary)
-            + Text(" \(propertyRowCloudGlyphText(cloudGlyph))")
-                .foregroundColor(propertyRowCloudGlyphColor(cloudGlyph))
-    }
 
-    private func propertyRowCloudGlyphText(_ state: AppState.PropertyRowCloudGlyphState) -> String {
-        switch state {
-        case .current:
-            return "✓"
-        case .uploading:
-            return "↑"
-        case .warning:
-            return "!"
-        }
-    }
 
-    private func propertyRowCloudGlyphColor(_ state: AppState.PropertyRowCloudGlyphState) -> Color {
-        switch state {
-        case .current, .uploading:
-            return .blue
-        case .warning:
-            return .orange
-        }
-    }
 
-    @ViewBuilder
-    private func propertyRow(_ property: Property) -> some View {
-        let badgeModel = appState.propertyCardBadgeModel(for: property.id)
-        let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
-        let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
-        let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
-        let pendingUploadCount = uploadProgressLabel == nil
-            ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
-        let rawHasDraft = badgeModel.showDraft
-        let uploadStatusChip = pendingUploadCount > 0 ? nil : sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
-        let isActivelyUploading = sessionUploadStatus?.state == .uploading &&
-            sessionUploadStatus?.isConfigurationBlocked == false
-        let hasDraft = rawHasDraft && !isActivelyUploading
-        let hasPendingExport = badgeModel.showPendingExport && !isActivelyUploading && uploadProgressLabel == nil
-        let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
-        let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
-        let manualExportSession = latestReExportSession ?? pendingSession
-        let hasManualExportAction = manualExportSession != nil && (hasReExportGlyph || hasPendingExport)
-        let clientLine = propertyClientLine(property)
-        let addressLine = propertyAddressLine(property)
-        let hasMapsButton = mapsAddressQuery(for: property) != nil
-        let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil || pendingUploadCount > 0 || uploadProgressLabel != nil
-        let showLock = badgeModel.showLock
-        Button {
-            handlePropertyTap(property)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        if hasReExportGlyph {
-                            Image(systemName: "arrow.clockwise.circle")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(Color.green.opacity(0.92))
-                        }
-                        if showLock {
-                            Image(systemName: "lock.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.red)
-                        }
-                        Text(property.name)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                        if let sessionUploadStatus {
-                            sessionSnapshotCloudIcon(sessionUploadStatus)
-                        }
-                    }
-
-                    if let clientLine {
-                        Text(clientLine)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-
-                    if let addressLine {
-                        Text(addressLine)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                VStack(alignment: .trailing, spacing: 6) {
-                    if hasStatusRow {
-                        VStack(alignment: .trailing, spacing: 4) {
-                            HStack(spacing: 8) {
-                                if hasDraft {
-                                    chipLabel("Draft", tint: .orange)
-                                }
-
-                                if hasPendingExport {
-                                    chipLabel("Pending Export", tint: .blue)
-                                }
-
-                                if let uploadProgressLabel {
-                                    chipLabel(uploadProgressLabel, tint: uploadProgressLabel.hasPrefix("Uploading") ? .blue : .orange)
-                                } else if pendingUploadCount > 0 {
-                                    chipLabel("\(pendingUploadCount) to upload", tint: .orange)
-                                }
-
-                                if let uploadStatusChip {
-                                    chipLabel(uploadStatusChip.title, tint: uploadStatusChip.tint)
-                                }
-                            }
-
-                        }
-                    }
-
-                }
-                .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 10)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button("Edit Contact") {
-                editContactProperty = property
-            }
-            if property.isArchived {
-                Button("Unarchive Property") {
-                    _ = appState.setPropertyArchived(id: property.id, archived: false)
-                }
-            } else {
-                Button("Archive Property") {
-                    propertyToArchive = property
-                }
-            }
-            Button("Delete Property", role: .destructive) {
-                requestDeleteProperty(property)
-            }
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if hasMapsButton {
-                Button {
-                    openMaps(for: property)
-                } label: {
-                    Label("Maps", systemImage: "map.fill")
-                }
-                .tint(.blue)
-            }
-
-            if hasPhoneActions {
-                Button {
-                    triggerPhoneAction(.message, for: property)
-                } label: {
-                    Label("Message", systemImage: "message.fill")
-                }
-                .tint(.green)
-
-                Button {
-                    triggerPhoneAction(.call, for: property)
-                } label: {
-                    Label("Call", systemImage: "phone.fill")
-                }
-                .tint(.green)
-            }
-        }
-        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-            if hasManualExportAction, let manualExportSession {
-                Button {
-                    print("[ReExportInvoke] propertyID=\(property.id.uuidString) sessionID=\(manualExportSession.id.uuidString) source=leadingSwipe")
-                    beginPendingExport(for: property, session: manualExportSession)
-                } label: {
-                    Label("Re-export", systemImage: "clock.arrow.circlepath")
-                }
-                .tint(.green)
-            }
-        }
-    }
 
     private func propertyClientLine(_ property: Property) -> String? {
         let client = appState.hubMeta(for: property.id)?.clientLine?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2077,26 +1873,6 @@ struct SessionHubView: View {
             .transition(.opacity)
     }
 
-    @ViewBuilder
-    private func chipLabel(_ text: String, tint: Color, systemImage: String? = nil) -> some View {
-        HStack(spacing: 5) {
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: 10, weight: .semibold))
-            }
-            Text(text)
-                .font(.system(size: 12, weight: .semibold))
-        }
-        .foregroundColor(tint)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(tint.opacity(0.15))
-        .clipShape(Capsule())
-        .overlay(
-            Capsule()
-                .stroke(tint.opacity(0.35), lineWidth: 1)
-        )
-    }
 
     private func sessionSnapshotCloudTint(_ tint: AppState.SessionSnapshotCloudStatus.Tint) -> Color {
         switch tint {
@@ -2120,25 +1896,6 @@ struct SessionHubView: View {
             .help(status.helpText)
     }
 
-    private func sessionSnapshotUploadStatusChip(
-        _ status: AppState.SessionSnapshotCloudStatus
-    ) -> (title: String, tint: Color)? {
-        if status.isConfigurationBlocked {
-            return nil
-        }
-        switch status.state {
-        case .queued:
-            return ("Pending Upload", .blue)
-        case .uploading:
-            return ("Uploading", .blue)
-        case .retryScheduled:
-            return ("Retrying Upload", .orange)
-        case .failed:
-            return ("Upload Failed", .red)
-        case .uploaded:
-            return nil
-        }
-    }
 
     private var countersHeader: some View {
         VStack(spacing: 12) {
@@ -2370,61 +2127,10 @@ struct SessionHubView: View {
         }
     }
 
-    private var cloudStatusTint: Color {
-        cloudIconMode == .offline ? .gray : .blue
-    }
 
-    private enum CloudIconMode {
-        case offline
-        case errorOnline
-        case backedUp
-        case pending
-    }
 
-    private var cloudIconMode: CloudIconMode {
-        let status = appState.cloudBackupStatus
-        if !status.iCloudAvailable {
-            return .offline
-        }
-        if let lastFailureMessage = status.lastFailureMessage,
-           !lastFailureMessage.isEmpty,
-           !status.isRunning {
-            return .errorOnline
-        }
-        if status.state == .backedUp && !status.isRunning {
-            return .backedUp
-        }
-        return .pending
-    }
 
-    @ViewBuilder
-    private var cloudStatusIcon: some View {
-        switch cloudIconMode {
-        case .offline, .errorOnline:
-            Image(systemName: "icloud.slash")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(cloudStatusTint)
-        case .backedUp:
-            Image(systemName: "icloud.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(cloudStatusTint)
-        case .pending:
-            ZStack {
-                Image(systemName: "icloud")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(cloudStatusTint)
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(cloudStatusTint)
-                    .offset(y: 1)
-                    .symbolEffect(.rotate.clockwise, options: .repeating, isActive: shouldAnimateCloudIcon)
-            }
-        }
-    }
 
-    private var shouldAnimateCloudIcon: Bool {
-        appState.cloudBackupStatus.isRunning && cloudIconMode == .pending
-    }
 
     @ViewBuilder
     private var addCircleButton: some View {
@@ -2512,64 +2218,19 @@ struct SessionHubView: View {
     }
 
     private struct HubSettingsSheet: View {
-        private struct PropertyAccessManagementPresentation: Identifiable {
-            let id = UUID()
-            let member: OrganizationAccessMember
-        }
 
-        private struct PendingMembershipRevoke: Identifiable {
-            let id = UUID()
-            let member: OrganizationAccessMember
-        }
 
         @EnvironmentObject private var appState: AppState
         @Binding var showArchivedProperties: Bool
         let onOpenCloudBackup: (() -> Void)?
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
         private let showDeveloperSection: Bool = false
-
-        private var buttonFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
-
-        private var buttonStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
-
-        private var buttonLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
 
         var body: some View {
             NavigationStack {
                 VStack(spacing: 0) {
-                    HStack {
-                        Text("Settings")
-                            .font(.system(size: 28, weight: .bold))
-                            .foregroundStyle(.primary)
-
-                        Spacer(minLength: 0)
-
-                        Button("Done") {
-                            dismiss()
-                        }
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(buttonLabel)
-                        .padding(.horizontal, 14)
-                        .frame(height: 36)
-                        .background(buttonFill)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(buttonStroke, lineWidth: 1)
-                        )
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 2)
+                    ScoutSheetHeader(title: "Settings", onDone: { dismiss() })
 
                     List {
                         if appState.requiresAuthentication {
@@ -2755,143 +2416,19 @@ struct SessionHubView: View {
         }
     }
 
-    private struct RecentlyDeletedSessionsRecoveryView: View {
-        @EnvironmentObject private var appState: AppState
-        @State private var sessions: [AppState.RecentlyDeletedSession] = []
-        @State private var isLoading: Bool = true
-        @State private var restoringSessionID: UUID?
-        @State private var errorMessage: String?
-
-        var body: some View {
-            List {
-                if isLoading {
-                    ProgressView("Loading recently deleted sessions...")
-                } else if let errorMessage {
-                    Text(errorMessage)
-                        .foregroundStyle(.red)
-                } else if sessions.isEmpty {
-                    Text("No recently deleted sessions.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(sessions) { session in
-                        HStack(alignment: .center, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(title(for: session))
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .foregroundStyle(.primary)
-                                Text(appState.displayNameForProperty(id: session.propertyID))
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                Text(deletedDetail(for: session))
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer(minLength: 0)
-
-                            Button(restoringSessionID == session.id ? "Restoring..." : "Restore") {
-                                restore(session)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(restoringSessionID != nil)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-            }
-            .navigationTitle("Recently Deleted Sessions")
-            .task {
-                await loadSessions()
-            }
-            .refreshable {
-                await loadSessions()
-            }
-        }
-
-        private func loadSessions() async {
-            isLoading = true
-            errorMessage = nil
-            do {
-                sessions = try await appState.fetchRecentlyDeletedSessionsRemote()
-            } catch {
-                errorMessage = "Recently deleted sessions could not be loaded. \(error.localizedDescription)"
-            }
-            isLoading = false
-        }
-
-        private func restore(_ session: AppState.RecentlyDeletedSession) {
-            restoringSessionID = session.id
-            Task {
-                let restored = await appState.remoteRestoreSession(session)
-                if restored {
-                    await loadSessions()
-                } else {
-                    errorMessage = "The session could not be restored."
-                }
-                restoringSessionID = nil
-            }
-        }
-
-        private func title(for session: AppState.RecentlyDeletedSession) -> String {
-            let date = session.startedAt.formatted(date: .abbreviated, time: .shortened)
-            return "\(session.status.capitalized) Session - \(date)"
-        }
-
-        private func deletedDetail(for session: AppState.RecentlyDeletedSession) -> String {
-            let deletedText = session.deletedAt.formatted(date: .abbreviated, time: .shortened)
-            return "Deleted \(deletedText) - restorable for 30 days"
-        }
-    }
 
     private struct ActivityFeedView: View {
         @EnvironmentObject private var appState: AppState
         @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
         let orgID: UUID
 
         @State private var items: [AppState.ActivityFeedItem] = []
         @State private var isLoading: Bool = true
         @State private var errorMessage: String?
 
-        private var buttonFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
-
-        private var buttonStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
-
-        private var buttonLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
-
         var body: some View {
             VStack(spacing: 0) {
-                HStack {
-                    Text("Activity")
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(.primary)
-
-                    Spacer(minLength: 0)
-
-                    Button("Done") {
-                        dismiss()
-                    }
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(buttonLabel)
-                    .padding(.horizontal, 14)
-                    .frame(height: 36)
-                    .background(buttonFill)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(buttonStroke, lineWidth: 1)
-                    )
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 2)
+                ScoutSheetHeader(title: "Activity", onDone: { dismiss() })
 
                 List {
                     if isLoading {
@@ -3193,420 +2730,6 @@ struct SessionHubView: View {
         }
     }
 
-    private struct SessionArchiveRestoreSheet: View {
-        private enum DeviceFilterMode: String, CaseIterable, Identifiable {
-            case all
-            case onDevice
-            case notOnDevice
-
-            var id: String { rawValue }
-
-            var title: String {
-                switch self {
-                case .all: return "All"
-                case .onDevice: return "On Device"
-                case .notOnDevice: return "Not On Device"
-                }
-            }
-        }
-
-        @EnvironmentObject private var appState: AppState
-        @Environment(\.dismiss) private var dismiss
-        @Environment(\.colorScheme) private var colorScheme
-        @State private var archives: [LocalStore.SessionArchiveSummary] = []
-        @State private var searchQuery: String = ""
-        @State private var isSearchActive: Bool = false
-        @State private var selectedArchive: LocalStore.SessionArchiveSummary?
-        @State private var pendingDeleteArchive: LocalStore.SessionArchiveSummary?
-        @State private var isRestoring: Bool = false
-        @State private var isRefreshingArchives: Bool = false
-        @State private var deviceFilterMode: DeviceFilterMode = .all
-        @State private var showRestoreSuccess: Bool = false
-        @State private var restoreErrorMessage: String?
-        @State private var showRestoreError: Bool = false
-        @State private var deleteErrorMessage: String?
-        @State private var showDeleteError: Bool = false
-
-        private var buttonFill: Color {
-            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
-        }
-
-        private var buttonStroke: Color {
-            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-        }
-
-        private var buttonLabel: Color {
-            colorScheme == .light ? Color.black.opacity(0.88) : .white
-        }
-
-        private let dateFormatter: DateFormatter = {
-            let formatter = DateFormatter()
-            formatter.dateStyle = .medium
-            formatter.timeStyle = .short
-            return formatter
-        }()
-
-        private var filteredArchives: [LocalStore.SessionArchiveSummary] {
-            let baseArchives: [LocalStore.SessionArchiveSummary]
-            switch deviceFilterMode {
-            case .all:
-                baseArchives = archives
-            case .onDevice:
-                baseArchives = archives.filter { !isDeletedProperty($0) }
-            case .notOnDevice:
-                baseArchives = archives.filter { isDeletedProperty($0) }
-            }
-            let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !query.isEmpty else { return baseArchives }
-            return baseArchives.filter { archive in
-                let propertyName = (archive.propertyNameAtCapture ?? appState.properties.first(where: { $0.id == archive.propertyID })?.name ?? "").lowercased()
-                let clientName = (archive.clientNameAtCapture ?? appState.properties.first(where: { $0.id == archive.propertyID })?.clientName ?? "").lowercased()
-                let orgName = (archive.orgNameAtCapture ?? appState.organizations.first(where: { $0.id == appState.properties.first(where: { $0.id == archive.propertyID })?.orgId })?.name ?? "").lowercased()
-                let address = (archive.propertyAddressAtCapture ?? "").lowercased()
-                let session = archive.sessionID.uuidString.lowercased()
-                return propertyName.contains(query)
-                    || clientName.contains(query)
-                    || orgName.contains(query)
-                    || address.contains(query)
-                    || session.contains(query)
-            }
-        }
-
-        var body: some View {
-            NavigationStack {
-                let items = filteredArchives
-                let hasQuery = !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                VStack(alignment: .leading, spacing: 0) {
-                    if !isSearchActive {
-                        HStack {
-                            Button("Done") { dismiss() }
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(buttonLabel)
-                                .padding(.horizontal, 14)
-                                .frame(height: 36)
-                                .background(buttonFill)
-                                .clipShape(Capsule())
-                                .overlay(
-                                    Capsule()
-                                        .stroke(buttonStroke, lineWidth: 1)
-                                )
-                                .buttonStyle(.plain)
-
-                            Spacer(minLength: 0)
-
-                            Text("Restore Session Snapshots")
-                                .font(.system(size: 20, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-
-                            Spacer(minLength: 0)
-
-                            HStack(spacing: 8) {
-                                Button {
-                                    reloadArchives()
-                                } label: {
-                                    Group {
-                                        if isRefreshingArchives {
-                                            ProgressView()
-                                                .progressViewStyle(.circular)
-                                                .tint(.primary)
-                                        } else {
-                                            Image(systemName: "arrow.clockwise")
-                                                .font(.system(size: 16, weight: .regular))
-                                                .foregroundColor(.primary)
-                                        }
-                                    }
-                                    .frame(width: 36, height: 36)
-                                    .background(
-                                        Circle()
-                                            .fill(buttonFill)
-                                    )
-                                    .overlay(
-                                        Circle()
-                                            .stroke(buttonStroke, lineWidth: 1)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Refresh")
-                                .disabled(isRestoring || isRefreshingArchives)
-
-                                Menu {
-                                    ForEach(DeviceFilterMode.allCases) { mode in
-                                        Button {
-                                            deviceFilterMode = mode
-                                        } label: {
-                                            if deviceFilterMode == mode {
-                                                Label(mode.title, systemImage: "checkmark")
-                                            } else {
-                                                Text(mode.title)
-                                            }
-                                        }
-                                    }
-                                } label: {
-                                    Image(systemName: "line.3.horizontal.decrease")
-                                        .font(.system(size: 16, weight: .regular))
-                                        .foregroundColor(deviceFilterMode == .all ? .primary : .orange)
-                                        .frame(width: 36, height: 36)
-                                        .background(
-                                            Circle()
-                                                .fill(buttonFill)
-                                        )
-                                        .overlay(
-                                            Circle()
-                                                .stroke(buttonStroke, lineWidth: 1)
-                                        )
-                                }
-                                .accessibilityLabel("Filter")
-                                .disabled(isRestoring)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, -58)
-                        .padding(.bottom, 4)
-                    }
-
-                    List {
-                        if archives.isEmpty {
-                            Section {
-                                Text("No archived snapshots found yet. Finish and seal/export a session first.")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.secondary)
-                            }
-                        } else {
-                            Section("Session Snapshots") {
-                                ForEach(items) { archive in
-                                    Button {
-                                        selectedArchive = archive
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            HStack(spacing: 6) {
-                                                Text(archiveTitle(archive))
-                                                    .font(.system(size: 15, weight: .semibold))
-                                                    .foregroundColor(.primary)
-                                                    .lineLimit(1)
-                                                if archive.isDeliveredCheckpoint {
-                                                    Image(systemName: "checkmark.circle.fill")
-                                                        .font(.system(size: 14, weight: .semibold))
-                                                        .foregroundColor(.green)
-                                                } else if archive.isSealedCheckpoint {
-                                                    Image(systemName: "lock.fill")
-                                                        .font(.system(size: 13, weight: .semibold))
-                                                        .foregroundColor(.orange)
-                                                }
-                                                Spacer(minLength: 0)
-                                                if isDeletedProperty(archive) {
-                                                    HStack(spacing: 4) {
-                                                        Image(systemName: "xmark.circle.fill")
-                                                            .font(.system(size: 14, weight: .semibold))
-                                                            .foregroundColor(.red)
-                                                        Text("Not On Device")
-                                                            .font(.system(size: 11, weight: .semibold))
-                                                            .foregroundColor(.red)
-                                                    }
-                                                }
-                                            }
-                                            if let clientOrgLine = archiveClientOrgLine(archive) {
-                                                Text(clientOrgLine)
-                                                    .font(.system(size: 12, weight: .medium))
-                                                    .foregroundColor(.secondary)
-                                                    .lineLimit(1)
-                                            }
-                                            if let contextLine = archiveContextLine(archive) {
-                                                Text(contextLine)
-                                                    .font(.system(size: 12, weight: .medium))
-                                                    .foregroundColor(.secondary)
-                                                    .lineLimit(1)
-                                            }
-                                            Text("Created \(dateFormatter.string(from: archive.createdAt))  File: \(archive.fileCount)")
-                                                .font(.system(size: 12, weight: .medium))
-                                                .foregroundColor(.secondary)
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button(role: .destructive) {
-                                            pendingDeleteArchive = archive
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                                }
-                            }
-                            if hasQuery && items.isEmpty {
-                                Section {
-                                    Text("No matching snapshots")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-                .searchable(
-                    text: $searchQuery,
-                    isPresented: $isSearchActive,
-                    prompt: "Search property, org, address, session ID"
-                )
-            }
-            .toolbar(.hidden, for: .navigationBar)
-            .ignoresSafeArea(.keyboard, edges: .all)
-            .onAppear(perform: reloadArchives)
-            .alert("Restore Snapshot?", isPresented: Binding(
-                get: { selectedArchive != nil },
-                set: { if !$0 { selectedArchive = nil } }
-            )) {
-                Button("Restore", role: .destructive) {
-                    guard let archive = selectedArchive else { return }
-                    restore(archive)
-                }
-                Button("Cancel", role: .cancel) {
-                    selectedArchive = nil
-                }
-            } message: {
-                if let archive = selectedArchive {
-                    Text("Restore session \(archive.sessionID.uuidString.prefix(8)) from this snapshot created \(dateFormatter.string(from: archive.createdAt))?")
-                }
-            }
-            .alert("Restore Complete", isPresented: $showRestoreSuccess) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text("Session snapshot restored successfully.")
-            }
-            .alert("Delete Snapshot?", isPresented: Binding(
-                get: { pendingDeleteArchive != nil },
-                set: { if !$0 { pendingDeleteArchive = nil } }
-            )) {
-                Button("Delete", role: .destructive) {
-                    guard let archive = pendingDeleteArchive else { return }
-                    delete(archive)
-                }
-                Button("Cancel", role: .cancel) {
-                    pendingDeleteArchive = nil
-                }
-            } message: {
-                if let archive = pendingDeleteArchive {
-                    Text("Delete archive snapshot for \(archiveTitle(archive)) created \(dateFormatter.string(from: archive.createdAt))?")
-                }
-            }
-            .alert("Restore Failed", isPresented: $showRestoreError) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text(restoreErrorMessage ?? "Unable to restore snapshot.")
-            }
-            .alert("Delete Failed", isPresented: $showDeleteError) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text(deleteErrorMessage ?? "Unable to delete snapshot.")
-            }
-            .overlay {
-                if isRestoring {
-                    ZStack {
-                        Color.black.opacity(0.2).ignoresSafeArea()
-                        ProgressView("Restoring...")
-                            .padding(18)
-                            .background(.ultraThinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                }
-            }
-        }
-
-        private func archiveTitle(_ archive: LocalStore.SessionArchiveSummary) -> String {
-            let propertyName = archive.propertyNameAtCapture
-                ?? appState.properties.first(where: { $0.id == archive.propertyID })?.name
-                ?? "Restorable Property"
-            return propertyName
-        }
-
-        private func isDeletedProperty(_ archive: LocalStore.SessionArchiveSummary) -> Bool {
-            !appState.properties.contains(where: { $0.id == archive.propertyID })
-        }
-
-        private func archiveClientOrgLine(_ archive: LocalStore.SessionArchiveSummary) -> String? {
-            let property = appState.properties.first(where: { $0.id == archive.propertyID })
-            let clientName = (archive.clientNameAtCapture ?? property?.clientName)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let fallbackOrgName: String? = {
-                guard let orgId = property?.orgId else { return nil }
-                return appState.organizations.first(where: { $0.id == orgId })?.name
-            }()
-            let orgName = (archive.orgNameAtCapture ?? fallbackOrgName)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            if let clientName, !clientName.isEmpty, let orgName, !orgName.isEmpty {
-                return "\(clientName) (\(orgName))"
-            }
-            if let clientName, !clientName.isEmpty {
-                return clientName
-            }
-            if let orgName, !orgName.isEmpty {
-                return "(\(orgName))"
-            }
-            return nil
-        }
-
-        private func archiveContextLine(_ archive: LocalStore.SessionArchiveSummary) -> String? {
-            let property = appState.properties.first(where: { $0.id == archive.propertyID })
-            let address = archive.propertyAddressAtCapture
-                ?? property?.address
-                ?? property?.street
-            let trimmed = address?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let trimmed, !trimmed.isEmpty {
-                return trimmed
-            }
-            return "Session \(archive.sessionID.uuidString.prefix(8))"
-        }
-
-
-        private func reloadArchives() {
-            isRefreshingArchives = true
-            DispatchQueue.global(qos: .userInitiated).async {
-                let refreshed = appState.sessionArchiveSummaries()
-                DispatchQueue.main.async {
-                    archives = refreshed
-                    isRefreshingArchives = false
-                }
-            }
-        }
-
-        private func restore(_ archive: LocalStore.SessionArchiveSummary) {
-            isRestoring = true
-            selectedArchive = nil
-            DispatchQueue.global(qos: .userInitiated).async {
-                let success = appState.restoreSessionArchiveSnapshot(
-                    propertyID: archive.propertyID,
-                    sessionID: archive.sessionID,
-                    snapshotName: archive.snapshotName
-                )
-                DispatchQueue.main.async {
-                    isRestoring = false
-                    if success {
-                        showRestoreSuccess = true
-                        reloadArchives()
-                    } else {
-                        restoreErrorMessage = "Snapshot restore failed. Check console for [SessionRestore] details."
-                        showRestoreError = true
-                    }
-                }
-            }
-        }
-
-        private func delete(_ archive: LocalStore.SessionArchiveSummary) {
-            let success = appState.deleteSessionArchiveSnapshot(
-                propertyID: archive.propertyID,
-                sessionID: archive.sessionID,
-                snapshotName: archive.snapshotName
-            )
-            pendingDeleteArchive = nil
-            if success {
-                reloadArchives()
-            } else {
-                deleteErrorMessage = "Snapshot delete failed. Check console for [SessionArchiveDelete] details."
-                showDeleteError = true
-            }
-        }
-    }
 
     @ViewBuilder
     private var pendingExportPromptOverlay: some View {
@@ -3935,29 +3058,8 @@ struct SessionHubView: View {
         selectionHaptic.prepare()
     }
 
-    private func isPropertyPressWithinTapDistance(_ translation: CGSize) -> Bool {
-        abs(translation.width) <= 12 && abs(translation.height) <= 12
-    }
 
-    private func handlePropertyPressChanged(propertyID: UUID, translation: CGSize) {
-        guard isPropertyPressWithinTapDistance(translation) else {
-            if pressedPropertyID == propertyID, !isOpeningProperty {
-                pressedPropertyID = nil
-            }
-            return
-        }
-        beginPropertyPressFeedback(propertyID: propertyID)
-    }
 
-    private func handlePropertyPressEnded(_ property: Property, translation: CGSize) {
-        guard isPropertyPressWithinTapDistance(translation) else {
-            if pressedPropertyID == property.id, !isOpeningProperty {
-                pressedPropertyID = nil
-            }
-            return
-        }
-        handlePropertyTap(property)
-    }
 
     private func handlePropertyTap(_ property: Property) {
         guard !isOpeningProperty else { return }
@@ -3982,7 +3084,8 @@ struct SessionHubView: View {
     private func continueAcceptedPropertyTap(
         _ property: Property,
         tapToken: Int,
-        didFreshEntryPreflight: Bool = false
+        didFreshEntryPreflight: Bool = false,
+        verifiedFastDraftResumeState: AppState.FastRuntimeDraftResumeState? = nil
     ) {
         if !didFreshEntryPreflight {
             Task { @MainActor in
@@ -4005,10 +3108,13 @@ struct SessionHubView: View {
                     return
                 }
 
+                let resumeState = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
+                guard tapToken == propertyTapToken else { return }
                 continueAcceptedPropertyTap(
                     property,
                     tapToken: tapToken,
-                    didFreshEntryPreflight: true
+                    didFreshEntryPreflight: true,
+                    verifiedFastDraftResumeState: resumeState
                 )
             }
             return
@@ -4016,7 +3122,7 @@ struct SessionHubView: View {
 
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
-        let fastDraftResumeState = appState.fastRuntimeDraftResumeState(for: property.id)
+        let fastDraftResumeState = verifiedFastDraftResumeState
         let hasPendingExport = badgeModel.showPendingExport
         let hasDraft = badgeModel.showDraft
         let isFastLaneUploading = appState.isFastRuntimeCompletionUploading(propertyID: property.id)
@@ -4347,7 +3453,7 @@ struct SessionHubView: View {
             if !fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType),
                result.entryState == .lockedByCurrentUser,
                result.isCurrentDeviceOccupiedClaim {
-                if let resumeState = appState.fastRuntimeDraftResumeState(for: property.id),
+                if let resumeState = await appState.verifiedFastRuntimeDraftResumeState(for: property.id),
                    resumeState.canResume,
                    let context = resumeState.context,
                    let storageRoot = resumeState.storageRoot,
@@ -4582,16 +3688,6 @@ struct SessionHubView: View {
         )
         let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
         try FileManager.default.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
-        var expectedPaths = Set([
-            "session.json",
-            "validation.txt",
-            "sessions.csv",
-            "shots.csv",
-            "issues.csv",
-            "issue_history.csv",
-            "guided_rows.csv",
-            "Originals/"
-        ])
         let sessionMetadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
 #if DEBUG
         print("Pending export sessionStartedAt: \(sessionMetadata.startedAt)")
@@ -4607,788 +3703,43 @@ struct SessionHubView: View {
             print("Pending export reExportExpiresAt: \(reExportExpiresAt)")
         }
 #endif
-        for originalFile in validationArtifacts.originalFiles {
-            let data = try Data(contentsOf: originalFile.sourceURL)
-            let attrs = try? FileManager.default.attributesOfItem(atPath: originalFile.sourceURL.path)
-            let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
-            try data.write(to: destinationURL, options: .atomic)
-            if let modifiedAt {
-                try? FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
-            }
-            expectedPaths.insert("Originals/\(originalFile.filename)")
-        }
-        progress?(.originals)
-        try validationArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
-        try validationArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
-        for csvFile in localStore.exportCSVFiles(for: validationArtifacts.metadata) {
-            try csvFile.data.write(to: exportRoot.appendingPathComponent(csvFile.filename), options: .atomic)
-        }
-        if !validationArtifacts.prewritePassed || !validationArtifacts.postwritePassed {
-            let message = String(data: validationArtifacts.validationData, encoding: .utf8) ?? "Export validation failed."
-            throw NSError(
-                domain: "ScoutCapture.PendingExport",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: "Export validation failed before ZIP creation.\n\n\(message)"]
-            )
-        }
+        let expectedPaths = try SessionExportZip.stageValidatedArtifacts(
+            validationArtifacts,
+            from: localStore,
+            at: exportRoot,
+            errorDomain: "ScoutCapture.PendingExport",
+            onOriginalsCopied: { progress?(.originals) }
+        )
+
 #if DEBUG
         print("EXPORT ROOT: \(exportRoot.path)")
         print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
         progress?(.sessionData)
 
-        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
-        let zipData = buildZipData(entries: zipEntries)
         let fileManager = FileManager.default
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename(for: property, session: session))
-        let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
+        let archive = try SessionExportZip.package(
+            exportRoot: exportRoot,
+            expectedPaths: expectedPaths,
+            finalURL: finalURL,
+            errorDomain: "ScoutCapture.PendingExport",
+            fileManager: fileManager
+        )
 #if DEBUG
-        print("Pending export ZIP temp path: \(tempURL.path)")
-        print("Pending export ZIP final path: \(finalURL.path)")
-#endif
-        if fileManager.fileExists(atPath: tempURL.path) {
-            try fileManager.removeItem(at: tempURL)
-        }
-        if fileManager.fileExists(atPath: finalURL.path) {
-            try fileManager.removeItem(at: finalURL)
-        }
-        try zipData.write(to: tempURL, options: [.atomic])
-        let tempExists = fileManager.fileExists(atPath: tempURL.path)
-        let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("Pending export ZIP temp exists: \(tempExists ? "YES" : "NO"), bytes: \(tempSize)")
-#endif
-        guard tempExists, tempSize > 0 else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 5, userInfo: [NSLocalizedDescriptionKey: "Temporary ZIP write failed."])
-        }
-
-        try fileManager.moveItem(at: tempURL, to: finalURL)
-        let finalExists = fileManager.fileExists(atPath: finalURL.path)
-        let finalSize = ((try? fileManager.attributesOfItem(atPath: finalURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("Pending export ZIP final exists: \(finalExists ? "YES" : "NO"), bytes: \(finalSize)")
-#endif
-        guard finalExists, finalSize > 0 else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
-        }
-
-        let listedEntries = try listPendingExportZipEntryPaths(at: finalURL)
-#if DEBUG
-        let preview = Array(listedEntries.prefix(12))
-        print("Pending export ZIP entries count: \(listedEntries.count)")
-        print("Pending export ZIP entries preview: \(preview)")
-#endif
-        let zipRootFolderName = exportRoot.deletingLastPathComponent().lastPathComponent
-        let normalizedExpectedPaths = Set(expectedPaths.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
-        let actualPaths = Set(listedEntries.compactMap { path -> String? in
-            let normalized = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !normalized.isEmpty else { return nil }
-            if normalized == zipRootFolderName { return nil }
-            let prefix = "\(zipRootFolderName)/"
-            if normalized.hasPrefix(prefix) {
-                return String(normalized.dropFirst(prefix.count))
-            }
-            return normalized
-        })
-        guard normalizedExpectedPaths.isSubset(of: actualPaths) else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
-        }
-#if DEBUG
-        guard actualPaths.contains("session.json"), actualPaths.contains("validation.txt") else {
+        print("Pending export ZIP entries count: \(archive.listedEntries.count)")
+        print("Pending export ZIP entries preview: \(Array(archive.listedEntries.prefix(12)))")
+        guard archive.relativePaths.contains("session.json"), archive.relativePaths.contains("validation.txt") else {
             assertionFailure("Pending export ZIP root missing session.json or validation.txt")
             throw NSError(domain: "ScoutCapture.PendingExport", code: 10, userInfo: [NSLocalizedDescriptionKey: "ZIP root missing validation artifacts."])
         }
 #endif
         progress?(.zipReady)
-        return finalURL
+        return archive.url
     }
 
-    private func requestImageData(for fileURL: URL) -> Data? {
-        try? Data(contentsOf: fileURL)
-    }
 
-    private func ensurePendingStampedJPEGs(
-        propertyID: UUID,
-        sessionID: UUID,
-        propertyName: String,
-        propertyAddress: String?,
-        sessionMetadata: SessionMetadata
-    ) throws -> [String: URL] {
-        let fileManager = FileManager.default
-        var metadata = sessionMetadata
-        var didUpdateMetadata = false
-        var output: [String: URL] = [:]
-        var reservedNames = Set(
-            ((try? fileManager.contentsOfDirectory(atPath: localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID).path)) ?? [])
-                .map { $0.lowercased() }
-        )
 
-        for index in metadata.shots.indices {
-            let shot = metadata.shots[index]
-            let originalURL = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
-                .appendingPathComponent(shot.originalFilename, isDirectory: false)
-            guard fileManager.fileExists(atPath: originalURL.path) else { continue }
-
-            let stampedName = nextReadablePendingStampedFilename(shot: shot, reservedNames: &reservedNames)
-            if metadata.shots[index].stampedFilename != stampedName {
-                metadata.shots[index].stampedFilename = stampedName
-                didUpdateMetadata = true
-            }
-            let stampedRelative = "Stamped/\(stampedName)"
-            if metadata.shots[index].stampedRelativePath != stampedRelative {
-                metadata.shots[index].stampedRelativePath = stampedRelative
-                didUpdateMetadata = true
-            }
-            if (metadata.shots[index].imageWidth ?? 0) <= 0 || (metadata.shots[index].imageHeight ?? 0) <= 0 {
-                let sourceImage = UIImage(contentsOfFile: originalURL.path)
-                if let sourceImage {
-                    metadata.shots[index].imageWidth = max(1, Int(sourceImage.size.width))
-                    metadata.shots[index].imageHeight = max(1, Int(sourceImage.size.height))
-                    didUpdateMetadata = true
-                }
-            }
-
-            let stampedURL = localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID)
-                .appendingPathComponent(stampedName, isDirectory: false)
-            try createPendingStampedJPEGIfMissing(
-                sourceURL: originalURL,
-                destinationURL: stampedURL,
-                captureDate: shot.updatedAt,
-                overlayLines: pendingStampOverlayLines(
-                    propertyName: propertyName,
-                    shot: shot,
-                    isBaselineSession: metadata.isBaselineSession
-                ),
-                metadataContext: pendingStampedMetadataContext(
-                    propertyID: propertyID,
-                    propertyName: propertyName,
-                    propertyAddress: propertyAddress,
-                    sessionID: sessionID,
-                    shot: shot,
-                    schemaVersion: metadata.schemaVersion
-                ),
-                fileManager: fileManager
-            )
-            output[shot.originalFilename] = stampedURL
-        }
-
-        if didUpdateMetadata {
-            try localStore.saveSessionMetadataAtomically(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                metadata: metadata
-            )
-#if DEBUG
-            if let firstStamped = metadata.shots.first?.stampedRelativePath {
-                print("[Stamp] metadata stampedRelativePath sample=\(firstStamped)")
-            }
-#endif
-        }
-
-        return output
-    }
-
-    private func createPendingStampedJPEGIfMissing(
-        sourceURL: URL,
-        destinationURL: URL,
-        captureDate: Date,
-        overlayLines: [String],
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext,
-        fileManager: FileManager
-    ) throws {
-        if fileManager.fileExists(atPath: destinationURL.path),
-           ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0 > 0 {
-            return
-        }
-
-        let parentDir = destinationURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        let sourceData = try Data(contentsOf: sourceURL)
-        let stampedData = try encodePendingStampedJPEG(
-            from: sourceData,
-            captureDate: captureDate,
-            overlayLines: overlayLines,
-            metadataContext: metadataContext
-        )
-        try stampedData.write(to: destinationURL, options: [.atomic])
-
-        let size = ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-#if DEBUG
-        print("[Stamp] destination=\(destinationURL.path) utType=\(UTType.jpeg.identifier) bytes=\(size)")
-#endif
-        guard fileManager.fileExists(atPath: destinationURL.path), size > 0 else {
-            throw NSError(domain: "ScoutCapture.PendingStamp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Stamped JPEG write failed"])
-        }
-
-        try fileManager.setAttributes(
-            [
-                .creationDate: captureDate,
-                .modificationDate: captureDate
-            ],
-            ofItemAtPath: destinationURL.path
-        )
-#if DEBUG
-        if let attrs = try? fileManager.attributesOfItem(atPath: destinationURL.path) {
-            let created = attrs[.creationDate] as? Date
-            let modified = attrs[.modificationDate] as? Date
-            print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
-        }
-        if let source = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
-           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-            let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
-            let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
-            let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
-            print("[Stamp] readback pixelWidth=\(width) pixelHeight=\(height) orientation=\(orientation)")
-        }
-#endif
-    }
-
-    private func encodePendingStampedJPEG(
-        from sourceData: Data,
-        captureDate: Date,
-        overlayLines: [String],
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) throws -> Data {
-        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
-            throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
-        }
-
-        let sourceCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
-        let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
-        let capturedOrientationRaw = metadataContext.capturedExifOrientationRaw
-        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
-        print("[Stamp] orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)")
-        if let sourceCGImage {
-            print("[Stamp] before encode pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
-        }
-        let image = normalizedPendingUprightCGImage(from: sourceData)
-            ?? sourceCGImage
-        guard let image else {
-            throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
-        }
-        print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
-        var mergedProps = sourceProps
-        mergedProps.removeValue(forKey: kCGImagePropertyGPSDictionary)
-        var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-        var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
-
-        let captureTime = ReportLibraryModel.EmbeddedCaptureTime(captureDate: captureDate)
-        exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
-        exif[kCGImagePropertyExifDateTimeDigitized] = captureTime.localDateTimeString
-        exif[kCGImagePropertyExifSubsecTimeOriginal] = captureTime.subsecString
-        exif[kCGImagePropertyExifSubsecTimeDigitized] = captureTime.subsecString
-        exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
-        exif[kCGImagePropertyExifUserComment] = pendingStructuredComment(
-            captureTime: captureTime,
-            metadataContext: metadataContext
-        )
-        tiff[kCGImagePropertyTIFFDateTime] = captureTime.localDateTimeString
-        mergedProps[kCGImagePropertyExifDictionary] = exif
-        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-        mergedProps[kCGImagePropertyOrientation] = 1
-        tiff[kCGImagePropertyTIFFOrientation] = 1
-        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-        mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
-        print("[Stamp] orientation writeTag exif/tiff=1")
-        if let gps = makePendingGPSDictionary(
-            latitude: metadataContext.latitude,
-            longitude: metadataContext.longitude,
-            accuracyMeters: metadataContext.accuracyMeters,
-            captureDate: captureDate
-        ) {
-            mergedProps[kCGImagePropertyGPSDictionary] = gps
-        }
-        let caption = overlayLines.joined(separator: "\n")
-        if !caption.isEmpty {
-            tiff[kCGImagePropertyTIFFImageDescription] = caption
-            mergedProps[kCGImagePropertyTIFFDictionary] = tiff
-            var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
-            iptc[kCGImagePropertyIPTCCaptionAbstract] = caption
-            iptc[kCGImagePropertyIPTCKeywords] = pendingKeywordList(metadataContext: metadataContext)
-            mergedProps[kCGImagePropertyIPTCDictionary] = iptc
-        }
-
-#if DEBUG
-        let topKeys = mergedProps.keys.map { $0 as String }.sorted()
-        let exifKeys = ((mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
-        let gpsKeys = ((mergedProps[kCGImagePropertyGPSDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
-        let hasDateTimeOriginal = ((mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:])[kCGImagePropertyExifDateTimeOriginal] != nil
-        let hasGpsAccuracy = ((mergedProps[kCGImagePropertyGPSDictionary] as? [CFString: Any]) ?? [:])[kCGImagePropertyGPSHPositioningError] != nil
-        print("[Stamp] captureDate=\(captureTime.captureDate) localDateTimeString=\(captureTime.localDateTimeString) tzOffset=\(captureTime.tzOffsetString) iso8601WithOffset=\(captureTime.iso8601WithOffset)")
-        let accuracyText = metadataContext.accuracyMeters.map { String(format: "%.3f", $0) } ?? "nil"
-        print("[Stamp] gps present=\(gpsKeys.isEmpty ? "NO" : "YES") accuracyMeters=\(accuracyText)")
-        print("[Stamp] metadata top-level keys: \(topKeys)")
-        print("[Stamp] metadata EXIF keys: \(exifKeys)")
-        print("[Stamp] metadata GPS keys: \(gpsKeys)")
-        print("[Stamp] metadata has DateTimeOriginal=\(hasDateTimeOriginal) has GPSHPositioningError=\(hasGpsAccuracy)")
-#endif
-
-        let stampedCGImage = drawPendingStampOverlay(on: image, lines: overlayLines) ?? image
-
-        let destinationData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            destinationData,
-            UTType.jpeg.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw NSError(domain: "ScoutCapture.PendingStamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
-        }
-        if let xmpMetadata = buildPendingXMPMetadata(
-            source: source,
-            captureTime: captureTime,
-            metadataContext: metadataContext
-        ) {
-            CGImageDestinationAddImageAndMetadata(
-                destination,
-                stampedCGImage,
-                xmpMetadata,
-                mergedProps as CFDictionary
-            )
-        } else {
-            CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
-        }
-        guard CGImageDestinationFinalize(destination) else {
-            throw NSError(domain: "ScoutCapture.PendingStamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
-        }
-        return destinationData as Data
-    }
-
-    private func pendingStampedMetadataContext(
-        propertyID: UUID,
-        propertyName: String,
-        propertyAddress: String?,
-        sessionID: UUID,
-        shot: ShotMetadata,
-        schemaVersion: Int
-    ) -> ReportLibraryModel.EmbeddedMetadataContext {
-        ReportLibraryModel.EmbeddedMetadataContext(
-            propertyID: propertyID,
-            propertyName: propertyName,
-            propertyAddress: propertyAddress,
-            sessionID: sessionID,
-            shotID: shot.shotID,
-            shotKey: shot.shotKey,
-            building: shot.building,
-            elevation: shot.elevation,
-            detailType: shot.detailType,
-            angleIndex: shot.angleIndex,
-            trade: shot.trade,
-            priority: shot.priority,
-            isGuided: shot.isGuided,
-            isFlagged: shot.isFlagged,
-            issueStatus: shot.issueStatus,
-            detailNote: shot.noteText,
-            captureMode: shot.captureMode,
-            lens: shot.lens,
-            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
-            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? pendingParseExifOrientationRaw(from: shot.orientation),
-            latitude: shot.latitude,
-            longitude: shot.longitude,
-            accuracyMeters: shot.accuracyMeters,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            osVersion: UIDevice.current.systemVersion,
-            deviceModel: UIDevice.current.model,
-            schemaVersion: schemaVersion
-        )
-    }
-
-    private func pendingParseExifOrientationRaw(from orientation: String?) -> UInt32? {
-        let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        if let direct = UInt32(trimmed), direct >= 1, direct <= 8 {
-            return direct
-        }
-        let prefix = "exif:"
-        if trimmed.lowercased().hasPrefix(prefix),
-           let value = UInt32(trimmed.dropFirst(prefix.count)),
-           value >= 1, value <= 8 {
-            return value
-        }
-        return nil
-    }
-
-    private func pendingStructuredComment(
-        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) -> String {
-        var pairs: [String] = []
-        func append(_ key: String, _ value: String?) {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                pairs.append("\(key)=\(trimmed)")
-            }
-        }
-        append("propertyID", metadataContext.propertyID?.uuidString)
-        append("propertyName", metadataContext.propertyName)
-        append("propertyAddress", metadataContext.propertyAddress)
-        append("sessionID", metadataContext.sessionID?.uuidString)
-        append("shotID", metadataContext.shotID?.uuidString)
-        append("shotKey", metadataContext.shotKey)
-        append("building", metadataContext.building)
-        append("elevation", metadataContext.elevation)
-        append("detailType", metadataContext.detailType)
-        append("angleIndex", metadataContext.angleIndex.map(String.init))
-        append("captureMode", metadataContext.captureMode)
-        append("lens", metadataContext.lens)
-        append("orientation", metadataContext.orientation)
-        append("trade", metadataContext.trade)
-        append("priority", metadataContext.priority)
-        append("captureDateLocal", captureTime.localDateTimeString)
-        append("captureDateISO8601", captureTime.iso8601WithOffset)
-        if let accuracy = metadataContext.accuracyMeters {
-            append("gpsAccuracyMeters", String(format: "%.3f", accuracy))
-        }
-        return pairs.joined(separator: ";")
-    }
-
-    private func pendingKeywordList(metadataContext: ReportLibraryModel.EmbeddedMetadataContext) -> [String] {
-        var keywords: [String] = ["SCOUT"]
-        let values = [
-            metadataContext.propertyName,
-            metadataContext.building,
-            metadataContext.elevation,
-            metadataContext.detailType,
-            metadataContext.trade,
-            metadataContext.priority
-        ]
-        for value in values {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                keywords.append(trimmed)
-            }
-        }
-        keywords.append(metadataContext.isGuided == true ? "Guided" : "Free")
-        if metadataContext.isFlagged == true {
-            keywords.append("Flagged")
-        }
-        if let angle = metadataContext.angleIndex {
-            keywords.append("Angle \(angle)")
-        }
-        return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
-    }
-
-    private func makePendingGPSDictionary(
-        latitude: Double?,
-        longitude: Double?,
-        accuracyMeters: Double?,
-        captureDate: Date
-    ) -> [CFString: Any]? {
-        guard let latitude, let longitude else { return nil }
-        var gps: [CFString: Any] = [:]
-        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
-        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
-        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
-        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
-        gps[kCGImagePropertyGPSDateStamp] = Self.pendingExportGPSDateFormatter.string(from: captureDate)
-        gps[kCGImagePropertyGPSTimeStamp] = Self.pendingExportGPSTimeFormatter.string(from: captureDate)
-        if let accuracyMeters, accuracyMeters >= 0 {
-            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
-        }
-        return gps
-    }
-
-    private func buildPendingXMPMetadata(
-        source: CGImageSource,
-        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
-        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
-    ) -> CGMutableImageMetadata? {
-        let baseMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
-        let mutable = baseMetadata.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
-        var registrationError: Unmanaged<CFError>?
-        _ = CGImageMetadataRegisterNamespaceForPrefix(
-            mutable,
-            "https://scoutcapture.app/ns/1.0/" as CFString,
-            "scout" as CFString,
-            &registrationError
-        )
-        func setTag(_ path: String, _ value: String?) {
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !trimmed.isEmpty else { return }
-            let components = path.split(separator: ":", maxSplits: 1).map(String.init)
-            guard components.count == 2 else { return }
-            let prefix = components[0]
-            let name = components[1]
-            let namespace: String
-            switch prefix {
-            case "xmp":
-                namespace = "http://ns.adobe.com/xap/1.0/"
-            case "scout":
-                namespace = "https://scoutcapture.app/ns/1.0/"
-            default:
-                return
-            }
-            guard let tag = CGImageMetadataTagCreate(
-                namespace as CFString,
-                prefix as CFString,
-                name as CFString,
-                .string,
-                trimmed as CFString
-            ) else {
-                return
-            }
-            CGImageMetadataSetTagWithPath(mutable, nil, path as CFString, tag)
-        }
-        setTag("xmp:CreateDate", captureTime.iso8601WithOffset)
-        setTag("xmp:ModifyDate", captureTime.iso8601WithOffset)
-        setTag("scout:propertyID", metadataContext.propertyID?.uuidString)
-        setTag("scout:propertyName", metadataContext.propertyName)
-        setTag("scout:propertyAddress", metadataContext.propertyAddress)
-        setTag("scout:sessionID", metadataContext.sessionID?.uuidString)
-        setTag("scout:shotID", metadataContext.shotID?.uuidString)
-        setTag("scout:shotKey", metadataContext.shotKey)
-        setTag("scout:building", metadataContext.building)
-        setTag("scout:elevation", metadataContext.elevation)
-        setTag("scout:detailType", metadataContext.detailType)
-        setTag("scout:angleIndex", metadataContext.angleIndex.map(String.init))
-        setTag("scout:isGuided", metadataContext.isGuided.map { $0 ? "true" : "false" })
-        setTag("scout:isFlagged", metadataContext.isFlagged.map { $0 ? "true" : "false" })
-        setTag("scout:captureMode", metadataContext.captureMode)
-        setTag("scout:lens", metadataContext.lens)
-        setTag("scout:orientation", metadataContext.orientation)
-        setTag("scout:appVersion", metadataContext.appVersion)
-        setTag("scout:osVersion", metadataContext.osVersion)
-        setTag("scout:deviceModel", metadataContext.deviceModel)
-        setTag("scout:schemaVersion", metadataContext.schemaVersion.map(String.init))
-        setTag("scout:issueStatus", metadataContext.issueStatus)
-        setTag("scout:issueNote", metadataContext.detailNote)
-        setTag("scout:trade", metadataContext.trade)
-        setTag("scout:priority", metadataContext.priority)
-        if let accuracy = metadataContext.accuracyMeters {
-            setTag("scout:gpsAccuracyMeters", String(format: "%.3f", accuracy))
-        }
-        return mutable
-    }
-
-    private func normalizedPendingUprightCGImage(from sourceData: Data) -> CGImage? {
-        guard let uiImage = UIImage(data: sourceData) else { return nil }
-        let size = uiImage.size
-        guard size.width > 0, size.height > 0 else { return nil }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        format.scale = 1
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            uiImage.draw(in: CGRect(origin: .zero, size: size))
-        }
-        return rendered.cgImage
-    }
-
-    private func drawPendingStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
-        guard !lines.isEmpty else { return image }
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return image }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        format.scale = 1
-        let size = CGSize(width: width, height: height)
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            UIImage(cgImage: image).draw(in: CGRect(origin: .zero, size: size))
-
-            let shortEdge = CGFloat(min(width, height))
-            let sideInset = max(16, shortEdge * 0.025)
-            let bottomInset = max(16, shortEdge * 0.025)
-            let lineSpacing = max(2, shortEdge * 0.004)
-            let cornerRadius = max(8, shortEdge * 0.016)
-            let primarySize = max(14, shortEdge * 0.030)
-            let secondarySize = max(12, shortEdge * 0.024)
-
-            let styled: [NSAttributedString] = lines.enumerated().map { idx, line in
-                NSAttributedString(
-                    string: line,
-                    attributes: [
-                        .font: idx == 0
-                            ? UIFont.systemFont(ofSize: primarySize, weight: .semibold)
-                            : UIFont.systemFont(ofSize: secondarySize, weight: .regular),
-                        .foregroundColor: UIColor.white
-                    ]
-                )
-            }
-            let maxTextWidth = size.width - (sideInset * 3)
-            let lineSizes = styled.map { text in
-                text.boundingRect(
-                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    context: nil
-                ).integral.size
-            }
-            let textHeight = lineSizes.reduce(0) { $0 + $1.height } + CGFloat(max(0, lineSizes.count - 1)) * lineSpacing
-            let textWidth = min(maxTextWidth, lineSizes.map(\.width).max() ?? maxTextWidth)
-            let padX = max(8, shortEdge * 0.013)
-            let padY = max(5, shortEdge * 0.009)
-            let panelRect = CGRect(
-                x: sideInset,
-                y: size.height - bottomInset - (textHeight + padY * 2),
-                width: textWidth + (padX * 2),
-                height: textHeight + (padY * 2)
-            )
-
-            let panelPath = UIBezierPath(roundedRect: panelRect, cornerRadius: cornerRadius)
-            UIColor.black.withAlphaComponent(0.58).setFill()
-            panelPath.fill()
-
-            var y = panelRect.minY + padY
-            for (idx, text) in styled.enumerated() {
-                let drawRect = CGRect(
-                    x: panelRect.minX + padX,
-                    y: y,
-                    width: textWidth,
-                    height: lineSizes[idx].height
-                )
-                text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                y += lineSizes[idx].height + lineSpacing
-            }
-        }
-        return rendered.cgImage
-    }
-
-    private static let pendingExportExifTimestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        return formatter
-    }()
-
-    private static let pendingExportExifSubsecFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "SSS"
-        return formatter
-    }()
-
-    private static let pendingExportGPSDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy:MM:dd"
-        return formatter
-    }()
-
-    private static let pendingExportGPSTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
-
-    private static func pendingExportExifOffsetString(for date: Date) -> String {
-        let seconds = TimeZone.current.secondsFromGMT(for: date)
-        let sign = seconds >= 0 ? "+" : "-"
-        let absolute = abs(seconds)
-        let hours = absolute / 3600
-        let minutes = (absolute % 3600) / 60
-        return String(format: "%@%02d:%02d", sign, hours, minutes)
-    }
-
-    private func pendingStampOverlayLines(propertyName: String, shot: ShotMetadata, isBaselineSession: Bool) -> [String] {
-        let line1 = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let line2 = [
-            shot.building,
-            shot.elevation,
-            shot.detailType,
-            "Angle \(max(1, shot.angleIndex))"
-        ]
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-        .joined(separator: " | ")
-        let line3 = Self.pendingOverlayDateFormatter.string(from: shot.updatedAt)
-        let noteLine = (shot.noteText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let line4 = (shot.isFlagged && !noteLine.isEmpty) ? noteLine : ""
-        _ = isBaselineSession
-        return [line1, line2, line3, line4].filter { !$0.isEmpty }
-    }
-
-    private func nextReadablePendingStampedFilename(shot: ShotMetadata, reservedNames: inout Set<String>) -> String {
-        let base = readablePendingStampedBaseName(for: shot)
-        var candidate = "\(base).jpg"
-        var counter = 1
-        while reservedNames.contains(candidate.lowercased()) {
-            candidate = "\(base)_\(String(format: "%02d", counter)).jpg"
-            counter += 1
-        }
-        reservedNames.insert(candidate.lowercased())
-        return candidate
-    }
-
-    private func readablePendingStampedBaseName(for shot: ShotMetadata) -> String {
-        let datePart = Self.pendingFilenameDateFormatter.string(from: shot.updatedAt)
-        let parts = [
-            sanitizePendingStampFilenamePart(shot.building),
-            sanitizePendingStampFilenamePart(shot.elevation),
-            sanitizePendingStampFilenamePart(shot.detailType),
-            "A\(max(1, shot.angleIndex))",
-            datePart
-        ].filter { !$0.isEmpty }
-        let base = parts.joined(separator: "_")
-        return base.isEmpty ? shot.shotID.uuidString : base
-    }
-
-    private func sanitizePendingStampFilenamePart(_ raw: String) -> String {
-        let normalized = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "_")
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
-        let collapsed = String(scalars)
-            .replacingOccurrences(of: "__", with: "_")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
-        return String(collapsed.prefix(40))
-    }
-
-    private static let pendingFilenameDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter
-    }()
-
-    private static let pendingOverlayDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
-        return formatter
-    }()
-
-    private func exportFilename(for fileURL: URL, index: Int) -> String {
-        let fallback = "photo-\(index).jpg"
-        let original = fileURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = original.isEmpty ? fallback : normalizedContextFilename(original)
-        return String(format: "%04d-%@", index, base.replacingOccurrences(of: "/", with: "-"))
-    }
-
-    private func normalizedContextFilename(_ filename: String) -> String {
-        var output = filename
-        let replacements: [(String, String)] = [
-            ("North Elevation", "N"),
-            ("South Elevation", "S"),
-            ("East Elevation", "E"),
-            ("West Elevation", "W")
-        ]
-        for (source, target) in replacements {
-            output = output.replacingOccurrences(of: source, with: target, options: .caseInsensitive)
-        }
-        output = output.replacingOccurrences(of: "Elevation", with: "", options: .caseInsensitive)
-        output = output.replacingOccurrences(of: "__", with: "_")
-        output = output.replacingOccurrences(of: "  ", with: " ")
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private func exportZipFilename(for property: Property, session: Session) -> String {
         let safeProperty = sanitizedExportName(property.name, fallback: "ScoutCapture-Export")
@@ -5408,189 +3759,10 @@ struct SessionHubView: View {
         return compact.isEmpty ? fallback : compact
     }
 
-    private func buildZipData(entries: [(path: String, data: Data, modifiedAt: Date?)]) -> Data {
-        struct CentralRecord {
-            let pathData: Data
-            let crc32: UInt32
-            let size: UInt32
-            let localHeaderOffset: UInt32
-            let dosTime: UInt16
-            let dosDate: UInt16
-        }
-
-        var zip = Data()
-        var centralRecords: [CentralRecord] = []
-        centralRecords.reserveCapacity(entries.count)
-
-        for entry in entries {
-            let pathData = Data(entry.path.utf8)
-            let crc = crc32(entry.data)
-            let size = UInt32(entry.data.count)
-            let localHeaderOffset = UInt32(zip.count)
-            let (dosTime, dosDate) = dosDateTime(entry.modifiedAt ?? Date())
-
-            appendUInt32LE(0x04034B50, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(dosTime, to: &zip)
-            appendUInt16LE(dosDate, to: &zip)
-            appendUInt32LE(crc, to: &zip)
-            appendUInt32LE(size, to: &zip)
-            appendUInt32LE(size, to: &zip)
-            appendUInt16LE(UInt16(pathData.count), to: &zip)
-            appendUInt16LE(0, to: &zip)
-            zip.append(pathData)
-            zip.append(entry.data)
-
-            centralRecords.append(
-                CentralRecord(
-                    pathData: pathData,
-                    crc32: crc,
-                    size: size,
-                    localHeaderOffset: localHeaderOffset,
-                    dosTime: dosTime,
-                    dosDate: dosDate
-                )
-            )
-        }
-
-        let centralDirectoryOffset = UInt32(zip.count)
-        for record in centralRecords {
-            appendUInt32LE(0x02014B50, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(record.dosTime, to: &zip)
-            appendUInt16LE(record.dosDate, to: &zip)
-            appendUInt32LE(record.crc32, to: &zip)
-            appendUInt32LE(record.size, to: &zip)
-            appendUInt32LE(record.size, to: &zip)
-            appendUInt16LE(UInt16(record.pathData.count), to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt32LE(0, to: &zip)
-            appendUInt32LE(record.localHeaderOffset, to: &zip)
-            zip.append(record.pathData)
-        }
-
-        let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
-        let count = UInt16(centralRecords.count)
-        appendUInt32LE(0x06054B50, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        appendUInt16LE(count, to: &zip)
-        appendUInt16LE(count, to: &zip)
-        appendUInt32LE(centralDirectorySize, to: &zip)
-        appendUInt32LE(centralDirectoryOffset, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        return zip
-    }
-
-    private func dosDateTime(_ date: Date) -> (UInt16, UInt16) {
-        let calendar = Calendar(identifier: .gregorian)
-        let comps = calendar.dateComponents(in: TimeZone.current, from: date)
-        let year = min(max(comps.year ?? 1980, 1980), 2107)
-        let month = min(max(comps.month ?? 1, 1), 12)
-        let day = min(max(comps.day ?? 1, 1), 31)
-        let hour = min(max(comps.hour ?? 0, 0), 23)
-        let minute = min(max(comps.minute ?? 0, 0), 59)
-        let second = min(max(comps.second ?? 0, 0), 59)
-
-        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
-        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
-        return (dosTime, dosDate)
-    }
-
-    private func listPendingExportZipEntryPaths(at url: URL) throws -> [String] {
-        let data = try Data(contentsOf: url)
-        let bytes = [UInt8](data)
-        let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
-        guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
-            var i = idx
-            while i >= 0 {
-                if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
-                if i == 0 { break }
-                i -= 1
-            }
-            return nil
-        }) else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 8, userInfo: [NSLocalizedDescriptionKey: "EOCD not found."])
-        }
-
-        func u16(_ offset: Int) -> Int {
-            Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
-        }
-        func u32(_ offset: Int) -> Int {
-            Int(bytes[offset]) |
-            (Int(bytes[offset + 1]) << 8) |
-            (Int(bytes[offset + 2]) << 16) |
-            (Int(bytes[offset + 3]) << 24)
-        }
-
-        guard eocdIndex + 22 <= bytes.count else {
-            throw NSError(domain: "ScoutCapture.PendingExport", code: 9, userInfo: [NSLocalizedDescriptionKey: "EOCD truncated."])
-        }
-
-        let totalEntries = u16(eocdIndex + 10)
-        let centralOffset = u32(eocdIndex + 16)
-        var cursor = centralOffset
-        var paths: [String] = []
-        paths.reserveCapacity(totalEntries)
-
-        while paths.count < totalEntries, cursor + 46 <= bytes.count {
-            guard cursor + 3 < bytes.count,
-                  bytes[cursor] == 0x50, bytes[cursor + 1] == 0x4B, bytes[cursor + 2] == 0x01, bytes[cursor + 3] == 0x02 else {
-                break
-            }
-            let nameLength = u16(cursor + 28)
-            let extraLength = u16(cursor + 30)
-            let commentLength = u16(cursor + 32)
-            let nameStart = cursor + 46
-            let nameEnd = nameStart + nameLength
-            guard nameEnd <= bytes.count else { break }
-            let nameBytes = Array(bytes[nameStart..<nameEnd])
-            let name = String(bytes: nameBytes, encoding: .utf8) ?? ""
-            paths.append(name)
-            cursor = nameEnd + extraLength + commentLength
-        }
-
-        return paths
-    }
-
-    private func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >>= 1
-                }
-            }
-        }
-        return crc ^ 0xFFFF_FFFF
-    }
-
-    private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
-    }
-
-    private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
-    }
-
     private func requestDeleteProperty(_ property: Property) {
         propertyToDelete = property
     }
-    
-    @ViewBuilder
+
     private func customCapsuleToolbarButton(
         title: String,
         isEnabled: Bool,
@@ -5599,23 +3771,14 @@ struct SessionHubView: View {
         label: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let resolvedFill = fill ?? buttonFill
-        let resolvedStroke = stroke ?? buttonStroke
-        let resolvedLabel = label ?? buttonLabel
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 42)
-                .padding(.horizontal, 14)
-                .background(resolvedFill)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(resolvedStroke, lineWidth: 1)
-                )
-        }
+        standardCapsuleButton(
+            title: title,
+            isEnabled: isEnabled,
+            fill: fill ?? buttonFill,
+            stroke: stroke ?? buttonStroke,
+            label: label ?? buttonLabel,
+            action: action
+        )
         .buttonStyle(.plain)
         .tint(.clear)
         .disabled(!isEnabled)
@@ -6127,14 +4290,23 @@ private final class PropertyListTableCell: UITableViewCell {
     }
 }
 
-private struct HubSessionDocumentExportPicker: UIViewControllerRepresentable {
+struct SharedDocumentExportPicker: UIViewControllerRepresentable {
     let fileURL: URL
+    let usesFormSheet: Bool
     let onComplete: (Bool) -> Void
+
+    init(fileURL: URL, usesFormSheet: Bool = false, onComplete: @escaping (Bool) -> Void) {
+        self.fileURL = fileURL
+        self.usesFormSheet = usesFormSheet
+        self.onComplete = onComplete
+    }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
         picker.delegate = context.coordinator
-        picker.modalPresentationStyle = .formSheet
+        if usesFormSheet {
+            picker.modalPresentationStyle = .formSheet
+        }
         return picker
     }
 
@@ -6216,17 +4388,11 @@ private struct HubAddPropertySheet: View {
         !streetAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
     
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
     
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     private var primaryButtonFill: Color { .blue }
     private var primaryButtonStroke: Color { .blue.opacity(0.85) }
@@ -6517,29 +4683,10 @@ private struct HubAddPropertySheet: View {
         return normalized.isEmpty ? formattedAddress : normalized
     }
 
-    private var orderedFields: [Field] {
-        Field.allCases
-    }
 
-    private var previousField: Field? {
-        guard let focusedField else { return nil }
-        guard let index = orderedFields.firstIndex(of: focusedField), index > 0 else { return nil }
-        return orderedFields[index - 1]
-    }
 
-    private var nextField: Field? {
-        guard let focusedField else { return orderedFields.first }
-        guard let index = orderedFields.firstIndex(of: focusedField), index < orderedFields.count - 1 else { return nil }
-        return orderedFields[index + 1]
-    }
 
-    private func moveFocusToPreviousField() {
-        focusedField = previousField
-    }
 
-    private func moveFocusToNextField() {
-        focusedField = nextField
-    }
 
     private func applyInitialClientFocusIfNeeded() {
         guard !hasAppliedInitialFocus else { return }
@@ -6715,7 +4862,6 @@ private struct HubAddPropertySheet: View {
         }
     }
     
-    @ViewBuilder
     private func customCapsuleButton(
         title: String,
         isEnabled: Bool,
@@ -6724,23 +4870,14 @@ private struct HubAddPropertySheet: View {
         label: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let resolvedFill = fill ?? buttonFill
-        let resolvedStroke = stroke ?? buttonStroke
-        let resolvedLabel = label ?? buttonLabel
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 42)
-                .padding(.horizontal, 14)
-                .background(resolvedFill)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(resolvedStroke, lineWidth: 1)
-                )
-        }
+        standardCapsuleButton(
+            title: title,
+            isEnabled: isEnabled,
+            fill: fill ?? buttonFill,
+            stroke: stroke ?? buttonStroke,
+            label: label ?? buttonLabel,
+            action: action
+        )
         .buttonStyle(.plain)
         .disabled(!isEnabled)
     }
@@ -6768,17 +4905,11 @@ private struct EditContactSheet: View {
     @State private var showPendingExportRenameConfirm: Bool = false
     private let addOrganizationToken = "__add_new_organization__"
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     private var primaryButtonFill: Color { .blue }
     private var primaryButtonStroke: Color { .blue.opacity(0.85) }
@@ -7089,7 +5220,6 @@ private struct EditContactSheet: View {
         return digits
     }
 
-    @ViewBuilder
     private func customCapsuleButton(
         title: String,
         isEnabled: Bool,
@@ -7098,23 +5228,14 @@ private struct EditContactSheet: View {
         label: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let resolvedFill = fill ?? buttonFill
-        let resolvedStroke = stroke ?? buttonStroke
-        let resolvedLabel = label ?? buttonLabel
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 42)
-                .padding(.horizontal, 14)
-                .background(resolvedFill)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(resolvedStroke, lineWidth: 1)
-                )
-        }
+        standardCapsuleButton(
+            title: title,
+            isEnabled: isEnabled,
+            fill: fill ?? buttonFill,
+            stroke: stroke ?? buttonStroke,
+            label: label ?? buttonLabel,
+            action: action
+        )
         .buttonStyle(.plain)
         .disabled(!isEnabled)
     }
@@ -7750,17 +5871,11 @@ private struct PropertySessionsManagerView: View {
     @State private var showDeleteError: Bool = false
     @State private var deleteErrorMessage: String? = nil
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     private var destructiveFill: Color { Color.red.opacity(0.86) }
     private var destructiveStroke: Color { Color.red.opacity(0.90) }
@@ -9915,7 +8030,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Org", snapshot.activeOrganizationID)
                     diagnosticRow("Overall Status", snapshot.overallStatus)
                     NavigationLink {
-                        DebugCanonicalReadinessSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Readiness Report",
+                            footerText: "Copies the sanitized canonical readiness report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Readiness Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -9974,7 +8093,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Not Export Complete Sessions", snapshot.notExportCompleteSessionCount)
                     diagnosticRow("Diagnostic-Only Rows", snapshot.diagnosticOnlyRowCount)
                     NavigationLink {
-                        DebugCompletenessGatesSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Completeness Report",
+                            footerText: "Copies the sanitized completeness gates report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Completeness Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -10020,7 +8143,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Checksum Pass", snapshot.checksumGenerationPassCount)
                     diagnosticRow("Checksum Fail", snapshot.checksumGenerationFailCount)
                     NavigationLink {
-                        DebugSessionSnapshotPreviewTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Snapshot Preview Report",
+                            footerText: "Copies the sanitized local-only snapshot preview report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                        )
                     } label: {
                         Text("View Copyable Snapshot Preview Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -10091,7 +8218,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow(AppState.ExportSealPreflightCategory.informationalOnly.visibleLabel, snapshot.informationalOnlyCount)
                     diagnosticRow(AppState.ExportSealPreflightCategory.unknownNeedsReview.visibleLabel, snapshot.unknownNeedsReviewCount)
                     NavigationLink {
-                        DebugExportSealPreflightSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Preflight Report",
+                            footerText: "Copies the sanitized advisory preflight report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Preflight Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -10122,7 +8253,11 @@ private struct DebugLocalDiagnosticsView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                     NavigationLink {
-                        DebugFutureEnforcementWarningsSnapshotTextView(snapshotText: snapshot.futureWarningsText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.futureWarningsText,
+                            title: "Future Warnings",
+                            footerText: "Copies the sanitized future enforcement warnings report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Warning Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -10211,7 +8346,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Inspected", snapshot.inspectedAt)
                     diagnosticRow("Policy Rows", snapshot.rowCount)
                     NavigationLink {
-                        DebugEnforcementPolicyMatrixSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Policy Matrix",
+                            footerText: "Copies the sanitized enforcement policy matrix as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Policy Matrix")
                             .font(.system(size: 14, weight: .semibold))
@@ -10321,7 +8460,12 @@ private struct DebugLocalDiagnosticsView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                     NavigationLink {
-                        DebugMediaRecoverySnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Media Snapshot",
+                            footerText: "Copies the sanitized media recovery snapshot as plain text only.",
+                            copyButtonTitle: "Copy Snapshot"
+                        )
                     } label: {
                         Text("View Copyable Snapshot")
                             .font(.system(size: 14, weight: .semibold))
@@ -10358,7 +8502,12 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Org", snapshot.activeOrganizationID)
                     diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
                     NavigationLink {
-                        DebugDivergenceAuditSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Audit Snapshot",
+                            footerText: "Copies the sanitized snapshot as plain text only.",
+                            copyButtonTitle: "Copy Snapshot"
+                        )
                     } label: {
                         Text("View Copyable Snapshot")
                             .font(.system(size: 14, weight: .semibold))
@@ -10392,7 +8541,11 @@ private struct DebugLocalDiagnosticsView: View {
                         diagnosticRow(classification.rawValue, count)
                     }
                     NavigationLink {
-                        DebugSyncDebtInspectionSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Debt Report",
+                            footerText: "Copies the sanitized sync debt report as plain text only."
+                        )
                     } label: {
                         Text("View Copyable Debt Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -10426,7 +8579,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Possible Hydration Candidate", snapshot.possibleHydrationCandidateCount)
                     diagnosticRow("Draft Caution", snapshot.draftCautionCount)
                     NavigationLink {
-                        DebugRemoteOnlySessionDetailSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        DebugCopyableReportTextView(
+                            snapshotText: snapshot.snapshotText,
+                            title: "Session Details",
+                            footerText: "Copies the sanitized remote-only session detail report as plain text only. It does not include local paths, signed URLs, media, or auth material."
+                        )
                     } label: {
                         Text("View Copyable Remote-Only Detail Report")
                             .font(.system(size: 14, weight: .semibold))
@@ -11812,1242 +9969,19 @@ private struct DebugDivergenceAuditHistoricalGroupView: View {
     }
 }
 
-private struct DebugDivergenceAuditSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
 
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Snapshot") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized snapshot as plain text only.")
-            }
 
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Audit Snapshot")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugMediaRecoverySnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Snapshot") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized media recovery snapshot as plain text only.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Media Snapshot")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugSyncDebtInspectionSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized sync debt report as plain text only.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Debt Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugRemoteOnlySessionDetailSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized remote-only session detail report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Session Details")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugCanonicalReadinessSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized canonical readiness report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Readiness Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugCompletenessGatesSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized completeness gates report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Completeness Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugSessionSnapshotPreviewTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized local-only snapshot preview report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Snapshot Preview Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugSessionSnapshotUploadDiagnosticsView: View {
-    @ObservedObject var appState: AppState
-    @State private var isUploadingSessionSnapshot: Bool = false
-    @State private var isCheckingSnapshotReadback: Bool = false
-    @State private var isCheckingSnapshotRestoreDiagnostics: Bool = false
-    @State private var isCheckingRecoveryCohort: Bool = false
-    @State private var isHydratingSnapshotMetadata: Bool = false
-    @State private var isShowingHydrationConfirmation: Bool = false
-    @State private var isRetrievingSnapshotMedia: Bool = false
-    @State private var isShowingMediaRetrievalConfirmation: Bool = false
-    @State private var isCheckingCanonicalReadDiagnostics: Bool = false
-    @State private var isBuildingCanonicalCandidateOverlay: Bool = false
-    @State private var isRunningPackageValidation: Bool = false
-    @State private var packageValidationReport: AppState.LocalHealthSessionSnapshotPackageValidationReport?
-    @State private var isRefreshingAuthPreflight: Bool = false
-    @State private var isRepairingLocalOrgDrift: Bool = false
-    @State private var isRunningLocalOrgDriftAudit: Bool = false
-    @State private var isRepairingConfirmedLocalOrgDrift: Bool = false
-    @State private var isSnapshotUploadDetailsExpanded: Bool = false
-    @State private var testSessionCreationMessage: String?
-
-    init(appState: AppState, diagnostics: AppState.SessionSnapshotUploadDiagnostics) {
-        self.appState = appState
-    }
-
-    private var diagnostics: AppState.SessionSnapshotUploadDiagnostics {
-        appState.localDiagnostics.sessionSnapshotUpload
-    }
-
-    private var reportText: String {
-        AppState.sessionSnapshotUploadReportText(diagnostics)
-    }
-
-    private var uploadAvailability: (isAvailable: Bool, reason: String) {
-        appState.manualSessionSnapshotUploadAvailability
-    }
-
-    private var uploadTarget: AppState.ManualSessionSnapshotUploadTarget? {
-        appState.manualSessionSnapshotUploadTarget
-    }
-
-    private var uploadTargetResolution: AppState.ManualSessionSnapshotUploadTargetResolution {
-        appState.manualSessionSnapshotUploadTargetResolution
-    }
-
-    private var hydrationPolicy: AppState.SessionSnapshotHydrationPolicyDiagnostics {
-        appState.sessionSnapshotHydrationPolicyDiagnostics
-    }
-
-    private var hydrationConfirmation: AppState.SessionSnapshotHydrationConfirmation {
-        AppState.makeSessionSnapshotHydrationConfirmation(
-            diagnostics: diagnostics,
-            policy: hydrationPolicy
-        )
-    }
-
-    private var mediaRetrievalConfirmation: AppState.SessionSnapshotMediaRetrievalConfirmation {
-        AppState.makeSessionSnapshotMediaRetrievalConfirmation(
-            diagnostics: diagnostics,
-            targetClassification: appState.supabaseConfiguration.targetClassification
-        )
-    }
-
-    private var testSessionCreationAvailability: (isAvailable: Bool, reason: String) {
-        appState.manualSessionSnapshotTestSessionCreationAvailability
-    }
-
-    private var effectiveFlagEnabled: Bool {
-        appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled
-    }
-
-    private var effectiveAutoUploadFlagEnabled: Bool {
-        appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled
-    }
-
-    private var effectiveAutoUploadKillSwitchActive: Bool {
-        appState.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch
-    }
-
-    private var environmentFlagDetected: Bool {
-        ProcessInfo.processInfo.environment["session_snapshot_shadow_write_enabled"] != nil ||
-            ProcessInfo.processInfo.environment["SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"] != nil
-    }
-
-    var body: some View {
-        List {
-            Section("Supabase Target") {
-                diagnosticRow("URL", appState.supabaseConfiguration.sanitizedURLDisplay)
-                diagnosticRow("Target", appState.supabaseConfiguration.targetClassification.rawValue)
-                diagnosticRow("Override Active", appState.supabaseConfiguration.isOverrideActive ? "true" : "false")
-                diagnosticRow("Config Source", appState.supabaseConfiguration.source.rawValue)
-                diagnosticRow("Anon Key", appState.supabaseConfiguration.redactedAnonKeyDisplay)
-                diagnosticRow("Snapshot Flag Env", environmentFlagDetected ? "detected" : "not detected")
-                diagnosticRow(
-                    "Production Validation Allowed",
-                    appState.supabaseConfiguration.productionSnapshotValidationAllowed ? "true" : "false"
-                )
-                diagnosticRow(
-                    "Manual Only",
-                    appState.supabaseConfiguration.isProductionSnapshotValidationManualOnly ? "true" : "false"
-                )
-                diagnosticRow(
-                    "Snapshot Override Allowed",
-                    appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed ? "true" : "false"
-                )
-                diagnosticRow(
-                    "Production Hydration Gate",
-                    appState.supabaseConfiguration.productionSnapshotHydrationAllowed ? "true" : "false"
-                )
-            }
-
-            Section("Snapshot Upload Details") {
-                DisclosureGroup(isExpanded: $isSnapshotUploadDetailsExpanded) {
-                    Text("Upload, preflight, readback, restore, and recovery diagnostics remain available here. Keep this collapsed during controlled activation evaluation unless fresh snapshot evidence needs investigation.")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Upload Diagnostics And Repair Tools")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text(isSnapshotUploadDetailsExpanded ? "Hide snapshot upload controls" : "Show snapshot upload controls")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            if isSnapshotUploadDetailsExpanded {
-            Section("Session Snapshot Upload") {
-                Text("Shadow-write only diagnostics. The feature flag defaults off. Upload failures do not block capture, export, sealing, sync, media recovery, or iCloud fallback.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                diagnosticRow("Flag Enabled", effectiveFlagEnabled ? "true" : "false")
-                diagnosticRow("Remote Availability", diagnostics.remoteAvailability)
-                diagnosticRow("Attempts", diagnostics.attemptedCount)
-                diagnosticRow("Successes", diagnostics.successCount)
-                diagnosticRow("Failures", diagnostics.failureCount)
-                diagnosticRow("Orphan Risk", diagnostics.orphanRiskCount)
-                diagnosticRow("Final Upload Outcome", diagnostics.lastUploadOutcome)
-                diagnosticRow("Last Attempt", formattedRunDate(diagnostics.lastAttemptAt))
-                diagnosticRow("Last Success", formattedRunDate(diagnostics.lastSuccessAt))
-                diagnosticRow("Last Failure", formattedRunDate(diagnostics.lastFailureAt))
-                if let uploadError = AppState.diagnosticsPreviewText(diagnostics.lastUploadErrorMessage, maxLength: 160) {
-                    diagnosticRow("Last Upload Error", uploadError)
-                }
-                NavigationLink {
-                    DebugSessionSnapshotUploadTextView(snapshotText: reportText)
-                } label: {
-                    Text("View Copyable Upload Report")
-                        .font(.system(size: 14, weight: .semibold))
-                }
-            }
-
-            Section("Automatic Upload Guard") {
-                diagnosticRow("Auto Flag Enabled", effectiveAutoUploadFlagEnabled ? "true" : "false")
-                diagnosticRow("Kill Switch Active", effectiveAutoUploadKillSwitchActive ? "true" : "false")
-                diagnosticRow("Allowlist Match", diagnostics.autoUploadAllowlistMatch ? "true" : "false")
-                diagnosticRow("Skipped Reason", diagnostics.autoUploadSkippedReason ?? "none")
-                diagnosticRow("Trigger Source", diagnostics.autoUploadTriggerSource ?? "none")
-                diagnosticRow("Last Auto Attempt", formattedRunDate(diagnostics.lastAutoAttemptAt))
-                diagnosticRow("Last Auto Success", formattedRunDate(diagnostics.lastAutoSuccessAt))
-                diagnosticRow("Last Auto Failure", formattedRunDate(diagnostics.lastAutoFailureAt))
-                diagnosticRow("Last Auto Outcome", diagnostics.lastAutoUploadOutcome)
-                if let autoError = AppState.diagnosticsPreviewText(diagnostics.lastAutoFailureMessage, maxLength: 160) {
-                    diagnosticRow("Last Auto Failure", autoError)
-                }
-            }
-
-            Section("Selected Upload Target") {
-                if let uploadTarget {
-                    diagnosticRow("Source", uploadTarget.source.rawValue)
-                    diagnosticRow("Property Name", uploadTarget.propertyName)
-                    diagnosticRow("Property ID", uploadTarget.propertyID.uuidString)
-                    diagnosticRow("Session ID", uploadTarget.sessionID.uuidString)
-                    diagnosticRow("Session Status", uploadTarget.sessionStatus.rawValue)
-                    diagnosticRow("Session Started", formattedRunDate(uploadTarget.sessionStartedAt))
-                } else {
-                    diagnosticRow("Target", "none")
-                    diagnosticRow("Selected Property ID", uploadTargetResolution.selectedPropertyID?.uuidString ?? "none")
-                    diagnosticRow("Sessions Found", uploadTargetResolution.sessionsFoundForPropertyCount)
-                    diagnosticRow("Session Index Available", uploadTargetResolution.localSessionIndexAvailable ? "true" : "false")
-                    diagnosticRow("Reason", uploadTargetResolution.reason)
-                }
-                Button("Create Local Snapshot Test Session") {
-                    let result = appState.createManualSessionSnapshotTestSessionForLocalDev()
-                    if let sessionID = result.sessionID {
-                        testSessionCreationMessage = "\(result.message): \(sessionID.uuidString)"
-                    } else {
-                        testSessionCreationMessage = result.message
-                    }
-                }
-                .disabled(!testSessionCreationAvailability.isAvailable)
-                .font(.system(size: 14, weight: .semibold))
-                Text(testSessionCreationMessage ?? testSessionCreationAvailability.reason)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Auth Preflight") {
-                diagnosticRow("Checked", formattedRunDate(diagnostics.lastAuthPreflightAt))
-                diagnosticRow("App Auth User", diagnostics.lastAuthPreflightAppUserID ?? "none")
-                diagnosticRow("Client Session User", diagnostics.lastAuthPreflightClientUserID ?? "none")
-                diagnosticRow("Users Match", optionalBoolText(diagnostics.lastAuthPreflightUsersMatch))
-                diagnosticRow("Payload Org ID", diagnostics.lastAuthPreflightPayloadOrgID?.uuidString ?? "none")
-                diagnosticRow("Payload Property ID", diagnostics.lastAuthPreflightPayloadPropertyID?.uuidString ?? "none")
-                diagnosticRow("Payload Session ID", diagnostics.lastAuthPreflightPayloadSessionID?.uuidString ?? "none")
-                diagnosticRow("Remote Property", optionalBoolText(diagnostics.lastAuthPreflightRemotePropertyExists))
-                diagnosticRow("Remote Session", optionalBoolText(diagnostics.lastAuthPreflightRemoteSessionExists))
-                diagnosticRow("Remote Property Org", diagnostics.lastAuthPreflightRemotePropertyOrgID?.uuidString ?? "none")
-                diagnosticRow("Remote Session Org", diagnostics.lastAuthPreflightRemoteSessionOrgID?.uuidString ?? "none")
-                diagnosticRow("Remote Session Property", optionalBoolText(diagnostics.lastAuthPreflightRemoteSessionPropertyMatches))
-                diagnosticRow("Remote Org Match", optionalBoolText(diagnostics.lastAuthPreflightRemoteOrgIDsMatch))
-                diagnosticRow("Preflight Ready", optionalBoolText(diagnostics.lastAuthPreflightReady))
-                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastAuthPreflightFailureMessage, maxLength: 160) {
-                    diagnosticRow("Preflight Failure", failure)
-                }
-                diagnosticRow("Repair Outcome", diagnostics.lastLocalOrgRepairOutcome)
-                diagnosticRow("Repair Previous Org", diagnostics.lastLocalOrgRepairPreviousOrgID?.uuidString ?? "none")
-                diagnosticRow("Repair Canonical Org", diagnostics.lastLocalOrgRepairCanonicalOrgID?.uuidString ?? "none")
-                if let repairMessage = AppState.diagnosticsPreviewText(diagnostics.lastLocalOrgRepairMessage, maxLength: 160) {
-                    diagnosticRow("Repair Message", repairMessage)
-                }
-                Button(isRefreshingAuthPreflight ? "Checking..." : "Refresh Auth Preflight") {
-                    guard !isRefreshingAuthPreflight else { return }
-                    isRefreshingAuthPreflight = true
-                    Task {
-                        _ = await appState.refreshManualSessionSnapshotAuthPreflight()
-                        await MainActor.run {
-                            isRefreshingAuthPreflight = false
-                        }
-                    }
-                }
-                .disabled(isRefreshingAuthPreflight || uploadTarget == nil)
-                .font(.system(size: 14, weight: .semibold))
-                Button(isRepairingLocalOrgDrift ? "Repairing..." : "Repair Selected Local Org Drift") {
-                    guard !isRepairingLocalOrgDrift else { return }
-                    isRepairingLocalOrgDrift = true
-                    Task {
-                        _ = await appState.repairSelectedManualSessionSnapshotLocalOrgDrift()
-                        await MainActor.run {
-                            isRepairingLocalOrgDrift = false
-                        }
-                    }
-                }
-                .disabled(isRepairingLocalOrgDrift || uploadTarget == nil)
-                .font(.system(size: 14, weight: .semibold))
-            }
-
-            Section("Local Org Drift Audit") {
-                Text("Read-only manual audit. Confirms canonical org only when active remote property/session rows exist, agree, and the remote session belongs to the local property.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                diagnosticRow("Checked", formattedRunDate(diagnostics.lastLocalOrgDriftAuditAt))
-                diagnosticRow("Properties Checked", diagnostics.lastLocalOrgDriftAuditPropertiesChecked)
-                diagnosticRow("Sessions Checked", diagnostics.lastLocalOrgDriftAuditSessionsChecked)
-                diagnosticRow("Property Mismatches", diagnostics.lastLocalOrgDriftAuditPropertyMismatchCount)
-                diagnosticRow("Session Mismatches", diagnostics.lastLocalOrgDriftAuditSessionMismatchCount)
-                diagnosticRow("Unable To Confirm", diagnostics.lastLocalOrgDriftAuditUnableToConfirmCount)
-                diagnosticRow("Repair Checked", formattedRunDate(diagnostics.lastLocalOrgDriftRepairAt))
-                diagnosticRow("Repair Attempts", diagnostics.lastLocalOrgDriftRepairAttemptedCount)
-                diagnosticRow("Repaired Properties", diagnostics.lastLocalOrgDriftRepairPropertyCount)
-                diagnosticRow("Repaired Sessions", diagnostics.lastLocalOrgDriftRepairSessionCount)
-                diagnosticRow("Repair Skipped", diagnostics.lastLocalOrgDriftRepairSkippedCount)
-                diagnosticRow("Repair Failures", diagnostics.lastLocalOrgDriftRepairFailureCount)
-                if diagnostics.lastLocalOrgDriftAuditSamples.isEmpty {
-                    diagnosticRow("Samples", "none")
-                } else {
-                    ForEach(Array(diagnostics.lastLocalOrgDriftAuditSamples.enumerated()), id: \.offset) { index, sample in
-                        diagnosticRow(
-                            "Sample \(index + 1)",
-                            AppState.diagnosticsPreviewText(sample, maxLength: 180) ?? "sample_unavailable"
-                        )
-                    }
-                }
-                if diagnostics.lastLocalOrgDriftRepairSamples.isEmpty {
-                    diagnosticRow("Repair Samples", "none")
-                } else {
-                    ForEach(Array(diagnostics.lastLocalOrgDriftRepairSamples.enumerated()), id: \.offset) { index, sample in
-                        diagnosticRow(
-                            "Repair \(index + 1)",
-                            AppState.diagnosticsPreviewText(sample, maxLength: 180) ?? "sample_unavailable"
-                        )
-                    }
-                }
-                Button(isRunningLocalOrgDriftAudit ? "Auditing..." : "Run Local Org Drift Audit") {
-                    guard !isRunningLocalOrgDriftAudit else { return }
-                    isRunningLocalOrgDriftAudit = true
-                    Task {
-                        _ = await appState.runLocalOrgDriftAudit()
-                        await MainActor.run {
-                            isRunningLocalOrgDriftAudit = false
-                        }
-                    }
-                }
-                .disabled(isRunningLocalOrgDriftAudit)
-                .font(.system(size: 14, weight: .semibold))
-                Button(isRepairingConfirmedLocalOrgDrift ? "Repairing..." : "Repair Confirmed Local Org Drift") {
-                    guard !isRepairingConfirmedLocalOrgDrift else { return }
-                    isRepairingConfirmedLocalOrgDrift = true
-                    Task {
-                        _ = await appState.repairConfirmedLocalOrgDrift()
-                        await MainActor.run {
-                            isRepairingConfirmedLocalOrgDrift = false
-                        }
-                    }
-                }
-                .disabled(isRepairingConfirmedLocalOrgDrift)
-                .font(.system(size: 14, weight: .semibold))
-            }
-
-            Section("Manual Diagnostic Trigger") {
-                Button(isUploadingSessionSnapshot ? "Uploading..." : "Upload Selected Session Snapshot") {
-                    guard uploadAvailability.isAvailable else { return }
-                    isUploadingSessionSnapshot = true
-                    Task {
-                        _ = await appState.uploadCurrentSessionSnapshotShadowWrite(
-                            kind: .manual,
-                            trigger: "manual_diagnostic"
-                        )
-                        await MainActor.run {
-                            isUploadingSessionSnapshot = false
-                        }
-                    }
-                }
-                .disabled(!uploadAvailability.isAvailable || isUploadingSessionSnapshot)
-                .font(.system(size: 14, weight: .semibold))
-                Text(uploadAvailability.reason)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Last Sanitized Attempt") {
-                diagnosticRow("Snapshot ID", diagnostics.lastSnapshotID?.uuidString ?? "none")
-                diagnosticRow("Property ID", diagnostics.lastPropertyID?.uuidString ?? "none")
-                diagnosticRow("Session ID", diagnostics.lastSessionID?.uuidString ?? "none")
-                diagnosticRow("Snapshot Kind", diagnostics.lastKind ?? "none")
-                diagnosticRow("Trigger", diagnostics.lastTrigger ?? "none")
-                diagnosticRow("Generated Payload Path", AppState.diagnosticsPreviewText(diagnostics.lastUploadPath) == nil ? "false" : "true")
-                diagnosticRow("Storage Upload Completed", diagnostics.lastStorageUploadCompleted ? "true" : "false")
-                diagnosticRow("Row Insert Completed", diagnostics.lastRowInsertCompleted ? "true" : "false")
-            }
-
-            Section("Remote Readback") {
-                Text("Read-only row and payload consistency check. It does not hydrate sessions, restore data, switch reads, download media, or change local session state.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                diagnosticRow("Status", diagnostics.lastReadbackStatus)
-                diagnosticRow("Last Checked", formattedRunDate(diagnostics.lastReadbackAt))
-                diagnosticRow("Snapshot ID", diagnostics.lastReadbackSnapshotID?.uuidString ?? "none")
-                diagnosticRow("Row Found", diagnostics.lastReadbackRowFound ? "true" : "false")
-                diagnosticRow("Payload Readable", diagnostics.lastReadbackPayloadReadable ? "true" : "false")
-                diagnosticRow("Checksum Verified", diagnostics.lastReadbackChecksumVerified ? "true" : "false")
-                diagnosticRow("Row/Object Consistent", diagnostics.lastReadbackRowObjectConsistent ? "true" : "false")
-                diagnosticRow("Payload Byte Size", diagnostics.lastReadbackPayloadByteSize.map(String.init) ?? "none")
-                diagnosticRow("Snapshot Created", formattedRunDate(diagnostics.lastReadbackSnapshotCreatedAt))
-                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastReadbackFailureMessage, maxLength: 160) {
-                    diagnosticRow("Readback Failure", failure)
-                }
-                Button(isCheckingSnapshotReadback ? "Checking..." : "Check Remote Readback") {
-                    isCheckingSnapshotReadback = true
-                    Task {
-                        _ = await appState.validateLatestSessionSnapshotRemoteReadback()
-                        await MainActor.run {
-                            isCheckingSnapshotReadback = false
-                        }
-                    }
-                }
-                .disabled(isCheckingSnapshotReadback)
-                .font(.system(size: 14, weight: .semibold))
-            }
-
-            Section("Snapshot Restore Diagnostics") {
-                Text("Diagnostics are read-only. Metadata hydration is a separate manual action that writes local session, shot, issue, and guided metadata only; it does not restore media, download originals, switch canonical reads, or bypass local_newer_conflict / production policy blocks.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                diagnosticRow("Result", diagnostics.lastRestoreDiagnosticsResult)
-                diagnosticRow("Last Checked", formattedRunDate(diagnostics.lastRestoreDiagnosticsAt))
-                diagnosticRow("Property ID", diagnostics.lastRestoreDiagnosticsPropertyID?.uuidString ?? "none")
-                diagnosticRow("Session ID", diagnostics.lastRestoreDiagnosticsSessionID?.uuidString ?? "none")
-                diagnosticRow("Snapshot ID", diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none")
-                diagnosticRow("Row Found", diagnostics.lastRestoreDiagnosticsRowFound ? "true" : "false")
-                diagnosticRow("Object Readable", diagnostics.lastRestoreDiagnosticsObjectReadable ? "true" : "false")
-                diagnosticRow("Checksum Verified", diagnostics.lastRestoreDiagnosticsChecksumVerified ? "true" : "false")
-                diagnosticRow("Byte Size Matches", diagnostics.lastRestoreDiagnosticsByteSizeMatches ? "true" : "false")
-                diagnosticRow("Row/Object Verified", diagnostics.lastRestoreDiagnosticsRowObjectVerified ? "true" : "false")
-                diagnosticRow("Parent Remote Verified", diagnostics.lastRestoreDiagnosticsParentRemoteVerified ? "true" : "false")
-                diagnosticRow("Snapshot Schema", diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion.map(String.init) ?? "none")
-                diagnosticRow("Snapshot Created", formattedRunDate(diagnostics.lastRestoreDiagnosticsSnapshotCreatedAt))
-                diagnosticRow("Snapshot Generated", formattedRunDate(diagnostics.lastRestoreDiagnosticsSnapshotGeneratedAt))
-                diagnosticRow("Local Known State", formattedRunDate(diagnostics.lastRestoreDiagnosticsLocalKnownStateAt))
-                diagnosticRow("Local Known Source", diagnostics.lastRestoreDiagnosticsLocalKnownStateSource ?? "none")
-                diagnosticRow("Freshness", diagnostics.lastRestoreDiagnosticsFreshness)
-                diagnosticRow("Local Session Exists", diagnostics.lastRestoreDiagnosticsLocalSessionExists ? "true" : "false")
-                diagnosticRow("Local Session Status", diagnostics.lastRestoreDiagnosticsLocalSessionStatus ?? "none")
-                diagnosticRow("Local Shots", diagnostics.lastRestoreDiagnosticsLocalShotCount.map(String.init) ?? "none")
-                diagnosticRow("Local Issues", diagnostics.lastRestoreDiagnosticsLocalIssueCount.map(String.init) ?? "none")
-                diagnosticRow("Local Guided", diagnostics.lastRestoreDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
-                diagnosticRow("Snapshot Shots", diagnostics.lastRestoreDiagnosticsSnapshotShotCount.map(String.init) ?? "none")
-                diagnosticRow("Snapshot Issues", diagnostics.lastRestoreDiagnosticsSnapshotIssueCount.map(String.init) ?? "none")
-                diagnosticRow("Snapshot Guided", diagnostics.lastRestoreDiagnosticsSnapshotGuidedCount.map(String.init) ?? "none")
-                diagnosticRow("Media Manifest Count", diagnostics.lastRestoreDiagnosticsSnapshotMediaManifestCount.map(String.init) ?? "none")
-                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFailureReason, maxLength: 160) {
-                    diagnosticRow("Failure Reason", failure)
-                }
-                diagnosticRow("Media Retrieval Allowed", mediaRetrievalConfirmation.canRetrieve ? "true" : "false")
-                diagnosticRow("Media Retrieval Blocked", mediaRetrievalConfirmation.blockedReason ?? "none")
-                diagnosticRow("Media Retrieval Attempted", diagnostics.lastMediaRetrievalAttemptedCount)
-                diagnosticRow("Media Retrieval Downloaded", diagnostics.lastMediaRetrievalDownloadedCount)
-                diagnosticRow("Media Retrieval Checksums", diagnostics.lastMediaRetrievalChecksumVerifiedCount)
-                diagnosticRow("Media Retrieval Existing", diagnostics.lastMediaRetrievalSkippedExistingCount)
-                diagnosticRow("Media Retrieval Failed", diagnostics.lastMediaRetrievalFailedCount)
-                diagnosticRow("Recovered Local Paths", diagnostics.lastMediaRetrievalRecoveredLocalPathCount)
-                diagnosticRow("Hydration Allowed", diagnostics.lastHydrationAllowed ? "true" : "false")
-                diagnosticRow("Hydration Blocked", diagnostics.lastHydrationBlockedReason ?? "none")
-                diagnosticRow("Hydration Source", diagnostics.lastHydrationSourceSnapshotID?.uuidString ?? "none")
-                diagnosticRow("Hydrated At", formattedRunDate(diagnostics.lastHydrationAt))
-                diagnosticRow("Hydrated Session", diagnostics.lastHydrationSessionID?.uuidString ?? "none")
-                diagnosticRow("Hydrated Shots", diagnostics.lastHydrationShotCount)
-                diagnosticRow("Hydrated Issues", diagnostics.lastHydrationIssueCount)
-                diagnosticRow("Hydrated Guided", diagnostics.lastHydrationGuidedCount)
-                diagnosticRow("Production Hydration Allowed", hydrationPolicy.productionHydrationAllowed ? "true" : "false")
-                diagnosticRow("Hydration Mode", hydrationPolicy.hydrationMode)
-                diagnosticRow("Hydration Scope", hydrationPolicy.hydrationScope)
-                diagnosticRow("Production Hydration Blocked Reason", hydrationPolicy.productionHydrationBlockedReason ?? "none")
-                diagnosticRow("Hydration Confirmation Required", hydrationConfirmation.confirmationRequired ? "true" : "false")
-                diagnosticRow("Hydration Action Available", hydrationConfirmation.canHydrate ? "true" : "false")
-                diagnosticRow("Hydration Action Blocked Reason", hydrationConfirmation.blockedReason ?? "none")
-                Button(isCheckingSnapshotRestoreDiagnostics ? "Checking..." : "Check Restore Diagnostics") {
-                    isCheckingSnapshotRestoreDiagnostics = true
-                    Task {
-                        _ = await appState.validateLatestSessionSnapshotRestoreDiagnostics()
-                        await MainActor.run {
-                            isCheckingSnapshotRestoreDiagnostics = false
-                        }
-                    }
-                }
-                .disabled(isCheckingSnapshotRestoreDiagnostics)
-                .font(.system(size: 14, weight: .semibold))
-                Button(isHydratingSnapshotMetadata ? "Hydrating..." : "Review Metadata Hydration...") {
-                    isShowingHydrationConfirmation = true
-                }
-                .disabled(isHydratingSnapshotMetadata)
-                .font(.system(size: 14, weight: .semibold))
-                Button(isRetrievingSnapshotMedia ? "Retrieving..." : "Retrieve Snapshot Media Test-Only") {
-                    isShowingMediaRetrievalConfirmation = true
-                }
-                .disabled(isRetrievingSnapshotMedia)
-                .font(.system(size: 14, weight: .semibold))
-            }
-
-            Section("Snapshot Recovery Cohort") {
-                Text("Read-only recovery cohort and readiness summary. It does not hydrate metadata, download media, switch canonical reads, or change local or remote state.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                diagnosticRow("Cohort", diagnostics.lastRecoveryCohortCategory)
-                diagnosticRow("Readiness", diagnostics.lastRecoveryReadiness)
-                diagnosticRow("Risk", diagnostics.lastRecoveryRiskLevel)
-                diagnosticRow("Snapshot Age Seconds", diagnostics.lastRecoverySnapshotFreshnessAgeSeconds.map { String(Int($0)) } ?? "none")
-                diagnosticRow("Hydration Eligibility", diagnostics.lastRecoveryHydrationEligibilityReason)
-                diagnosticRow("Latest Snapshot Covered", diagnostics.lastRecoveryLatestSnapshotCovered ? "true" : "false")
-                diagnosticRow("Restore Result", diagnostics.lastRecoveryRestoreDiagnosticsResult)
-                Button(isCheckingRecoveryCohort ? "Checking..." : "Check Recovery Cohort") {
-                    isCheckingRecoveryCohort = true
-                    Task {
-                        _ = await appState.validateSnapshotRecoveryCohort()
-                        await MainActor.run {
-                            isCheckingRecoveryCohort = false
-                        }
-                    }
-                }
-                .disabled(isCheckingRecoveryCohort)
-                .font(.system(size: 14, weight: .semibold))
-            }
-            }
-
-            Section("Snapshot Package Validation") {
-                Text("Selected-session package validation. It keeps canonical reads disabled, does not activate, does not write remote state, and removes package-candidate diagnostic artifacts before a pass.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                if let packageValidationReport {
-                    diagnosticRow("Package Parity", packageValidationReport.packageParity.state.rawValue)
-                    diagnosticRow("Package Blockers", packageValidationReport.packageParity.blockers.isEmpty ? "none" : packageValidationReport.packageParity.blockers.joined(separator: ", "))
-                    diagnosticRow("Rollback", packageValidationReport.fullyRestoredRollback.state.rawValue)
-                    diagnosticRow("Rollback Blockers", packageValidationReport.fullyRestoredRollback.blockers.isEmpty ? "none" : packageValidationReport.fullyRestoredRollback.blockers.joined(separator: ", "))
-                    diagnosticRow("Snapshot ID", packageValidationReport.snapshotID?.uuidString ?? "none")
-                    NavigationLink {
-                        DebugSessionSnapshotUploadTextView(
-                            snapshotText: packageValidationReport.combinedReportText,
-                            title: "Package Validation",
-                            footerText: "Copies the selected-session package validation reports as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
-                        )
-                    } label: {
-                        Text("View Copyable Package Validation Report")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                } else {
-                    diagnosticRow("Package Parity", "not run")
-                    diagnosticRow("Rollback", "not run")
-                }
-                Button(isRunningPackageValidation ? "Running..." : AppState.localHealthSessionSnapshotPackageValidationActionTitle) {
-                    guard !isRunningPackageValidation else { return }
-                    isRunningPackageValidation = true
-                    Task {
-                        let report = await appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
-                        await MainActor.run {
-                            packageValidationReport = report
-                            isRunningPackageValidation = false
-                        }
-                    }
-                }
-                .disabled(isRunningPackageValidation)
-                .font(.system(size: 14, weight: .semibold))
-            }
-
-            DebugSessionSnapshotCanonicalReadDiagnosticsSection(
-                appState: appState,
-                diagnostics: diagnostics,
-                isCheckingCanonicalReadDiagnostics: $isCheckingCanonicalReadDiagnostics,
-                isBuildingCanonicalCandidateOverlay: $isBuildingCanonicalCandidateOverlay,
-                uploadTarget: uploadTarget,
-                packageValidationReport: packageValidationReport
-            )
-        }
-        .navigationTitle("Snapshot Upload")
-        .navigationBarTitleDisplayMode(.inline)
-        .alert("Hydrate Metadata From Snapshot?", isPresented: $isShowingHydrationConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            if hydrationConfirmation.canHydrate {
-                Button("Hydrate Local Metadata Only", role: .destructive) {
-                    isHydratingSnapshotMetadata = true
-                    Task {
-                        _ = await appState.hydrateMetadataFromLatestSessionSnapshot()
-                        await MainActor.run {
-                            isHydratingSnapshotMetadata = false
-                        }
-                    }
-                }
-            }
-        } message: {
-            Text(hydrationConfirmation.messageText)
-        }
-        .alert("Retrieve Snapshot Media Test-Only?", isPresented: $isShowingMediaRetrievalConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            if mediaRetrievalConfirmation.canRetrieve {
-                Button("Retrieve Test Media", role: .destructive) {
-                    isRetrievingSnapshotMedia = true
-                    Task {
-                        _ = await appState.retrieveSnapshotMediaTestOnly()
-                        await MainActor.run {
-                            isRetrievingSnapshotMedia = false
-                        }
-                    }
-                }
-            }
-        } message: {
-            Text(mediaRetrievalConfirmation.messageText)
-        }
-    }
-
-    @ViewBuilder
-    private func diagnosticRow(_ label: String, _ value: Int) -> some View {
-        diagnosticRow(label, String(value))
-    }
-
-    private func optionalBoolText(_ value: Bool?) -> String {
-        value.map { $0 ? "true" : "false" } ?? "not checked"
-    }
-
-    @ViewBuilder
-    private func diagnosticRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.primary)
-            Spacer(minLength: 12)
-            Text(value)
-                .font(.system(size: 14, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.trailing)
-                .textSelection(.enabled)
-        }
-        .padding(.vertical, 2)
-    }
-
-    private func formattedRunDate(_ date: Date?) -> String {
-        date?.formatted(date: .abbreviated, time: .standard) ?? "never"
-    }
-}
-
-private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
-    @ObservedObject var appState: AppState
-    let diagnostics: AppState.SessionSnapshotUploadDiagnostics
-    @Binding var isCheckingCanonicalReadDiagnostics: Bool
-    @Binding var isBuildingCanonicalCandidateOverlay: Bool
-    let uploadTarget: AppState.ManualSessionSnapshotUploadTarget?
-    let packageValidationReport: AppState.LocalHealthSessionSnapshotPackageValidationReport?
-    @State private var isShowingCanonicalCandidateActivationConfirmation = false
-    @State private var isActivatingCanonicalCandidate = false
-    @State private var isRollingBackCanonicalCandidate = false
-    @State private var isReplayingFlaggedObservationShadowWrites = false
-    @State private var flaggedObservationReplayActionResult: AppState.SelectedSessionFlaggedObservationReplayActionResult?
-    @State private var isReplayingSelectedSessionLifecycleShadowWrite = false
-    @State private var selectedSessionLifecycleReplayActionResult: AppState.SelectedSessionLifecycleReplayActionResult?
-    @State private var operatorApproval: AppState.ProductionCohortOperatorApprovalDiagnostics?
-    @State private var isAuthorizingSelectedSessionQA = false
-    @State private var isRunningSelectedSessionValidationPipeline = false
-    @State private var selectedSessionValidationPipelineReport: AppState.LocalHealthSelectedSessionValidationPipelineReport?
-
-    private var rolloutReadiness: AppState.CanonicalRolloutReadinessDiagnostics {
-        AppState.makeCanonicalRolloutReadinessDiagnostics(diagnostics)
-    }
-
-    private var activationGate: AppState.ProductionSingleSessionActivationGateDiagnostics {
-        appState.productionSingleSessionActivationGateForSelectedSession(approval: operatorApproval)
-    }
-
-    private var packageEvidenceReady: Bool {
-        packageValidationReport?.packageParity.state == .testOnlyPackageParityPassed &&
-            packageValidationReport?.packageParity.blockers.isEmpty == true &&
-            packageValidationReport?.fullyRestoredRollback.state == .testOnlyFullyRestoredPackageRollbackPassed &&
-            packageValidationReport?.fullyRestoredRollback.blockers.isEmpty == true
-    }
-
-    private var qaControlsPresentation: AppState.LocalHealthSelectedSessionQAControlsPresentationState {
-        appState.localHealthSelectedSessionQAControlsPresentationState
-    }
-
-    var body: some View {
-        Group {
-        Section("Controlled Activation Evaluation") {
-            Text("Selected-session diagnostic activation evaluation only. This does not enable broad canonical reads, change supabase_read_enabled, write remote state, or change export, seal, sync, media, or iCloud behavior.")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-            if let uploadTarget {
-                diagnosticRow("Selected Property", uploadTarget.propertyName)
-                diagnosticRow("Selected Org", diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
-                diagnosticRow("Property ID", uploadTarget.propertyID.uuidString)
-                diagnosticRow("Session ID", uploadTarget.sessionID.uuidString)
-                diagnosticRow("Session Status", uploadTarget.sessionStatus.rawValue)
-            } else {
-                diagnosticRow("Selected Org", diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
-                diagnosticRow("Selected Property", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
-                diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
-            }
-            diagnosticRow("Snapshot ID", packageValidationReport?.snapshotID?.uuidString ?? diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none")
-            diagnosticRow("Package Parity", packageValidationReport?.packageParity.state.rawValue ?? "not run")
-            diagnosticRow("Package Blockers", packageValidationReport.map { $0.packageParity.blockers.isEmpty ? "none" : compactListSummary($0.packageParity.blockers) } ?? "not run")
-            diagnosticRow("Rollback Validation", packageValidationReport?.fullyRestoredRollback.state.rawValue ?? "not run")
-            diagnosticRow("Rollback Blockers", packageValidationReport.map { $0.fullyRestoredRollback.blockers.isEmpty ? "none" : compactListSummary($0.fullyRestoredRollback.blockers) } ?? "not run")
-            diagnosticRow("Package Evidence Ready", packageEvidenceReady ? "true" : "false")
-            diagnosticRow("Candidate Diagnostics Ready", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
-            diagnosticRow("Overlay Ready", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
-            diagnosticRow("Operator Approval", operatorApproval?.state.rawValue ?? "not recorded")
-            diagnosticRow("Approval Scope", operatorApproval?.approvedScope.description ?? "none")
-            diagnosticRow("Approval Expires", formattedDate(operatorApproval?.expirationTimestamp))
-            diagnosticRow("Approval Blocked", compactValue(operatorApproval?.approvalBlockedReason ?? "none"))
-            diagnosticRow("Activation Gate", activationGate.productionSingleSessionActivationGateEnabled ? "enabled" : "disabled")
-            diagnosticRow("Gate Allowed", activationGate.gateAllowed ? "true" : "false")
-            diagnosticRow("Gate Blocked", compactValue(activationGate.gateBlockedReason ?? "none"))
-            diagnosticRow("Gate Selected Scope", activationGate.selectedScope.description)
-            diagnosticRow("Gate Approved Scope", activationGate.approvedScope.description)
-            diagnosticRow("Activation Allowed", diagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
-            diagnosticRow("Activation Blocked", compactValue(diagnostics.lastCanonicalCandidateActivationBlockedReason))
-            diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateActivationActiveSource)
-            diagnosticRow("Rollback Availability", diagnostics.lastCanonicalCandidateActivationRollbackAvailable ? "available" : "missing")
-            diagnosticRow("supabase_read_enabled", appState.backendFeatureFlags.supabaseReadEnabled ? "true" : "false")
-            diagnosticRow("Broad Canonical Reads", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "enabled" : "disabled")
-            diagnosticRow("QA Authorization", diagnostics.runtimeSelectedSessionQAAuthAuthorized ? "authorized" : "not authorized")
-            diagnosticRow("QA Authorized Org", diagnostics.runtimeSelectedSessionQAAuthOrgID?.uuidString ?? "none")
-            diagnosticRow("QA Authorized Property", diagnostics.runtimeSelectedSessionQAAuthPropertyID?.uuidString ?? "none")
-            diagnosticRow("QA Authorized Session", diagnostics.runtimeSelectedSessionQAAuthSessionID?.uuidString ?? "none")
-            diagnosticRow("QA Authorized At", formattedDate(diagnostics.runtimeSelectedSessionQAAuthAuthorizedAt))
-            diagnosticRow("QA Expires", formattedDate(diagnostics.runtimeSelectedSessionQAAuthExpiresAt))
-            diagnosticRow("QA Freshness", diagnostics.runtimeSelectedSessionQAAuthFreshness)
-            diagnosticRow("QA Scope Match", diagnostics.runtimeSelectedSessionQAAuthScopeMatches ? "true" : "false")
-            diagnosticRow("QA Clear Reason", compactValue(diagnostics.runtimeSelectedSessionQAAuthClearReason ?? "none"))
-            diagnosticRow("Pipeline State", diagnostics.lastSelectedSessionValidationPipelineState)
-            diagnosticRow("Pipeline Blocker", compactValue(diagnostics.lastSelectedSessionValidationPipelineBlocker ?? "none"))
-            diagnosticRow("QA Controls", qaControlsPresentation.controlsMounted ? "available" : "blocked")
-            if let blocker = qaControlsPresentation.blocker {
-                diagnosticRow("QA Controls Blocker", blocker)
-                diagnosticRow("QA Target Reason", compactValue(qaControlsPresentation.targetResolutionReason))
-            }
-        }
-
-        Section("Canonical Read - Rollout Readiness") {
-            diagnosticRow("Readiness State", rolloutReadiness.state.rawValue)
-            diagnosticRow("Next Action", rolloutReadiness.nextRecommendedAction)
-            diagnosticRow("Checklist", rolloutReadiness.checklistPassed ? "pass" : "needs review")
-            diagnosticRow("Blockers", compactListSummary(rolloutReadiness.blockers))
-            ForEach(rolloutReadiness.checklist) { item in
-                diagnosticRow(item.label, item.passed ? "pass" : "fail")
-            }
-        }
-
-        Section("Canonical Read - Read Diagnostics") {
-            Text("Read-only local-vs-remote normalized row comparison. It does not switch canonical reads, hydrate data, restore files, download media, or change local or remote state.")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-            diagnosticRow("Result", diagnostics.lastCanonicalReadDiagnosticsResult)
-            diagnosticRow("Checked", formattedDate(diagnostics.lastCanonicalReadDiagnosticsAt))
-            diagnosticRow("Verified Org", diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
-            diagnosticRow("Property ID", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
-            diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
-            diagnosticRow("Local Property", diagnostics.lastCanonicalReadDiagnosticsLocalPropertyFound ? "true" : "false")
-            diagnosticRow("Local Session", diagnostics.lastCanonicalReadDiagnosticsLocalSessionFound ? "true" : "false")
-            diagnosticRow("Remote Property", diagnostics.lastCanonicalReadDiagnosticsRemotePropertyFound ? "true" : "false")
-            diagnosticRow("Remote Session", diagnostics.lastCanonicalReadDiagnosticsRemoteSessionFound ? "true" : "false")
-            diagnosticRow("Count Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsCountParity))
-            diagnosticRow("Status Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsStatusParity))
-            diagnosticRow("Parent Org", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent))
-            diagnosticRow("Parent Property", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent))
-            diagnosticRow("Local Shots", diagnostics.lastCanonicalReadDiagnosticsLocalShotCount.map(String.init) ?? "none")
-            diagnosticRow("Remote Shots", diagnostics.lastCanonicalReadDiagnosticsRemoteShotCount.map(String.init) ?? "none")
-            diagnosticRow("Local Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount.map(String.init) ?? "none")
-            diagnosticRow("Remote Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")
-            diagnosticRow("Local Guided", diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
-            diagnosticRow("Local Known State", formattedDate(diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateAt))
-            diagnosticRow("Known State Source", diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateSource ?? "none")
-            diagnosticRow("Remote Freshness Seconds", diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")
-            diagnosticRow("Remote Revision", diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")
-            diagnosticRow("Recommendation", diagnostics.lastCanonicalReadDiagnosticsRecommendation)
-            if let blockedReason = AppState.diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) {
-                diagnosticRow("Blocked Reason", blockedReason)
-            }
-        }
-
-        Section("Canonical Read - Parity / Repair") {
-            diagnosticRow("Parity Gaps", compactListSummary(diagnostics.lastNormalizedParityGapTaxonomy))
-            diagnosticRow("Completeness", diagnostics.lastNormalizedParityCompleteness)
-            diagnosticRow("Shadow Coverage", diagnostics.lastRemoteShadowWriteCoverage)
-            diagnosticRow("Missing Remote", diagnostics.lastMissingRemoteEntityClassification)
-            diagnosticRow("Lineage Source", diagnostics.lastLineageDivergenceSource)
-            diagnosticRow("Repair Tooling", diagnostics.lastParityRepairToolingRecommended ? "recommended" : "not required")
-            diagnosticRow("Canonical Blocked", diagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
-            diagnosticRow("Repair Strategies", compactListSummary(diagnostics.lastParityRepairStrategies))
-            diagnosticRow("Completeness Score", String(format: "%.2f", diagnostics.lastParityCompletenessScore))
-            diagnosticRow("Shadow Score", String(format: "%.2f", diagnostics.lastShadowWriteCoverageScore))
-            diagnosticRow("Lineage Confidence", diagnostics.lastLineageConfidence)
-            diagnosticRow("Missing Child Count", "\(diagnostics.lastMissingChildCount)")
-            diagnosticRow("Replay Eligibility", diagnostics.lastReplayEligibility)
-            diagnosticRow("Repair Phase", diagnostics.lastParityRepairRolloutPhase)
-            diagnosticRow("Backfill Eligible", diagnostics.lastNormalizedBackfillEligible ? "true" : "false")
-            diagnosticRow("Backfill Blocked", diagnostics.lastNormalizedBackfillBlockedReason)
-            diagnosticRow("Backfill Planned", "sessions \(diagnostics.lastNormalizedBackfillPlannedSessionUpserts), shots \(diagnostics.lastNormalizedBackfillPlannedShotUpserts), observations \(diagnostics.lastNormalizedBackfillPlannedObservationUpserts)")
-            diagnosticRow("Backfill Executed", "\(diagnostics.lastNormalizedBackfillExecutedEntityCount)")
-            diagnosticRow("Backfill Skipped", "\(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
-            diagnosticRow("Remote Newer Conflicts", "\(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
-            diagnosticRow("Production Backfill", diagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
-        }
-
-        Section("Canonical Read - Candidate") {
-            diagnosticRow("Candidate Flag", diagnostics.lastCanonicalReadCandidateFlagEnabled ? "enabled" : "off")
-            diagnosticRow("Candidate Allowed", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
-            diagnosticRow("Candidate Blocked", compactValue(diagnostics.lastCanonicalReadCandidateBlockedReason))
-            diagnosticRow("Effective Source", diagnostics.lastCanonicalReadCandidateEffectiveSourceRecommendation)
-            diagnosticRow("Local Fallback", diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable ? "available" : "missing")
-            diagnosticRow("Candidate Parity", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateParityConfidence))
-            diagnosticRow("Candidate Replay", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateReplayConfidence))
-            diagnosticRow("Candidate Media", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateMediaRecoveryConfidence))
-            diagnosticRow("Candidate Remote State", diagnostics.lastCanonicalReadCandidateRemoteStateReadable ? "readable" : "blocked")
-            diagnosticRow("Candidate Scope", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "production-wide" : "allowlisted/test-only")
-            if !diagnostics.lastCanonicalReadCandidateWarnings.isEmpty {
-                diagnosticRow("Candidate Warnings", compactListSummary(diagnostics.lastCanonicalReadCandidateWarnings))
-            }
-        }
-
-        Section("Canonical Read - Overlay") {
-            diagnosticRow("Overlay Built", diagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
-            diagnosticRow("Overlay Allowed", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
-            diagnosticRow("Overlay Blocked", compactValue(diagnostics.lastCanonicalCandidateOverlayBlockedReason))
-            diagnosticRow("Overlay Source", diagnostics.lastCanonicalCandidateOverlaySource)
-            diagnosticRow("Overlay Property", diagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")
-            diagnosticRow("Overlay Session", diagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")
-            diagnosticRow("Overlay Shots", "\(diagnostics.lastCanonicalCandidateOverlayShotCount)")
-            diagnosticRow("Overlay Issues", "\(diagnostics.lastCanonicalCandidateOverlayIssueObservationCount)")
-            diagnosticRow("Overlay Fallback", diagnostics.lastCanonicalCandidateOverlayFallbackSource)
-            diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateOverlayActiveSource)
-            diagnosticRow("Rollback/Fallback", diagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
-            diagnosticRow("Overlay Production", diagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
-        }
-
-        Section("Canonical Read - Comparison") {
-            diagnosticRow("Comparison Result", diagnostics.lastCanonicalCandidateOverlayComparisonResult)
-            diagnosticRow("Local Counts", "shots \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalShotCount.map(String.init) ?? "none"), issues \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount.map(String.init) ?? "none")")
-            diagnosticRow("Candidate Counts", "shots \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteShotCount.map(String.init) ?? "none"), issues \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount.map(String.init) ?? "none")")
-            diagnosticRow("Freshness", "local \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness), remote \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness)")
-            diagnosticRow("Why Trusted", compactValue(diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason))
-            diagnosticRow("Why Blocked", compactValue(diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason))
-        }
-
-        Section("Canonical Read - Activation / Rollback") {
-            diagnosticRow("Activation Allowed", diagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
-            diagnosticRow("Activation Blocked", compactValue(diagnostics.lastCanonicalCandidateActivationBlockedReason))
-            diagnosticRow("Activation Active Source", diagnostics.lastCanonicalCandidateActivationActiveSource)
-            diagnosticRow("Activation Rollback Source", diagnostics.lastCanonicalCandidateActivationRollbackSource)
-            diagnosticRow("Activation Scope", diagnostics.lastCanonicalCandidateActivationScope)
-            diagnosticRow("Activation Property", diagnostics.lastCanonicalCandidateActivationPropertyID?.uuidString ?? "none")
-            diagnosticRow("Activation Session", diagnostics.lastCanonicalCandidateActivationSessionID?.uuidString ?? "none")
-            diagnosticRow("Activation Rollback", diagnostics.lastCanonicalCandidateActivationRollbackAvailable ? "available" : "missing")
-            diagnosticRow("Last Activation", formattedDate(diagnostics.lastCanonicalCandidateActivationLastActivatedAt))
-            diagnosticRow("Last Rollback", formattedDate(diagnostics.lastCanonicalCandidateActivationLastRolledBackAt))
-            diagnosticRow("Production Activation", diagnostics.lastCanonicalCandidateActivationProductionBlocked ? "blocked" : "not blocked")
-            if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
-                diagnosticRow("Rollout Blockers", compactListSummary(diagnostics.lastCanonicalReadRolloutBlockers))
-            }
-        }
-
-        Section("Controlled Activation Evaluation Actions") {
-            NavigationLink {
-                DebugSessionSnapshotUploadTextView(
-                    snapshotText: AppState.canonicalReadRolloutReportText(
-                        diagnostics,
-                        operatorApproval: operatorApproval,
-                        singleSessionActivationGatePolicy: AppState.loadProductionSingleSessionActivationGatePolicy()
-                    ),
-                    title: "Canonical Read Report",
-                    footerText: "Copies the sanitized canonical-read rollout report as plain text. It keeps full canonical details out of the primary diagnostic rows and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
-                )
-            } label: {
-                Text("View Canonical Read Rollout Report")
-                    .font(.system(size: 14, weight: .semibold))
-            }
-            Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
-                guard !isCheckingCanonicalReadDiagnostics else { return }
-                isCheckingCanonicalReadDiagnostics = true
-                Task {
-                    _ = await appState.runCanonicalReadDiagnosticsForSelectedSession(
-                        productionValidationEvidence: packageValidationReport
-                    )
-                    await MainActor.run {
-                        isCheckingCanonicalReadDiagnostics = false
-                    }
-                }
-            }
-            .disabled(isCheckingCanonicalReadDiagnostics)
-            .font(.system(size: 14, weight: .semibold))
-            Button(isBuildingCanonicalCandidateOverlay ? "Building..." : "Build Canonical Candidate Overlay") {
-                guard !isBuildingCanonicalCandidateOverlay else { return }
-                isBuildingCanonicalCandidateOverlay = true
-                Task {
-                    _ = await appState.buildCanonicalCandidateOverlayForSelectedSession(
-                        productionValidationEvidence: packageValidationReport
-                    )
-                    await MainActor.run {
-                        isBuildingCanonicalCandidateOverlay = false
-                    }
-                }
-            }
-            .disabled(isBuildingCanonicalCandidateOverlay)
-            .font(.system(size: 14, weight: .semibold))
-            if qaControlsPresentation.controlsMounted {
-                Button(isAuthorizingSelectedSessionQA ? "Authorizing..." : AppState.localHealthAuthorizeSelectedSessionQAActionTitle) {
-                    guard !isAuthorizingSelectedSessionQA else { return }
-                    isAuthorizingSelectedSessionQA = true
-                    Task {
-                        _ = await MainActor.run {
-                            appState.authorizeSelectedSessionForQAValidation()
-                        }
-                        await MainActor.run {
-                            isAuthorizingSelectedSessionQA = false
-                        }
-                    }
-                }
-                .disabled(isAuthorizingSelectedSessionQA)
-                .font(.system(size: 14, weight: .semibold))
-                Button(AppState.localHealthClearSelectedSessionQAActionTitle) {
-                    _ = appState.clearSelectedSessionQAValidationAuthorization()
-                }
-                .disabled(!diagnostics.runtimeSelectedSessionQAAuthAuthorized)
-                .font(.system(size: 14, weight: .semibold))
-                Button(isRunningSelectedSessionValidationPipeline ? "Running..." : AppState.localHealthSelectedSessionValidationPipelineActionTitle) {
-                    guard !isRunningSelectedSessionValidationPipeline else { return }
-                    isRunningSelectedSessionValidationPipeline = true
-                    Task {
-                        let report = await appState.runSelectedSessionValidationPipeline()
-                        await MainActor.run {
-                            selectedSessionValidationPipelineReport = report
-                            isRunningSelectedSessionValidationPipeline = false
-                        }
-                    }
-                }
-                .disabled(isRunningSelectedSessionValidationPipeline)
-                .font(.system(size: 14, weight: .semibold))
-                if let selectedSessionValidationPipelineReport {
-                    diagnosticRow("Pipeline Result", selectedSessionValidationPipelineReport.state.rawValue)
-                    diagnosticRow("Pipeline Final Blocker", compactValue(selectedSessionValidationPipelineReport.finalBlocker ?? "none"))
-                    diagnosticRow("Pipeline Next Action", selectedSessionValidationPipelineReport.recommendedNextAction)
-                    NavigationLink {
-                        DebugSessionSnapshotUploadTextView(
-                            snapshotText: selectedSessionValidationPipelineReport.reportText,
-                            title: "Validation Pipeline",
-                            footerText: "Copies the selected-session validation pipeline report as plain text. It is diagnostic-only and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
-                        )
-                    } label: {
-                        Text("View Copyable Validation Pipeline Report")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                }
-            } else {
-                diagnosticRow("QA Controls", "blocked")
-                diagnosticRow("QA Controls Blocker", qaControlsPresentation.blocker ?? "selected_session_required")
-                diagnosticRow("QA Target Reason", compactValue(qaControlsPresentation.targetResolutionReason))
-                if let selectedPropertyID = qaControlsPresentation.selectedPropertyID {
-                    diagnosticRow("QA Selected Property", selectedPropertyID.uuidString)
-                }
-            }
-            Button(isReplayingFlaggedObservationShadowWrites ? "Replaying..." : AppState.localHealthFlaggedObservationReplayActionTitle) {
-                guard !isReplayingFlaggedObservationShadowWrites else { return }
-                isReplayingFlaggedObservationShadowWrites = true
-                Task {
-                    let result = await appState.replayFlaggedObservationShadowWritesForSelectedSession(
-                        productionValidationEvidence: packageValidationReport
-                    )
-                    await MainActor.run {
-                        flaggedObservationReplayActionResult = result
-                        isReplayingFlaggedObservationShadowWrites = false
-                    }
-                }
-            }
-            .disabled(isReplayingFlaggedObservationShadowWrites)
-            .font(.system(size: 14, weight: .semibold))
-            if let flaggedObservationReplayActionResult {
-                diagnosticRow("Replay Action", flaggedObservationReplayActionResult.allowed ? "allowed" : "blocked")
-                diagnosticRow("Replay Blocked", compactValue(flaggedObservationReplayActionResult.blockedReason ?? "none"))
-                diagnosticRow("Replay Scope", "property \(flaggedObservationReplayActionResult.propertyID?.uuidString ?? "none"), session \(flaggedObservationReplayActionResult.sessionID?.uuidString ?? "none")")
-                if let replay = flaggedObservationReplayActionResult.replayResult {
-                    diagnosticRow("Replay Result", replay.message)
-                    diagnosticRow("Replay Executed", "\(replay.upsertedCount)")
-                    diagnosticRow("Replay Skipped", "\(replay.skippedCount)")
-                    diagnosticRow("Replay Remote Newer", "\(replay.remoteNewerConflictCount)")
-                    diagnosticRow("Replay Failed", "\(replay.failedCount)")
-                }
-                diagnosticRow("Post-Replay Diagnostics", flaggedObservationReplayActionResult.diagnosticsAfterReplay == nil ? "not run" : "refreshed")
-            }
-            Button(isReplayingSelectedSessionLifecycleShadowWrite ? "Replaying..." : AppState.localHealthSelectedSessionLifecycleReplayActionTitle) {
-                guard !isReplayingSelectedSessionLifecycleShadowWrite else { return }
-                isReplayingSelectedSessionLifecycleShadowWrite = true
-                Task {
-                    let result = await appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
-                        productionValidationEvidence: packageValidationReport
-                    )
-                    await MainActor.run {
-                        selectedSessionLifecycleReplayActionResult = result
-                        isReplayingSelectedSessionLifecycleShadowWrite = false
-                    }
-                }
-            }
-            .disabled(isReplayingSelectedSessionLifecycleShadowWrite)
-            .font(.system(size: 14, weight: .semibold))
-            if let selectedSessionLifecycleReplayActionResult {
-                diagnosticRow("Lifecycle Replay Action", selectedSessionLifecycleReplayActionResult.allowed ? "allowed" : "blocked")
-                diagnosticRow("Lifecycle Replay Blocked", compactValue(selectedSessionLifecycleReplayActionResult.blockedReason ?? "none"))
-                diagnosticRow("Lifecycle Replay Scope", "property \(selectedSessionLifecycleReplayActionResult.propertyID?.uuidString ?? "none"), session \(selectedSessionLifecycleReplayActionResult.sessionID?.uuidString ?? "none")")
-                if let replay = selectedSessionLifecycleReplayActionResult.replayResult {
-                    diagnosticRow("Lifecycle Planned", "\(replay.attemptedCount)")
-                    diagnosticRow("Lifecycle Executed", "\(replay.upsertedCount)")
-                    diagnosticRow("Lifecycle Skipped", "\(replay.skippedCount)")
-                    diagnosticRow("Lifecycle Remote Newer", "\(replay.remoteNewerConflictCount)")
-                    diagnosticRow("Lifecycle Failed", "\(replay.failedCount)")
-                    diagnosticRow("Lifecycle Result", replay.message)
-                }
-                diagnosticRow("Lifecycle Post-Replay Diagnostics", selectedSessionLifecycleReplayActionResult.diagnosticsAfterReplay == nil ? "not run" : "refreshed")
-            }
-            Button("Record Fresh Operator Approval") {
-                operatorApproval = appState.makeProductionSingleSessionOperatorApprovalForSelectedSession()
-            }
-            .font(.system(size: 14, weight: .semibold))
-            Button("Clear Operator Approval") {
-                operatorApproval = nil
-            }
-            .disabled(operatorApproval == nil)
-            .font(.system(size: 14, weight: .semibold))
-            Button(isActivatingCanonicalCandidate ? "Activating..." : "Activate Canonical Candidate For Session") {
-                guard !isActivatingCanonicalCandidate else { return }
-                isShowingCanonicalCandidateActivationConfirmation = true
-            }
-            .disabled(isActivatingCanonicalCandidate)
-            .font(.system(size: 14, weight: .semibold))
-            .alert("Activate Canonical Candidate?", isPresented: $isShowingCanonicalCandidateActivationConfirmation) {
-                Button("Cancel", role: .cancel) {}
-                Button("Activate") {
-                    guard !isActivatingCanonicalCandidate else { return }
-                    isActivatingCanonicalCandidate = true
-                    Task {
-                        _ = await MainActor.run {
-                            appState.activateCanonicalCandidateForSelectedSession(operatorApproval: operatorApproval)
-                        }
-                        await MainActor.run {
-                            isActivatingCanonicalCandidate = false
-                        }
-                    }
-                }
-            } message: {
-                Text("Selected session only. Active read source changes to the candidate overlay for this diagnostic scope, local fallback stays retained, export/seal/sync/media/iCloud behavior is unchanged, and production remains blocked.")
-            }
-            Button(isRollingBackCanonicalCandidate ? "Rolling Back..." : "Rollback To Local Source") {
-                guard !isRollingBackCanonicalCandidate else { return }
-                isRollingBackCanonicalCandidate = true
-                Task {
-                    _ = await MainActor.run {
-                        appState.rollbackCanonicalCandidateToLocalSource()
-                    }
-                    await MainActor.run {
-                        isRollingBackCanonicalCandidate = false
-                    }
-                }
-            }
-            .disabled(isRollingBackCanonicalCandidate)
-            .font(.system(size: 14, weight: .semibold))
-        }
-        }
-    }
-
-    private func optionalBoolText(_ value: Bool?) -> String {
-        value.map { $0 ? "true" : "false" } ?? "not checked"
-    }
-
-    private func compactListSummary(_ values: [String]) -> String {
-        guard !values.isEmpty else { return "none" }
-        let preview = values.prefix(2).joined(separator: ", ")
-        guard values.count > 2 else { return preview }
-        return "\(preview) +\(values.count - 2) more"
-    }
-
-    private func compactValue(_ value: String) -> String {
-        AppState.diagnosticsPreviewText(value, maxLength: 80) ?? "none"
-    }
-}
-
-private struct DebugSessionSnapshotUploadTextView: View {
+private struct DebugCopyableReportTextView: View {
     let snapshotText: String
     var title: String = "Snapshot Upload Report"
     var footerText: String = "Copies the sanitized shadow-write upload report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+    var copyButtonTitle: String = "Copy Report"
     @State private var didCopySnapshot: Bool = false
 
     var body: some View {
         List {
             Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                Button(didCopySnapshot ? "Copied Plain Text" : copyButtonTitle) {
                     UIPasteboard.general.string = snapshotText
                     didCopySnapshot = true
                 }
@@ -13074,95 +10008,11 @@ private struct StageLazySessionSnapshotUploadTextView: View {
     let reportText: () -> String
 
     var body: some View {
-        DebugSessionSnapshotUploadTextView(
+        DebugCopyableReportTextView(
             snapshotText: reportText(),
             title: title,
             footerText: footerText
         )
-    }
-}
-
-private struct DebugExportSealPreflightSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized advisory preflight report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Preflight Report")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugFutureEnforcementWarningsSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized future enforcement warnings report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Future Warnings")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct DebugEnforcementPolicyMatrixSnapshotTextView: View {
-    let snapshotText: String
-    @State private var didCopySnapshot: Bool = false
-
-    var body: some View {
-        List {
-            Section {
-                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
-                    UIPasteboard.general.string = snapshotText
-                    didCopySnapshot = true
-                }
-                .font(.system(size: 14, weight: .semibold))
-            } footer: {
-                Text("Copies the sanitized enforcement policy matrix as plain text only. It does not include local paths, signed URLs, media, or auth material.")
-            }
-
-            Section {
-                Text(snapshotText)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .navigationTitle("Policy Matrix")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -13848,17 +10698,18 @@ private struct FastLaneReferenceViewerState: Identifiable {
     let startIndex: Int
 }
 
-private struct FastLaneSharedActionMenuItem: Identifiable {
+struct CaptureActionMenuItem: Identifiable {
     let id = UUID()
     let title: String
     var isEnabled: Bool = true
     let action: () -> Void
 }
 
-private struct FastLaneSharedActionMenuOverlay: View {
+struct CaptureActionMenuOverlay: View {
     let rotation: Angle
-    let items: [FastLaneSharedActionMenuItem]
+    let items: [CaptureActionMenuItem]
     let onDismiss: () -> Void
+    var cornerStyle: RoundedCornerStyle = .continuous
 
     var body: some View {
         ZStack {
@@ -13917,9 +10768,9 @@ private struct FastLaneSharedActionMenuOverlay: View {
                 .padding(.vertical, 6)
             }
             .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: cornerStyle))
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: cornerStyle)
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
@@ -14086,8 +10937,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
     @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
     @State private var chromeLocationMode: CameraChromeLocationMode = .exterior
-    @StateObject private var fastDetailTypesModel = FastLaneDetailTypesModel()
-    @StateObject private var fastPanelDetailTypesModel = DetailTypesModel()
+    @StateObject private var fastDetailTypesModel = DetailTypesModel.shared
     @StateObject private var locationManager = LocationManager()
     @State private var fastLaneCaptureProfileState: CaptureProfile = .residential
     @State private var fastMetadataContext: AppState.FastRuntimeCaptureMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
@@ -14332,7 +11182,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
         }
         .sheet(isPresented: $showFastLaneManageBuildingsSheet) {
-            FastLaneManageBuildingsSheet(
+            ContentView.ManageBuildingsSheet(
                 options: $fastBuildingOptions,
                 selectedBuilding: Binding(
                     get: { fastMetadataContext.building },
@@ -14349,14 +11199,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         ))
                     }
                 ),
-                onClose: { showFastLaneManageBuildingsSheet = false }
+                buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                buildingFullLabelForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                onClose: { showFastLaneManageBuildingsSheet = false },
+                onPersist: { options, selectedBuilding in
+                    FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
+                }
             )
         }
         .sheet(item: $fastLaneManageDetailMode) { mode in
-            FastLaneManageDetailTypesView(mode: mode, profile: fastLaneCaptureProfile, model: fastDetailTypesModel)
+            ContentView.ManageDetailTypesView(mode: mode == .interior ? .interior : .exterior, profile: fastLaneCaptureProfile, model: fastDetailTypesModel)
         }
         .sheet(isPresented: $showFastLaneManageTradesSheet) {
-            FastLaneManageTradesSheet(
+            ContentView.ManageTradesSheet(
                 options: $fastTradeOptions,
                 selectedTrade: Binding(
                     get: { fastMetadataContext.trade ?? "" },
@@ -14373,7 +11228,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         ))
                     }
                 ),
-                onClose: { showFastLaneManageTradesSheet = false }
+                onClose: { showFastLaneManageTradesSheet = false },
+                onPersist: { options, selectedTrade in
+                    FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
+                }
             )
         }
         .fullScreenCover(isPresented: $showFastLaneGallery) {
@@ -14424,7 +11282,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     selectedTrade: fastMetadataContext.trade
                 ),
                 buildingOptions: $fastBuildingOptions,
-                detailTypesModel: fastPanelDetailTypesModel,
+                detailTypesModel: fastDetailTypesModel,
                 buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 cache: fastLaneGalleryImageCache,
@@ -14472,7 +11330,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 allowReferenceFallback: true,
                 captureProfile: fastLaneCaptureProfile,
                 buildingOptions: $fastBuildingOptions,
-                detailTypesModel: fastPanelDetailTypesModel,
+                detailTypesModel: fastDetailTypesModel,
                 buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 refreshToken: fastLaneGalleryRefreshToken,
@@ -14659,16 +11517,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
-    private func reopenFastLaneResolutionObservation(_ observation: Observation) {
-        if appState.fastRuntimeReopenObservation(
-            propertyID: context.propertyID,
-            observationID: observation.id
-        ) {
-            reloadFastLaneSideControlPayloadFromLocalStore()
-        } else {
-            showFastLaneSideControlToast("Unable to reopen issue")
-        }
-    }
 
     private var cameraChromeDisplay: CameraChromeDisplayModel {
         let profile = fastLaneCaptureProfile
@@ -14933,7 +11781,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         guard !isFastLaneCaptureProfileLocked else { return }
         let targetProfile: CaptureProfile = fastLaneCaptureProfile == .residential ? .commercial : .residential
         fastLaneCaptureProfileState = targetProfile
-        fastDetailTypesModel.resetSelectionsToOverview(for: targetProfile)
+        fastDetailTypesModel.resetFastLaneSelectionsToOverview(for: targetProfile)
         let currentMode = chromeLocationMode
         let nextElevation = currentMode == .interior
             ? "Interior"
@@ -15182,10 +12030,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var fastLaneArmedReferenceActionOverlay: some View {
         let referencePath = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: false)
         let capturedPath = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: true)
-        return FastLaneSharedActionMenuOverlay(
+        return CaptureActionMenuOverlay(
             rotation: .degrees(glyphAngleDegrees),
             items: [
-                FastLaneSharedActionMenuItem(
+                CaptureActionMenuItem(
                     title: "View Reference Image",
                     isEnabled: referencePath != nil,
                     action: {
@@ -15193,7 +12041,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         showFastLaneArmedReferenceImage(isCaptured: false)
                     }
                 ),
-                FastLaneSharedActionMenuItem(
+                CaptureActionMenuItem(
                     title: "View Captured Image",
                     isEnabled: capturedPath != nil,
                     action: {
@@ -15278,7 +12126,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneDetailNoteOverlay: some View {
-        FastLaneDetailNoteModal(
+        DetailNoteModal(
             elevation: fastMetadataContext.elevation,
             detailType: fastMetadataContext.detailType,
             existingNote: fastMetadataContext.detailNote ?? "",
@@ -15341,71 +12189,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
-    private var headerPanel: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 10) {
-                Button(isClosing ? "Closing..." : "Close") {
-                    closePreview()
-                }
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .background(Color.black.opacity(0.58))
-                .clipShape(Capsule())
-                .disabled(isClosing || isSavingFastCapture || camera.isCapturing)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(propertyName)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    Text(isDraftResume ? "\(sessionTypeLabel) Draft" : sessionTypeLabel)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.78))
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 0)
-
-                if isDebugMode {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isTimingExpanded.toggle()
-                        }
-                    } label: {
-                        Text(isTimingExpanded ? "Hide" : "Timing")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.92))
-                            .padding(.horizontal, 10)
-                            .frame(height: 28)
-                            .background(Color.black.opacity(0.58))
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            HStack(spacing: 8) {
-                statusBadge(previewStatusTitle, color: previewStatusColor)
-                statusBadge("Saved \(fastLaneGalleryDisplayCount)", color: .white.opacity(0.82))
-                if didCompleteUpload {
-                    statusBadge("Uploaded", color: .green)
-                }
-                if isDebugMode, let total = lastCapture?.totalMilliseconds {
-                    statusBadge("Last \(String(format: "%.0f", total)) ms", color: .white.opacity(0.82))
-                }
-                Spacer(minLength: 0)
-            }
-
-            if isDebugMode && isTimingExpanded {
-                timingPanel
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-    }
 
     private var previewStatusTitle: String {
         if isFastLaneExiting { return "Closing" }
@@ -15419,142 +12202,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         return camera.isPreviewRunning ? .green : .yellow
     }
 
-    private var shutterPanel: some View {
-        VStack(spacing: 10) {
-            if let captureErrorMessage {
-                Text(captureErrorMessage)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.red.opacity(0.72))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .padding(.horizontal, 18)
-            }
 
-            if capturedCount > 0 {
-                if isDebugMode {
-                    HStack(spacing: 10) {
-                        Button(isRunningCompleteDryRun ? "Checking..." : "Complete Dry Run") {
-                            runCompleteDryRun()
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.94))
-                        .padding(.horizontal, 14)
-                        .frame(height: 34)
-                        .background(Color.black.opacity(0.58))
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(Color.white.opacity(0.20), lineWidth: 1)
-                        )
-                        .disabled(isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
 
-                        Button(didCompleteUpload ? "Uploaded" : (isRunningCompleteUpload ? "Uploading..." : "Fast Complete Upload (Experimental)")) {
-                            runCompleteUpload()
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.96))
-                        .padding(.horizontal, 14)
-                        .frame(height: 34)
-                        .background(Color.orange.opacity(0.72))
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
-                        )
-                        .disabled(didCompleteUpload || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
-                    }
-                } else {
-                    productionCompletePanel
-                }
-            }
-
-            if isDebugMode && didCompleteUpload {
-                HStack(spacing: 10) {
-                    Button(isRunningReportPackageDryRun ? "Checking Report..." : "Fast Report Package Dry Run") {
-                        runReportPackageDryRun()
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.96))
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .background(Color.green.opacity(0.68))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
-                    )
-                    .disabled(isRunningReportPackageDryRun || isRunningReportHandoff || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
-
-                    Button(isRunningReportHandoff ? "Handing Off..." : "Fast Report Handoff (Experimental)") {
-                        runReportHandoff()
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.96))
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .background(Color.teal.opacity(0.72))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
-                    )
-                    .disabled(isRunningReportHandoff || isRunningReportPackageDryRun || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
-                }
-            }
-
-            HStack(spacing: 18) {
-                Text("Saved \(fastLaneGalleryDisplayCount)")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.88))
-                    .frame(width: 92, alignment: .leading)
-
-                Button {
-                    beginFastLaneShutter()
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(isSavingFastCapture || camera.isCapturing ? 0.62 : 0.96))
-                            .frame(width: 72, height: 72)
-                        Circle()
-                            .stroke(Color.black.opacity(0.78), lineWidth: 3)
-                            .frame(width: 58, height: 58)
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(!canUseFastShutter)
-                .accessibilityLabel("Capture photo")
-
-                Text(didCompleteUpload ? "Uploaded" : (isSavingFastCapture || camera.isCapturing ? "Saving" : (isDraftResume ? "Draft" : "Ready")))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(canUseFastShutter ? 0.88 : 0.55))
-                    .frame(width: 92, alignment: .trailing)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 28)
-    }
-
-    private var sessionTypeLabel: String {
-        switch context.sessionType {
-        case .fullDocumentation:
-            return "Full Documentation"
-        case .punchlistVisit:
-            return "Punchlist"
-        }
-    }
-
-    private func statusBadge(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundColor(color)
-            .padding(.horizontal, 9)
-            .frame(height: 24)
-            .background(Color.black.opacity(0.52))
-            .clipShape(Capsule())
-    }
 
     private var timingPanel: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -15611,64 +12260,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
-    private var productionCompletePanel: some View {
-        VStack(spacing: 8) {
-            if case let .failed(message) = productionCompleteState {
-                Text(message)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color.red.opacity(0.72))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
 
-            HStack(spacing: 10) {
-                Button(productionCompleteButtonTitle) {
-                    runProductionComplete()
-                }
-                .font(.system(size: 15, weight: .bold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 20)
-                .frame(height: 42)
-                .background(productionCompleteState.isComplete ? Color.green.opacity(0.74) : Color.blue.opacity(0.84))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(Color.white.opacity(0.26), lineWidth: 1)
-                )
-                .disabled(!canRunProductionComplete)
-
-                if productionCompleteState.isRunning {
-                    ProgressView()
-                        .tint(.white)
-                }
-            }
-
-            if let status = productionCompleteStatusText {
-                Text(status)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.82))
-            }
-        }
-    }
-
-    private var productionCompleteButtonTitle: String {
-        switch productionCompleteState {
-        case .idle, .failed:
-            return "Complete"
-        case .validating:
-            return "Checking..."
-        case .uploading:
-            return "Uploading..."
-        case .preparingReport:
-            return "Preparing Report..."
-        case .complete:
-            return "Complete"
-        }
-    }
 
     private var productionCompleteStatusText: String? {
         switch productionCompleteState {
@@ -17221,36 +13813,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
-    private func openFastLaneGuidedImage(_ guidedShot: GuidedShot) {
-        guard let path = fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot),
-              let asset = fastLaneReportAsset(forLocalPath: path, creationDate: guidedShot.shot?.capturedAt) else {
-            showFastLaneSideControlToast("Image not available yet")
-            return
-        }
 
-        fastLaneReferenceViewerState = FastLaneReferenceViewerState(
-            title: guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Guided Photo" : guidedShot.title,
-            assets: [asset],
-            startIndex: 0
-        )
-    }
-
-    private func openFastLaneIssueImage(_ observation: Observation) {
-        guard let path = fastLaneIssueThumbnailPathByID[observation.id] ?? fastLaneIssueDisplayImagePath(for: observation),
-              let asset = fastLaneReportAsset(
-                forLocalPath: path,
-                creationDate: observation.shots.first(where: { $0.imageLocalIdentifier == path })?.capturedAt
-              ) else {
-            showFastLaneSideControlToast("Image not available yet")
-            return
-        }
-
-        fastLaneReferenceViewerState = FastLaneReferenceViewerState(
-            title: observation.statement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Issue Photo" : observation.statement,
-            assets: [asset],
-            startIndex: 0
-        )
-    }
 
     private func fastLaneArmedGuidedShot() -> GuidedShot? {
         guard case .guided(let id) = fastLaneCaptureIntent else { return nil }
@@ -17304,23 +13867,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         return fastLaneExistingLocalPath(raw)
     }
 
-    private func fastLaneArmedReferenceDetailLabel() -> String {
-        if let guidedShot = fastLaneArmedGuidedShot() {
-            return fastLaneConciseContextLabel(
-                building: guidedShot.building,
-                elevation: guidedShot.targetElevation,
-                detailType: guidedShot.detailType
-            )
-        }
-        if let observation = fastLaneArmedObservation() {
-            return fastLaneConciseContextLabel(
-                building: observation.building,
-                elevation: observation.targetElevation,
-                detailType: observation.detailType
-            )
-        }
-        return ""
-    }
 
     private func showFastLaneArmedReferenceImage(isCaptured: Bool) {
         guard let path = fastLaneArmedReferenceImageLocalIdentifier(isCaptured: isCaptured),
@@ -18025,7 +14571,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneGalleryRefreshToken = UUID()
                 refreshFastLaneGalleryThumbnail(from: gallery.assets)
                 scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
-                scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(requests: mergedPreviousGallery.requests)
+                scheduleFastLaneGalleryMediaHydrationIfNeeded(requests: mergedPreviousGallery.requests)
             }
         }
     }
@@ -18388,24 +14934,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             sessionID: context.sessionID,
             shots: localShots
         )
-        let pending = requests.filter { request in
-            !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
-        }
-        guard !pending.isEmpty else { return }
-        for request in pending {
-            fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
-        }
-
-        Task {
-            let didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
-            guard didStart else { return }
-            await MainActor.run {
-                reloadFastLaneGalleryAssets()
-            }
-        }
+        scheduleFastLaneGalleryMediaHydrationIfNeeded(requests: requests)
     }
 
-    private func scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(
+    private func scheduleFastLaneGalleryMediaHydrationIfNeeded(
         requests: [AppState.OperationalMediaHydrationRequest]
     ) {
         let pending = requests.filter { request in
@@ -18445,69 +14977,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
-    private func runCompleteDryRun() {
-        let photoCount = fastLaneCompletionCapturedPhotoCount()
-        guard photoCount > 0, !isRunningCompleteDryRun else { return }
-        isRunningCompleteDryRun = true
-        Task {
-            let result = await appState.runFastRuntimeCompleteDryRun(
-                context: context,
-                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: photoCount
-            )
-            await MainActor.run {
-                completeDryRunResult = result
-                isRunningCompleteDryRun = false
-            }
-        }
-    }
 
-    private func runCompleteUpload() {
-        let photoCount = fastLaneCompletionCapturedPhotoCount()
-        guard photoCount > 0, !isRunningCompleteUpload else { return }
-        isRunningCompleteUpload = true
-        Task {
-            let result = await appState.runFastRuntimeCompleteUpload(
-                context: context,
-                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: photoCount
-            )
-            await MainActor.run {
-                completeUploadResult = result
-                if result.success {
-                    didCompleteUpload = true
-                }
-                isRunningCompleteUpload = false
-            }
-        }
-    }
 
-    private func runReportPackageDryRun() {
-        guard didCompleteUpload, !isRunningReportPackageDryRun else { return }
-        isRunningReportPackageDryRun = true
-        Task {
-            let result = await appState.runFastRuntimeReportPackageDryRun(context: context)
-            await MainActor.run {
-                reportPackageDryRunResult = result
-                isRunningReportPackageDryRun = false
-            }
-        }
-    }
 
-    private func runReportHandoff() {
-        guard didCompleteUpload, !isRunningReportHandoff else { return }
-        isRunningReportHandoff = true
-        Task {
-            let result = await appState.runFastRuntimeReportHandoff(
-                propertyID: context.propertyID,
-                sessionType: context.sessionType
-            )
-            await MainActor.run {
-                reportHandoffResult = result
-                isRunningReportHandoff = false
-            }
-        }
-    }
 
     private func runProductionComplete() {
         primeFastLaneSideControlSnapshot()
@@ -18973,297 +15445,6 @@ private enum FastLaneMetadataOptions {
     }
 }
 
-private final class FastLaneDetailTypesModel: ObservableObject {
-    struct DetailTypeItem: Identifiable, Codable, Equatable {
-        var id: UUID = UUID()
-        var name: String
-    }
-
-    @Published var residentialInteriorTypes: [DetailTypeItem] = []
-    @Published var residentialExteriorTypes: [DetailTypeItem] = []
-    @Published var commercialInteriorTypes: [DetailTypeItem] = []
-    @Published var commercialExteriorTypes: [DetailTypeItem] = []
-    @Published var selectedResidentialInterior: String = ""
-    @Published var selectedResidentialExterior: String = ""
-    @Published var selectedCommercialInterior: String = ""
-    @Published var selectedCommercialExterior: String = ""
-
-    private let residentialInteriorTypesKey = "scout.detailTypes.residential.interior.list.v1"
-    private let residentialExteriorTypesKey = "scout.detailTypes.residential.exterior.list.v1"
-    private let commercialInteriorTypesKey = "scout.detailTypes.commercial.interior.list.v1"
-    private let commercialExteriorTypesKey = "scout.detailTypes.commercial.exterior.list.v1"
-    private let selectedResidentialInteriorKey = "scout.detailTypes.residential.interior.selected.v1"
-    private let selectedResidentialExteriorKey = "scout.detailTypes.residential.exterior.selected.v1"
-    private let selectedCommercialInteriorKey = "scout.detailTypes.commercial.interior.selected.v1"
-    private let selectedCommercialExteriorKey = "scout.detailTypes.commercial.exterior.selected.v1"
-    private let legacyResidentialInteriorTypesKey = "scout.detailTypes.interior.list.v4"
-    private let legacyResidentialExteriorTypesKey = "scout.detailTypes.exterior.list.v4"
-    private let legacySelectedResidentialInteriorKey = "scout.detailTypes.interior.selected.v4"
-    private let legacySelectedResidentialExteriorKey = "scout.detailTypes.exterior.selected.v4"
-    private let legacyInteriorTypesKey = "scout.detailTypes.interior.list.v2"
-    private let legacyExteriorTypesKey = "scout.detailTypes.exterior.list.v2"
-    private let legacySelectedInteriorKey = "scout.detailTypes.interior.selected.v2"
-    private let legacySelectedExteriorKey = "scout.detailTypes.exterior.selected.v2"
-    private var pendingPersist: DispatchWorkItem?
-
-    private let defaultResidentialInteriorTypes = [
-        "Overview", "Entry / Foyer", "Living Room", "Sitting room", "Kitchen", "Guest kitchen",
-        "Dining Area", "Primary Bedroom", "Primary bath", "Bedroom 2", "Bedroom 3", "Bedroom 4",
-        "Bedroom 5", "Bathroom", "Half bath", "Guest bathroom", "Hallway", "Stairs",
-        "Basement stairs", "Secondary stairs", "Laundry", "Garage", "Mechanical / HVAC", "Storage"
-    ]
-    private let defaultResidentialExteriorTypes = [
-        "Overview", "Elevation", "Entry / Porch", "Window", "Roofline", "Cladding / Siding",
-        "Driveway / Garage", "Backyard / Patio", "Landscaping", "Fence / Gate", "Utility / HVAC",
-        "Pool / Outdoor Amenities", "Sidewalk", "Exterior Stairs / Ramp", "Downspout", "Chimney", "Foundation"
-    ]
-    private let defaultCommercialInteriorTypes = [
-        "Overview", "Lobby / Reception", "Corridor", "Stairs", "Elevator", "Office",
-        "Conference Room", "Open Workspace", "Break Room / Kitchenette", "Restroom", "Storage",
-        "Electrical Room", "Mechanical Room", "IT / Server Room", "Janitorial / Service Room",
-        "Retail Floor", "Suite Entry", "Leasing / Amenity Area"
-    ]
-    private let defaultCommercialExteriorTypes = [
-        "Overview", "Elevation", "Entry", "Storefront", "Loading Dock", "Parking Area",
-        "Site Circulation", "Signage", "Window / Glazing", "Roofline", "Cladding / Facade",
-        "Canopy / Awning", "Exterior Stairs / Ramp", "Trash / Service Area", "Fence / Gate",
-        "Utility / HVAC", "Mechanical Equipment", "Landscape / Hardscape", "Downspout", "Foundation"
-    ]
-
-    init() {
-        load()
-        normalizeDefaultsIfNeeded()
-        addNewResidentialInteriorPresetsIfNeeded()
-    }
-
-    private func addNewResidentialInteriorPresetsIfNeeded() {
-        let migrationKey = "scout.detailTypes.residential.interior.additions.2026-10-09"
-        if !UserDefaults.standard.bool(forKey: migrationKey) {
-            let additions = ["Sitting room", "Guest kitchen", "Primary bath", "Half bath", "Guest bathroom", "Basement stairs", "Secondary stairs"]
-            for name in additions where !residentialInteriorTypes.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-                residentialInteriorTypes.append(DetailTypeItem(name: name))
-            }
-            UserDefaults.standard.set(true, forKey: migrationKey)
-        }
-
-        let orderKey = "scout.detailTypes.residential.interior.additions.order.2026-10-09"
-        guard !UserDefaults.standard.bool(forKey: orderKey) else { return }
-        let placements = [
-            ("Sitting room", "Living Room"),
-            ("Guest kitchen", "Kitchen"),
-            ("Primary bath", "Primary Bedroom"),
-            ("Half bath", "Bathroom"),
-            ("Guest bathroom", "Half bath"),
-            ("Basement stairs", "Stairs"),
-            ("Secondary stairs", "Basement stairs")
-        ]
-        for (name, anchor) in placements {
-            guard let index = residentialInteriorTypes.firstIndex(where: { $0.name == name }),
-                  let anchorIndex = residentialInteriorTypes.firstIndex(where: { $0.name == anchor }) else { continue }
-            let item = residentialInteriorTypes.remove(at: index)
-            residentialInteriorTypes.insert(item, at: min(anchorIndex + (index < anchorIndex ? 0 : 1), residentialInteriorTypes.count))
-        }
-        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
-        UserDefaults.standard.set(true, forKey: orderKey)
-    }
-
-    func items(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
-        switch (profile, mode) {
-        case (.residential, .interior): return residentialInteriorTypes
-        case (.residential, .exterior): return residentialExteriorTypes
-        case (.commercial, .interior): return commercialInteriorTypes
-        case (.commercial, .exterior): return commercialExteriorTypes
-        }
-    }
-
-    func names(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [String] {
-        items(for: mode, profile: profile).map(\.name).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-    }
-
-    func selected(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> String {
-        switch (profile, mode) {
-        case (.residential, .interior): return selectedResidentialInterior
-        case (.residential, .exterior): return selectedResidentialExterior
-        case (.commercial, .interior): return selectedCommercialInterior
-        case (.commercial, .exterior): return selectedCommercialExterior
-        }
-    }
-
-    func setSelected(_ value: String, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior): selectedResidentialInterior = value
-        case (.residential, .exterior): selectedResidentialExterior = value
-        case (.commercial, .interior): selectedCommercialInterior = value
-        case (.commercial, .exterior): selectedCommercialExterior = value
-        }
-        persistSelected()
-    }
-
-    func resetSelectionsToOverview(for profile: CaptureProfile) {
-        let interiorOverview = names(for: .interior, profile: profile)
-            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
-            names(for: .interior, profile: profile).first ??
-            ""
-        let exteriorOverview = names(for: .exterior, profile: profile)
-            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
-            names(for: .exterior, profile: profile).first ??
-            ""
-        setSelected(interiorOverview, for: .interior, profile: profile)
-        setSelected(exteriorOverview, for: .exterior, profile: profile)
-    }
-
-    @discardableResult
-    func insertBlankItem(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> UUID {
-        let newItem = DetailTypeItem(name: "")
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes.append(newItem)
-        case (.residential, .exterior): residentialExteriorTypes.append(newItem)
-        case (.commercial, .interior): commercialInteriorTypes.append(newItem)
-        case (.commercial, .exterior): commercialExteriorTypes.append(newItem)
-        }
-        persistAll()
-        return newItem.id
-    }
-
-    func updateItem(_ value: String, id: UUID, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        let cleaned = value.trimmingCharacters(in: .newlines)
-        switch (profile, mode) {
-        case (.residential, .interior):
-            guard let idx = residentialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            residentialInteriorTypes[idx].name = cleaned
-        case (.residential, .exterior):
-            guard let idx = residentialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            residentialExteriorTypes[idx].name = cleaned
-        case (.commercial, .interior):
-            guard let idx = commercialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            commercialInteriorTypes[idx].name = cleaned
-        case (.commercial, .exterior):
-            guard let idx = commercialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            commercialExteriorTypes[idx].name = cleaned
-        }
-        normalizeDefaultsIfNeeded()
-        persistAll()
-    }
-
-    func delete(at offsets: IndexSet, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior):
-            let deleting = offsets.compactMap { residentialInteriorTypes.indices.contains($0) ? residentialInteriorTypes[$0].name : nil }
-            residentialInteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedResidentialInterior) { selectedResidentialInterior = residentialInteriorTypes.first?.name ?? "" }
-        case (.residential, .exterior):
-            let deleting = offsets.compactMap { residentialExteriorTypes.indices.contains($0) ? residentialExteriorTypes[$0].name : nil }
-            residentialExteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedResidentialExterior) { selectedResidentialExterior = residentialExteriorTypes.first?.name ?? "" }
-        case (.commercial, .interior):
-            let deleting = offsets.compactMap { commercialInteriorTypes.indices.contains($0) ? commercialInteriorTypes[$0].name : nil }
-            commercialInteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedCommercialInterior) { selectedCommercialInterior = commercialInteriorTypes.first?.name ?? "" }
-        case (.commercial, .exterior):
-            let deleting = offsets.compactMap { commercialExteriorTypes.indices.contains($0) ? commercialExteriorTypes[$0].name : nil }
-            commercialExteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedCommercialExterior) { selectedCommercialExterior = commercialExteriorTypes.first?.name ?? "" }
-        }
-        normalizeDefaultsIfNeeded()
-        persistAll()
-    }
-
-    func move(from source: IndexSet, to destination: Int, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
-        switch (profile, mode) {
-        case (.residential, .interior): residentialInteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.residential, .exterior): residentialExteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.commercial, .interior): commercialInteriorTypes.move(fromOffsets: source, toOffset: destination)
-        case (.commercial, .exterior): commercialExteriorTypes.move(fromOffsets: source, toOffset: destination)
-        }
-        schedulePersist()
-    }
-
-    private func schedulePersist() {
-        pendingPersist?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.normalizeDefaultsIfNeeded()
-            self.persistAll()
-        }
-        pendingPersist = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
-    }
-
-    private func load() {
-        residentialInteriorTypes = loadItems(key: residentialInteriorTypesKey, legacyKeys: [legacyResidentialInteriorTypesKey, legacyInteriorTypesKey])
-        residentialExteriorTypes = loadItems(key: residentialExteriorTypesKey, legacyKeys: [legacyResidentialExteriorTypesKey, legacyExteriorTypesKey])
-        commercialInteriorTypes = loadItems(key: commercialInteriorTypesKey, legacyKeys: [])
-        commercialExteriorTypes = loadItems(key: commercialExteriorTypesKey, legacyKeys: [])
-        selectedResidentialInterior = UserDefaults.standard.string(forKey: selectedResidentialInteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialInteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedInteriorKey)
-            ?? ""
-        selectedResidentialExterior = UserDefaults.standard.string(forKey: selectedResidentialExteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialExteriorKey)
-            ?? UserDefaults.standard.string(forKey: legacySelectedExteriorKey)
-            ?? ""
-        selectedCommercialInterior = UserDefaults.standard.string(forKey: selectedCommercialInteriorKey) ?? ""
-        selectedCommercialExterior = UserDefaults.standard.string(forKey: selectedCommercialExteriorKey) ?? ""
-    }
-
-    private func persistAll() {
-        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
-        saveItems(residentialExteriorTypes, key: residentialExteriorTypesKey)
-        saveItems(commercialInteriorTypes, key: commercialInteriorTypesKey)
-        saveItems(commercialExteriorTypes, key: commercialExteriorTypesKey)
-        persistSelected()
-    }
-
-    private func persistSelected() {
-        UserDefaults.standard.set(selectedResidentialInterior, forKey: selectedResidentialInteriorKey)
-        UserDefaults.standard.set(selectedResidentialExterior, forKey: selectedResidentialExteriorKey)
-        UserDefaults.standard.set(selectedCommercialInterior, forKey: selectedCommercialInteriorKey)
-        UserDefaults.standard.set(selectedCommercialExterior, forKey: selectedCommercialExteriorKey)
-    }
-
-    private func normalizeDefaultsIfNeeded() {
-        if residentialInteriorTypes.isEmpty { residentialInteriorTypes = defaultResidentialInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if residentialExteriorTypes.isEmpty { residentialExteriorTypes = defaultResidentialExteriorTypes.map { DetailTypeItem(name: $0) } }
-        if commercialInteriorTypes.isEmpty { commercialInteriorTypes = defaultCommercialInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if commercialExteriorTypes.isEmpty { commercialExteriorTypes = defaultCommercialExteriorTypes.map { DetailTypeItem(name: $0) } }
-        if selectedResidentialInterior.isEmpty { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
-        if selectedResidentialExterior.isEmpty { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
-        if selectedCommercialInterior.isEmpty { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
-        if selectedCommercialExterior.isEmpty { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
-        if !residentialInteriorTypes.contains(where: { $0.name == selectedResidentialInterior }) { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
-        if !residentialExteriorTypes.contains(where: { $0.name == selectedResidentialExterior }) { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
-        if !commercialInteriorTypes.contains(where: { $0.name == selectedCommercialInterior }) { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
-        if !commercialExteriorTypes.contains(where: { $0.name == selectedCommercialExterior }) { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
-    }
-
-    private func firstNonEmpty(from list: [DetailTypeItem]) -> String? {
-        list.first(where: { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.name
-    }
-
-    private func loadItems(key: String, legacyKeys: [String]) -> [DetailTypeItem] {
-        if let data = UserDefaults.standard.data(forKey: key),
-           let decoded = try? JSONDecoder().decode([DetailTypeItem].self, from: data) {
-            return decoded
-        }
-        for legacyKey in legacyKeys {
-            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
-               let decodedItems = try? JSONDecoder().decode([DetailTypeItem].self, from: legacyData) {
-                return decodedItems
-            }
-            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
-               let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
-                return decodedStrings.map { DetailTypeItem(name: $0) }
-            }
-        }
-        return []
-    }
-
-    private func saveItems(_ items: [DetailTypeItem], key: String) {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        UserDefaults.standard.set(data, forKey: key)
-    }
-}
-
 private struct FastLaneSessionActionsSummary: Equatable {
     let guidedRemainingCount: Int
     let flaggedRemainingCount: Int
@@ -19295,7 +15476,6 @@ private struct FastLaneSessionActionsSummary: Equatable {
 }
 
 private struct FastLaneSessionActionsSheet: View {
-    @Environment(\.colorScheme) private var colorScheme
     let summary: FastLaneSessionActionsSummary
     let isEndingSession: Bool
     let endingTitle: String
@@ -19303,17 +15483,44 @@ private struct FastLaneSessionActionsSheet: View {
     let onSaveDraftAndExit: () -> Void
     let onComplete: () -> Void
 
-    private var neutralFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+    var body: some View {
+        SessionActionsPanel(
+            flaggedRemainingCount: summary.flaggedRemainingCount,
+            guidedRemainingCount: summary.guidedRemainingCount,
+            isPunchlistVisit: summary.isPunchlistVisit,
+            exitActionTitle: summary.exitActionTitle,
+            completeActionTitle: summary.exportActionTitle,
+            isEndingSession: isEndingSession,
+            endingTitle: endingTitle,
+            isActionEnabled: !isEndingSession,
+            isCompleteEnabled: !isEndingSession && summary.isExportActionEnabled,
+            disabledReason: summary.isExportActionEnabled ? nil : summary.disabledReason,
+            onResume: onResume,
+            onSaveDraftAndExit: onSaveDraftAndExit,
+            onComplete: onComplete
+        )
     }
+}
 
-    private var neutralStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+struct SessionActionsPanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let flaggedRemainingCount: Int
+    let guidedRemainingCount: Int
+    let isPunchlistVisit: Bool
+    let exitActionTitle: String
+    let completeActionTitle: String
+    let isEndingSession: Bool
+    let endingTitle: String
+    let isActionEnabled: Bool
+    let isCompleteEnabled: Bool
+    let disabledReason: String?
+    let onResume: () -> Void
+    let onSaveDraftAndExit: () -> Void
+    let onComplete: () -> Void
 
-    private var neutralLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var neutralFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.65) }
+    private var neutralStroke: Color { colorScheme.scoutSheetButtonStroke }
+    private var neutralLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     var body: some View {
         GeometryReader { geo in
@@ -19333,9 +15540,9 @@ private struct FastLaneSessionActionsSheet: View {
                             .foregroundColor(.white)
 
                         VStack(spacing: 8) {
-                            summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
-                            if !summary.isPunchlistVisit {
-                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                            summaryRow(title: "Flagged Remaining", value: flaggedRemainingCount)
+                            if !isPunchlistVisit {
+                                summaryRow(title: "Guided Remaining", value: guidedRemainingCount)
                             }
                         }
                         .padding(.horizontal, 12)
@@ -19391,23 +15598,23 @@ private struct FastLaneSessionActionsSheet: View {
             actionButton(
                 title: "Resume",
                 role: .primary,
-                isEnabled: !isEndingSession,
+                isEnabled: isActionEnabled,
                 action: onResume
             )
             actionButton(
-                title: summary.exitActionTitle,
+                title: exitActionTitle,
                 role: .secondary,
-                isEnabled: !isEndingSession,
+                isEnabled: isActionEnabled,
                 action: onSaveDraftAndExit
             )
             actionButton(
-                title: isEndingSession ? endingTitle : summary.exportActionTitle,
+                title: isEndingSession ? endingTitle : completeActionTitle,
                 role: .tertiary,
-                isEnabled: !isEndingSession && summary.isExportActionEnabled,
+                isEnabled: isCompleteEnabled,
                 action: onComplete
             )
 
-            if !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
+            if let disabledReason {
                 Text(disabledReason)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.72))
@@ -19525,23 +15732,10 @@ private struct FastLaneIssueListSheet: View {
     let onClose: () -> Void
 
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
-    @State private var inlineToastText: String?
-    @State private var inlineToastToken: Int = 0
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     var body: some View {
         GeometryReader { geo in
@@ -19590,23 +15784,6 @@ private struct FastLaneIssueListSheet: View {
                             .background(.thinMaterial)
                             .clipShape(Circle())
                             .padding(.top, 66)
-                    }
-                }
-                .overlay(alignment: .top) {
-                    if let inlineToastText {
-                        Text(inlineToastText)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .background(Color.black.opacity(0.72))
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                            )
-                            .padding(.top, 64)
-                            .transition(.opacity)
                     }
                 }
                 .toolbar(.hidden, for: .navigationBar)
@@ -19688,24 +15865,11 @@ private struct FastLaneIssueListSheet: View {
     }
 
     private func refreshOrientation() {
-        let orientation = UIDevice.current.orientation
-        switch orientation {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+        if let orientation = UIDevice.current.orientation.scoutCaptureStableOrientation(includingUpsideDown: true) {
             lastValidOrientation = orientation
-        default:
-            break
         }
     }
 
-    private func showInlineToast(_ text: String) {
-        inlineToastText = text
-        inlineToastToken += 1
-        let token = inlineToastToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            guard token == inlineToastToken else { return }
-            inlineToastText = nil
-        }
-    }
 }
 
 private struct FastLanePanelThumbnail: View {
@@ -19936,309 +16100,7 @@ private struct FastLaneIssueListRow: View {
     }
 }
 
-private struct FastLaneGuidedChecklistSheet: View {
-    let guidedShots: [GuidedShot]
-    let retiredGuidedShots: [GuidedShot]
-    let thumbnailPathByID: [UUID: String]
-    @ObservedObject var imageCache: AssetImageCache
-    let isLoading: Bool
-    let onClose: () -> Void
-    let onSelectGuided: (GuidedShot) -> Void
-    let onOpenImage: (GuidedShot) -> Void
 
-    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
-    @State private var inlineToastText: String?
-    @State private var inlineToastToken: Int = 0
-
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
-
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
-
-    var body: some View {
-        GeometryReader { geo in
-            let contentW = isLandscape ? geo.size.height : geo.size.width
-            let contentH = isLandscape ? geo.size.width : geo.size.height
-
-            NavigationStack {
-                ZStack {
-                    Color(uiColor: .secondarySystemGroupedBackground)
-                        .ignoresSafeArea()
-
-                    if guidedShots.isEmpty && isLoading {
-                        VStack(spacing: 10) {
-                            ProgressView()
-                                .progressViewStyle(.circular)
-                                .tint(.secondary)
-                            Text("Loading")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if guidedShots.isEmpty {
-                        VStack(spacing: 10) {
-                            Image(systemName: "safari")
-                                .font(.system(size: 28, weight: .medium))
-                                .foregroundColor(.secondary)
-                            Text("No guided photos")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        List {
-                            Section {
-                                ForEach(guidedShots) { guidedShot in
-                                    FastLaneGuidedChecklistRow(
-                                        guidedShot: guidedShot,
-                                        thumbnailPath: thumbnailPathByID[guidedShot.id],
-                                        imageCache: imageCache,
-                                        onTap: {
-                                            onSelectGuided(guidedShot)
-                                        },
-                                        onOpenImage: {
-                                            onOpenImage(guidedShot)
-                                        }
-                                    )
-                                }
-                            }
-
-                            if !retiredGuidedShots.isEmpty {
-                                Section("Retired") {
-                                    ForEach(retiredGuidedShots) { guidedShot in
-                                        FastLaneGuidedChecklistRow(
-                                            guidedShot: guidedShot,
-                                            thumbnailPath: thumbnailPathByID[guidedShot.id],
-                                            imageCache: imageCache,
-                                            onTap: {
-                                                showInlineToast("Restore retired guided items is deferred")
-                                            },
-                                            onOpenImage: {
-                                                onOpenImage(guidedShot)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        .listStyle(.insetGrouped)
-                        .scrollIndicators(.hidden)
-                        .scrollContentBackground(.hidden)
-                        .background(Color.clear)
-                    }
-                }
-                .overlay(alignment: .top) {
-                    if let inlineToastText {
-                        Text(inlineToastText)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .background(Color.black.opacity(0.72))
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                            )
-                            .padding(.top, 64)
-                    }
-                }
-                .toolbar(.hidden, for: .navigationBar)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    ZStack {
-                        Text("Guided Checklist")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(.primary)
-                            .minimumScaleFactor(0.75)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .center)
-
-                        HStack(spacing: 10) {
-                            Spacer(minLength: 0)
-
-                            Button(action: onClose) {
-                                Text("Done")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(.primary)
-                                    .frame(width: 72, height: 42)
-                                    .background(Color(uiColor: .secondarySystemBackground))
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 14)
-                    .padding(.bottom, 4)
-                }
-            }
-            .frame(width: contentW, height: contentH, alignment: .center)
-            .rotationEffect(.degrees(rotationDegrees))
-            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
-            .statusBarHidden(isLandscape)
-            .onAppear {
-                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-                refreshOrientation()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-                refreshOrientation()
-            }
-            .onDisappear {
-                UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            }
-        }
-    }
-
-    private func refreshOrientation() {
-        let orientation = UIDevice.current.orientation
-        switch orientation {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
-            lastValidOrientation = orientation
-        default:
-            break
-        }
-    }
-
-    private func showInlineToast(_ text: String) {
-        inlineToastText = text
-        inlineToastToken += 1
-        let token = inlineToastToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            guard token == inlineToastToken else { return }
-            inlineToastText = nil
-        }
-    }
-}
-
-private struct FastLaneGuidedChecklistRow: View {
-    let guidedShot: GuidedShot
-    let thumbnailPath: String?
-    @ObservedObject var imageCache: AssetImageCache
-    let onTap: () -> Void
-    let onOpenImage: () -> Void
-
-    private var fallbackTitleLabel: String {
-        let title = guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? "Guided Shot" : title
-    }
-
-    private var contextLabel: String {
-        let composed = fastLaneConciseContextLabel(
-            building: guidedShot.building,
-            elevation: guidedShot.targetElevation,
-            detailType: guidedShot.detailType
-        )
-        let base = composed.isEmpty ? fallbackTitleLabel : composed
-        return "\(base) - Angle \(max(1, guidedShot.angleIndex ?? 1))"
-    }
-
-    private var statusLabel: String {
-        if guidedShot.isRetired || guidedShot.status == .retired {
-            if let retiredAt = guidedShot.retiredAt {
-                return "Retired \(fastLaneFormatPanelTimestamp(retiredAt))"
-            }
-            return "Retired"
-        }
-        if guidedShot.skipReason != nil {
-            return guidedShot.skipReason.map(fastLaneSkipReasonTitle(for:)) ?? "Skipped"
-        }
-        if guidedShot.isCompleted {
-            return "Captured"
-        }
-        return "Pending"
-    }
-
-    private var statusColor: Color {
-        switch statusLabel {
-        case "Captured":
-            return .green
-        case "Skipped", "Retired":
-            return .gray
-        default:
-            return .orange
-        }
-    }
-
-    private var detailLine: String? {
-        if let note = fastLaneTrimmedNonEmpty(guidedShot.skipReasonNote), guidedShot.skipReason != nil {
-            return note
-        }
-        if let shotNote = fastLaneTrimmedNonEmpty(guidedShot.shot?.note), guidedShot.isCompleted {
-            return shotNote
-        }
-        return nil
-    }
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Button(action: onTap) {
-                FastLanePanelThumbnail(
-                    path: thumbnailPath,
-                    fallbackSystemImage: "photo",
-                    fallbackColor: .secondary,
-                    cache: imageCache
-                )
-            }
-            .buttonStyle(.borderless)
-            .overlay(alignment: .topTrailing) {
-                if statusLabel == "Captured" {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
-                        .padding(4)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(contextLabel)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-
-                Text(statusLabel)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(statusColor)
-
-                if let detailLine {
-                    Text(detailLine)
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.white.opacity(0.66))
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-        .listRowBackground(Color.clear)
-    }
-}
 
 private struct FastLaneCoreChecklistSheet: View {
     let elevationTitle: String
@@ -20372,12 +16234,8 @@ private struct FastLaneCoreChecklistSheet: View {
     }
 
     private func refreshOrientation() {
-        let orientation = UIDevice.current.orientation
-        switch orientation {
-        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+        if let orientation = UIDevice.current.orientation.scoutCaptureStableOrientation(includingUpsideDown: true) {
             lastValidOrientation = orientation
-        default:
-            break
         }
     }
 }
@@ -20501,20 +16359,9 @@ private struct FastLanePhotoLibraryFullscreen: View {
         previousSessionID != nil || !previousAssets.isEmpty
     }
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     var body: some View {
         GeometryReader { geo in
@@ -20670,16 +16517,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
 
     private func refreshOrientation() {
         let orientation = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch orientation {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return orientation
-            default:
-                return nil
-            }
-        }()
+        let newValue = orientation.scoutCaptureStableOrientation()
         guard let newValue, newValue != lastValidOrientation else { return }
         lastValidOrientation = newValue
     }
@@ -20787,20 +16625,9 @@ private struct FastLanePhotoViewer: View {
         _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
     }
 
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
+    private var isLandscape: Bool { lastValidOrientation.scoutCaptureIsLandscape }
 
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
+    private var rotationDegrees: Double { lastValidOrientation.scoutCaptureRotationDegrees }
 
     var body: some View {
         GeometryReader { geo in
@@ -20957,16 +16784,7 @@ private struct FastLanePhotoViewer: View {
 
     private func refreshOrientation() {
         let orientation = UIDevice.current.orientation
-        let newValue: UIDeviceOrientation? = {
-            switch orientation {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return orientation
-            default:
-                return nil
-            }
-        }()
+        let newValue = orientation.scoutCaptureStableOrientation()
         guard let newValue, newValue != lastValidOrientation else { return }
         lastValidOrientation = newValue
     }
@@ -21217,16 +17035,17 @@ private struct FastLaneFilmThumb: View {
     }
 }
 
-private struct FastLaneSheetControlTheme {
+struct FastLaneSheetControlTheme {
     let fill: Color
     let stroke: Color
     let label: Color
 
     static func forScheme(_ scheme: ColorScheme) -> FastLaneSheetControlTheme {
-        if scheme == .light {
-            return FastLaneSheetControlTheme(fill: Color.white.opacity(0.90), stroke: Color.black.opacity(0.14), label: Color.black.opacity(0.88))
-        }
-        return FastLaneSheetControlTheme(fill: Color.black.opacity(0.55), stroke: Color.white.opacity(0.28), label: Color.white)
+        return FastLaneSheetControlTheme(
+            fill: scheme.scoutSheetButtonFill(darkOpacity: 0.55),
+            stroke: scheme.scoutSheetButtonStroke,
+            label: scheme.scoutSheetButtonLabel
+        )
     }
 }
 
@@ -21255,7 +17074,7 @@ private struct FastLaneMetadataFilterSheet: View {
     let context: AppState.FastRuntimeCaptureMetadataContext
     @Binding var buildingOptions: [String]
     @Binding var tradeOptions: [String]
-    @ObservedObject var detailTypesModel: FastLaneDetailTypesModel
+    @ObservedObject var detailTypesModel: DetailTypesModel
     let onCancel: () -> Void
     let onConfirm: (AppState.FastRuntimeCaptureMetadataContext) -> Void
 
@@ -21275,7 +17094,7 @@ private struct FastLaneMetadataFilterSheet: View {
         context: AppState.FastRuntimeCaptureMetadataContext,
         buildingOptions: Binding<[String]>,
         tradeOptions: Binding<[String]>,
-        detailTypesModel: FastLaneDetailTypesModel,
+        detailTypesModel: DetailTypesModel,
         onCancel: @escaping () -> Void,
         onConfirm: @escaping (AppState.FastRuntimeCaptureMetadataContext) -> Void
     ) {
@@ -21356,7 +17175,7 @@ private struct FastLaneMetadataFilterSheet: View {
                 }
             }
             .navigationDestination(item: $selectionContext) { context in
-                FastLaneMetadataSelectionListView(
+                SharedMetadataSelectionListView(
                     title: context.title,
                     options: selectionOptions(for: context.kind),
                     selectedValue: currentSelectionValue(for: context.kind),
@@ -21407,20 +17226,28 @@ private struct FastLaneMetadataFilterSheet: View {
                 .background(Color.clear)
             }
             .sheet(isPresented: $showManageBuildingsSheet, onDismiss: normalizeBuildingSelection) {
-                FastLaneManageBuildingsSheet(
+                ContentView.ManageBuildingsSheet(
                     options: $buildingOptions,
                     selectedBuilding: $selectedBuilding,
-                    onClose: { showManageBuildingsSheet = false }
+                    buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                    buildingFullLabelForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                    onClose: { showManageBuildingsSheet = false },
+                    onPersist: { options, selectedBuilding in
+                        FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
+                    }
                 )
             }
             .sheet(item: $manageDetailMode, onDismiss: normalizeDetailSelection) { mode in
-                FastLaneManageDetailTypesView(mode: mode, profile: profile, model: detailTypesModel)
+                ContentView.ManageDetailTypesView(mode: mode == .interior ? .interior : .exterior, profile: profile, model: detailTypesModel)
             }
             .sheet(isPresented: $showManageTradesSheet, onDismiss: normalizeTradeOptions) {
-                FastLaneManageTradesSheet(
+                ContentView.ManageTradesSheet(
                     options: $tradeOptions,
                     selectedTrade: $selectedTrade,
-                    onClose: { showManageTradesSheet = false }
+                    onClose: { showManageTradesSheet = false },
+                    onPersist: { options, selectedTrade in
+                        FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
+                    }
                 )
             }
             .onAppear {
@@ -21556,7 +17383,7 @@ private struct FastLaneMetadataFilterSheet: View {
     private static let exteriorElevationOptions = ["North", "South", "East", "West"]
 }
 
-private struct FastLaneMetadataSelectionListView: View {
+struct SharedMetadataSelectionListView: View {
     let title: String
     let options: [(title: String, value: String)]
     let selectedValue: String
@@ -21618,386 +17445,7 @@ private struct FastLaneMetadataSelectionListView: View {
     }
 }
 
-private struct FastLaneManageDetailTypesView: View {
-    let mode: CameraChromeLocationMode
-    let profile: CaptureProfile
-    @ObservedObject var model: FastLaneDetailTypesModel
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.dismiss) private var dismiss
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedRow: UUID?
-    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
-    private var titleText: String { "\(profile.title) \(mode == .interior ? "Interior Detail Types" : "Exterior Detail Types")" }
-    private var isEditing: Bool { editModeState == .active }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(model.items(for: mode, profile: profile)) { item in
-                    rowView(item: item)
-                }
-                .onDelete { offsets in
-                    withAnimation(.none) { model.delete(at: offsets, for: mode, profile: profile) }
-                }
-                .onMove { source, destination in
-                    withAnimation(.none) { model.move(from: source, to: destination, for: mode, profile: profile) }
-                }
-            }
-            .environment(\.editMode, $editModeState)
-            .listStyle(.insetGrouped)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack(spacing: 10) {
-                    Button { dismiss() } label: {
-                        toolbarCapsuleLabel {
-                            Text("Done")
-                                .font(.system(size: 17, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    Text(titleText)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .minimumScaleFactor(0.72)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 0) {
-                        Button {
-                            if editModeState != .active { editModeState = .active }
-                            let newId = model.insertBlankItem(for: mode, profile: profile)
-                            DispatchQueue.main.async { focusedRow = newId }
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundColor(theme.label)
-                                .frame(width: 44, height: 42)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            if editModeState == .active {
-                                editModeState = .inactive
-                                focusedRow = nil
-                            } else {
-                                editModeState = .active
-                            }
-                        } label: {
-                            Group {
-                                if editModeState == .active {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 17, weight: .medium))
-                                } else {
-                                    Text("Edit")
-                                        .font(.system(size: 17, weight: .medium))
-                                }
-                            }
-                            .foregroundColor(theme.label)
-                            .frame(width: 72, height: 42)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
-                .background(Color.clear)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func toolbarCapsuleLabel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .foregroundColor(theme.label)
-            .frame(minHeight: 42)
-            .padding(.horizontal, 14)
-            .background(theme.fill)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-    }
-
-    @ViewBuilder
-    private func rowView(item: FastLaneDetailTypesModel.DetailTypeItem) -> some View {
-        if isEditing {
-            TextField("Name", text: bindingForRow(id: item.id))
-                .focused($focusedRow, equals: item.id)
-                .submitLabel(.done)
-                .onSubmit { focusedRow = nil }
-        } else {
-            HStack(spacing: 10) {
-                Text(item.name.isEmpty ? " " : item.name)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    private func bindingForRow(id: UUID) -> Binding<String> {
-        Binding(
-            get: { model.items(for: mode, profile: profile).first(where: { $0.id == id })?.name ?? "" },
-            set: { newValue in
-                withAnimation(.none) {
-                    model.updateItem(newValue, id: id, for: mode, profile: profile)
-                }
-            }
-        )
-    }
-}
-
-private struct FastLaneManageTradesSheet: View {
-    @Environment(\.colorScheme) private var colorScheme
-    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedIndex: Int?
-    @Binding var options: [String]
-    @Binding var selectedTrade: String
-    let onClose: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(Array(options.indices), id: \.self) { index in
-                    if editModeState == .active {
-                        TextField("Trade", text: Binding(
-                            get: { options.indices.contains(index) ? options[index] : "" },
-                            set: { newValue in
-                                guard options.indices.contains(index) else { return }
-                                options[index] = newValue
-                            }
-                        ))
-                        .focused($focusedIndex, equals: index)
-                        .submitLabel(.done)
-                    } else {
-                        HStack(spacing: 10) {
-                            Text(options[index])
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                .onDelete { offsets in options.remove(atOffsets: offsets) }
-                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
-            }
-            .listStyle(.insetGrouped)
-            .environment(\.editMode, $editModeState)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                manageToolbar(title: "Trades")
-            }
-            .onDisappear {
-                FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
-            }
-        }
-    }
-
-    private func manageToolbar(title: String) -> some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Text("Done")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(theme.label)
-                    .frame(minHeight: 42)
-                    .padding(.horizontal, 14)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
-
-            Text(title)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundColor(theme.label)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 0) {
-                Button {
-                    if editModeState != .active { editModeState = .active }
-                    options.append("New Trade")
-                    focusedIndex = max(0, options.count - 1)
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .frame(width: 44, height: 42)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    if editModeState == .active {
-                        editModeState = .inactive
-                        focusedIndex = nil
-                    } else {
-                        editModeState = .active
-                    }
-                } label: {
-                    Group {
-                        if editModeState == .active {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 17, weight: .medium))
-                        } else {
-                            Text("Edit")
-                                .font(.system(size: 17, weight: .medium))
-                        }
-                    }
-                    .foregroundColor(theme.label)
-                    .frame(width: 72, height: 42)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
-            .background(theme.fill)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 4)
-    }
-}
-
-private struct FastLaneManageBuildingsSheet: View {
-    @Environment(\.colorScheme) private var colorScheme
-    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedIndex: Int?
-    @Binding var options: [String]
-    @Binding var selectedBuilding: String
-    let onClose: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(Array(options.indices), id: \.self) { index in
-                    if editModeState == .active {
-                        TextField("Building", text: Binding(
-                            get: { options.indices.contains(index) ? options[index] : "" },
-                            set: { newValue in
-                                guard options.indices.contains(index) else { return }
-                                options[index] = newValue
-                            }
-                        ))
-                        .focused($focusedIndex, equals: index)
-                        .submitLabel(.done)
-                    } else {
-                        HStack(spacing: 10) {
-                            Text(FastLaneMetadataOptions.buildingDisplayName(for: options[index]))
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                .onDelete { offsets in options.remove(atOffsets: offsets) }
-                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
-            }
-            .listStyle(.insetGrouped)
-            .environment(\.editMode, $editModeState)
-            .toolbar(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack(spacing: 10) {
-                    Button(action: onClose) {
-                        Text("Done")
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundColor(theme.label)
-                            .frame(minHeight: 42)
-                            .padding(.horizontal, 14)
-                            .background(theme.fill)
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    Text("Buildings")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(theme.label)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 0) {
-                        Button {
-                            if editModeState != .active { editModeState = .active }
-                            options.append("New Building")
-                            focusedIndex = max(0, options.count - 1)
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundColor(theme.label)
-                                .frame(width: 44, height: 42)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            if editModeState == .active {
-                                editModeState = .inactive
-                                focusedIndex = nil
-                            } else {
-                                editModeState = .active
-                            }
-                        } label: {
-                            Group {
-                                if editModeState == .active {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 17, weight: .medium))
-                                } else {
-                                    Text("Edit")
-                                        .font(.system(size: 17, weight: .medium))
-                                }
-                            }
-                            .foregroundColor(theme.label)
-                            .frame(width: 72, height: 42)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(theme.fill)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
-            }
-            .onDisappear {
-                FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
-            }
-        }
-    }
-}
-
-private struct FastLaneDetailNoteModal: View {
+struct DetailNoteModal: View {
     let elevation: String
     let detailType: String
     let existingNote: String
@@ -22302,23 +17750,7 @@ private func fastLaneObservationDisplayAngleIndex(_ observation: Observation) ->
     return newestFirst.first?.angleIndex.map { max(1, $0) }
 }
 
-private func fastLaneFormatPanelTimestamp(_ date: Date) -> String {
-    date.formatted(date: .abbreviated, time: .shortened)
-}
 
-private func fastLaneSkipReasonTitle(for reason: SkipReason) -> String {
-    switch reason {
-    case .inaccessible: return "Skipped - Inaccessible"
-    case .obstructed: return "Skipped - Obstructed"
-    case .activeConstruction: return "Skipped - Active construction"
-    case .safetyConcern: return "Skipped - Safety concern"
-    case .other: return "Skipped - Other"
-    case .notVisible: return "Skipped - Not visible"
-    case .unsafe: return "Skipped - Unsafe"
-    case .blocked: return "Skipped - Blocked"
-    case .notApplicable: return "Skipped - Not applicable"
-    }
-}
 
 private func fastLaneDetailPriorityOrDefault(_ value: String?) -> String {
     let normalized = normalizedFastLaneDetailPriority(value)
@@ -23120,17 +18552,11 @@ private struct DebugToolsView: View {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private var buttonFill: Color {
-        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
-    }
+    private var buttonFill: Color { colorScheme.scoutSheetButtonFill(darkOpacity: 0.55) }
 
-    private var buttonStroke: Color {
-        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
-    }
+    private var buttonStroke: Color { colorScheme.scoutSheetButtonStroke }
 
-    private var buttonLabel: Color {
-        colorScheme == .light ? Color.black.opacity(0.88) : .white
-    }
+    private var buttonLabel: Color { colorScheme.scoutSheetButtonLabel }
 
     var body: some View {
         ZStack {
@@ -24020,14 +19446,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLaneReportHandoffResultBlock(
@@ -24057,14 +19476,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLanePendingExportCleanupResultBlock(
@@ -24092,14 +19504,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLaneLauncherResultBlock(
@@ -24134,14 +19539,7 @@ private struct DebugToolsView: View {
                     .foregroundColor(.orange)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastLaneLauncherCloseResultBlock(
@@ -24169,14 +19567,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func fastRuntimeCleanupResultBlock(
@@ -24197,14 +19588,7 @@ private struct DebugToolsView: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(buttonFill)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(buttonStroke, lineWidth: 1)
-        )
+        .scoutDiagnosticResultCard(fill: buttonFill, stroke: buttonStroke)
     }
 
     private func captureProfileBackfillSummaryHint(
@@ -24405,6 +19789,8 @@ struct PropertySessionView: View {
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
     @State private var isVerifyingSessionAfterPresentation: Bool = false
     @State private var didUseLightweightFastEntry: Bool = false
+    @State private var isLeavingSessionTypeSelection: Bool = false
+    @State private var sessionTypeExitError: String? = nil
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -24429,6 +19815,8 @@ struct PropertySessionView: View {
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $isAwaitingInitialSessionTypeSelection) {
                 InitialSessionTypeChoiceSheet(
+                    isLeaving: isLeavingSessionTypeSelection,
+                    exitError: sessionTypeExitError,
                     onChoose: { sessionType in
                         isAwaitingInitialSessionTypeSelection = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -24437,8 +19825,19 @@ struct PropertySessionView: View {
                         }
                     },
                     onBack: {
-                        isAwaitingInitialSessionTypeSelection = false
-                        exitCaptureScreen()
+                        guard !isLeavingSessionTypeSelection else { return }
+                        isLeavingSessionTypeSelection = true
+                        sessionTypeExitError = nil
+                        Task { @MainActor in
+                            let didRelease = await appState.cancelUnstartedSessionTypeSelection(propertyID: propertyID)
+                            isLeavingSessionTypeSelection = false
+                            if didRelease {
+                                isAwaitingInitialSessionTypeSelection = false
+                                exitCaptureScreen()
+                            } else {
+                                sessionTypeExitError = "Couldn't close this property cleanly. Check your connection and try Back again."
+                            }
+                        }
                     }
                 )
                 .interactiveDismissDisabled(true)
@@ -24984,6 +20383,8 @@ struct PropertySessionView: View {
     }
 
     private struct InitialSessionTypeChoiceSheet: View {
+        let isLeaving: Bool
+        let exitError: String?
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
         @State private var selectedSessionTypeBeingOpened: SessionType? = nil
@@ -25008,12 +20409,19 @@ struct PropertySessionView: View {
                     )
                 }
 
-                Button("Back", action: onBack)
+                if let exitError {
+                    Text(exitError)
+                        .font(.system(size: 13))
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                }
+
+                Button(isLeaving ? "Closing..." : "Back", action: onBack)
                     .font(.system(size: 16, weight: .semibold))
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .padding(.top, 2)
-                    .disabled(selectedSessionTypeBeingOpened != nil)
+                    .disabled(selectedSessionTypeBeingOpened != nil || isLeaving)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
@@ -25052,7 +20460,7 @@ struct PropertySessionView: View {
                 .frame(minHeight: 72)
             }
             .buttonStyle(SessionTypeChoiceButtonStyle(isSelected: isSelected))
-            .disabled(selectedSessionTypeBeingOpened != nil && !isSelected)
+            .disabled(isLeaving || (selectedSessionTypeBeingOpened != nil && !isSelected))
             .accessibilityValue(isSelected ? "Selected" : "")
         }
     }
@@ -25068,4 +20476,45 @@ struct PropertySessionView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
+}
+
+@MainActor
+enum ScoutStampPresentation {
+
+
+    static func readableBaseName(for shot: ShotMetadata) -> String {
+        let datePart = Self.filenameDateFormatter.string(from: shot.updatedAt)
+        let anglePart = "A\(max(1, shot.angleIndex))"
+        let parts = [
+            sanitizePart(shot.building),
+            sanitizePart(shot.elevation),
+            sanitizePart(shot.detailType),
+            anglePart,
+            datePart
+        ].filter { !$0.isEmpty }
+        let joined = parts.joined(separator: "_")
+        return joined.isEmpty ? shot.shotID.uuidString : joined
+    }
+
+    private static func sanitizePart(_ raw: String) -> String {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "_")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let collapsed = String(scalars)
+            .replacingOccurrences(of: "__", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        return String(collapsed.prefix(40))
+    }
+
+    private static let filenameDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        return formatter
+    }()
+
 }

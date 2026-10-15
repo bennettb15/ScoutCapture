@@ -605,7 +605,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
 
         let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
-        XCTAssertEqual(result.appliedCount, 0)
+        XCTAssertEqual(result.appliedCount, 1) // The newer portal timestamp is persisted.
         XCTAssertEqual(updated.priority, "High")
         XCTAssertEqual(updated.trade, "Roofing")
     }
@@ -1060,7 +1060,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updated.updatedInSessionID, reopenSessionID)
     }
 
-    func testPortalStatusChangedActiveReopensCompletedResolutionRequiredDocumentation() throws {
+    func testGenericPortalStatusChangeDoesNotReopenCompletedDocumentation() throws {
         let fixture = try makeStore()
         let resolutionSessionID = UUID()
         let issueID = UUID()
@@ -1085,8 +1085,8 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
 
         let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
-        XCTAssertEqual(updated.status, .active)
-        XCTAssertNil(updated.resolvedInSessionID)
+        XCTAssertEqual(updated.status, .resolved)
+        XCTAssertEqual(updated.resolvedInSessionID, resolutionSessionID)
     }
 
     func testResolutionRequiredAndActiveCountsAreSeparate() throws {
@@ -1196,7 +1196,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         let issue = try XCTUnwrap(reloaded.issues.first(where: { $0.issueID == issueID }))
         XCTAssertEqual(shot.issueStatus, "resolved")
         XCTAssertEqual(shot.captureKind, "resolved_capture")
-        XCTAssertFalse(shot.isFlagged)
+        XCTAssertTrue(shot.isFlagged)
         XCTAssertEqual(issue.issueStatus, "resolved")
         XCTAssertNotNil(issue.resolvedAt)
         XCTAssertEqual(issue.lastCaptureSessionId, sessionID)
@@ -1269,7 +1269,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         let issue = try XCTUnwrap(reloaded.issues.first(where: { $0.issueID == issueID }))
         XCTAssertEqual(shot.issueStatus, "pending_review")
         XCTAssertEqual(shot.captureKind, "resolved_capture")
-        XCTAssertFalse(shot.isFlagged)
+        XCTAssertTrue(shot.isFlagged)
         XCTAssertEqual(issue.issueStatus, "pending_review")
         XCTAssertNil(issue.resolvedAt)
         XCTAssertEqual(issue.lastCaptureSessionId, sessionID)
@@ -1411,7 +1411,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(row.updatedAt, newest)
     }
 
-    func testFieldResolutionReplaysPendingReviewCompletionSubmission() throws {
+    func testFieldResolutionPreservesPendingReviewWithoutUpdateRow() throws {
         let propertyID = UUID()
         let sessionID = UUID()
         let orgID = UUID()
@@ -1453,12 +1453,10 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
 
         let observationRow = try XCTUnwrap(replay.observations.first(where: { $0.id == issueID }))
-        let updateRow = try XCTUnwrap(replay.updates.first(where: { $0.observationID == issueID }))
         XCTAssertEqual(observationRow.status, "pending_review")
         XCTAssertEqual(observationRow.shotID, shotID)
-        XCTAssertEqual(updateRow.status, "pending_review")
-        XCTAssertEqual(updateRow.updateType, "completion_submitted")
-        XCTAssertEqual(updateRow.shotID, shotID)
+        // Pending review is represented by the observation and shot, not observation_updates.
+        XCTAssertFalse(replay.updates.contains(where: { $0.observationID == issueID }))
     }
 
     func testCompletionApprovalFullyResolvesPendingReviewAndRemovesCarryForwardState() throws {
@@ -1523,7 +1521,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updated.status, .active)
         XCTAssertEqual(updated.linkedShotID, resolutionShotID)
         XCTAssertNil(updated.resolvedInSessionID)
-        XCTAssertNil(updated.resolutionPhotoRef)
+        XCTAssertEqual(updated.resolutionPhotoRef, "/tmp/rejected-resolution.jpg")
         XCTAssertNil(updated.resolutionStatement)
         XCTAssertTrue(updated.shots.contains(where: { $0.id == resolutionShotID }))
         XCTAssertTrue(updated.historyEvents.contains { event in
@@ -1543,8 +1541,8 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
         stalePendingReviewMetadata.shots[0].isFlagged = false
         stalePendingReviewMetadata.shots[0].captureKind = "resolved_capture"
-        stalePendingReviewMetadata.shots[0].updatedAt = newest.addingTimeInterval(20)
-        stalePendingReviewMetadata.issues[0].lastSeenAt = newest.addingTimeInterval(20)
+        stalePendingReviewMetadata.shots[0].updatedAt = newest
+        stalePendingReviewMetadata.issues[0].lastSeenAt = newest
         stalePendingReviewMetadata.issues[0].resolvedAt = nil
 
         try fixture.store.mergeRemoteFlaggedReferenceObservations(
@@ -1557,7 +1555,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(replayed.status, .active)
         XCTAssertEqual(replayed.linkedShotID, resolutionShotID)
         XCTAssertNil(replayed.resolvedInSessionID)
-        XCTAssertNil(replayed.resolutionPhotoRef)
+        XCTAssertEqual(replayed.resolutionPhotoRef, "/tmp/rejected-resolution.jpg")
         XCTAssertTrue(replayed.shots.contains(where: { $0.id == resolutionShotID }))
     }
 
@@ -1659,7 +1657,7 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(result.appliedCount, 1)
         XCTAssertEqual(updated.status, .active)
         XCTAssertEqual(updated.linkedShotID, resolutionShotID)
-        XCTAssertNil(updated.resolutionPhotoRef)
+        XCTAssertEqual(updated.resolutionPhotoRef, "/tmp/rejected-resolution.jpg")
         XCTAssertTrue(updated.shots.contains(where: { $0.id == resolutionShotID }))
     }
 

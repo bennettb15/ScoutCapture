@@ -5,6 +5,59 @@ import ImageIO
 
 @MainActor
 final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
+    func testHistoricalGuidedReferencesStayVisibleUntilDraftIsVerifiedActive() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HistoricalGuidedReferences-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let org = try store.createOrganization(Organization(name: "Test Organization"))
+        let property = try store.createProperty(Property(orgId: org.id, name: "Test Property", address: "100 Test Way"))
+        let suiteName = "HistoricalGuidedReferences-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        let appState = AppState(localStore: store, userDefaults: defaults)
+        appState._debugRefreshPropertiesLocallyForTests()
+
+        let historicalSessionID = UUID()
+        let shotID = UUID()
+        try store.ensureSessionFileStorage(propertyID: property.id, sessionID: historicalSessionID)
+        let original = store.originalsDirectoryURL(propertyID: property.id, sessionID: historicalSessionID)
+            .appendingPathComponent("\(shotID.uuidString).jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: original)
+        let reference = GuidedShot(
+            id: shotID,
+            title: "B1 North Overview",
+            building: "B1",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: Shot(id: shotID, capturedAt: Date().addingTimeInterval(-86_400), imageLocalIdentifier: original.path),
+            isCompleted: true
+        )
+        try store.saveGuidedShots([reference], propertyID: property.id)
+        XCTAssertEqual(try store.fetchSessions(propertyID: property.id).map(\.id), [historicalSessionID])
+        XCTAssertNil(appState.fastRuntimeDraftsByPropertyID[property.id])
+
+        let newSessionID = UUID()
+        let historicalPanel = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: newSessionID
+        )
+        XCTAssertEqual(historicalPanel.guidedShots.map(\.id), [shotID])
+
+        let activeDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(for: property.id))
+        XCTAssertEqual(activeDraft.context?.sessionID, historicalSessionID)
+        let activeDraftPanel = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: newSessionID
+        )
+        XCTAssertTrue(activeDraftPanel.guidedShots.isEmpty)
+    }
+
     func testElevationChecklistCountsSavedTypesAndDistinctAnglesPerElevation() {
         func capture(_ building: String, _ elevation: String, _ detail: String, _ angle: Int) -> ElevationChecklistCapture {
             ElevationChecklistCapture(
@@ -84,10 +137,21 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.sessionFolderURL(
             propertyID: property.id, sessionID: context.sessionID
         ).appendingPathComponent("session.json").path))
-        XCTAssertTrue(appState.propertyCardBadgeModel(for: property.id).showDraft)
-        XCTAssertTrue(appState.prepareFastRuntimeCompletion(
+        let draftBadge = appState.propertyCardBadgeModel(for: property.id)
+        let draftSummary = appState.fastRuntimeDraftsByPropertyID[property.id]
+        XCTAssertTrue(
+            draftBadge.showDraft,
+            "badge=\(draftBadge.badgeSource):\(draftBadge.draftReason), " +
+                "summaryOwner=\(draftSummary?.ownerDeviceID ?? "nil"), device=\(deviceID)"
+        )
+        // An unauthenticated local fixture cannot start the upload phase, but the
+        // completion request still checkpoints its marker and hides the draft.
+        XCTAssertFalse(appState.prepareFastRuntimeCompletion(
             context: context, storageRoot: result.storageRoot, shots: []
         ))
+        let completionStorageRoot = try XCTUnwrap(result.storageRoot)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: completionStorageRoot
+            .appendingPathComponent("Metadata/complete-requested-at.json").path))
         XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
         XCTAssertEqual(appState.propertyRowDraftCount, 0)
         XCTAssertNil(appState.fastRuntimeDraftResumeState(for: property.id))
@@ -107,14 +171,67 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
             isCompleted: true
         )
         try store.saveGuidedShots([newerGuided], propertyID: property.id)
-        let selectedDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(for: property.id))
+        let selectedDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(
+            for: property.id,
+            publishRecoveredDraft: false
+        ))
         XCTAssertEqual(selectedDraft.context?.sessionID, newerSessionID)
         XCTAssertEqual(selectedDraft.summary?.photoCount, 1)
+        XCTAssertNotEqual(appState.fastRuntimeDraftsByPropertyID[property.id]?.sessionID, newerSessionID)
+        XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
+        appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: newerSessionID,
+                orgID: org.id,
+                propertyID: property.id,
+                lockedByUserID: nil,
+                lockedByDeviceID: deviceID,
+                lockedAt: nil,
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date(),
+                status: Session.Status.draft.rawValue,
+                isSealed: false
+            )
+        )
+        let verifiedLocalDraft = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
+        XCTAssertEqual(verifiedLocalDraft?.context?.sessionID, newerSessionID)
+        XCTAssertEqual(appState.fastRuntimeDraftsByPropertyID[property.id]?.sessionID, newerSessionID)
+        XCTAssertTrue(appState.propertyCardBadgeModel(for: property.id).showDraft)
+
+        let deliveredAt = Date()
+        appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: newerSessionID,
+                orgID: org.id,
+                propertyID: property.id,
+                lockedByUserID: nil,
+                lockedByDeviceID: nil,
+                lockedAt: nil,
+                coordinationTier1Snapshot: nil,
+                updatedAt: deliveredAt,
+                status: Session.Status.completed.rawValue,
+                completedAt: deliveredAt,
+                exportedAt: deliveredAt,
+                isSealed: true,
+                firstDeliveredAt: deliveredAt
+            )
+        )
+
+        let verifiedResume = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
+        XCTAssertNil(verifiedResume)
+        let finalSession = try XCTUnwrap(store.fetchSessions(propertyID: property.id)
+            .first { $0.id == newerSessionID })
+        XCTAssertEqual(finalSession.status, .completed)
+        XCTAssertTrue(finalSession.isSealed)
+        XCTAssertNotNil(finalSession.firstDeliveredAt)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newerOriginal.path))
+        XCTAssertNil(appState.fastRuntimeDraftResumeState(for: property.id))
+        XCTAssertNotEqual(appState.preferredPropertyEntrySessionID(for: property.id), newerSessionID)
     }
 
     func testFlaggedGuidedCaptureKeepsOnePhotoAndCreatesAnActiveIssue() async throws {
-        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
-        let root = externalRoot.appendingPathComponent("FlaggedGuidedCapture-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlaggedGuidedCapture-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalStore(testStorageRootURL: root)
         let org = try store.createOrganization(Organization(name: "Test Organization"))
@@ -197,8 +314,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
     }
 
     func testReclassifyingCapturedGuidedShotKeepsOnePhotoAndCompletedChecklistRow() async throws {
-        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
-        let root = externalRoot.appendingPathComponent("GuidedReclassification-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GuidedReclassification-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalStore(testStorageRootURL: root)
         let org = try store.createOrganization(Organization(name: "Test Organization"))
@@ -266,8 +383,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
     }
 
     func testReclassifyingCapturedFlaggedIssueKeepsOnePhotoAndItsIssueLink() async throws {
-        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
-        let root = externalRoot.appendingPathComponent("FlaggedReclassification-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlaggedReclassification-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalStore(testStorageRootURL: root)
         let org = try store.createOrganization(Organization(name: "Test Organization"))

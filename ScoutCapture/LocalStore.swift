@@ -738,48 +738,35 @@ final class LocalStore {
     private let guidedShotsDirectoryURL: URL
     private let sessionsDirectoryURL: URL
 
-    init(fileManager: FileManager = .default) {
-        self.fileManager = fileManager
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        self.encoder = encoder
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        self.decoder = decoder
-
+    convenience init(fileManager: FileManager = .default) {
         let appRoot = StorageRoot.prepareStorage()
-        let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
-        self.activeRootURL = appRoot
-        self.scoutRootURL = scoutRoot
-        self.scoutRootStatusReadCandidates = StorageRoot.scoutRootCandidates()
-        self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
-        self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
-        self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
         let localAppSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScoutCapture", isDirectory: true)
-        self.localHubIndexCacheURL = localAppSupportRoot.appendingPathComponent("local-hub-index.json")
-        self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
-        self.sessionSnapshotUploadRetryQueueURL = scoutRoot.appendingPathComponent("session_snapshot_upload_retry_queue.json")
-        self.sessionSnapshotUploadStatusURL = scoutRoot.appendingPathComponent("session_snapshot_upload_status.json")
-        self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
-        self.propertySyncEventsDirectoryURL = scoutRoot
-            .appendingPathComponent("sync-events", isDirectory: true)
-            .appendingPathComponent("properties", isDirectory: true)
-        self.propertyFoldersURL = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
-        self.observationsDirectoryURL = scoutRoot.appendingPathComponent("observations", isDirectory: true)
-        self.guidedShotsDirectoryURL = scoutRoot.appendingPathComponent("guided-shots", isDirectory: true)
-        self.sessionsDirectoryURL = scoutRoot.appendingPathComponent("sessions", isDirectory: true)
-        self.fileIOQueue.setSpecific(key: fileIOQueueKey, value: fileIOQueueValue)
-
-        try? createStorageDirectories(baseDirectoryURL: scoutRoot)
-
+        self.init(
+            activeRootURL: appRoot,
+            statusReadCandidates: StorageRoot.scoutRootCandidates(),
+            localHubIndexCacheURL: localAppSupportRoot.appendingPathComponent("local-hub-index.json"),
+            fileManager: fileManager
+        )
         // Operational storage is local App Support. Legacy iCloud recovery paths are explicit.
     }
 
-    init(testStorageRootURL: URL, fileManager: FileManager = .default) {
+    convenience init(testStorageRootURL: URL, fileManager: FileManager = .default) {
+        let scoutRoot = testStorageRootURL.appendingPathComponent("SCOUT", isDirectory: true)
+        self.init(
+            activeRootURL: testStorageRootURL,
+            statusReadCandidates: [scoutRoot],
+            localHubIndexCacheURL: testStorageRootURL.appendingPathComponent("local-hub-index.json"),
+            fileManager: fileManager
+        )
+    }
+
+    private init(
+        activeRootURL appRoot: URL,
+        statusReadCandidates: [URL],
+        localHubIndexCacheURL: URL,
+        fileManager: FileManager
+    ) {
         self.fileManager = fileManager
 
         let encoder = JSONEncoder()
@@ -791,15 +778,14 @@ final class LocalStore {
         decoder.dateDecodingStrategy = .iso8601
         self.decoder = decoder
 
-        let appRoot = testStorageRootURL
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
         self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
-        self.scoutRootStatusReadCandidates = [scoutRoot]
+        self.scoutRootStatusReadCandidates = statusReadCandidates
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
-        self.localHubIndexCacheURL = appRoot.appendingPathComponent("local-hub-index.json")
+        self.localHubIndexCacheURL = localHubIndexCacheURL
         self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
         self.sessionSnapshotUploadRetryQueueURL = scoutRoot.appendingPathComponent("session_snapshot_upload_retry_queue.json")
         self.sessionSnapshotUploadStatusURL = scoutRoot.appendingPathComponent("session_snapshot_upload_status.json")
@@ -3142,6 +3128,67 @@ final class LocalStore {
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
     }
 
+    private func replacementShotMetadata(existing: ShotMetadata, shot: ShotMetadata) -> ShotMetadata {
+        return ShotMetadata(
+            shotID: existing.shotID,
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            createdAt: existing.createdAt,
+            capturedAtLocal: existing.capturedAtLocal ?? shot.capturedAtLocal,
+            updatedAt: shot.updatedAt,
+            capturedByUserID: shot.capturedByUserID ?? existing.capturedByUserID,
+            capturedByEmail: shot.capturedByEmail ?? existing.capturedByEmail,
+            uploadedByUserID: shot.uploadedByUserID ?? existing.uploadedByUserID,
+            uploadedByEmail: shot.uploadedByEmail ?? existing.uploadedByEmail,
+            building: shot.building,
+            elevation: shot.elevation,
+            detailType: shot.detailType,
+            angleIndex: shot.angleIndex,
+            trade: shot.trade,
+            priority: shot.priority,
+            shotKey: shot.shotKey,
+            isGuided: shot.isGuided,
+            isFlagged: shot.isFlagged,
+            issueID: shot.issueID,
+            issueStatus: shot.issueStatus,
+            captureKind: shot.captureKind,
+            firstCaptureKind: existing.firstCaptureKind ?? shot.firstCaptureKind,
+            noteText: shot.noteText,
+            noteCategory: shot.noteCategory,
+            originalFilename: shot.originalFilename,
+            originalRelativePath: shot.originalRelativePath,
+            originalByteSize: shot.originalByteSize,
+            storageBucket: shot.storageBucket,
+            storagePath: shot.storagePath,
+            checksumSHA256: shot.checksumSHA256,
+            byteSize: shot.byteSize,
+            uploadState: shot.uploadState,
+            uploadAttempts: shot.uploadAttempts,
+            lastUploadError: shot.lastUploadError,
+            stampedFilename: shot.stampedFilename,
+            stampedRelativePath: shot.stampedRelativePath,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            exifOrientation: shot.exifOrientation,
+            orientation: shot.orientation,
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            imageWidth: shot.imageWidth,
+            imageHeight: shot.imageHeight,
+            lifecycleState: shot.lifecycleState,
+            retiredAt: shot.retiredAt,
+            retiredReason: shot.retiredReason,
+            retiredByUserID: shot.retiredByUserID,
+            supersededByShotID: shot.supersededByShotID,
+            supersedesShotID: shot.supersedesShotID,
+            replacementReason: shot.replacementReason,
+            hiddenFromReports: shot.hiddenFromReports,
+            hiddenFromGallery: shot.hiddenFromGallery,
+            lifecycleUpdatedAt: shot.lifecycleUpdatedAt
+        )
+    }
+
     func upsertShot(
         propertyID: UUID,
         sessionID: UUID,
@@ -3156,65 +3203,7 @@ final class LocalStore {
         var persistedShot = shot
         if let index = metadata.shots.firstIndex(where: { $0.shotID == shot.shotID }) {
             let existing = metadata.shots[index]
-            var replacement = shot
-            replacement = ShotMetadata(
-                shotID: existing.shotID,
-                propertyID: shot.propertyID,
-                sessionID: shot.sessionID,
-                createdAt: existing.createdAt,
-                capturedAtLocal: existing.capturedAtLocal ?? shot.capturedAtLocal,
-                updatedAt: shot.updatedAt,
-                capturedByUserID: shot.capturedByUserID ?? existing.capturedByUserID,
-                capturedByEmail: shot.capturedByEmail ?? existing.capturedByEmail,
-                uploadedByUserID: shot.uploadedByUserID ?? existing.uploadedByUserID,
-                uploadedByEmail: shot.uploadedByEmail ?? existing.uploadedByEmail,
-                building: shot.building,
-                elevation: shot.elevation,
-                detailType: shot.detailType,
-                angleIndex: shot.angleIndex,
-                trade: shot.trade,
-                priority: shot.priority,
-                shotKey: shot.shotKey,
-                isGuided: shot.isGuided,
-                isFlagged: shot.isFlagged,
-                issueID: shot.issueID,
-                issueStatus: shot.issueStatus,
-                captureKind: shot.captureKind,
-                firstCaptureKind: existing.firstCaptureKind ?? shot.firstCaptureKind,
-                noteText: shot.noteText,
-                noteCategory: shot.noteCategory,
-                originalFilename: shot.originalFilename,
-                originalRelativePath: shot.originalRelativePath,
-                originalByteSize: shot.originalByteSize,
-                storageBucket: shot.storageBucket,
-                storagePath: shot.storagePath,
-                checksumSHA256: shot.checksumSHA256,
-                byteSize: shot.byteSize,
-                uploadState: shot.uploadState,
-                uploadAttempts: shot.uploadAttempts,
-                lastUploadError: shot.lastUploadError,
-                stampedFilename: shot.stampedFilename,
-                stampedRelativePath: shot.stampedRelativePath,
-                captureMode: shot.captureMode,
-                lens: shot.lens,
-                exifOrientation: shot.exifOrientation,
-                orientation: shot.orientation,
-                latitude: shot.latitude,
-                longitude: shot.longitude,
-                accuracyMeters: shot.accuracyMeters,
-                imageWidth: shot.imageWidth,
-                imageHeight: shot.imageHeight,
-                lifecycleState: shot.lifecycleState,
-                retiredAt: shot.retiredAt,
-                retiredReason: shot.retiredReason,
-                retiredByUserID: shot.retiredByUserID,
-                supersededByShotID: shot.supersededByShotID,
-                supersedesShotID: shot.supersedesShotID,
-                replacementReason: shot.replacementReason,
-                hiddenFromReports: shot.hiddenFromReports,
-                hiddenFromGallery: shot.hiddenFromGallery,
-                lifecycleUpdatedAt: shot.lifecycleUpdatedAt
-            )
+            let replacement = replacementShotMetadata(existing: existing, shot: shot)
             persistedShot = replacement
             metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
                 current: metadata.shots,
@@ -3237,64 +3226,7 @@ final class LocalStore {
                       )
                   }) {
             let existing = metadata.shots[index]
-            let replacement = ShotMetadata(
-                shotID: existing.shotID,
-                propertyID: shot.propertyID,
-                sessionID: shot.sessionID,
-                createdAt: existing.createdAt,
-                capturedAtLocal: existing.capturedAtLocal ?? shot.capturedAtLocal,
-                updatedAt: shot.updatedAt,
-                capturedByUserID: shot.capturedByUserID ?? existing.capturedByUserID,
-                capturedByEmail: shot.capturedByEmail ?? existing.capturedByEmail,
-                uploadedByUserID: shot.uploadedByUserID ?? existing.uploadedByUserID,
-                uploadedByEmail: shot.uploadedByEmail ?? existing.uploadedByEmail,
-                building: shot.building,
-                elevation: shot.elevation,
-                detailType: shot.detailType,
-                angleIndex: shot.angleIndex,
-                trade: shot.trade,
-                priority: shot.priority,
-                shotKey: shot.shotKey,
-                isGuided: shot.isGuided,
-                isFlagged: shot.isFlagged,
-                issueID: shot.issueID,
-                issueStatus: shot.issueStatus,
-                captureKind: shot.captureKind,
-                firstCaptureKind: existing.firstCaptureKind ?? shot.firstCaptureKind,
-                noteText: shot.noteText,
-                noteCategory: shot.noteCategory,
-                originalFilename: shot.originalFilename,
-                originalRelativePath: shot.originalRelativePath,
-                originalByteSize: shot.originalByteSize,
-                storageBucket: shot.storageBucket,
-                storagePath: shot.storagePath,
-                checksumSHA256: shot.checksumSHA256,
-                byteSize: shot.byteSize,
-                uploadState: shot.uploadState,
-                uploadAttempts: shot.uploadAttempts,
-                lastUploadError: shot.lastUploadError,
-                stampedFilename: shot.stampedFilename,
-                stampedRelativePath: shot.stampedRelativePath,
-                captureMode: shot.captureMode,
-                lens: shot.lens,
-                exifOrientation: shot.exifOrientation,
-                orientation: shot.orientation,
-                latitude: shot.latitude,
-                longitude: shot.longitude,
-                accuracyMeters: shot.accuracyMeters,
-                imageWidth: shot.imageWidth,
-                imageHeight: shot.imageHeight,
-                lifecycleState: shot.lifecycleState,
-                retiredAt: shot.retiredAt,
-                retiredReason: shot.retiredReason,
-                retiredByUserID: shot.retiredByUserID,
-                supersededByShotID: shot.supersededByShotID,
-                supersedesShotID: shot.supersedesShotID,
-                replacementReason: shot.replacementReason,
-                hiddenFromReports: shot.hiddenFromReports,
-                hiddenFromGallery: shot.hiddenFromGallery,
-                lifecycleUpdatedAt: shot.lifecycleUpdatedAt
-            )
+            let replacement = replacementShotMetadata(existing: existing, shot: shot)
             persistedShot = replacement
             metadata.shots.remove(at: index)
             metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
@@ -5111,6 +5043,37 @@ final class LocalStore {
         }
     }
 
+    private func referenceIssueShotsByIssueID(from metadata: SessionMetadata) -> [UUID: [ShotMetadata]] {
+        let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
+            partial[issue.issueID] = issue
+        }
+        return Dictionary(grouping: metadata.shots.filter { shot in
+            guard let issueID = shot.issueID else { return false }
+            let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
+            let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+            let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+            return shot.isFlagged ||
+                issueStatus == "resolved" ||
+                issueStatus == "pending_review" ||
+                shotStatus == "resolved" ||
+                shotStatus == "pending_review" ||
+                captureKind == "resolved_capture"
+        }) { shot in
+            shot.issueID!
+        }
+    }
+
+    private func referenceShotPath(for shot: ShotMetadata, in sessionFolder: URL) -> String {
+        let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if relative.isEmpty {
+            return sessionFolder
+                .appendingPathComponent("Originals", isDirectory: true)
+                .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                .path
+        }
+        return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
+    }
+
     private func syncPropertyStoresFromRestoredSessionMetadata(
         metadata: SessionMetadata,
         propertyID: UUID,
@@ -5125,39 +5088,12 @@ final class LocalStore {
         try writeGuidedShots(normalizedGuided, propertyID: propertyID)
 
         let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-        let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
-            partial[issue.issueID] = issue
-        }
-        let issueShotsByIssueID = Dictionary(grouping: metadata.shots.filter { shot in
-            guard let issueID = shot.issueID else { return false }
-            let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
-            let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-            let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
-            return shot.isFlagged ||
-                issueStatus == "resolved" ||
-                issueStatus == "pending_review" ||
-                shotStatus == "resolved" ||
-                shotStatus == "pending_review" ||
-                captureKind == "resolved_capture"
-        }) { shot in
-            shot.issueID!
-        }
+        let issueShotsByIssueID = referenceIssueShotsByIssueID(from: metadata)
 
         // Authoritative restore: property-level observation store is replaced by snapshot-derived issues.
         let existingObservations = (try? readObservations(propertyID: propertyID)) ?? []
         let existingObservationsByID = Dictionary(uniqueKeysWithValues: existingObservations.map { ($0.id, $0) })
         var mergedByID: [UUID: Observation] = [:]
-
-        func shotPath(for shot: ShotMetadata) -> String {
-            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            if relative.isEmpty {
-                return sessionFolder
-                    .appendingPathComponent("Originals", isDirectory: true)
-                    .appendingPathComponent(shot.originalFilename, isDirectory: false)
-                    .path
-            }
-            return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
-        }
 
         func buildObservation(issue: IssueMetadata, fallbackSessionID: UUID) -> Observation {
             let issueShots = issueShotsByIssueID[issue.issueID] ?? []
@@ -5182,7 +5118,7 @@ final class LocalStore {
                     Shot(
                         id: shot.shotID,
                         capturedAt: shot.createdAt,
-                        imageLocalIdentifier: shotPath(for: shot),
+                        imageLocalIdentifier: referenceShotPath(for: shot, in: sessionFolder),
                         note: shot.noteText
                     )
             }
@@ -5225,7 +5161,7 @@ final class LocalStore {
                 statement: trimmedNonEmpty(issue.detailNote) ?? "",
                 status: status,
                 linkedShotID: linkedShot,
-                resolutionPhotoRef: resolvedMetaShot.map(shotPath(for:)) ?? existing?.resolutionPhotoRef,
+                resolutionPhotoRef: resolvedMetaShot.map { referenceShotPath(for: $0, in: sessionFolder) } ?? existing?.resolutionPhotoRef,
                 resolutionStatement: nil,
                 updatedInSessionID: effectiveSessionID,
                 resolvedInSessionID: status == .resolved || status == .pendingReview ? effectiveSessionID : nil,
@@ -5290,23 +5226,7 @@ final class LocalStore {
         try performFileIOSync {
             try ensurePropertyExists(propertyID)
             let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
-                partial[issue.issueID] = issue
-            }
-            let issueShotsByIssueID = Dictionary(grouping: metadata.shots.filter { shot in
-                guard let issueID = shot.issueID else { return false }
-                let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
-                let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-                let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
-                return shot.isFlagged ||
-                    issueStatus == "resolved" ||
-                    issueStatus == "pending_review" ||
-                    shotStatus == "resolved" ||
-                    shotStatus == "pending_review" ||
-                    captureKind == "resolved_capture"
-            }) { shot in
-                shot.issueID!
-            }
+            let issueShotsByIssueID = referenceIssueShotsByIssueID(from: metadata)
             let resolvedIssueIDs = Set(metadata.issues.compactMap { issue -> UUID? in
                 trimmedNonEmpty(issue.issueStatus)?.lowercased() == "resolved" ? issue.issueID : nil
             })
@@ -5315,17 +5235,6 @@ final class LocalStore {
 
             var observations = try readObservations(propertyID: propertyID)
             var observationsByID = Dictionary(uniqueKeysWithValues: observations.map { ($0.id, $0) })
-
-            func shotPath(for shot: ShotMetadata) -> String {
-                let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-                if relative.isEmpty {
-                    return sessionFolder
-                        .appendingPathComponent("Originals", isDirectory: true)
-                        .appendingPathComponent(shot.originalFilename, isDirectory: false)
-                        .path
-                }
-                return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
-            }
 
             var didMutate = false
             for issueID in candidateIssueIDs {
@@ -5352,7 +5261,7 @@ final class LocalStore {
                     Shot(
                         id: shot.shotID,
                         capturedAt: shot.createdAt,
-                        imageLocalIdentifier: shotPath(for: shot),
+                        imageLocalIdentifier: referenceShotPath(for: shot, in: sessionFolder),
                         note: shot.noteText
                     )
                 }
@@ -5400,7 +5309,7 @@ final class LocalStore {
                     ? (issue?.lastCaptureSessionId ?? sessionID)
                     : nil
                 if let resolvedShot {
-                    next.resolutionPhotoRef = shotPath(for: resolvedShot)
+                    next.resolutionPhotoRef = referenceShotPath(for: resolvedShot, in: sessionFolder)
                 }
                 next.building = latestShot?.building ?? next.building
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
@@ -6648,49 +6557,53 @@ final class LocalStore {
         try writeSessionMetadata(normalized)
     }
 
+    private func makeRecoveredSessionMetadata(propertyID: UUID, sessionID: UUID) -> SessionMetadata {
+        let now = Date()
+        let captureTimeZone = captureTimeZoneContext(for: now)
+        let property = currentProperty(for: propertyID)
+        return SessionMetadata(
+            schemaVersion: currentSessionSchemaVersion,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            orgID: property?.orgId,
+            orgNameAtCapture: property?.orgId.flatMap { organization(withID: $0)?.name },
+            folderIDAtCapture: property?.folderId,
+            propertyNameAtCapture: nil,
+            propertyNameAtExport: nil,
+            primaryContactNameAtCapture: property?.clientName,
+            primaryContactEmailAtCapture: property?.clientEmail,
+            propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
+            propertyStreetAtCapture: trimmedNonEmpty(property?.street),
+            propertyCityAtCapture: trimmedNonEmpty(property?.city),
+            propertyStateAtCapture: trimmedNonEmpty(property?.state),
+            propertyZipAtCapture: trimmedNonEmpty(property?.zip),
+            propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
+            timeZoneIdentifierAtCapture: captureTimeZone.identifier,
+            timeZoneOffsetAtCapture: captureTimeZone.offsetString,
+            timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+            startedAt: now,
+            sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
+            endedAt: nil,
+            sessionEndedAtLocal: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: false,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil,
+            appVersion: appVersionString(),
+            deviceModel: deviceModelString(),
+            osVersion: osVersionString(),
+            shots: [],
+            issues: [],
+            guidedShots: []
+        )
+    }
+
     private func readOrRecoverSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
         let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: fileURL.path) {
-            let now = Date()
-            let captureTimeZone = captureTimeZoneContext(for: now)
-            let property = currentProperty(for: propertyID)
-            return SessionMetadata(
-                schemaVersion: currentSessionSchemaVersion,
-                propertyID: propertyID,
-                sessionID: sessionID,
-                orgID: property?.orgId,
-                orgNameAtCapture: property?.orgId.flatMap { organization(withID: $0)?.name },
-                folderIDAtCapture: property?.folderId,
-                propertyNameAtCapture: nil,
-                propertyNameAtExport: nil,
-                primaryContactNameAtCapture: property?.clientName,
-                primaryContactEmailAtCapture: property?.clientEmail,
-                propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
-                propertyStreetAtCapture: trimmedNonEmpty(property?.street),
-                propertyCityAtCapture: trimmedNonEmpty(property?.city),
-                propertyStateAtCapture: trimmedNonEmpty(property?.state),
-                propertyZipAtCapture: trimmedNonEmpty(property?.zip),
-                propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
-                timeZoneIdentifierAtCapture: captureTimeZone.identifier,
-                timeZoneOffsetAtCapture: captureTimeZone.offsetString,
-                timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
-                startedAt: now,
-                sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
-                endedAt: nil,
-                sessionEndedAtLocal: nil,
-                status: .draft,
-                isBaselineSession: false,
-                exportedAt: nil,
-                isSealed: false,
-                firstDeliveredAt: nil,
-                reExportExpiresAt: nil,
-                appVersion: appVersionString(),
-                deviceModel: deviceModelString(),
-                osVersion: osVersionString(),
-                shots: [],
-                issues: [],
-                guidedShots: []
-            )
+            return makeRecoveredSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         }
 
         do {
@@ -6711,46 +6624,7 @@ final class LocalStore {
             return normalizeSessionMetadata(metadata, propertyID: propertyID, sessionID: sessionID)
         } catch {
             print("Recoverable session metadata decode failure for session \(sessionID): \(error)")
-            let now = Date()
-            let captureTimeZone = captureTimeZoneContext(for: now)
-            let property = currentProperty(for: propertyID)
-            return SessionMetadata(
-                schemaVersion: currentSessionSchemaVersion,
-                propertyID: propertyID,
-                sessionID: sessionID,
-                orgID: property?.orgId,
-                orgNameAtCapture: property?.orgId.flatMap { organization(withID: $0)?.name },
-                folderIDAtCapture: property?.folderId,
-                propertyNameAtCapture: nil,
-                propertyNameAtExport: nil,
-                primaryContactNameAtCapture: property?.clientName,
-                primaryContactEmailAtCapture: property?.clientEmail,
-                propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
-                propertyStreetAtCapture: trimmedNonEmpty(property?.street),
-                propertyCityAtCapture: trimmedNonEmpty(property?.city),
-                propertyStateAtCapture: trimmedNonEmpty(property?.state),
-                propertyZipAtCapture: trimmedNonEmpty(property?.zip),
-                propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
-                timeZoneIdentifierAtCapture: captureTimeZone.identifier,
-                timeZoneOffsetAtCapture: captureTimeZone.offsetString,
-                timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
-                startedAt: now,
-                sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
-                endedAt: nil,
-                sessionEndedAtLocal: nil,
-                status: .draft,
-                isBaselineSession: false,
-                exportedAt: nil,
-                isSealed: false,
-                firstDeliveredAt: nil,
-                reExportExpiresAt: nil,
-                appVersion: appVersionString(),
-                deviceModel: deviceModelString(),
-                osVersion: osVersionString(),
-                shots: [],
-                issues: [],
-                guidedShots: []
-            )
+            return makeRecoveredSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         }
     }
 
@@ -6845,28 +6719,7 @@ final class LocalStore {
     }
 
     private func referencedPathsStillUsedByOtherProperties(excluding propertyID: UUID, allProperties: [Property]) throws -> Set<String> {
-        var referencedPaths = Set<String>()
-
-        for otherPropertyID in allProperties.map(\.id) where otherPropertyID != propertyID {
-            let guided = try readGuidedShots(propertyID: otherPropertyID)
-            let observations = try readObservations(propertyID: otherPropertyID)
-
-            for path in guided.compactMap(\.referenceImagePath) {
-                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    referencedPaths.insert(trimmed)
-                }
-            }
-
-            for path in observations.flatMap({ $0.guidedShots.compactMap(\.referenceImagePath) }) {
-                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    referencedPaths.insert(trimmed)
-                }
-            }
-        }
-
-        return referencedPaths
+        try referencedPaths(for: allProperties.filter { $0.id != propertyID })
     }
 
     private func referencedPaths(for properties: [Property]) throws -> Set<String> {
@@ -6950,10 +6803,6 @@ final class LocalStore {
         return properties.first(where: { $0.id == propertyID })?.baselineSessionID == sessionID
     }
 
-    private func currentPropertyName(for propertyID: UUID) -> String {
-        let value = currentProperty(for: propertyID)?.name ?? ""
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private func currentProperty(for propertyID: UUID) -> Property? {
         let properties = (try? migratedPropertyAndOrganizationState().properties) ?? ((try? readPropertiesRaw()) ?? [])

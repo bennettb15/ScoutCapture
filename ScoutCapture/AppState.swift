@@ -14,567 +14,6 @@ extension Notification.Name {
     static let scoutVerifyExportSessionJSONSource = Notification.Name("scout.verifyExportSessionJSONSource")
 }
 
-struct SupabaseRuntimeConfiguration {
-    enum Source: String, Equatable {
-        case infoPlist = "info_plist"
-        case environmentOverride = "environment_override"
-        case invalidEnvironmentOverride = "invalid_environment_override"
-    }
-
-    enum TargetClassification: String, Equatable {
-        case missing
-        case invalid
-        case localDev = "local_dev"
-        case approvedStaging = "approved_staging"
-        case approvedProductionValidation = "approved_production_validation"
-        case remote
-    }
-
-    static let approvedSessionSnapshotStagingProjectRef = "hpekjqqiyurrewfjvjmn"
-    static let productionSnapshotValidationProjectRef = "chlvazmtucoszicehtnm"
-    static let productionSnapshotValidationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
-    static let productionSnapshotHydrationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_HYDRATION_ALLOWED"
-    nonisolated static let productionSingleSessionCanonicalActivationEnabledEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ENABLED"
-    nonisolated static let productionSingleSessionCanonicalActivationOrgAllowlistEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ORG_ALLOWLIST"
-    nonisolated static let productionSingleSessionCanonicalActivationPropertyAllowlistEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_PROPERTY_ALLOWLIST"
-    nonisolated static let productionSingleSessionCanonicalActivationSessionAllowlistEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_SESSION_ALLOWLIST"
-    nonisolated static let canonicalReadCandidateEnabledEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ENABLED"
-    nonisolated static let canonicalReadCandidateOrgAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ORG_ALLOWLIST"
-    nonisolated static let canonicalReadCandidatePropertyAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_PROPERTY_ALLOWLIST"
-    nonisolated static let canonicalReadCandidateSessionAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_SESSION_ALLOWLIST"
-
-    let url: URL?
-    let anonKey: String?
-    let source: Source
-    let overrideURLRawValue: String?
-    let overrideAnonKeyPresent: Bool
-    let productionSnapshotValidationAllowed: Bool
-    let productionSnapshotHydrationAllowed: Bool
-
-    var isConfigured: Bool {
-        url != nil && !(anonKey?.isEmpty ?? true)
-    }
-
-    var isOverrideActive: Bool {
-        source == .environmentOverride || source == .invalidEnvironmentOverride
-    }
-
-    var targetClassification: TargetClassification {
-        guard source != .invalidEnvironmentOverride else { return .invalid }
-        guard let url else { return .missing }
-        guard isConfigured else { return .invalid }
-        let host = (url.host ?? "").lowercased()
-        if host == "127.0.0.1" || host == "localhost" || host == "::1" {
-            return .localDev
-        }
-        if host == "\(Self.approvedSessionSnapshotStagingProjectRef).supabase.co" {
-            return .approvedStaging
-        }
-        if host == "\(Self.productionSnapshotValidationProjectRef).supabase.co",
-           productionSnapshotValidationAllowed {
-            return .approvedProductionValidation
-        }
-        return .remote
-    }
-
-    var isSafeLocalDevOverride: Bool {
-        isOverrideActive && isConfigured && targetClassification == .localDev
-    }
-
-    var isSessionSnapshotShadowWriteOverrideAllowed: Bool {
-        guard isConfigured else { return false }
-        switch targetClassification {
-        case .localDev, .approvedStaging:
-            return isOverrideActive
-        case .approvedProductionValidation:
-            return true
-        case .missing, .invalid, .remote:
-            return false
-        }
-    }
-
-    var isProductionSnapshotValidationManualOnly: Bool {
-        targetClassification == .approvedProductionValidation
-    }
-
-    var isExactProductionSnapshotAutoUploadTarget: Bool {
-        isExactProductionSnapshotHydrationTarget
-    }
-
-    var isExactProductionSnapshotHydrationTarget: Bool {
-        guard let url else { return false }
-        guard url.scheme?.lowercased() == "https",
-              url.host?.lowercased() == "\(Self.productionSnapshotValidationProjectRef).supabase.co",
-              url.port == nil,
-              url.user == nil,
-              url.password == nil,
-              url.query == nil,
-              url.fragment == nil else {
-            return false
-        }
-        return url.path.isEmpty || url.path == "/"
-    }
-
-    var sanitizedURLDisplay: String {
-        guard let url else {
-            return overrideURLRawValue.map { "invalid:\(Self.sanitizedURLText($0))" } ?? "none"
-        }
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.user = nil
-        components?.password = nil
-        components?.query = nil
-        components?.fragment = nil
-        return components?.string ?? Self.sanitizedURLText(url.absoluteString)
-    }
-
-    var redactedAnonKeyDisplay: String {
-        guard let anonKey, !anonKey.isEmpty else {
-            return overrideAnonKeyPresent ? "[invalid]" : "none"
-        }
-        if anonKey.count <= 10 {
-            return "[redacted]"
-        }
-        return "\(anonKey.prefix(4))...\(anonKey.suffix(4))"
-    }
-
-    init(
-        url: URL?,
-        anonKey: String?,
-        source: Source = .infoPlist,
-        overrideURLRawValue: String? = nil,
-        overrideAnonKeyPresent: Bool = false,
-        productionSnapshotValidationAllowed: Bool = false,
-        productionSnapshotHydrationAllowed: Bool = false
-    ) {
-        self.url = url
-        self.anonKey = anonKey
-        self.source = source
-        self.overrideURLRawValue = overrideURLRawValue
-        self.overrideAnonKeyPresent = overrideAnonKeyPresent
-        self.productionSnapshotValidationAllowed = productionSnapshotValidationAllowed
-        self.productionSnapshotHydrationAllowed = productionSnapshotHydrationAllowed
-    }
-
-    private static func sanitizedURLText(_ value: String) -> String {
-        var components = URLComponents(string: value)
-        components?.user = nil
-        components?.password = nil
-        components?.query = nil
-        components?.fragment = nil
-        return components?.string ?? "[invalid-url]"
-    }
-}
-
-enum CutoverPhase: String, CaseIterable {
-    case phaseA = "phase_a"
-    case phaseB = "phase_b"
-    case phaseC = "phase_c"
-
-    var displayName: String {
-        switch self {
-        case .phaseA:
-            return "Phase A"
-        case .phaseB:
-            return "Phase B"
-        case .phaseC:
-            return "Phase C"
-        }
-    }
-
-    var summary: String {
-        switch self {
-        case .phaseA:
-            return "iCloud read/write"
-        case .phaseB:
-            return "iCloud read/write + Supabase metadata shadow-write"
-        case .phaseC:
-            return "Supabase canonical read/write + iCloud passive cache/DR"
-        }
-    }
-
-    var logDescription: String {
-        "\(displayName) (\(summary))"
-    }
-}
-
-// 2C-08 rollback is operator-driven and restart-based. This catalog is only used to
-// make the intended rollback posture explicit in startup logs.
-enum CutoverRollbackTrigger: String, CaseIterable {
-    case operatorFlagRollback = "operator_flag_rollback"
-    case phaseBShadowWriteInstability = "phase_b_shadow_write_instability"
-    case phaseCCanonicalPathInstability = "phase_c_canonical_path_instability"
-    case unexpectedRemoteMetadataDivergence = "unexpected_remote_metadata_divergence"
-
-    var summary: String {
-        switch self {
-        case .operatorFlagRollback:
-            return "Operator changes cutover flags and restarts the app"
-        case .phaseBShadowWriteInstability:
-            return "Phase B metadata shadow-write failures or instability"
-        case .phaseCCanonicalPathInstability:
-            return "Phase C canonical Supabase read/write instability"
-        case .unexpectedRemoteMetadataDivergence:
-            return "Unexpected remote metadata divergence during cutover"
-        }
-    }
-
-    static var restartCatalogForLogs: String {
-        allCases.map { "\($0.rawValue)=\($0.summary)" }.joined(separator: " | ")
-    }
-}
-
-struct BackendFeatureFlags {
-    let supabaseEnabled: Bool
-    let shadowWriteEnabled: Bool
-    let supabaseReadEnabled: Bool
-    let supabasePropertyReadEnabled: Bool
-    let mediaSupabaseUploadEnabled: Bool
-    let syncDeltaEnabled: Bool
-    let sessionCoordinationEnabled: Bool
-    let sessionSnapshotShadowWriteEnabled: Bool
-    let sessionSnapshotAutoUploadEnabled: Bool
-    let sessionSnapshotProductionAutoUploadTargetEnabled: Bool
-    let sessionSnapshotAutoUploadKillSwitch: Bool
-    let sessionSnapshotAutoUploadOrgAllowlist: Set<UUID>
-    let sessionSnapshotAutoUploadPropertyAllowlist: Set<UUID>
-
-    init(
-        supabaseEnabled: Bool,
-        shadowWriteEnabled: Bool,
-        supabaseReadEnabled: Bool,
-        supabasePropertyReadEnabled: Bool,
-        mediaSupabaseUploadEnabled: Bool,
-        syncDeltaEnabled: Bool,
-        sessionCoordinationEnabled: Bool,
-        sessionSnapshotShadowWriteEnabled: Bool = false,
-        sessionSnapshotAutoUploadEnabled: Bool = false,
-        sessionSnapshotProductionAutoUploadTargetEnabled: Bool = false,
-        sessionSnapshotAutoUploadKillSwitch: Bool = false,
-        sessionSnapshotAutoUploadOrgAllowlist: Set<UUID> = [],
-        sessionSnapshotAutoUploadPropertyAllowlist: Set<UUID> = []
-    ) {
-        self.supabaseEnabled = supabaseEnabled
-        self.shadowWriteEnabled = shadowWriteEnabled
-        self.supabaseReadEnabled = supabaseReadEnabled
-        self.supabasePropertyReadEnabled = supabasePropertyReadEnabled
-        self.mediaSupabaseUploadEnabled = mediaSupabaseUploadEnabled
-        self.syncDeltaEnabled = syncDeltaEnabled
-        self.sessionCoordinationEnabled = sessionCoordinationEnabled
-        self.sessionSnapshotShadowWriteEnabled = sessionSnapshotShadowWriteEnabled
-        self.sessionSnapshotAutoUploadEnabled = sessionSnapshotAutoUploadEnabled
-        self.sessionSnapshotProductionAutoUploadTargetEnabled = sessionSnapshotProductionAutoUploadTargetEnabled
-        self.sessionSnapshotAutoUploadKillSwitch = sessionSnapshotAutoUploadKillSwitch
-        self.sessionSnapshotAutoUploadOrgAllowlist = sessionSnapshotAutoUploadOrgAllowlist
-        self.sessionSnapshotAutoUploadPropertyAllowlist = sessionSnapshotAutoUploadPropertyAllowlist
-    }
-
-    // The cutover phase is derived from the existing backend flags. Property-list
-    // remote reads remain separately controlled by `supabase_property_read_enabled`
-    // so the stabilized 2C-07 property refresh behavior is not coupled to phase.
-    // `supabase_enabled` only indicates backend availability/bootstrap posture.
-    // The actual A/B/C cutover meaning comes from `shadow_write_enabled` and
-    // `supabase_read_enabled`.
-    var cutoverPhase: CutoverPhase {
-        if !supabaseEnabled {
-            return .phaseA
-        }
-        if supabaseReadEnabled {
-            return .phaseC
-        }
-        if shadowWriteEnabled {
-            return .phaseB
-        }
-        return .phaseA
-    }
-
-    static func load(
-        bundle: Bundle = .main,
-        userDefaults: UserDefaults = .standard,
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        allowSessionSnapshotEnvironmentOverride: Bool = false,
-        allowSessionSnapshotKillSwitchEnvironmentOverride: Bool = false
-    ) -> BackendFeatureFlags {
-        let preferSessionSnapshotBundleConfiguration = Self.preferSessionSnapshotBundleConfiguration(bundle: bundle)
-        return BackendFeatureFlags(
-            supabaseEnabled: Self.boolValue(for: "supabase_enabled", bundle: bundle, userDefaults: userDefaults),
-            shadowWriteEnabled: Self.boolValue(for: "shadow_write_enabled", bundle: bundle, userDefaults: userDefaults),
-            supabaseReadEnabled: Self.boolValue(for: "supabase_read_enabled", bundle: bundle, userDefaults: userDefaults),
-            supabasePropertyReadEnabled: Self.boolValue(for: "supabase_property_read_enabled", bundle: bundle, userDefaults: userDefaults),
-            mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults),
-            syncDeltaEnabled: Self.boolValue(for: "sync_delta_enabled", bundle: bundle, userDefaults: userDefaults),
-            sessionCoordinationEnabled: Self.boolValue(for: "session_coordination_enabled", bundle: bundle, userDefaults: userDefaults),
-            sessionSnapshotShadowWriteEnabled: Self.sessionSnapshotShadowWriteValue(
-                bundle: bundle,
-                userDefaults: userDefaults,
-                environment: environment,
-                allowEnvironmentOverride: allowSessionSnapshotEnvironmentOverride,
-                preferBundleConfiguration: preferSessionSnapshotBundleConfiguration
-            ),
-            sessionSnapshotAutoUploadEnabled: Self.sessionSnapshotAutoUploadValue(
-                bundle: bundle,
-                userDefaults: userDefaults,
-                environment: environment,
-                preferBundleConfiguration: preferSessionSnapshotBundleConfiguration
-            ),
-            sessionSnapshotProductionAutoUploadTargetEnabled: Self.boolValue(
-                for: "session_snapshot_production_auto_upload_target_enabled",
-                environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_PRODUCTION_AUTO_UPLOAD_TARGET_ENABLED",
-                bundle: bundle,
-                userDefaults: userDefaults,
-                environment: environment,
-                preferBundleValueOverUserDefaults: preferSessionSnapshotBundleConfiguration
-            ),
-            sessionSnapshotAutoUploadKillSwitch: Self.sessionSnapshotAutoUploadKillSwitchValue(
-                bundle: bundle,
-                userDefaults: userDefaults,
-                environment: environment,
-                allowEnvironmentOverride: allowSessionSnapshotKillSwitchEnvironmentOverride,
-                preferBundleConfiguration: preferSessionSnapshotBundleConfiguration
-            ),
-            sessionSnapshotAutoUploadOrgAllowlist: Self.uuidAllowlistValue(
-                for: "session_snapshot_auto_upload_org_allowlist",
-                environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ORG_ALLOWLIST",
-                bundle: bundle,
-                userDefaults: userDefaults,
-                environment: environment,
-                preferBundleValueOverUserDefaults: preferSessionSnapshotBundleConfiguration
-            ),
-            sessionSnapshotAutoUploadPropertyAllowlist: Self.uuidAllowlistValue(
-                for: "session_snapshot_auto_upload_property_allowlist",
-                environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_PROPERTY_ALLOWLIST",
-                bundle: bundle,
-                userDefaults: userDefaults,
-                environment: environment,
-                preferBundleValueOverUserDefaults: preferSessionSnapshotBundleConfiguration
-            )
-        )
-    }
-
-    var sessionSnapshotAutoUploadHasAllowlist: Bool {
-        !sessionSnapshotAutoUploadOrgAllowlist.isEmpty || !sessionSnapshotAutoUploadPropertyAllowlist.isEmpty
-    }
-
-    private static func sessionSnapshotShadowWriteValue(
-        bundle: Bundle,
-        userDefaults: UserDefaults,
-        environment: [String: String],
-        allowEnvironmentOverride: Bool,
-        preferBundleConfiguration: Bool
-    ) -> Bool {
-        let configuredValue = Self.boolValue(
-            for: "session_snapshot_shadow_write_enabled",
-            bundle: bundle,
-            userDefaults: userDefaults,
-            preferBundleValueOverUserDefaults: preferBundleConfiguration
-        )
-
-        #if DEBUG
-        guard allowEnvironmentOverride else { return configuredValue }
-        #else
-        guard AppStateTestEnvironment.isRunningUnderXCTest, allowEnvironmentOverride else { return configuredValue }
-        #endif
-
-        guard let rawOverride = environment["session_snapshot_shadow_write_enabled"]
-            ?? environment["SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"] else {
-            return configuredValue
-        }
-
-        switch rawOverride.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "1", "true", "yes", "on":
-            return true
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return configuredValue
-        }
-    }
-
-    private static func sessionSnapshotAutoUploadValue(
-        bundle: Bundle,
-        userDefaults: UserDefaults,
-        environment: [String: String],
-        preferBundleConfiguration: Bool
-    ) -> Bool {
-        let configuredValue = Self.boolValue(
-            for: "session_snapshot_auto_upload_enabled",
-            bundle: bundle,
-            userDefaults: userDefaults,
-            preferBundleValueOverUserDefaults: preferBundleConfiguration
-        )
-
-        guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED"] else {
-            return configuredValue
-        }
-
-        switch rawOverride.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "1", "true", "yes", "on":
-            return true
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return configuredValue
-        }
-    }
-
-    private static func sessionSnapshotAutoUploadKillSwitchValue(
-        bundle: Bundle,
-        userDefaults: UserDefaults,
-        environment: [String: String],
-        allowEnvironmentOverride: Bool,
-        preferBundleConfiguration: Bool
-    ) -> Bool {
-        let configuredValue = Self.boolValue(
-            for: "session_snapshot_auto_upload_kill_switch",
-            bundle: bundle,
-            userDefaults: userDefaults,
-            preferBundleValueOverUserDefaults: preferBundleConfiguration
-        )
-
-        guard allowEnvironmentOverride else { return configuredValue }
-        guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() else {
-            return configuredValue
-        }
-
-        switch rawOverride {
-        case "1", "true", "yes", "on":
-            return true
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return configuredValue
-        }
-    }
-
-    private static func boolEnvironmentValue(
-        for key: String,
-        environment: [String: String]
-    ) -> Bool {
-        guard let rawValue = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
-            return false
-        }
-        switch rawValue {
-        case "1", "true", "yes", "on":
-            return true
-        default:
-            return false
-        }
-    }
-
-    private static func uuidAllowlistValue(
-        for key: String,
-        environmentKey: String,
-        bundle: Bundle,
-        userDefaults: UserDefaults,
-        environment: [String: String],
-        preferBundleValueOverUserDefaults: Bool = false
-    ) -> Set<UUID> {
-        if let rawValue = environment[environmentKey] {
-            return Self.uuidSet(from: rawValue)
-        }
-        if preferBundleValueOverUserDefaults,
-           let bundleValue = Self.uuidAllowlistBundleValue(for: key, bundle: bundle) {
-            return bundleValue
-        }
-        if let rawValue = userDefaults.string(forKey: key) {
-            return Self.uuidSet(from: rawValue)
-        }
-        if let rawValues = userDefaults.array(forKey: key) as? [String] {
-            return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) })
-        }
-        return Self.uuidAllowlistBundleValue(for: key, bundle: bundle) ?? []
-    }
-
-    private static func uuidAllowlistBundleValue(for key: String, bundle: Bundle) -> Set<UUID>? {
-        if let rawValue = bundle.object(forInfoDictionaryKey: key) as? String {
-            return Self.uuidSet(from: rawValue)
-        }
-        if let rawValues = bundle.object(forInfoDictionaryKey: key) as? [String] {
-            return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) })
-        }
-        return nil
-    }
-
-    private static func uuidSet(from rawValue: String) -> Set<UUID> {
-        let parts = rawValue
-            .split { character in
-                character == "," || character == ";" || character == "\n" || character == "\t" || character == " "
-            }
-        return Set(parts.compactMap { part in
-            UUID(uuidString: String(part).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
-        })
-    }
-
-    private static func boolValue(
-        for key: String,
-        environmentKey: String,
-        bundle: Bundle,
-        userDefaults: UserDefaults,
-        environment: [String: String],
-        preferBundleValueOverUserDefaults: Bool = false
-    ) -> Bool {
-        if let rawValue = environment[environmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            switch rawValue {
-            case "1", "true", "yes", "on":
-                return true
-            case "0", "false", "no", "off":
-                return false
-            default:
-                break
-            }
-        }
-        return Self.boolValue(
-            for: key,
-            bundle: bundle,
-            userDefaults: userDefaults,
-            preferBundleValueOverUserDefaults: preferBundleValueOverUserDefaults
-        )
-    }
-
-    private static func boolValue(
-        for key: String,
-        bundle: Bundle,
-        userDefaults: UserDefaults,
-        preferBundleValueOverUserDefaults: Bool = false
-    ) -> Bool {
-        if preferBundleValueOverUserDefaults,
-           let bundleValue = Self.boolBundleValue(for: key, bundle: bundle) {
-            return bundleValue
-        }
-
-        if userDefaults.object(forKey: key) != nil {
-            return userDefaults.bool(forKey: key)
-        }
-
-        return Self.boolBundleValue(for: key, bundle: bundle) ?? false
-    }
-
-    private static func boolBundleValue(for key: String, bundle: Bundle) -> Bool? {
-        if let number = bundle.object(forInfoDictionaryKey: key) as? NSNumber {
-            return number.boolValue
-        }
-
-        if let string = bundle.object(forInfoDictionaryKey: key) as? String {
-            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "1", "true", "yes", "on":
-                return true
-            default:
-                return false
-            }
-        }
-
-        return nil
-    }
-
-    private static func preferSessionSnapshotBundleConfiguration(bundle: Bundle) -> Bool {
-        boolBundleValue(
-            for: "session_snapshot_production_auto_upload_target_enabled",
-            bundle: bundle
-        ) == true
-    }
-}
-
 struct AuthenticatedSupabaseUser: Equatable {
     let id: UUID
     let email: String?
@@ -658,7 +97,7 @@ struct PortalPunchlistNote: Identifiable, Equatable {
     }
 }
 
-private enum AppStateTestEnvironment {
+enum AppStateTestEnvironment {
     static var isRunningUnderXCTest: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
@@ -680,179 +119,6 @@ final class AppState: ObservableObject {
     typealias PasswordRecoveryRequestOverride = (String, URL) async throws -> Void
     typealias PropertyOpenFreshnessRecheckOverride = @MainActor (UUID) async -> Void
 #endif
-
-    enum SessionSnapshotKind: String, Codable, CaseIterable, Equatable {
-        case draft
-        case completed
-        case export
-        case delivery
-        case manual
-    }
-
-    enum SessionSnapshotUploadOutcome: String, Equatable {
-        case disabled
-        case unavailable
-        case succeeded
-        case failed
-        case orphanRisk
-    }
-
-    struct SessionSnapshotUploadResult: Equatable {
-        let outcome: SessionSnapshotUploadOutcome
-        let snapshotID: UUID?
-        let sessionID: UUID?
-        let propertyID: UUID?
-        let storagePath: String?
-        let message: String?
-    }
-
-    struct SessionSnapshotAutoUploadEligibility: Equatable {
-        let allowed: Bool
-        let reason: String
-    }
-
-    struct SessionSnapshotUploadRetryRunSummary: Equatable {
-        let didStart: Bool
-        let source: String
-        let discoveredCount: Int
-        let normalizedInFlightCount: Int
-        let skippedBackoffCount: Int
-        let attemptedCount: Int
-        let succeededCount: Int
-        let failedCount: Int
-        let terminalFailedCount: Int
-        let skippedIneligibleCount: Int
-    }
-
-    enum SessionSnapshotCloudState: String, Equatable {
-        case queued
-        case uploading
-        case retryScheduled = "retry_scheduled"
-        case failed
-        case uploaded
-    }
-
-    enum PropertyRowCloudGlyphState: String, Equatable {
-        case current
-        case uploading
-        case warning
-    }
-
-    enum PropertyRowStatusChipState: String, Equatable {
-        case pendingExport = "pending_export"
-        case uploading
-    }
-
-    struct SessionSnapshotCloudStatus: Equatable {
-        enum Tint: String, Equatable {
-            case neutral
-            case blue
-            case orange
-            case red
-        }
-
-        let state: SessionSnapshotCloudState
-        let snapshotID: UUID
-        let organizationID: UUID
-        let propertyID: UUID
-        let sessionID: UUID
-        let triggerSource: String
-        let reason: String?
-        let generatedAt: Date
-        let updatedAt: Date
-
-        var accessibilityLabel: String {
-            if isConfigurationBlocked {
-                return "Session snapshot upload disabled"
-            }
-            switch state {
-            case .queued:
-                return "Session snapshot queued"
-            case .uploading:
-                return "Session snapshot uploading"
-            case .retryScheduled:
-                return "Session snapshot upload retry scheduled"
-            case .failed:
-                return "Session snapshot upload failed"
-            case .uploaded:
-                return "Session snapshot uploaded"
-            }
-        }
-
-        var helpText: String {
-            if isConfigurationBlocked {
-                return "Automatic session snapshot upload is disabled or blocked by configuration."
-            }
-            switch state {
-            case .queued:
-                return "Automatic session snapshot upload is queued."
-            case .uploading:
-                return "Automatic session snapshot upload is in progress."
-            case .retryScheduled:
-                return "Automatic session snapshot upload will retry automatically."
-            case .failed:
-                return "Automatic session snapshot upload reached a terminal failure."
-            case .uploaded:
-                return "Automatic session snapshot upload completed."
-            }
-        }
-
-        var symbolName: String {
-            if isConfigurationBlocked {
-                return "icloud.slash"
-            }
-            switch state {
-            case .queued:
-                return "icloud"
-            case .uploading:
-                return "icloud.and.arrow.up"
-            case .retryScheduled:
-                return "arrow.clockwise.icloud"
-            case .failed:
-                return "exclamationmark.icloud"
-            case .uploaded:
-                return "checkmark.icloud.fill"
-            }
-        }
-
-        var tint: Tint {
-            if isConfigurationBlocked {
-                return .orange
-            }
-            switch state {
-            case .queued:
-                return .neutral
-            case .uploading:
-                return .blue
-            case .retryScheduled:
-                return .orange
-            case .failed:
-                return .red
-            case .uploaded:
-                return .blue
-            }
-        }
-
-        var isConfigurationBlocked: Bool {
-            guard state == .failed else { return false }
-            switch reason {
-            case "auto_upload_disabled",
-                "kill_switch_active",
-                "allowlist_empty",
-                "snapshot_shadow_write_disabled",
-                "supabase_config_invalid",
-                "snapshot_target_not_approved",
-                "production_validation_manual_only",
-                "missing_org_id",
-                "allowlist_no_match",
-                "authentication_not_ready",
-                "active_org_required":
-                return true
-            default:
-                return false
-            }
-        }
-    }
 
     struct FastRuntimePendingExportRecoveryResult: Equatable {
         let success: Bool
@@ -1147,738 +413,6 @@ final class AppState: ObservableObject {
             if !countsValid { return "count_mismatch" }
             return "row_object_mismatch"
         }
-    }
-
-    enum SessionSnapshotRestoreDiagnosticOutcome: String, Codable, Equatable, CaseIterable {
-        case restorableMetadataCandidate = "restorable_metadata_candidate"
-        case noSnapshotFound = "no_snapshot_found"
-        case checksumFailed = "checksum_failed"
-        case objectMissing = "object_missing"
-        case parentMismatch = "parent_mismatch"
-        case staleSnapshot = "stale_snapshot"
-        case localNewerConflict = "local_newer_conflict"
-        case unsupportedSchema = "unsupported_schema"
-        case unableToVerify = "unable_to_verify"
-    }
-
-    struct SessionSnapshotRestoreDiagnosticsResult: Equatable {
-        var checkedAt: Date
-        var propertyID: UUID?
-        var sessionID: UUID?
-        var snapshotID: UUID?
-        var result: SessionSnapshotRestoreDiagnosticOutcome
-        var failureReason: String?
-        var rowFound: Bool
-        var objectReadable: Bool
-        var checksumVerified: Bool
-        var byteSizeMatches: Bool
-        var rowObjectVerified: Bool
-        var parentRemoteVerified: Bool
-        var snapshotSchemaVersion: Int?
-        var snapshotCreatedAt: Date?
-        var snapshotGeneratedAt: Date?
-        var localKnownStateAt: Date? = nil
-        var localKnownStateSource: String? = nil
-        var localSessionExists: Bool
-        var localSessionStatus: String?
-        var localShotCount: Int?
-        var localIssueCount: Int?
-        var localGuidedCount: Int?
-        var snapshotShotCount: Int?
-        var snapshotIssueCount: Int?
-        var snapshotGuidedCount: Int?
-        var snapshotMediaManifestCount: Int?
-        var snapshotMissingLocalOriginalsCount: Int?
-        var snapshotSupabaseStorageMetadataCount: Int?
-        var freshness: String
-        var mediaRecoveryDiagnostics: SessionSnapshotMediaRecoveryDiagnostics
-    }
-
-    enum SessionSnapshotMediaRecoveryState: String, Codable, Equatable, CaseIterable {
-        case recoverableFromSupabaseStorage = "recoverable_from_supabase_storage"
-        case recoverableFromLocalCache = "recoverable_from_local_cache"
-        case missingRemoteStorageMetadata = "missing_remote_storage_metadata"
-        case missingLocalFile = "missing_local_file"
-        case missingBoth = "missing_both"
-        case checksumUnknown = "checksum_unknown"
-        case checksumMismatch = "checksum_mismatch"
-        case unsupportedMediaManifest = "unsupported_media_manifest"
-        case notChecked = "not_checked"
-    }
-
-    enum SessionSnapshotMediaRecoveryPlanningState: String, Codable, Equatable, CaseIterable {
-        case fullyRecoverable = "fully_recoverable"
-        case partiallyRecoverable = "partially_recoverable"
-        case metadataOnly = "metadata_only"
-        case remoteOnly = "remote_only"
-        case localOnly = "local_only"
-        case unrecoverable = "unrecoverable"
-    }
-
-    enum SessionSnapshotMediaRecoverySource: String, Codable, Equatable, CaseIterable {
-        case localCache = "local_cache"
-        case iCloudLocalBackup = "icloud_local_backup"
-        case supabaseStorage = "supabase_storage"
-        case exportArchives = "export_archives"
-
-        nonisolated static var defaultPriority: [SessionSnapshotMediaRecoverySource] {
-            [
-                .localCache,
-                .iCloudLocalBackup,
-                .supabaseStorage,
-                .exportArchives
-            ]
-        }
-    }
-
-    struct SessionSnapshotMediaRetrievalPolicyDiagnostics: Equatable {
-        let mode: String
-        let allowlistMode: String
-        let productionWideRetrievalAllowed: Bool
-        let maxBatchSize: Int
-        let storageQuotaAwarenessRequired: Bool
-        let networkRequirement: String
-        let batteryRequirement: String
-        let checksumValidationRequired: Bool
-        let duplicatePreventionRequired: Bool
-        let partialFailureHandling: String
-        let trustModel: String
-        let rolloutPhase: String
-        let canStartRetrieval: Bool
-        let blockedReasons: [String]
-
-        nonisolated static var guardrailsOnly: SessionSnapshotMediaRetrievalPolicyDiagnostics {
-            SessionSnapshotMediaRetrievalPolicyDiagnostics(
-                mode: "manual_only",
-                allowlistMode: "allowlisted_test_only_first",
-                productionWideRetrievalAllowed: false,
-                maxBatchSize: 25,
-                storageQuotaAwarenessRequired: true,
-                networkRequirement: "unmetered_or_operator_approved",
-                batteryRequirement: "charging_or_sufficient_battery",
-                checksumValidationRequired: true,
-                duplicatePreventionRequired: true,
-                partialFailureHandling: "per_item_report_continue_safe_items",
-                trustModel: "checksum_required_before_accept_storage_metadata_is_locator_only",
-                rolloutPhase: "26C_test_only_media_retrieval",
-                canStartRetrieval: false,
-                blockedReasons: [
-                    "manual_operator_confirmation_required",
-                    "production_wide_retrieval_blocked"
-                ]
-            )
-        }
-    }
-
-    struct SessionSnapshotMediaRecoveryItemDiagnostic: Equatable, Identifiable {
-        let id: UUID
-        let state: SessionSnapshotMediaRecoveryState
-        let localReferencePresent: Bool
-        let localFilePresent: Bool
-        let remoteStorageMetadataPresent: Bool
-        let checksumPresent: Bool
-        let checksumVerified: Bool
-    }
-
-    struct SessionSnapshotMediaRecoveryDiagnostics: Equatable {
-        var checkedAt: Date?
-        var readiness: String
-        var planningState: SessionSnapshotMediaRecoveryPlanningState
-        var sourcePriority: [SessionSnapshotMediaRecoverySource]
-        var retrievalPolicy: SessionSnapshotMediaRetrievalPolicyDiagnostics
-        var manifestSupported: Bool
-        var manifestCount: Int
-        var originalsCount: Int
-        var localFilesPresentCount: Int
-        var remoteStorageMetadataPresentCount: Int
-        var recoverableRemoteCount: Int
-        var recoverableLocalCount: Int
-        var missingCount: Int
-        var missingRemoteStorageMetadataCount: Int
-        var missingLocalFileCount: Int
-        var checksumVerifiedCount: Int
-        var checksumUnknownCount: Int
-        var checksumMismatchCount: Int
-        var unsupportedCount: Int
-        var notCheckedCount: Int
-        var stateCounts: [SessionSnapshotMediaRecoveryState: Int]
-        var items: [SessionSnapshotMediaRecoveryItemDiagnostic]
-
-        static let notChecked = SessionSnapshotMediaRecoveryDiagnostics(
-            checkedAt: nil,
-            readiness: SessionSnapshotMediaRecoveryState.notChecked.rawValue,
-            planningState: .unrecoverable,
-            sourcePriority: SessionSnapshotMediaRecoverySource.defaultPriority,
-            retrievalPolicy: .guardrailsOnly,
-            manifestSupported: false,
-            manifestCount: 0,
-            originalsCount: 0,
-            localFilesPresentCount: 0,
-            remoteStorageMetadataPresentCount: 0,
-            recoverableRemoteCount: 0,
-            recoverableLocalCount: 0,
-            missingCount: 0,
-            missingRemoteStorageMetadataCount: 0,
-            missingLocalFileCount: 0,
-            checksumVerifiedCount: 0,
-            checksumUnknownCount: 0,
-            checksumMismatchCount: 0,
-            unsupportedCount: 0,
-            notCheckedCount: 0,
-            stateCounts: [:],
-            items: []
-        )
-    }
-
-    struct SessionSnapshotHydrationResult: Equatable {
-        var hydratedAt: Date
-        var allowed: Bool
-        var blockedReason: String?
-        var sourceSnapshotID: UUID?
-        var propertyID: UUID?
-        var sessionID: UUID?
-        var hydratedShotCount: Int
-        var hydratedIssueCount: Int
-        var hydratedGuidedCount: Int
-    }
-
-    struct SessionSnapshotHydrationPolicyDiagnostics: Equatable {
-        var hydrationAvailable: Bool
-        var productionHydrationAllowed: Bool
-        var hydrationMode: String
-        var hydrationScope: String
-        var productionHydrationBlockedReason: String?
-    }
-
-    struct SessionSnapshotHydrationConfirmation: Equatable {
-        var confirmationRequired: Bool
-        var canHydrate: Bool
-        var blockedReason: String?
-        var propertyIDText: String
-        var sessionIDText: String
-        var snapshotIDText: String
-        var restoreResult: String
-        var shotCountText: String
-        var issueCountText: String
-        var guidedCountText: String
-        var messageText: String
-    }
-
-    struct SessionSnapshotMediaRetrievalConfirmation: Equatable {
-        var confirmationRequired: Bool
-        var canRetrieve: Bool
-        var blockedReason: String?
-        var propertyIDText: String
-        var sessionIDText: String
-        var snapshotIDText: String
-        var mediaCount: Int
-        var maxBatchSize: Int
-        var messageText: String
-    }
-
-    enum SessionSnapshotMediaRetrievalItemStatus: String, Codable, Equatable {
-        case downloaded
-        case skippedExisting = "skipped_existing"
-        case skippedMissingStorageMetadata = "skipped_missing_storage_metadata"
-        case skippedChecksumMissing = "skipped_checksum_missing"
-        case rejectedChecksumMismatch = "rejected_checksum_mismatch"
-        case failed
-    }
-
-    struct SessionSnapshotMediaRetrievalItemResult: Equatable, Identifiable {
-        let id: UUID
-        let status: SessionSnapshotMediaRetrievalItemStatus
-        let checksumVerified: Bool
-        let recoveredLocalPathPresent: Bool
-        let failureReason: String?
-    }
-
-    struct SessionSnapshotMediaRetrievalResult: Equatable {
-        let retrievedAt: Date
-        let allowed: Bool
-        let blockedReason: String?
-        let propertyID: UUID?
-        let sessionID: UUID?
-        let snapshotID: UUID?
-        let attemptedCount: Int
-        let downloadedCount: Int
-        let checksumVerifiedCount: Int
-        let skippedExistingCount: Int
-        let failedCount: Int
-        let recoveredLocalPathCount: Int
-        let recoveredMediaDirectoryPathPresent: Bool
-        let items: [SessionSnapshotMediaRetrievalItemResult]
-    }
-
-
-    enum SnapshotRecoveryCohortCategory: String, Codable, Equatable, CaseIterable {
-        case completedSealedSession = "completed_sealed_session"
-        case draftSession = "draft_session"
-        case highVolumeMetadata = "many_shots_issues_guided_items"
-        case noMediaManifest = "no_media_manifest"
-        case localNewerConflict = "local_newer_conflict"
-        case missingLocalMetadata = "missing_local_metadata"
-        case orgDriftHistory = "org_drift_history"
-        case staleSnapshot = "stale_snapshot"
-        case noSnapshotFound = "no_snapshot_found"
-        case blockedVerification = "blocked_verification"
-        case unknown = "unknown"
-    }
-
-    enum SnapshotRecoveryReadiness: String, Codable, Equatable, CaseIterable {
-        case readyForManualHydration = "ready_for_manual_hydration"
-        case needsReview = "needs_review"
-        case blocked = "blocked"
-        case notChecked = "not_checked"
-    }
-
-    enum SnapshotRestoreRiskLevel: String, Codable, Equatable, CaseIterable {
-        case low
-        case medium
-        case high
-        case blocking
-        case unknown
-    }
-
-    struct SnapshotRecoveryCohortResult: Equatable {
-        var checkedAt: Date
-        var propertyID: UUID?
-        var sessionID: UUID?
-        var snapshotID: UUID?
-        var category: SnapshotRecoveryCohortCategory
-        var readiness: SnapshotRecoveryReadiness
-        var riskLevel: SnapshotRestoreRiskLevel
-        var snapshotFreshnessAgeSeconds: TimeInterval?
-        var hydrationEligibilityReason: String
-        var latestSnapshotCovered: Bool
-        var restoreDiagnosticsResult: String
-    }
-
-    enum SessionSnapshotUploadError: LocalizedError, Equatable {
-        case disabled
-        case missingSupabaseClient
-        case missingOrgID
-        case notPreviewable(String)
-        case remoteUnavailable(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .disabled:
-                return "Session snapshot shadow-write is disabled."
-            case .missingSupabaseClient:
-                return "Supabase client is unavailable for session snapshot upload."
-            case .missingOrgID:
-                return "Session snapshot upload requires an org_id."
-            case .notPreviewable(let reason):
-                return "Session snapshot is not previewable: \(reason)"
-            case .remoteUnavailable(let reason):
-                return "Session snapshot remote table or bucket is unavailable: \(reason)"
-            }
-        }
-    }
-    struct CaptureProfileMaintenanceBackfillResult: Equatable {
-        var localPropertiesFound: Int = 0
-        var propertiesScanned: Int = 0
-        var sessionsScanned: Int = 0
-        var remotePropertiesChecked: Int = 0
-        var remoteSessionsChecked: Int = 0
-        var remoteActivePropertyCount: Int = 0
-        var propertyProfilesFilled: Int = 0
-        var sessionProfilesFilled: Int = 0
-        var sessionsEnsured: Int = 0
-        var skipped: Int = 0
-        var failed: Int = 0
-        var staleOrgReconciledCount: Int = 0
-        var trueOrgMismatchCount: Int = 0
-        var propertiesFilteredDeleted: Int = 0
-        var propertiesFilteredArchived: Int = 0
-        var propertiesFilteredOrgMismatch: Int = 0
-        var propertiesFilteredInaccessible: Int = 0
-        var sessionMetadataMissing: Int = 0
-        var sessionProfileUnknown: Int = 0
-    }
-
-    enum DiagnosticErrorCategory: String, Equatable {
-        case authOrRLS = "auth_or_rls"
-        case network
-        case conflict
-        case duplicate
-        case localIO = "local_io"
-        case unknown
-    }
-
-    struct DiagnosticErrorSnapshot: Equatable {
-        let category: DiagnosticErrorCategory
-        let message: String
-        let recordedAt: Date
-    }
-
-    struct OfflineReplayDiagnostics: Equatable {
-        var discoveredCount: Int = 0
-        var attemptedCount: Int = 0
-        var succeededCount: Int = 0
-        var failedCount: Int = 0
-        var skippedBackoffCount: Int = 0
-        var normalizedInFlightCount: Int = 0
-        var lastRunAt: Date?
-    }
-
-    struct OfflineQueueDiagnostics: Equatable {
-        var totalQueued: Int = 0
-        var pendingCount: Int = 0
-        var failedCount: Int = 0
-        var acknowledgedHistoricalCount: Int = 0
-        var oldestFailureAgeSeconds: TimeInterval?
-        var refreshedAt: Date?
-    }
-
-    struct MediaDiagnostics: Equatable {
-        var lastBackfillDiscoveredCount: Int = 0
-        var lastBackfillAttemptedCount: Int = 0
-        var lastBackfillSkippedRetryCapCount: Int = 0
-        var uploadSuccessCount: Int = 0
-        var uploadFailureCount: Int = 0
-        var pendingLocalMediaCount: Int?
-        var lastBackfillAt: Date?
-    }
-
-    struct ShadowWriteEntityDiagnostics: Equatable {
-        var successCount: Int = 0
-        var failureCount: Int = 0
-    }
-
-    struct ShadowWriteDiagnostics: Equatable {
-        var property = ShadowWriteEntityDiagnostics()
-        var session = ShadowWriteEntityDiagnostics()
-        var shotMetadata = ShadowWriteEntityDiagnostics()
-        var captureProfile = ShadowWriteEntityDiagnostics()
-    }
-
-    struct SessionSnapshotUploadDiagnostics: Equatable {
-        var flagEnabled: Bool = false
-        var autoUploadFlagEnabled: Bool = false
-        var autoUploadKillSwitchActive: Bool = false
-        var autoUploadAllowlistMatch: Bool = false
-        var autoUploadSkippedReason: String?
-        var autoUploadTriggerSource: String?
-        var lastAutoAttemptAt: Date?
-        var lastAutoSuccessAt: Date?
-        var lastAutoFailureAt: Date?
-        var lastAutoFailureMessage: String?
-        var lastAutoPropertyID: UUID?
-        var lastAutoSessionID: UUID?
-        var lastAutoSnapshotID: UUID?
-        var lastAutoUploadPath: String?
-        var lastAutoUploadOutcome: String = "not_attempted"
-        var lastDraftReuseDecisionAt: Date?
-        var lastDraftReusePropertyID: UUID?
-        var lastDraftReuseSessionID: UUID?
-        var lastDraftReuseDecision: String = "not_checked"
-        var lastDraftReuseCandidateCount: Int = 0
-        var lastDraftReuseBlockedReason: String?
-        var lastDraftDuplicateDetected: Bool = false
-        var lastDraftForegroundRefreshReconciliation: String = "not_checked"
-        var lastOrgPersistenceRepairAt: Date?
-        var lastOrgPersistencePropertyID: UUID?
-        var lastOrgPersistencePersistedOrgID: UUID?
-        var lastOrgPersistenceRuntimeOrgID: UUID?
-        var lastOrgPersistenceCanonicalSupabaseOrgID: UUID?
-        var lastOrgPersistenceMatch: Bool?
-        var lastOrgPersistenceRepairResult: String = "not_checked"
-        var remoteAvailability: String = "not_checked"
-        var attemptedCount: Int = 0
-        var successCount: Int = 0
-        var failureCount: Int = 0
-        var orphanRiskCount: Int = 0
-        var lastAttemptAt: Date?
-        var lastSuccessAt: Date?
-        var lastFailureAt: Date?
-        var lastFailureMessage: String?
-        var lastSnapshotID: UUID?
-        var lastPropertyID: UUID?
-        var lastSessionID: UUID?
-        var lastUploadPath: String?
-        var lastStorageUploadCompleted: Bool = false
-        var lastRowInsertCompleted: Bool = false
-        var lastUploadOutcome: String = "not_attempted"
-        var lastUploadErrorMessage: String?
-        var lastKind: String?
-        var lastTrigger: String?
-        var lastAuthPreflightAt: Date?
-        var lastAuthPreflightAppUserID: String?
-        var lastAuthPreflightClientUserID: String?
-        var lastAuthPreflightUsersMatch: Bool?
-        var lastAuthPreflightPayloadOrgID: UUID?
-        var lastAuthPreflightPayloadPropertyID: UUID?
-        var lastAuthPreflightPayloadSessionID: UUID?
-        var lastAuthPreflightRemotePropertyExists: Bool?
-        var lastAuthPreflightRemoteSessionExists: Bool?
-        var lastAuthPreflightRemotePropertyOrgID: UUID?
-        var lastAuthPreflightRemoteSessionOrgID: UUID?
-        var lastAuthPreflightRemoteSessionPropertyMatches: Bool?
-        var lastAuthPreflightRemoteOrgIDsMatch: Bool?
-        var lastAuthPreflightReady: Bool?
-        var lastAuthPreflightFailureMessage: String?
-        var lastLocalOrgRepairAt: Date?
-        var lastLocalOrgRepairOutcome: String = "not_attempted"
-        var lastLocalOrgRepairPropertyID: UUID?
-        var lastLocalOrgRepairSessionID: UUID?
-        var lastLocalOrgRepairPreviousOrgID: UUID?
-        var lastLocalOrgRepairCanonicalOrgID: UUID?
-        var lastLocalOrgRepairMessage: String?
-        var lastLocalOrgDriftAuditAt: Date?
-        var lastLocalOrgDriftAuditPropertiesChecked: Int = 0
-        var lastLocalOrgDriftAuditSessionsChecked: Int = 0
-        var lastLocalOrgDriftAuditPropertyMismatchCount: Int = 0
-        var lastLocalOrgDriftAuditSessionMismatchCount: Int = 0
-        var lastLocalOrgDriftAuditUnableToConfirmCount: Int = 0
-        var lastLocalOrgDriftAuditSamples: [String] = []
-        var lastLocalOrgDriftRepairAt: Date?
-        var lastLocalOrgDriftRepairAttemptedCount: Int = 0
-        var lastLocalOrgDriftRepairPropertyCount: Int = 0
-        var lastLocalOrgDriftRepairSessionCount: Int = 0
-        var lastLocalOrgDriftRepairSkippedCount: Int = 0
-        var lastLocalOrgDriftRepairFailureCount: Int = 0
-        var lastLocalOrgDriftRepairSamples: [String] = []
-        var lastReadbackAt: Date?
-        var lastReadbackStatus: String = "not_checked"
-        var lastReadbackSnapshotID: UUID?
-        var lastReadbackRowFound: Bool = false
-        var lastReadbackPayloadReadable: Bool = false
-        var lastReadbackChecksumVerified: Bool = false
-        var lastReadbackRowObjectConsistent: Bool = false
-        var lastReadbackPayloadByteSize: Int?
-        var lastReadbackSnapshotCreatedAt: Date?
-        var lastReadbackFailureMessage: String?
-        var lastRestoreDiagnosticsAt: Date?
-        var lastRestoreDiagnosticsResult: String = "not_checked"
-        var lastRestoreDiagnosticsFailureReason: String?
-        var lastRestoreDiagnosticsPropertyID: UUID?
-        var lastRestoreDiagnosticsSessionID: UUID?
-        var lastRestoreDiagnosticsSnapshotID: UUID?
-        var lastRestoreDiagnosticsRowFound: Bool = false
-        var lastRestoreDiagnosticsObjectReadable: Bool = false
-        var lastRestoreDiagnosticsChecksumVerified: Bool = false
-        var lastRestoreDiagnosticsByteSizeMatches: Bool = false
-        var lastRestoreDiagnosticsRowObjectVerified: Bool = false
-        var lastRestoreDiagnosticsParentRemoteVerified: Bool = false
-        var lastRestoreDiagnosticsSnapshotSchemaVersion: Int?
-        var lastRestoreDiagnosticsSnapshotCreatedAt: Date?
-        var lastRestoreDiagnosticsSnapshotGeneratedAt: Date?
-        var lastRestoreDiagnosticsLocalKnownStateAt: Date?
-        var lastRestoreDiagnosticsLocalKnownStateSource: String?
-        var lastRestoreDiagnosticsLocalSessionExists: Bool = false
-        var lastRestoreDiagnosticsLocalSessionStatus: String?
-        var lastRestoreDiagnosticsLocalShotCount: Int?
-        var lastRestoreDiagnosticsLocalIssueCount: Int?
-        var lastRestoreDiagnosticsLocalGuidedCount: Int?
-        var lastRestoreDiagnosticsSnapshotShotCount: Int?
-        var lastRestoreDiagnosticsSnapshotIssueCount: Int?
-        var lastRestoreDiagnosticsSnapshotGuidedCount: Int?
-        var lastRestoreDiagnosticsSnapshotMediaManifestCount: Int?
-        var lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount: Int?
-        var lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount: Int?
-        var lastRestoreDiagnosticsFreshness: String = "not_checked"
-        var lastRestoreDiagnosticsMediaRecoveryReadiness: String = SessionSnapshotMediaRecoveryState.notChecked.rawValue
-        var lastRestoreDiagnosticsMediaRecoveryPlanningState: String = SessionSnapshotMediaRecoveryPlanningState.unrecoverable.rawValue
-        var lastRestoreDiagnosticsMediaRecoverySourcePriority: [String] = SessionSnapshotMediaRecoverySource.defaultPriority.map(\.rawValue)
-        var lastRestoreDiagnosticsMediaRetrievalMode: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.mode
-        var lastRestoreDiagnosticsMediaRetrievalAllowlistMode: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.allowlistMode
-        var lastRestoreDiagnosticsMediaProductionWideRetrievalAllowed: Bool = false
-        var lastRestoreDiagnosticsMediaRetrievalMaxBatchSize: Int = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.maxBatchSize
-        var lastRestoreDiagnosticsMediaRetrievalStorageQuotaRequired: Bool = true
-        var lastRestoreDiagnosticsMediaRetrievalNetworkRequirement: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.networkRequirement
-        var lastRestoreDiagnosticsMediaRetrievalBatteryRequirement: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.batteryRequirement
-        var lastRestoreDiagnosticsMediaRetrievalChecksumRequired: Bool = true
-        var lastRestoreDiagnosticsMediaRetrievalDuplicatePreventionRequired: Bool = true
-        var lastRestoreDiagnosticsMediaRetrievalPartialFailureHandling: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.partialFailureHandling
-        var lastRestoreDiagnosticsMediaRetrievalTrustModel: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.trustModel
-        var lastRestoreDiagnosticsMediaRetrievalRolloutPhase: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.rolloutPhase
-        var lastRestoreDiagnosticsMediaRetrievalCanStart: Bool = false
-        var lastRestoreDiagnosticsMediaRetrievalBlockedReasons: [String] = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.blockedReasons
-        var lastRestoreDiagnosticsMediaManifestSupported: Bool = false
-        var lastRestoreDiagnosticsMediaManifestCount: Int = 0
-        var lastRestoreDiagnosticsMediaOriginalsCount: Int = 0
-        var lastRestoreDiagnosticsMediaLocalFilesPresentCount: Int = 0
-        var lastRestoreDiagnosticsMediaRemoteStorageMetadataPresentCount: Int = 0
-        var lastRestoreDiagnosticsMediaRecoverableRemoteCount: Int = 0
-        var lastRestoreDiagnosticsMediaRecoverableLocalCount: Int = 0
-        var lastRestoreDiagnosticsMediaMissingCount: Int = 0
-        var lastRestoreDiagnosticsMediaMissingRemoteStorageMetadataCount: Int = 0
-        var lastRestoreDiagnosticsMediaMissingLocalFileCount: Int = 0
-        var lastRestoreDiagnosticsMediaChecksumVerifiedCount: Int = 0
-        var lastRestoreDiagnosticsMediaChecksumUnknownCount: Int = 0
-        var lastRestoreDiagnosticsMediaChecksumMismatchCount: Int = 0
-        var lastRestoreDiagnosticsMediaUnsupportedCount: Int = 0
-        var lastRestoreDiagnosticsMediaNotCheckedCount: Int = 0
-        var lastRestoreDiagnosticsMediaStateCounts: [String] = []
-        var lastMediaRetrievalAt: Date?
-        var lastMediaRetrievalAllowed: Bool = false
-        var lastMediaRetrievalBlockedReason: String?
-        var lastMediaRetrievalPropertyID: UUID?
-        var lastMediaRetrievalSessionID: UUID?
-        var lastMediaRetrievalSnapshotID: UUID?
-        var lastMediaRetrievalAttemptedCount: Int = 0
-        var lastMediaRetrievalDownloadedCount: Int = 0
-        var lastMediaRetrievalChecksumVerifiedCount: Int = 0
-        var lastMediaRetrievalSkippedExistingCount: Int = 0
-        var lastMediaRetrievalFailedCount: Int = 0
-        var lastMediaRetrievalRecoveredLocalPathCount: Int = 0
-        var lastMediaRetrievalRecoveredDirectoryPathPresent: Bool = false
-        var lastHydrationAt: Date?
-        var lastHydrationAllowed: Bool = false
-        var lastHydrationBlockedReason: String?
-        var lastHydrationSourceSnapshotID: UUID?
-        var lastHydrationPropertyID: UUID?
-        var lastHydrationSessionID: UUID?
-        var lastHydrationShotCount: Int = 0
-        var lastHydrationIssueCount: Int = 0
-        var lastHydrationGuidedCount: Int = 0
-        var productionHydrationAllowed: Bool = false
-        var hydrationMode: String = "blocked_by_default"
-        var hydrationScope: String = "none"
-        var productionHydrationBlockedReason: String = "production_hydration_gate_disabled"
-        var lastRecoveryCohortAt: Date?
-        var lastRecoveryCohortCategory: String = SnapshotRecoveryCohortCategory.unknown.rawValue
-        var lastRecoveryReadiness: String = SnapshotRecoveryReadiness.notChecked.rawValue
-        var lastRecoveryRiskLevel: String = SnapshotRestoreRiskLevel.unknown.rawValue
-        var lastRecoverySnapshotFreshnessAgeSeconds: TimeInterval?
-        var lastRecoveryHydrationEligibilityReason: String = "not_checked"
-        var lastRecoveryLatestSnapshotCovered: Bool = false
-        var lastRecoveryRestoreDiagnosticsResult: String = "not_checked"
-        var lastCanonicalReadDiagnosticsAt: Date?
-        var lastCanonicalReadDiagnosticsVerifiedOrgID: UUID?
-        var lastCanonicalReadDiagnosticsPropertyID: UUID?
-        var lastCanonicalReadDiagnosticsSessionID: UUID?
-        var lastCanonicalReadDiagnosticsResult: String = CanonicalReadDiagnosticResult.localOnly.rawValue
-        var lastCanonicalReadDiagnosticsRemotePropertyFound: Bool = false
-        var lastCanonicalReadDiagnosticsRemoteSessionFound: Bool = false
-        var lastCanonicalReadDiagnosticsLocalPropertyFound: Bool = false
-        var lastCanonicalReadDiagnosticsLocalSessionFound: Bool = false
-        var lastCanonicalReadDiagnosticsCountParity: Bool?
-        var lastCanonicalReadDiagnosticsStatusParity: Bool?
-        var lastCanonicalReadDiagnosticsParentOrgConsistent: Bool?
-        var lastCanonicalReadDiagnosticsParentPropertyConsistent: Bool?
-        var lastCanonicalReadDiagnosticsLocalShotCount: Int?
-        var lastCanonicalReadDiagnosticsRemoteShotCount: Int?
-        var lastCanonicalReadDiagnosticsLocalIssueObservationCount: Int?
-        var lastCanonicalReadDiagnosticsRemoteIssueObservationCount: Int?
-        var lastCanonicalReadDiagnosticsLocalGuidedCount: Int?
-        var lastCanonicalReadDiagnosticsRemoteGuidedCount: Int?
-        var lastCanonicalReadDiagnosticsLocalKnownStateAt: Date?
-        var lastCanonicalReadDiagnosticsLocalKnownStateSource: String?
-        var lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds: TimeInterval?
-        var lastCanonicalReadDiagnosticsRemoteRevision: Int64?
-        var lastCanonicalReadDiagnosticsRecommendation: String = "local_first"
-        var lastCanonicalReadDiagnosticsBlockedReason: String?
-        var lastNormalizedParityGapTaxonomy: [String] = []
-        var lastNormalizedParityCompleteness: String = "not_checked"
-        var lastRemoteShadowWriteCoverage: String = "not_checked"
-        var lastMissingRemoteEntityClassification: String = "not_checked"
-        var lastLineageDivergenceSource: String = "not_checked"
-        var lastParityRepairToolingRecommended: Bool = false
-        var lastCanonicalReadsRemainBlocked: Bool = true
-        var lastCanonicalReadRolloutBlockers: [String] = []
-        var lastCanonicalReadPrerequisitesBeforeAllowlist: [String] = []
-        var lastCanonicalReadProbableCauses: [String] = []
-        var lastParityRepairStrategies: [String] = []
-        var lastParityRepairSafetyRules: [String] = []
-        var lastParityDiagnosticsBeforeRepair: [String] = []
-        var lastParityCompletenessScore: Double = 0
-        var lastShadowWriteCoverageScore: Double = 0
-        var lastLineageConfidence: String = "not_checked"
-        var lastMissingChildCount: Int = 0
-        var lastReplayEligibility: String = "not_checked"
-        var lastParityRepairRolloutPhase: String = "diagnostics_only"
-        var lastNormalizedBackfillEligible: Bool = false
-        var lastNormalizedBackfillBlockedReason: String = "not_checked"
-        var lastNormalizedBackfillPlannedSessionUpserts: Int = 0
-        var lastNormalizedBackfillPlannedShotUpserts: Int = 0
-        var lastNormalizedBackfillPlannedObservationUpserts: Int = 0
-        var lastNormalizedBackfillExecutedEntityCount: Int = 0
-        var lastNormalizedBackfillSkippedEntityCount: Int = 0
-        var lastNormalizedBackfillRemoteNewerConflictCount: Int = 0
-        var lastNormalizedBackfillProductionBlocked: Bool = true
-        var lastSelectedSessionLifecycleReplaySucceeded: Bool = false
-        var lastSelectedSessionLifecycleReplayOrgID: UUID?
-        var lastSelectedSessionLifecycleReplayPropertyID: UUID?
-        var lastSelectedSessionLifecycleReplaySessionID: UUID?
-        var lastSelectedSessionLifecycleReplayExecutedEntityCount: Int = 0
-        var lastSelectedSessionLifecycleReplayFailedEntityCount: Int = 0
-        var lastSelectedSessionLifecycleReplayRemoteNewerConflictCount: Int = 0
-        var lastCanonicalReadCandidateAllowed: Bool = false
-        var lastCanonicalReadCandidateBlockedReason: String = "not_checked"
-        var lastCanonicalReadCandidateEffectiveSourceRecommendation: String = "local_first"
-        var lastCanonicalReadCandidateLocalFallbackAvailable: Bool = true
-        var lastCanonicalReadCandidateParityConfidence: Double = 0
-        var lastCanonicalReadCandidateReplayConfidence: Double = 0
-        var lastCanonicalReadCandidateMediaRecoveryConfidence: Double = 0
-        var lastCanonicalReadCandidateRemoteStateReadable: Bool = false
-        var lastCanonicalReadCandidateFlagEnabled: Bool = false
-        var lastCanonicalReadCandidateOrgAllowlisted: Bool = false
-        var lastCanonicalReadCandidatePropertyAllowlisted: Bool = false
-        var lastCanonicalReadCandidateSessionAllowlisted: Bool = false
-        var lastCanonicalReadCandidateProductionWideEnabled: Bool = false
-        var lastCanonicalReadCandidateWarnings: [String] = []
-        var lastCanonicalCandidateOverlayBuilt: Bool = false
-        var lastCanonicalCandidateOverlayAllowed: Bool = false
-        var lastCanonicalCandidateOverlayBlockedReason: String = "not_checked"
-        var lastCanonicalCandidateOverlaySource: String = "not_built"
-        var lastCanonicalCandidateOverlayPropertyID: UUID?
-        var lastCanonicalCandidateOverlaySessionID: UUID?
-        var lastCanonicalCandidateOverlayShotCount: Int = 0
-        var lastCanonicalCandidateOverlayIssueObservationCount: Int = 0
-        var lastCanonicalCandidateOverlayGuidedCount: Int?
-        var lastCanonicalCandidateOverlayFallbackSource: String = "local"
-        var lastCanonicalCandidateOverlayActiveSource: String = "local"
-        var lastCanonicalCandidateOverlayRollbackAvailable: Bool = true
-        var lastCanonicalCandidateOverlayProductionBlocked: Bool = true
-        var lastCanonicalCandidateOverlayComparisonResult: String = "candidate_unavailable"
-        var lastCanonicalCandidateOverlayComparisonLocalStatus: String = "unknown"
-        var lastCanonicalCandidateOverlayComparisonRemoteStatus: String = "unknown"
-        var lastCanonicalCandidateOverlayComparisonLocalShotCount: Int?
-        var lastCanonicalCandidateOverlayComparisonRemoteShotCount: Int?
-        var lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount: Int?
-        var lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount: Int?
-        var lastCanonicalCandidateOverlayComparisonLocalFreshness: String = "unknown"
-        var lastCanonicalCandidateOverlayComparisonRemoteFreshness: String = "unknown"
-        var lastCanonicalCandidateOverlayComparisonParityConfidence: String = "not_checked"
-        var lastCanonicalCandidateOverlayComparisonTrustedReason: String = "not_checked"
-        var lastCanonicalCandidateOverlayComparisonBlockedReason: String = "not_checked"
-        var lastCanonicalCandidateActivationAllowed: Bool = false
-        var lastCanonicalCandidateActivationBlockedReason: String = "not_checked"
-        var lastCanonicalCandidateActivationActiveSource: String = "local"
-        var lastCanonicalCandidateActivationRollbackSource: String = "local"
-        var lastCanonicalCandidateActivationScope: String = "selected_session_only"
-        var lastCanonicalCandidateActivationPropertyID: UUID?
-        var lastCanonicalCandidateActivationSessionID: UUID?
-        var lastCanonicalCandidateActivationRollbackAvailable: Bool = true
-        var lastCanonicalCandidateActivationLastActivatedAt: Date?
-        var lastCanonicalCandidateActivationLastRolledBackAt: Date?
-        var lastCanonicalCandidateActivationProductionBlocked: Bool = true
-        var runtimeSelectedSessionQAAuthAuthorized: Bool = false
-        var runtimeSelectedSessionQAAuthOrgID: UUID?
-        var runtimeSelectedSessionQAAuthPropertyID: UUID?
-        var runtimeSelectedSessionQAAuthSessionID: UUID?
-        var runtimeSelectedSessionQAAuthAuthorizedAt: Date?
-        var runtimeSelectedSessionQAAuthExpiresAt: Date?
-        var runtimeSelectedSessionQAAuthFreshness: String = "not_authorized"
-        var runtimeSelectedSessionQAAuthScopeMatches: Bool = false
-        var runtimeSelectedSessionQAAuthClearReason: String?
-        var lastSelectedSessionValidationPipelineState: String = "not_started"
-        var lastSelectedSessionValidationPipelineCheckedAt: Date?
-        var lastSelectedSessionValidationPipelineBlocker: String?
-        var lastSelectedSessionValidationPipelineReportText: String = ""
-    }
-
-    struct LocalDiagnosticsState: Equatable {
-        var offlineReplay = OfflineReplayDiagnostics()
-        var offlineQueue = OfflineQueueDiagnostics()
-        var media = MediaDiagnostics()
-        var shadowWrites = ShadowWriteDiagnostics()
-        var sessionSnapshotUpload = SessionSnapshotUploadDiagnostics()
-        var captureProfileMaintenance: CaptureProfileMaintenanceBackfillResult?
-        var lastError: DiagnosticErrorSnapshot?
     }
 
     enum PropertyOpenFreshnessStatus: String, CaseIterable, Equatable {
@@ -6175,10 +4709,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabaseOrgPayload: Encodable {
-        let id: UUID
-        let name: String
-    }
 
     private struct SupabaseAccessibleOrgRecord: Decodable {
         let id: UUID
@@ -6334,21 +4864,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabasePropertyAccessGrantMutationPayload: Encodable {
-        let orgID: UUID
-        let propertyID: UUID
-        let userID: UUID
-        let grantedBy: UUID
-        let deletedAt: String?
-
-        enum CodingKeys: String, CodingKey {
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case userID = "user_id"
-            case grantedBy = "granted_by"
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct SupabasePropertyAccessGrantInsertPayload: Encodable {
         let id: UUID
@@ -7839,6 +6354,9 @@ final class AppState: ObservableObject {
             refreshPropertyRowStatusChipCache()
         }
     }
+    @Published private var verifiedRemoteDraftSessionIDs: Set<UUID> = [] {
+        didSet { refreshPropertyRowLockBadgeCache() }
+    }
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
@@ -8444,6 +6962,9 @@ final class AppState: ObservableObject {
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
     private let propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride?
+#if DEBUG
+    private var propertyStatusShadowWriteOverrideForTests: ((String, UUID, UUID?, String, String) async -> Bool)?
+#endif
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let shotMetadataWriteOverride: ShotMetadataWriteOverride?
     private let sessionSnapshotStorageUploadOverride: SessionSnapshotStorageUploadOverride?
@@ -8463,7 +6984,7 @@ final class AppState: ObservableObject {
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
     private let localActivityFeedDefaultsKey = "scoutcapture.localActivityFeed.v1"
-    private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
+
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
     private static let propertyStatusOccupiedStaleThreshold: TimeInterval = 3 * 60
@@ -8569,6 +7090,7 @@ final class AppState: ObservableObject {
     private var propertyDeletePreflightRefreshOverride: PropertyDeletePreflightRefreshOverride?
     private var propertySessionOccupancyPersistOverride: PropertySessionOccupancyPersistOverride?
     private var propertyStatusFetchOverride: PropertyStatusFetchOverride?
+    private var linkedDraftSessionFetchOverride: ((UUID, [PropertyStatusRecord]) async throws -> Set<UUID>)?
     private var lightweightPropertyEntryStatusOverride: LightweightPropertyEntryStatusOverride?
     private var sessionSoftDeleteRPCOverride: SessionSoftDeleteRPCOverride?
     private var sessionSoftDeleteRefreshOverride: SessionSoftDeleteRefreshOverride?
@@ -8582,6 +7104,7 @@ final class AppState: ObservableObject {
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
+    private var authBootstrapTask: Task<Void, Never>?
     private var authAccessRebuildTask: Task<Void, Never>?
     private var authenticatedAccessContextGeneration: UInt64 = 0
     private var nextPropertyRefreshToken: UInt64 = 0
@@ -9264,6 +7787,9 @@ final class AppState: ObservableObject {
         let existingTask = authStateChangesTask
         authStateChangesTask = nil
         existingTask?.cancel()
+        let existingBootstrapTask = authBootstrapTask
+        authBootstrapTask = nil
+        existingBootstrapTask?.cancel()
     }
 
     func stopAllObservers() {
@@ -9290,7 +7816,8 @@ final class AppState: ObservableObject {
             return
         }
 
-        Task { @MainActor [weak self] in
+        authBootstrapTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
             self?.applyAuthenticationStateNow(user: nil, ready: false)
         }
 
@@ -9382,24 +7909,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func applyOrganizationContext(
-        memberships: [ActiveOrganizationMembership],
-        activeOrganizationID: UUID?,
-        ready: Bool,
-        expectedAuthenticatedUserID: UUID? = nil,
-        persistActiveSelection: Bool = true
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.applyOrganizationContextNow(
-                memberships: memberships,
-                activeOrganizationID: activeOrganizationID,
-                ready: ready,
-                expectedAuthenticatedUserID: expectedAuthenticatedUserID,
-                persistActiveSelection: persistActiveSelection
-            )
-        }
-    }
 
     @MainActor
     private func applyOrganizationContextNow(
@@ -9536,6 +8045,20 @@ final class AppState: ObservableObject {
         lastPropertyStatusRefreshAt = Date()
     }
 
+    func _debugMarkPropertyLocallyLockedForTests(_ propertyID: UUID) {
+        locallyLockedPropertyIDs.insert(propertyID)
+    }
+
+    func _debugMarkLinkedDraftSessionVerifiedForTests(_ sessionID: UUID) {
+        verifiedRemoteDraftSessionIDs.insert(sessionID)
+    }
+
+    func _debugSetLinkedDraftSessionFetchOverrideForTests(
+        _ override: ((UUID, [PropertyStatusRecord]) async throws -> Set<UUID>)?
+    ) {
+        linkedDraftSessionFetchOverride = override
+    }
+
     func _debugRunForegroundCacheRefreshForTests(reason: String = "test_foreground_cache_refresh") {
         refreshVisiblePropertySessionCachesFromLocalStore(reason: reason)
         reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
@@ -9624,6 +8147,12 @@ final class AppState: ObservableObject {
         propertyStatusFetchOverride = override
     }
 
+    func _debugSetPropertyStatusShadowWriteOverrideForTests(
+        _ override: ((String, UUID, UUID?, String, String) async -> Bool)?
+    ) {
+        propertyStatusShadowWriteOverrideForTests = override
+    }
+
     func _debugSetLightweightPropertyEntryStatusOverrideForTests(
         _ override: LightweightPropertyEntryStatusOverride?
     ) {
@@ -9695,6 +8224,7 @@ final class AppState: ObservableObject {
         if !locallyLockedPropertyIDs.isEmpty {
             locallyLockedPropertyIDs.removeAll()
         }
+        verifiedRemoteDraftSessionIDs.removeAll()
         if !propertySessionOccupancyByPropertyID.isEmpty {
             propertySessionOccupancyByPropertyID = [:]
         }
@@ -12024,6 +10554,31 @@ final class AppState: ObservableObject {
     func ensureOperationalMediaAvailableForRequests(
         _ requests: [OperationalMediaHydrationRequest]
     ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: false)
+    }
+
+    func ensureGuidedHistoricalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: true)
+    }
+
+    func ensureGalleryMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: true)
+    }
+
+    func ensureFlaggedHistoricalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        await ensureMediaAvailableForRequests(requests, allowRelaxedRemoteLookupFallback: true)
+    }
+
+    private func ensureMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest],
+        allowRelaxedRemoteLookupFallback: Bool
+    ) async -> Bool {
         let uniqueRequests = Array(Set(requests))
         guard !uniqueRequests.isEmpty else { return false }
 
@@ -12036,96 +10591,7 @@ final class AppState: ObservableObject {
                         propertyID: request.propertyID,
                         sessionID: request.sessionID,
                         shotID: request.shotID,
-                        relativePathOverride: request.relativePathOverride
-                    )
-                }
-            }
-
-            for await didStart in group {
-                if didStart {
-                    startedAny = true
-                }
-            }
-        }
-
-        return startedAny
-    }
-
-    func ensureGuidedHistoricalMediaAvailableForRequests(
-        _ requests: [OperationalMediaHydrationRequest]
-    ) async -> Bool {
-        let uniqueRequests = Array(Set(requests))
-        guard !uniqueRequests.isEmpty else { return false }
-
-        var startedAny = false
-        await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
-                group.addTask { [weak self] in
-                    guard let self else { return false }
-                    return await self.ensureGuidedHistoricalMediaAvailableIfNeeded(
-                        propertyID: request.propertyID,
-                        sessionID: request.sessionID,
-                        shotID: request.shotID,
-                        relativePathOverride: request.relativePathOverride
-                    )
-                }
-            }
-
-            for await didStart in group {
-                if didStart {
-                    startedAny = true
-                }
-            }
-        }
-
-        return startedAny
-    }
-
-    func ensureGalleryMediaAvailableForRequests(
-        _ requests: [OperationalMediaHydrationRequest]
-    ) async -> Bool {
-        let uniqueRequests = Array(Set(requests))
-        guard !uniqueRequests.isEmpty else { return false }
-
-        var startedAny = false
-        await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
-                group.addTask { [weak self] in
-                    guard let self else { return false }
-                    return await self.ensureGalleryMediaAvailableIfNeeded(
-                        propertyID: request.propertyID,
-                        sessionID: request.sessionID,
-                        shotID: request.shotID,
-                        relativePathOverride: request.relativePathOverride
-                    )
-                }
-            }
-
-            for await didStart in group {
-                if didStart {
-                    startedAny = true
-                }
-            }
-        }
-
-        return startedAny
-    }
-
-    func ensureFlaggedHistoricalMediaAvailableForRequests(
-        _ requests: [OperationalMediaHydrationRequest]
-    ) async -> Bool {
-        let uniqueRequests = Array(Set(requests))
-        guard !uniqueRequests.isEmpty else { return false }
-
-        var startedAny = false
-        await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
-                group.addTask { [weak self] in
-                    guard let self else { return false }
-                    return await self.ensureFlaggedHistoricalMediaAvailableIfNeeded(
-                        propertyID: request.propertyID,
-                        sessionID: request.sessionID,
-                        shotID: request.shotID,
+                        allowRelaxedRemoteLookupFallback: allowRelaxedRemoteLookupFallback,
                         relativePathOverride: request.relativePathOverride
                     )
                 }
@@ -12145,6 +10611,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         sessionID: UUID,
         shotID: UUID,
+        allowRelaxedRemoteLookupFallback: Bool = false,
         relativePathOverride: String? = nil
     ) async -> Bool {
         guard backendFeatureFlags.supabaseEnabled,
@@ -12161,84 +10628,7 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             sessionID: sessionID,
             shotID: shotID,
-            relativePathOverride: relativePathOverride
-        )
-        return true
-    }
-
-    private func ensureGuidedHistoricalMediaAvailableIfNeeded(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        relativePathOverride: String? = nil
-    ) async -> Bool {
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
-            relativePathOverride: relativePathOverride
-        )
-        return true
-    }
-
-    private func ensureGalleryMediaAvailableIfNeeded(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        relativePathOverride: String? = nil
-    ) async -> Bool {
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
-            relativePathOverride: relativePathOverride
-        )
-        return true
-    }
-
-    private func ensureFlaggedHistoricalMediaAvailableIfNeeded(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        relativePathOverride: String? = nil
-    ) async -> Bool {
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
+            allowRelaxedRemoteLookupFallback: allowRelaxedRemoteLookupFallback,
             relativePathOverride: relativePathOverride
         )
         return true
@@ -12769,11 +11159,18 @@ final class AppState: ObservableObject {
 
     private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
         print("[OfflineReplay] skipped source=\(source) reason=not_ready detail=\(reason)")
+        return offlineReplaySkippedSummary(source: source)
+    }
+
+    private func offlineReplaySkippedSummary(
+        source: String,
+        normalizedInFlightCount: Int = 0
+    ) -> OfflineReplayRunSummary {
         let summary = OfflineReplayRunSummary(
             didStart: false,
             source: source,
             discoveredCount: 0,
-            normalizedInFlightCount: 0,
+            normalizedInFlightCount: normalizedInFlightCount,
             skippedBackoffCount: 0,
             attemptedCount: 0,
             succeededCount: 0,
@@ -12804,18 +11201,7 @@ final class AppState: ObservableObject {
         }
         guard beginOfflineReplayRun() else {
             print("[OfflineReplay] skipped source=\(source) reason=in_flight")
-            let summary = OfflineReplayRunSummary(
-                didStart: false,
-                source: source,
-                discoveredCount: 0,
-                normalizedInFlightCount: 0,
-                skippedBackoffCount: 0,
-                attemptedCount: 0,
-                succeededCount: 0,
-                failedCount: 0
-            )
-            recordOfflineReplayDiagnostics(summary)
-            return summary
+            return offlineReplaySkippedSummary(source: source)
         }
 
         let startedAt = Date()
@@ -12834,18 +11220,7 @@ final class AppState: ObservableObject {
         } catch {
             print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
             recordDiagnosticsError(error)
-            let summary = OfflineReplayRunSummary(
-                didStart: false,
-                source: source,
-                discoveredCount: 0,
-                normalizedInFlightCount: 0,
-                skippedBackoffCount: 0,
-                attemptedCount: 0,
-                succeededCount: 0,
-                failedCount: 0
-            )
-            recordOfflineReplayDiagnostics(summary)
-            return summary
+            return offlineReplaySkippedSummary(source: source)
         }
 
         var queuedMutations: [LocalStore.QueuedMutation]
@@ -12854,18 +11229,10 @@ final class AppState: ObservableObject {
         } catch {
             print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
             recordDiagnosticsError(error)
-            let summary = OfflineReplayRunSummary(
-                didStart: false,
+            return offlineReplaySkippedSummary(
                 source: source,
-                discoveredCount: 0,
-                normalizedInFlightCount: normalizedInFlightCount,
-                skippedBackoffCount: 0,
-                attemptedCount: 0,
-                succeededCount: 0,
-                failedCount: 0
+                normalizedInFlightCount: normalizedInFlightCount
             )
-            recordOfflineReplayDiagnostics(summary)
-            return summary
         }
 
         let preAcknowledgedHistoricalDebtCount: Int
@@ -12904,7 +11271,7 @@ final class AppState: ObservableObject {
                 skippedBackoffCount += 1
                 return false
             }
-            return shouldReplayMutation(mutation, now: now)
+            return OfflineReplayPolicy.shouldReplay(mutation, now: now)
         }
         .sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt {
@@ -12912,7 +11279,10 @@ final class AppState: ObservableObject {
             }
             return lhs.id.uuidString < rhs.id.uuidString
         }
-        let replayLimit = automaticOfflineReplayAttemptLimit(for: source)
+        let replayLimit = OfflineReplayPolicy.automaticAttemptLimit(
+            for: source,
+            launchLimit: automaticLaunchOfflineReplayAttemptLimit
+        )
         let replayable: [LocalStore.QueuedMutation]
         let cappedReplayCount: Int
         if let replayLimit, replayableCandidates.count > replayLimit {
@@ -13081,7 +11451,7 @@ final class AppState: ObservableObject {
                 failedItem.attemptCount += 1
                 failedItem.lastAttemptAt = Date()
                 failedItem.nextAttemptAt = failedItem.lastAttemptAt?.addingTimeInterval(
-                    offlineReplayBackoffInterval(forAttemptCount: failedItem.attemptCount)
+                    OfflineReplayPolicy.backoffInterval(forAttemptCount: failedItem.attemptCount)
                 )
                 failedItem.lastError = error.localizedDescription
                 failedItem.status = .failed
@@ -13256,7 +11626,7 @@ final class AppState: ObservableObject {
                 message.contains("rls") else {
             return false
         }
-        guard message.contains("properties") || message.contains("sessions") else { return false }
+        guard message.contains("properties") else { return false }
         if Self.isTransientReplayErrorMessage(message) {
             return false
         }
@@ -13543,25 +11913,6 @@ final class AppState: ObservableObject {
         return true
     }
 
-    private func offlineReplayBackoffInterval(forAttemptCount attemptCount: Int) -> TimeInterval {
-        switch attemptCount {
-        case ...0:
-            return 0
-        case 1:
-            return 30
-        case 2:
-            return 120
-        case 3:
-            return 600
-        default:
-            return 1800
-        }
-    }
-
-    private func automaticOfflineReplayAttemptLimit(for source: String) -> Int? {
-        source.hasPrefix("launch") ? automaticLaunchOfflineReplayAttemptLimit : nil
-    }
-
     private func beginOfflineReplayRun() -> Bool {
         offlineReplayStateQueue.sync {
             if isOfflineReplayInFlight {
@@ -13575,20 +11926,6 @@ final class AppState: ObservableObject {
     private func endOfflineReplayRun() {
         let _: Void = offlineReplayStateQueue.sync {
             isOfflineReplayInFlight = false
-        }
-    }
-
-    private func shouldReplayMutation(_ mutation: LocalStore.QueuedMutation, now: Date) -> Bool {
-        if mutation.isAcknowledgedHistoricalDebt {
-            return false
-        }
-        switch mutation.status {
-        case .pending:
-            return true
-        case .failed:
-            return mutation.nextAttemptAt.map { now >= $0 } ?? true
-        case .inFlight, .completed:
-            return false
         }
     }
 
@@ -15770,10 +14107,10 @@ final class AppState: ObservableObject {
             normalizedError.contains("row-level security") ||
             normalizedError.contains("row level security") ||
             normalizedError.contains("rls")
-        if operation == "upsert_property", isRLSFailure {
+        if operation == "upsert_property", isRLSFailure, normalizedError.contains("properties") {
             return .staleRLSPropertyUpsert
         }
-        if operation == "upsert_session", isRLSFailure {
+        if operation == "upsert_session", isRLSFailure, normalizedError.contains("properties") {
             return .staleRLSSessionParentProperty
         }
         if lastErrorCategory == .network {
@@ -16048,6 +14385,7 @@ final class AppState: ObservableObject {
         let combined = "\(domain) \(message)"
 
         if combined.contains("rls") ||
+            combined.contains("row-level security") ||
             combined.contains("row level security") ||
             combined.contains("permission denied") ||
             combined.contains("unauthorized") ||
@@ -16357,134 +14695,42 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.sessionJSONIDMismatch
         }
 
-        let actor = sessionSnapshotActorIdentity(for: metadata)
-        let enrichedMetadata = Self.sessionSnapshotMetadata(metadata, stampedWith: actor)
-        let enrichedRawData = actor == nil ? rawData : try Self.encodeSessionSnapshotRawSessionJSON(enrichedMetadata)
-        let rawSessionJSON = String(data: enrichedRawData, encoding: .utf8) ?? enrichedRawData.base64EncodedString()
-        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: enrichedRawData)
-        let manifest = enrichedMetadata.shots.map { shot in
-            Self.makeSessionSnapshotMediaManifestItem(
-                for: shot,
-                propertyID: propertyID,
-                sessionID: session.id,
-                localStore: localStore
-            )
-        }
-        let missingOriginals = manifest.filter { !$0.localOriginalExists }.count
-        let storageMetadataCount = manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count
-        let payload = SessionSnapshotPayloadForChecksum(
-            snapshotSchemaVersion: 1,
-            sessionMetadataSchemaVersion: metadata.schemaVersion,
-            trigger: trigger,
-            generatedAt: generatedAt,
-            appVersion: Self.trimmedNonEmpty(metadata.appVersion),
-            sourceDeviceID: currentDeviceIdentifier(),
-            orgID: metadata.orgID,
+        return try buildSessionSnapshotPayload(
+            metadata: metadata,
+            rawData: rawData,
             propertyID: propertyID,
             sessionID: session.id,
-            sessionType: enrichedMetadata.sessionType,
-            status: metadata.status,
-            isSealed: metadata.isSealed,
-            exportedAt: metadata.exportedAt,
-            firstDeliveredAt: metadata.firstDeliveredAt,
-            reExportExpiresAt: metadata.reExportExpiresAt,
-            actor: actor,
-            capturedBy: actor,
-            uploadedBy: actor,
-            shotCount: enrichedMetadata.shots.count,
-            issueCount: enrichedMetadata.issues.count,
-            guidedCount: enrichedMetadata.guidedShots.count,
-            mediaManifestCount: manifest.count,
-            missingLocalOriginalsCount: missingOriginals,
-            supabaseStorageMetadataCount: storageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
-            rawSessionJSONByteCount: enrichedRawData.count,
-            mediaManifest: manifest
-        )
-
-        let payloadData: Data
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            payloadData = try encoder.encode(payload)
-        } catch {
-            throw SessionSnapshotPreviewError.checksumGenerationFailed
-        }
-
-        let envelope = SessionSnapshotEnvelope(
-            id: session.id,
-            snapshotSchemaVersion: payload.snapshotSchemaVersion,
-            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
-            trigger: trigger,
             generatedAt: generatedAt,
-            appVersion: payload.appVersion,
-            sourceDeviceID: payload.sourceDeviceID,
-            orgID: payload.orgID,
-            propertyID: payload.propertyID,
-            sessionID: payload.sessionID,
-            sessionType: payload.sessionType,
-            status: payload.status,
-            isSealed: payload.isSealed,
-            exportedAt: payload.exportedAt,
-            firstDeliveredAt: payload.firstDeliveredAt,
-            reExportExpiresAt: payload.reExportExpiresAt,
-            actor: payload.actor,
-            capturedBy: payload.capturedBy,
-            uploadedBy: payload.uploadedBy,
-            shotCount: payload.shotCount,
-            issueCount: payload.issueCount,
-            guidedCount: payload.guidedCount,
-            mediaManifestCount: payload.mediaManifestCount,
-            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
-            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
-            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: enrichedRawData.count,
-            snapshotPayloadByteCount: payloadData.count,
-            mediaManifest: manifest
-        )
-        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+            trigger: trigger,
+            sourceDeviceID: currentDeviceIdentifier()
+        ) { enrichedMetadata in
+            enrichedMetadata.shots.map { shot in
+                Self.makeSessionSnapshotMediaManifestItem(
+                    for: shot,
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    localStore: localStore
+                )
+            }
+        }
     }
 
-    private func makeSessionSnapshotBuildResult(
-        archivePath: String,
+    private func buildSessionSnapshotPayload(
+        metadata: SessionMetadata,
+        rawData: Data,
         propertyID: UUID,
         sessionID: UUID,
         generatedAt: Date,
         trigger: String,
-        sourceDeviceID: String?
+        sourceDeviceID: String?,
+        makeManifest: (SessionMetadata) -> [SessionSnapshotMediaManifestItem]
     ) throws -> SessionSnapshotBuildResult {
-        let archiveRoot = URL(fileURLWithPath: archivePath, isDirectory: true)
-        let payloadRoot = archiveRoot.appendingPathComponent("Payload", isDirectory: true)
-        let sessionJSONURL = payloadRoot.appendingPathComponent("session.json", isDirectory: false)
-        guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
-              let rawData = try? Data(contentsOf: sessionJSONURL) else {
-            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let metadata = try? decoder.decode(SessionMetadata.self, from: rawData) else {
-            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
-        }
-        guard metadata.propertyID == propertyID, metadata.sessionID == sessionID else {
-            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
-        }
-
         let actor = sessionSnapshotActorIdentity(for: metadata)
         let enrichedMetadata = Self.sessionSnapshotMetadata(metadata, stampedWith: actor)
         let enrichedRawData = actor == nil ? rawData : try Self.encodeSessionSnapshotRawSessionJSON(enrichedMetadata)
         let rawSessionJSON = String(data: enrichedRawData, encoding: .utf8) ?? enrichedRawData.base64EncodedString()
         let rawChecksum = Self.sessionSnapshotSHA256Hex(for: enrichedRawData)
-        let manifest = enrichedMetadata.shots.map { shot in
-            Self.makeSessionSnapshotMediaManifestItem(
-                forArchivedShot: shot,
-                payloadRoot: payloadRoot
-            )
-        }
+        let manifest = makeManifest(enrichedMetadata)
         let missingOriginals = manifest.filter { !$0.localOriginalExists }.count
         let storageMetadataCount = manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count
         let payload = SessionSnapshotPayloadForChecksum(
@@ -16528,12 +14774,25 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.checksumGenerationFailed
         }
 
-        let envelope = SessionSnapshotEnvelope(
+        let envelope = Self.makeSessionSnapshotEnvelope(
             id: sessionID,
+            payload: payload,
+            payloadData: payloadData
+        )
+        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private static func makeSessionSnapshotEnvelope(
+        id: UUID,
+        payload: SessionSnapshotPayloadForChecksum,
+        payloadData: Data
+    ) -> SessionSnapshotEnvelope {
+        SessionSnapshotEnvelope(
+            id: id,
             snapshotSchemaVersion: payload.snapshotSchemaVersion,
             sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
-            trigger: trigger,
-            generatedAt: generatedAt,
+            trigger: payload.trigger,
+            generatedAt: payload.generatedAt,
             appVersion: payload.appVersion,
             sourceDeviceID: payload.sourceDeviceID,
             orgID: payload.orgID,
@@ -16554,14 +14813,56 @@ final class AppState: ObservableObject {
             mediaManifestCount: payload.mediaManifestCount,
             missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
             supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
+            rawSessionJSON: payload.rawSessionJSON,
+            rawSessionJSONSHA256: payload.rawSessionJSONSHA256,
             snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: enrichedRawData.count,
+            rawSessionJSONByteCount: payload.rawSessionJSONByteCount,
             snapshotPayloadByteCount: payloadData.count,
-            mediaManifest: manifest
+            mediaManifest: payload.mediaManifest
         )
-        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private func makeSessionSnapshotBuildResult(
+        archivePath: String,
+        propertyID: UUID,
+        sessionID: UUID,
+        generatedAt: Date,
+        trigger: String,
+        sourceDeviceID: String?
+    ) throws -> SessionSnapshotBuildResult {
+        let archiveRoot = URL(fileURLWithPath: archivePath, isDirectory: true)
+        let payloadRoot = archiveRoot.appendingPathComponent("Payload", isDirectory: true)
+        let sessionJSONURL = payloadRoot.appendingPathComponent("session.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
+              let rawData = try? Data(contentsOf: sessionJSONURL) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let metadata = try? decoder.decode(SessionMetadata.self, from: rawData) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+        guard metadata.propertyID == propertyID, metadata.sessionID == sessionID else {
+            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
+        }
+
+        return try buildSessionSnapshotPayload(
+            metadata: metadata,
+            rawData: rawData,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            generatedAt: generatedAt,
+            trigger: trigger,
+            sourceDeviceID: sourceDeviceID
+        ) { enrichedMetadata in
+            enrichedMetadata.shots.map { shot in
+                Self.makeSessionSnapshotMediaManifestItem(
+                    forArchivedShot: shot,
+                    payloadRoot: payloadRoot
+                )
+            }
+        }
     }
 
     private func makeSessionSnapshotUploadArtifacts(
@@ -17907,18 +16208,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func refreshVisiblePropertySessionCachesFromLocalStoreIncrementally(reason: String) async {
-        let propertyIDs = Set(properties.map(\.id))
-            .sorted { $0.uuidString < $1.uuidString }
-        guard !propertyIDs.isEmpty else { return }
-
-        for propertyID in propertyIDs {
-            let sessions = refreshSessionDerivedCaches(propertyID: propertyID)
-            _ = updatePropertyRowSecondaryDetails(propertyID: propertyID, sessions: sessions)
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 12_000_000)
-        }
-    }
 
     private func schedulePersistentDataCacheRefresh(reason: String) {
         if persistentDataCacheRefreshRunning || persistentDataCacheRefreshScheduled {
@@ -18316,7 +16605,7 @@ final class AppState: ObservableObject {
         }
 
         for item in replayable {
-            guard ignoreBackoff || shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
+            guard ignoreBackoff || OfflineReplayPolicy.shouldReplaySnapshotUpload(item, now: now) else {
                 if item.status == .failed, let next = item.nextAttemptAt, now < next {
                     skippedBackoffCount += 1
                 }
@@ -18507,7 +16796,7 @@ final class AppState: ObservableObject {
         guard let item = items.first(where: { $0.id == itemID }) else {
             return nil
         }
-        guard shouldReplaySessionSnapshotUploadRetry(item, now: now) else { return nil }
+        guard OfflineReplayPolicy.shouldReplaySnapshotUpload(item, now: now) else { return nil }
         guard let session = try? localSessionForSnapshotUpload(propertyID: item.propertyID, sessionID: item.sessionID) else {
             var terminal = item
             terminal.status = .terminalFailed
@@ -18538,20 +16827,6 @@ final class AppState: ObservableObject {
             return nil
         }
         return await performSessionSnapshotUploadRetryAttempt(item: item, now: now)
-    }
-
-    private func shouldReplaySessionSnapshotUploadRetry(
-        _ item: LocalStore.SessionSnapshotUploadRetryWorkItem,
-        now: Date
-    ) -> Bool {
-        switch item.status {
-        case .pending:
-            return true
-        case .failed:
-            return item.nextAttemptAt.map { now >= $0 } ?? true
-        case .inFlight, .terminalFailed:
-            return false
-        }
     }
 
     private func pruneLocalArchiveSnapshotAfterSuccessfulUpload(
@@ -18789,7 +17064,7 @@ final class AppState: ObservableObject {
             failed.status = terminal ? .terminalFailed : .failed
             failed.lastError = terminal ? terminalSessionSnapshotUploadRetryReason(error) : sanitized
             failed.lastAttemptAt = now
-            failed.nextAttemptAt = terminal ? nil : now.addingTimeInterval(offlineReplayBackoffInterval(forAttemptCount: failed.attemptCount))
+            failed.nextAttemptAt = terminal ? nil : now.addingTimeInterval(OfflineReplayPolicy.backoffInterval(forAttemptCount: failed.attemptCount))
             failed.updatedAt = Date()
             try? localStore.updateSessionSnapshotUploadRetryWorkItem(failed)
             persistSessionSnapshotCloudStatus(
@@ -19037,35 +17312,12 @@ final class AppState: ObservableObject {
         do {
             let rows = try await fetchSessionSnapshotRows(snapshotID: nil, propertyID: propertyID, sessionID: sessionID)
             guard let row = rows.sorted(by: Self.sessionSnapshotUploadRowSort).first else {
-                let result = SessionSnapshotRestoreDiagnosticsResult(
+                let result = makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
                     checkedAt: checkedAt,
                     propertyID: propertyID,
                     sessionID: sessionID,
-                    snapshotID: nil,
-                    result: .noSnapshotFound,
-                    failureReason: "snapshot row not found",
-                    rowFound: false,
-                    objectReadable: false,
-                    checksumVerified: false,
-                    byteSizeMatches: false,
-                    rowObjectVerified: false,
-                    parentRemoteVerified: false,
-                    snapshotSchemaVersion: nil,
-                    snapshotCreatedAt: nil,
-                    snapshotGeneratedAt: nil,
-                    localSessionExists: false,
-                    localSessionStatus: nil,
-                    localShotCount: nil,
-                    localIssueCount: nil,
-                    localGuidedCount: nil,
-                    snapshotShotCount: nil,
-                    snapshotIssueCount: nil,
-                    snapshotGuidedCount: nil,
-                    snapshotMediaManifestCount: nil,
-                    snapshotMissingLocalOriginalsCount: nil,
-                    snapshotSupabaseStorageMetadataCount: nil,
-                    freshness: "unknown",
-                    mediaRecoveryDiagnostics: .notChecked
+                    outcome: .noSnapshotFound,
+                    failureReason: "snapshot row not found"
                 )
                 recordSessionSnapshotRestoreDiagnostics(result)
                 return result
@@ -19139,39 +17391,56 @@ final class AppState: ObservableObject {
             recordSessionSnapshotRestoreDiagnostics(result)
             return result
         } catch {
-            let result = SessionSnapshotRestoreDiagnosticsResult(
+            let result = makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
                 checkedAt: checkedAt,
                 propertyID: propertyID,
                 sessionID: sessionID,
-                snapshotID: nil,
-                result: .unableToVerify,
-                failureReason: "unable to verify snapshot restore diagnostics",
-                rowFound: false,
-                objectReadable: false,
-                checksumVerified: false,
-                byteSizeMatches: false,
-                rowObjectVerified: false,
-                parentRemoteVerified: false,
-                snapshotSchemaVersion: nil,
-                snapshotCreatedAt: nil,
-                snapshotGeneratedAt: nil,
-                localSessionExists: false,
-                localSessionStatus: nil,
-                localShotCount: nil,
-                localIssueCount: nil,
-                localGuidedCount: nil,
-                snapshotShotCount: nil,
-                snapshotIssueCount: nil,
-                snapshotGuidedCount: nil,
-                snapshotMediaManifestCount: nil,
-                snapshotMissingLocalOriginalsCount: nil,
-                snapshotSupabaseStorageMetadataCount: nil,
-                freshness: "unknown",
-                mediaRecoveryDiagnostics: .notChecked
+                outcome: .unableToVerify,
+                failureReason: "unable to verify snapshot restore diagnostics"
             )
             recordSessionSnapshotRestoreDiagnostics(result)
             return result
         }
+    }
+
+    private func makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
+        checkedAt: Date,
+        propertyID: UUID?,
+        sessionID: UUID?,
+        outcome: SessionSnapshotRestoreDiagnosticOutcome,
+        failureReason: String,
+        snapshotID: UUID? = nil
+    ) -> SessionSnapshotRestoreDiagnosticsResult {
+        SessionSnapshotRestoreDiagnosticsResult(
+            checkedAt: checkedAt,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotID: snapshotID,
+            result: outcome,
+            failureReason: failureReason,
+            rowFound: false,
+            objectReadable: false,
+            checksumVerified: false,
+            byteSizeMatches: false,
+            rowObjectVerified: false,
+            parentRemoteVerified: false,
+            snapshotSchemaVersion: nil,
+            snapshotCreatedAt: nil,
+            snapshotGeneratedAt: nil,
+            localSessionExists: false,
+            localSessionStatus: nil,
+            localShotCount: nil,
+            localIssueCount: nil,
+            localGuidedCount: nil,
+            snapshotShotCount: nil,
+            snapshotIssueCount: nil,
+            snapshotGuidedCount: nil,
+            snapshotMediaManifestCount: nil,
+            snapshotMissingLocalOriginalsCount: nil,
+            snapshotSupabaseStorageMetadataCount: nil,
+            freshness: "unknown",
+            mediaRecoveryDiagnostics: .notChecked
+        )
     }
 
     @discardableResult
@@ -21496,21 +19765,7 @@ final class AppState: ObservableObject {
         } else {
             localOriginalExists = false
         }
-        return SessionSnapshotMediaManifestItem(
-            id: shot.shotID,
-            originalFilenamePreview: diagnosticsPreviewText(shot.originalFilename, maxLength: 80),
-            originalRelativePathPresent: relativePath != nil,
-            originalByteSize: shot.originalByteSize,
-            localOriginalExists: localOriginalExists,
-            storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
-            storagePathPresent: trimmedNonEmpty(shot.storagePath) != nil,
-            checksumPresent: trimmedNonEmpty(shot.checksumSHA256) != nil,
-            storageByteSize: shot.byteSize,
-            capturedByUserID: shot.capturedByUserID,
-            capturedByEmail: trimmedNonEmpty(shot.capturedByEmail),
-            uploadedByUserID: shot.uploadedByUserID,
-            uploadedByEmail: trimmedNonEmpty(shot.uploadedByEmail)
-        )
+        return makeSessionSnapshotMediaManifestItem(for: shot, localOriginalExists: localOriginalExists)
     }
 
     private static func makeSessionSnapshotMediaManifestItem(
@@ -21525,10 +19780,16 @@ final class AppState: ObservableObject {
         } else {
             localOriginalExists = false
         }
+        return makeSessionSnapshotMediaManifestItem(for: shot, localOriginalExists: localOriginalExists)
+    }
+
+    private static func makeSessionSnapshotMediaManifestItem(
+        for shot: ShotMetadata, localOriginalExists: Bool
+    ) -> SessionSnapshotMediaManifestItem {
         return SessionSnapshotMediaManifestItem(
             id: shot.shotID,
             originalFilenamePreview: diagnosticsPreviewText(shot.originalFilename, maxLength: 80),
-            originalRelativePathPresent: relativePath != nil,
+            originalRelativePathPresent: trimmedNonEmpty(shot.originalRelativePath) != nil,
             originalByteSize: shot.originalByteSize,
             localOriginalExists: localOriginalExists,
             storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
@@ -25879,6 +24140,63 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    private func selectedSessionReplayAuthorization(
+        selectedTarget: ManualSessionSnapshotUploadTarget?,
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        pipelineAuthorizationContext: SelectedSessionValidationPipelineAuthorizationContext?,
+        checkedAt: Date
+    ) -> (orgID: UUID?, blockedReason: String?) {
+        guard let selectedTarget else {
+            return (nil, "selected_session_snapshot_target_required")
+        }
+        let propertyID = selectedTarget.propertyID
+        let sessionID = selectedTarget.sessionID
+        guard let productionValidationEvidence else {
+            return (nil, "package_validation_evidence_required")
+        }
+        guard productionValidationEvidence.targetScope.propertyID == propertyID,
+              productionValidationEvidence.targetScope.sessionID == sessionID else {
+            return (nil, "package_validation_selected_scope_mismatch")
+        }
+        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
+            productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return (nil, "package_validation_evidence_not_ready")
+        }
+        guard activeOrganizationID == orgID,
+              isOrganizationContextReady,
+              canAccessOrganization(orgID) else {
+            return (orgID, "selected_session_org_scope_not_verified")
+        }
+        guard selectedTarget.propertyID == propertyID,
+              selectedTarget.sessionID == sessionID else {
+            return (orgID, "selected_session_scope_not_exact")
+        }
+        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
+            pipelineAuthorizationContext,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        )
+        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
+            return (orgID, "exact_singleton_candidate_allowlist_required")
+        }
+        guard !backendFeatureFlags.supabaseReadEnabled,
+              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
+            return (orgID, "production_wide_canonical_reads_must_be_disabled")
+        }
+        return (orgID, nil)
+    }
+
+    @MainActor
     func replayFlaggedObservationShadowWritesForSelectedSession(
         checkedAt: Date = Date(),
         productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
@@ -25913,52 +24231,19 @@ final class AppState: ObservableObject {
             )
         }
 
-        guard let selectedTarget,
+        let authorization = selectedSessionReplayAuthorization(
+            selectedTarget: selectedTarget,
+            productionValidationEvidence: productionValidationEvidence,
+            pipelineAuthorizationContext: pipelineAuthorizationContext,
+            checkedAt: checkedAt
+        )
+        if let reason = authorization.blockedReason {
+            return blocked(reason, orgID: authorization.orgID)
+        }
+        guard let orgID = authorization.orgID,
               let propertyID,
               let sessionID else {
             return blocked("selected_session_snapshot_target_required")
-        }
-        guard let productionValidationEvidence else {
-            return blocked("package_validation_evidence_required")
-        }
-        guard productionValidationEvidence.targetScope.propertyID == propertyID,
-              productionValidationEvidence.targetScope.sessionID == sessionID else {
-            return blocked("package_validation_selected_scope_mismatch")
-        }
-        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
-            productionValidationEvidence,
-            propertyID: propertyID,
-            sessionID: sessionID
-        ) else {
-            return blocked("package_validation_evidence_not_ready")
-        }
-        guard activeOrganizationID == orgID,
-              isOrganizationContextReady,
-              canAccessOrganization(orgID) else {
-            return blocked("selected_session_org_scope_not_verified", orgID: orgID)
-        }
-        guard selectedTarget.propertyID == propertyID,
-              selectedTarget.sessionID == sessionID else {
-            return blocked("selected_session_scope_not_exact", orgID: orgID)
-        }
-        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID
-        )
-        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
-            pipelineAuthorizationContext,
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID,
-            checkedAt: checkedAt
-        )
-        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
-            return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
-        }
-        guard !backendFeatureFlags.supabaseReadEnabled,
-              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
-            return blocked("production_wide_canonical_reads_must_be_disabled", orgID: orgID)
         }
 
         let replayResult: NormalizedBackfillEntityResult
@@ -26095,52 +24380,19 @@ final class AppState: ObservableObject {
             )
         }
 
-        guard let selectedTarget,
+        let authorization = selectedSessionReplayAuthorization(
+            selectedTarget: selectedTarget,
+            productionValidationEvidence: productionValidationEvidence,
+            pipelineAuthorizationContext: pipelineAuthorizationContext,
+            checkedAt: checkedAt
+        )
+        if let reason = authorization.blockedReason {
+            return blocked(reason, orgID: authorization.orgID)
+        }
+        guard let orgID = authorization.orgID,
               let propertyID,
               let sessionID else {
             return blocked("selected_session_snapshot_target_required")
-        }
-        guard let productionValidationEvidence else {
-            return blocked("package_validation_evidence_required")
-        }
-        guard productionValidationEvidence.targetScope.propertyID == propertyID,
-              productionValidationEvidence.targetScope.sessionID == sessionID else {
-            return blocked("package_validation_selected_scope_mismatch")
-        }
-        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
-            productionValidationEvidence,
-            propertyID: propertyID,
-            sessionID: sessionID
-        ) else {
-            return blocked("package_validation_evidence_not_ready")
-        }
-        guard activeOrganizationID == orgID,
-              isOrganizationContextReady,
-              canAccessOrganization(orgID) else {
-            return blocked("selected_session_org_scope_not_verified", orgID: orgID)
-        }
-        guard selectedTarget.propertyID == propertyID,
-              selectedTarget.sessionID == sessionID else {
-            return blocked("selected_session_scope_not_exact", orgID: orgID)
-        }
-        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID
-        )
-        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
-            pipelineAuthorizationContext,
-            orgID: orgID,
-            propertyID: propertyID,
-            sessionID: sessionID,
-            checkedAt: checkedAt
-        )
-        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
-            return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
-        }
-        guard !backendFeatureFlags.supabaseReadEnabled,
-              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
-            return blocked("production_wide_canonical_reads_must_be_disabled", orgID: orgID)
         }
 
         let preflightDiagnostics = await runCanonicalReadDiagnosticsForPinnedSession(
@@ -28305,33 +26557,27 @@ final class AppState: ObservableObject {
         row: NormalizedObservationReplayRow,
         remoteObservations: [CanonicalReadRemoteObservationRow]
     ) -> NormalizedObservationInsertDuplicateResolution {
-        guard let remote = remoteObservations.first(where: { $0.id == row.id }) else {
-            return .unavailable
-        }
-        guard remote.orgID == row.orgID,
-              remote.propertyID == row.propertyID,
-              remote.sessionID == row.sessionID else {
-            return .conflict("remote_observation_parent_mismatch")
-        }
-        if remote.deletedAt != nil {
-            return .softDeletedPreserved
-        }
-        if let remoteUpdatedAt = remote.updatedAt,
-           remoteUpdatedAt > row.updatedAt {
-            return .newerRemotePreserved
-        }
-        return .idempotentExisting
+        normalizedObservationDuplicateResolution(row: row, remoteObservations: remoteObservations, requiresSameSession: true)
     }
 
     nonisolated static func normalizedObservationLineageInsertDuplicateResolution(
         row: NormalizedObservationReplayRow,
         remoteObservations: [CanonicalReadRemoteObservationRow]
     ) -> NormalizedObservationInsertDuplicateResolution {
+        normalizedObservationDuplicateResolution(row: row, remoteObservations: remoteObservations, requiresSameSession: false)
+    }
+
+    private nonisolated static func normalizedObservationDuplicateResolution(
+        row: NormalizedObservationReplayRow,
+        remoteObservations: [CanonicalReadRemoteObservationRow],
+        requiresSameSession: Bool
+    ) -> NormalizedObservationInsertDuplicateResolution {
         guard let remote = remoteObservations.first(where: { $0.id == row.id }) else {
             return .unavailable
         }
         guard remote.orgID == row.orgID,
-              remote.propertyID == row.propertyID else {
+              remote.propertyID == row.propertyID,
+              (!requiresSameSession || remote.sessionID == row.sessionID) else {
             return .conflict("remote_observation_parent_mismatch")
         }
         if remote.deletedAt != nil {
@@ -30433,22 +28679,14 @@ final class AppState: ObservableObject {
             propertyID: record.propertyID,
             sessionID: record.sessionID
         )
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
         let exactSingleScopeSelected = packageScope.orgID != nil &&
             packageScope.propertyID != nil &&
             packageScope.sessionID != nil &&
             record.exactSingleScopeSelected
-        let scopesMatch = scopesAreEqual(packageScope, decisionRecordScope) &&
-            scopesAreEqual(packageScope, preflight.recordScope) &&
-            scopesAreEqual(packageScope, preflight.gateSelectedScope) &&
-            scopesAreEqual(packageScope, preflight.gateApprovedScope)
+        let scopesMatch = packageScope == decisionRecordScope &&
+            packageScope == preflight.recordScope &&
+            packageScope == preflight.gateSelectedScope &&
+            packageScope == preflight.gateApprovedScope
         let approvalFreshnessRepresented = record.approvalTimestamp != nil &&
             record.expirationTimestamp != nil
         let approvalFresh = record.approvalState == .approved &&
@@ -30600,32 +28838,24 @@ final class AppState: ObservableObject {
             propertyID: activationResult.propertyID,
             sessionID: activationResult.sessionID
         )
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let exactSingleScopeSelected = packageScope.orgID != nil &&
             packageScope.propertyID != nil &&
             packageScope.sessionID != nil &&
             record.exactSingleScopeSelected &&
             persistencePreflight.exactSingleScopeSelected
-        let scopesMatch = scopesAreEqual(packageScope, decisionRecordScope) &&
-            scopesAreEqual(packageScope, activationPreflight.recordScope) &&
-            scopesAreEqual(packageScope, activationPreflight.gateSelectedScope) &&
-            scopesAreEqual(packageScope, activationPreflight.gateApprovedScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.packageScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.decisionRecordScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.preflightRecordScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.preflightGateSelectedScope) &&
-            scopesAreEqual(packageScope, persistencePreflight.preflightGateApprovedScope) &&
-            scopesAreEqual(packageScope, gate.selectedScope) &&
-            scopesAreEqual(packageScope, gate.approvedScope) &&
-            scopesAreEqual(packageScope, activationResultScope)
+        let scopesMatch = packageScope == decisionRecordScope &&
+            packageScope == activationPreflight.recordScope &&
+            packageScope == activationPreflight.gateSelectedScope &&
+            packageScope == activationPreflight.gateApprovedScope &&
+            packageScope == persistencePreflight.packageScope &&
+            packageScope == persistencePreflight.decisionRecordScope &&
+            packageScope == persistencePreflight.preflightRecordScope &&
+            packageScope == persistencePreflight.preflightGateSelectedScope &&
+            packageScope == persistencePreflight.preflightGateApprovedScope &&
+            packageScope == gate.selectedScope &&
+            packageScope == gate.approvedScope &&
+            packageScope == activationResultScope
         let activationPreflightManualReviewOnly = activationPreflight.state == .readyForManualReviewOnly &&
             activationPreflight.blockers.isEmpty
         let operatorRecordPersistencePreflightReviewOnly = persistencePreflight.state == .readyForOperatorRecordPersistenceReviewOnly &&
@@ -30834,14 +29064,6 @@ final class AppState: ObservableObject {
             propertyID: activationResult.propertyID,
             sessionID: activationResult.sessionID
         )
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let candidatePackageReadyForManualReviewOnly = package.state == .readyForActivationCandidateManualReviewOnly &&
             package.blockers.isEmpty
@@ -30849,15 +29071,15 @@ final class AppState: ObservableObject {
             package.packageScope.orgID != nil &&
             package.packageScope.propertyID != nil &&
             package.packageScope.sessionID != nil
-        let scopesMatch = scopesAreEqual(package.packageScope, package.decisionRecordScope) &&
-            scopesAreEqual(package.packageScope, package.activationPreflightScope) &&
-            scopesAreEqual(package.packageScope, package.persistencePreflightScope) &&
-            scopesAreEqual(package.packageScope, package.gateSelectedScope) &&
-            scopesAreEqual(package.packageScope, package.gateApprovedScope) &&
-            scopesAreEqual(package.packageScope, package.activationResultScope) &&
-            scopesAreEqual(package.packageScope, gate.selectedScope) &&
-            scopesAreEqual(package.packageScope, gate.approvedScope) &&
-            scopesAreEqual(package.packageScope, activationResultScope)
+        let scopesMatch = package.packageScope == package.decisionRecordScope &&
+            package.packageScope == package.activationPreflightScope &&
+            package.packageScope == package.persistencePreflightScope &&
+            package.packageScope == package.gateSelectedScope &&
+            package.packageScope == package.gateApprovedScope &&
+            package.packageScope == package.activationResultScope &&
+            package.packageScope == gate.selectedScope &&
+            package.packageScope == gate.approvedScope &&
+            package.packageScope == activationResultScope
         let productionWideDisabledConfirmation = package.productionWideDisabledConfirmation &&
             gate.productionWideDisabledConfirmed
         let productionSingleSessionGateDisabled = package.productionSingleSessionGateDisabled &&
@@ -31023,14 +29245,6 @@ final class AppState: ObservableObject {
         hydrationPolicy policy: SessionSnapshotHydrationPolicyDiagnostics,
         hydrationConfirmation confirmation: SessionSnapshotHydrationConfirmation
     ) -> ProductionSingleSessionHydrationReadinessPreflight {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: package.packageScope.orgID,
@@ -31044,8 +29258,8 @@ final class AppState: ObservableObject {
             package.packageScope.orgID != nil &&
             package.packageScope.propertyID != nil &&
             package.packageScope.sessionID != nil
-        let restoreDiagnosticsScopeMatchesPackage = scopesAreEqual(package.packageScope, validation.candidatePackageScope) &&
-            scopesAreEqual(package.packageScope, restoreScope)
+        let restoreDiagnosticsScopeMatchesPackage = package.packageScope == validation.candidatePackageScope &&
+            package.packageScope == restoreScope
         let expectedPropertyIDText = package.packageScope.propertyID?.uuidString ?? "none"
         let expectedSessionIDText = package.packageScope.sessionID?.uuidString ?? "none"
         let expectedSnapshotIDText = restore.snapshotID?.uuidString ?? "none"
@@ -31226,14 +29440,6 @@ final class AppState: ObservableObject {
         rollbackOperation: ProductionSingleSessionHydrationRehearsalOperationEvidence,
         restoredFixture: ProductionSingleSessionHydrationFixtureMetadataEvidence
     ) -> ProductionSingleSessionHydrationExecutionRehearsal {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: preflight.candidatePackageScope.orgID,
@@ -31253,7 +29459,7 @@ final class AppState: ObservableObject {
             postHydrationFixture.scope,
             rollbackOperation.targetScope,
             restoredFixture.scope
-        ].allSatisfy { scopesAreEqual(preflight.candidatePackageScope, $0) }
+        ].allSatisfy { preflight.candidatePackageScope == $0 }
         let productionHydrationDisabled = preflight.productionHydrationDisabledNonWriting &&
             !policy.productionHydrationAllowed &&
             policy.hydrationMode != "operator_approved_single_session" &&
@@ -32406,35 +30612,13 @@ final class AppState: ObservableObject {
         reason: String,
         restore: SessionSnapshotRestoreDiagnosticsResult? = nil
     ) -> LocalHealthSessionSnapshotPackageValidationReport {
-        let fallbackRestore = restore ?? SessionSnapshotRestoreDiagnosticsResult(
+        let fallbackRestore = restore ?? makeUnavailableSessionSnapshotRestoreDiagnosticsResult(
             checkedAt: checkedAt,
             propertyID: targetScope.propertyID,
             sessionID: targetScope.sessionID,
-            snapshotID: snapshotID,
-            result: .noSnapshotFound,
+            outcome: .noSnapshotFound,
             failureReason: reason,
-            rowFound: false,
-            objectReadable: false,
-            checksumVerified: false,
-            byteSizeMatches: false,
-            rowObjectVerified: false,
-            parentRemoteVerified: false,
-            snapshotSchemaVersion: nil,
-            snapshotCreatedAt: nil,
-            snapshotGeneratedAt: nil,
-            localSessionExists: false,
-            localSessionStatus: nil,
-            localShotCount: nil,
-            localIssueCount: nil,
-            localGuidedCount: nil,
-            snapshotShotCount: nil,
-            snapshotIssueCount: nil,
-            snapshotGuidedCount: nil,
-            snapshotMediaManifestCount: nil,
-            snapshotMissingLocalOriginalsCount: nil,
-            snapshotSupabaseStorageMetadataCount: nil,
-            freshness: "unknown",
-            mediaRecoveryDiagnostics: .notChecked
+            snapshotID: snapshotID
         )
         let hydration = SessionSnapshotHydrationResult(
             hydratedAt: checkedAt,
@@ -32685,14 +30869,6 @@ final class AppState: ObservableObject {
         fallbackRetained: Bool = true,
         exportSealSyncMediaICloudBehaviorChanged: Bool = false
     ) -> ProductionSingleSessionSnapshotPackageParityValidation {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: targetScope.orgID,
@@ -32735,7 +30911,7 @@ final class AppState: ObservableObject {
             candidateScope,
             overlayScope,
             comparisonScope
-        ].allSatisfy { scopesAreEqual(targetScope, $0) }
+        ].allSatisfy { targetScope == $0 }
 
         let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate
         let rowObjectChecksumSchemaParentPassed = restore.rowFound &&
@@ -33016,14 +31192,6 @@ final class AppState: ObservableObject {
         exportSealSyncMediaICloudBehaviorChanged: Bool = false,
         schemaRLSDataBehaviorChanged: Bool = false
     ) -> ProductionSingleSessionFullyRestoredPackageRollbackValidation {
-        func scopesAreEqual(
-            _ lhs: ProductionCohortApprovalScope,
-            _ rhs: ProductionCohortApprovalScope
-        ) -> Bool {
-            lhs.orgID == rhs.orgID &&
-                lhs.propertyID == rhs.propertyID &&
-                lhs.sessionID == rhs.sessionID
-        }
 
         let restoreScope = ProductionCohortApprovalScope(
             orgID: targetScope.orgID,
@@ -33046,7 +31214,7 @@ final class AppState: ObservableObject {
             mediaRetrievalScope,
             mediaRestoration.targetScope,
             mediaRollback.targetScope
-        ].allSatisfy { scopesAreEqual(targetScope, $0) }
+        ].allSatisfy { targetScope == $0 }
         let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate &&
             restore.checksumVerified &&
             restore.rowObjectVerified &&
@@ -36869,42 +35037,6 @@ final class AppState: ObservableObject {
         return rows.first
     }
 
-    private func fetchRemotePropertySessionLockRecords(
-        orgID: UUID,
-        propertyID: UUID
-    ) async throws -> [RemotePropertySessionLockRecord] {
-#if DEBUG
-        if AppStateTestEnvironment.isRunningUnderXCTest {
-            return sessionCoordinationDebugRemoteRecords.values
-                .filter { $0.orgID == orgID && $0.propertyID == propertyID }
-                .map {
-                    RemotePropertySessionLockRecord(
-                        id: $0.id,
-                        orgID: $0.orgID,
-                        propertyID: $0.propertyID,
-                        status: $0.status,
-                        completedAt: $0.completedAt,
-                        exportedAt: $0.exportedAt,
-                        isSealed: $0.isSealed,
-                        firstDeliveredAt: $0.firstDeliveredAt,
-                        lockedByUserID: $0.lockedByUserID,
-                        lockedByDeviceID: $0.lockedByDeviceID,
-                        lockedAt: $0.lockedAt
-                    )
-                }
-        }
-#endif
-        let rows = try await fetchRemotePropertySessionLockRecordsDirect(
-            orgID: orgID,
-            propertyID: propertyID
-        )
-        applyRemoteFinalSessionStatesFromLockRecords(rows, reason: "property_lock_refresh")
-        return rows.filter { record in
-            record.lockedByUserID != nil ||
-            normalizedSupabaseText(record.lockedByDeviceID) != nil ||
-            normalizedSupabaseText(record.lockedAt) != nil
-        }
-    }
 
     private func fetchRemotePropertySessionLockRecordsDirect(
         orgID: UUID,
@@ -37267,17 +35399,6 @@ final class AppState: ObservableObject {
         return candidates.max { $0.timestamp < $1.timestamp }
     }
 
-    private func remotePropertySessionLockRecordsSorted(
-        orgID: UUID,
-        propertyID: UUID
-    ) async -> [RemotePropertySessionLockRecord] {
-        (await fetchRemotePropertySessionLockRecordsForPrecedence(orgID: orgID, propertyID: propertyID))
-            .filter { hasActiveRemoteLock(record: $0) }
-            .sorted {
-                ($0.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast) >
-                ($1.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast)
-            }
-    }
 
     private func activeRemotePropertyLockOwnedByOther(
         orgID: UUID,
@@ -37333,20 +35454,6 @@ final class AppState: ObservableObject {
             .first
     }
 
-    private func refreshRemotePropertySessionOccupancyState(
-        orgID: UUID
-    ) async throws {
-        let records = try await fetchRemotePropertySessionOccupancyRecords(activeOrganizationID: orgID)
-        var nextState: [UUID: PropertySessionOccupancyState] = [:]
-        for record in records {
-            nextState[record.propertyID] = PropertySessionOccupancyState(
-                occupiedByUserID: record.occupiedByUserID,
-                occupiedByDeviceID: normalizedSupabaseText(record.occupiedByDeviceID),
-                occupiedAt: record.occupiedAt.flatMap(parseSupabaseDateString)
-            )
-        }
-        propertySessionOccupancyByPropertyID = nextState
-    }
 
     @MainActor
     private func clearLockDisplayState(propertyIDs: [UUID]) {
@@ -38219,6 +36326,57 @@ final class AppState: ObservableObject {
         )
         guard !diffs.isEmpty else { return nil }
         return SessionCoordinationConflictReview(sessionID: sessionID, diffs: diffs)
+    }
+
+    @MainActor
+    func cancelUnstartedSessionTypeSelection(propertyID: UUID) async -> Bool {
+        guard let session = currentSession,
+              session.propertyID == propertyID,
+              currentSessionRequiresInitialSessionTypeSelection(propertyID: propertyID),
+              !hasMaterialDraftCaptures(session) else {
+            return false
+        }
+
+        if backendFeatureFlags.sessionCoordinationEnabled &&
+            backendFeatureFlags.supabaseEnabled &&
+            backendFeatureFlags.shadowWriteEnabled {
+            guard let remoteStatus = try? await fetchPropertyStatusRecord(propertyID: propertyID) else {
+                return false
+            }
+            let ownedUnstartedClaim = remoteStatus.status == .occupied &&
+                remoteStatus.activeSessionID == session.id &&
+                normalizedSupabaseText(remoteStatus.ownerDeviceID) == currentDeviceIdentifier()
+
+            if ownedUnstartedClaim {
+                if let occupancyState = propertySessionOccupancyByPropertyID[propertyID],
+                   normalizedSupabaseText(occupancyState.occupiedByDeviceID) == currentDeviceIdentifier() {
+                    let didReleaseOccupancy = await releasePropertySessionOccupancyIfOwned(
+                        propertyID: propertyID,
+                        sessionID: session.id,
+                        emitReleasedEvent: true,
+                        ownershipState: occupancyState
+                    )
+                    guard didReleaseOccupancy else { return false }
+                }
+
+                let didReleaseStatus = await performPropertyStatusShadowWrite(
+                    transition: .release,
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    deviceID: currentDeviceIdentifier(),
+                    reason: "session_type_selection_cancelled"
+                )
+                guard didReleaseStatus,
+                      let releasedStatus = try? await fetchPropertyStatusRecord(propertyID: propertyID),
+                      releasedStatus.status == .idle || releasedStatus.status == .exported else {
+                    return false
+                }
+            }
+        }
+
+        occupancyOnlyClaimedSessionIDs.remove(session.id)
+        clearCurrentSession()
+        return true
     }
 
     @MainActor
@@ -39171,16 +37329,11 @@ final class AppState: ObservableObject {
         return fallbackFormatter.date(from: trimmed)
     }
 
-    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
+    private func loadLegacyMigrationLedgerForRun(
+        runID: UUID,
+        startedAt now: Date,
+        activeOrganizationID: UUID
+    ) throws -> LegacyMigrationPreflightLedger {
         var ledger: LegacyMigrationPreflightLedger
 
         do {
@@ -39221,6 +37374,14 @@ final class AppState: ObservableObject {
             )
         }
 
+        return ledger
+    }
+
+    private func beginLegacyMigrationRun(
+        ledger: inout LegacyMigrationPreflightLedger,
+        runID: UUID,
+        startedAt now: Date
+    ) throws {
         ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
         ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
             currentRunID: runID,
@@ -39231,6 +37392,72 @@ final class AppState: ObservableObject {
             lastErrorMessage: nil
         )
         try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func completeLegacyMigrationRun(
+        ledger: inout LegacyMigrationPreflightLedger
+    ) throws {
+        ledger.mutationRun.state = "completed"
+        ledger.mutationRun.completedAt = Date()
+        ledger.mutationRun.lastErrorCategory = nil
+        ledger.mutationRun.lastErrorMessage = nil
+        try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func recordLegacyMigrationRunFailure(
+        ledger: inout LegacyMigrationPreflightLedger,
+        runID: UUID,
+        error: Error,
+        fallbackCategory: String
+    ) {
+        if ledger.mutationRun.currentRunID == runID {
+            if ledger.mutationRun.lastErrorCategory == nil {
+                ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                    for: error,
+                    fallback: fallbackCategory
+                )
+            }
+            ledger.mutationRun.lastErrorMessage = error.localizedDescription
+            if ledger.mutationRun.state == "in_progress" {
+                let terminal = legacyMigrationStep2AIsTerminalError(error)
+                ledger.mutationRun.state = terminal
+                    ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                    : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+            }
+            ledger.mutationRun.completedAt = Date()
+            try? localStore.writeLegacyMigrationLedger(ledger)
+        }
+    }
+
+    private func loadLegacyMigrationRunContext() throws -> (
+        client: SupabaseClient,
+        activeOrganizationID: UUID,
+        runID: UUID,
+        startedAt: Date,
+        ledger: LegacyMigrationPreflightLedger
+    ) {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        let ledger = try loadLegacyMigrationLedgerForRun(
+            runID: runID,
+            startedAt: now,
+            activeOrganizationID: activeOrganizationID
+        )
+        return (client, activeOrganizationID, runID, now, ledger)
+    }
+
+    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
+
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let propertyIndexByID = Dictionary(uniqueKeysWithValues: ledger.properties.enumerated().map { ($0.element.localID, $0.offset) })
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
@@ -39484,11 +37711,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2AResult(
                 runID: runID,
@@ -39498,87 +37721,21 @@ final class AppState: ObservableObject {
                 verifiedSessionCount: ledger.sessions.filter { $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2a_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2a_failed"
+            )
             throw error
         }
     }
 
     func runLegacyMigrationStep2BSlice1() async throws -> LegacyMigrationStep2BSlice1Result {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
-        let runID = UUID()
-        let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
-
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
-            startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
-        )
-        try localStore.writeLegacyMigrationLedger(ledger)
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -39744,11 +37901,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice1Result(
                 runID: runID,
@@ -39757,87 +37910,21 @@ final class AppState: ObservableObject {
                 verifiedShotCount: ledger.shots.filter { $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice1_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice1_failed"
+            )
             throw error
         }
     }
 
     func runLegacyMigrationStep2BSlice2A() async throws -> LegacyMigrationStep2BSlice2AResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
-        let runID = UUID()
-        let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
-
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
-            startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
-        )
-        try localStore.writeLegacyMigrationLedger(ledger)
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -39975,11 +38062,7 @@ final class AppState: ObservableObject {
                 }
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice2AResult(
                 runID: runID,
@@ -39988,87 +38071,21 @@ final class AppState: ObservableObject {
                 uploadedMediaCount: ledger.media.filter { $0.mutation.state == .mediaUploadSucceeded || $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice2a_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice2a_failed"
+            )
             throw error
         }
     }
 
     func runLegacyMigrationStep2BSlice2BReadiness() async throws -> LegacyMigrationStep2BSlice2BReadinessResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
-        let runID = UUID()
-        let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
-
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
-            startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
-        )
-        try localStore.writeLegacyMigrationLedger(ledger)
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -40219,11 +38236,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice2BReadinessResult(
                 runID: runID,
@@ -40233,76 +38246,19 @@ final class AppState: ObservableObject {
                 readyForFinalizeCount: ledger.media.filter { $0.mutation.isReadyForFinalize }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice2b_readiness_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice2b_readiness_failed"
+            )
             throw error
         }
     }
 
     func runLegacyMigrationStep2BSlice2BFinalize() async throws -> LegacyMigrationStep2BSlice2BFinalizeResult {
-        guard let client = supabaseClient else {
-            throw LegacyMigrationStep2AError.missingSupabaseClient
-        }
-        guard let activeOrganizationID else {
-            throw LegacyMigrationStep2AError.missingActiveOrganization
-        }
-
-        let runID = UUID()
-        let now = Date()
-        var ledger: LegacyMigrationPreflightLedger
-
-        do {
-            ledger = try localStore.loadLegacyMigrationLedger()
-        } catch {
-            throw LegacyMigrationStep2AError.missingLedger
-        }
-
-        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "unsupported_ledger_schema",
-                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
-        }
-
-        guard ledger.activeOrganizationID == activeOrganizationID else {
-            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-                currentRunID: runID,
-                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
-                startedAt: now,
-                completedAt: Date(),
-                lastErrorCategory: "active_org_drift",
-                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
-                    expected: ledger.activeOrganizationID,
-                    actual: activeOrganizationID
-                ).localizedDescription
-            )
-            try localStore.writeLegacyMigrationLedger(ledger)
-            throw LegacyMigrationStep2AError.activeOrgDrift(
-                expected: ledger.activeOrganizationID,
-                actual: activeOrganizationID
-            )
-        }
+        let (client, activeOrganizationID, runID, now, loadedLedger) = try loadLegacyMigrationRunContext()
+        var ledger = loadedLedger
 
         guard !hasInFlightSupabaseUploadOperations() else {
             ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
@@ -40317,16 +38273,7 @@ final class AppState: ObservableObject {
             throw LegacyMigrationStep2AError.verificationFailed("Finalize cannot run while live upload activity is in flight for this app.")
         }
 
-        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
-        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
-            currentRunID: runID,
-            state: "in_progress",
-            startedAt: now,
-            completedAt: nil,
-            lastErrorCategory: nil,
-            lastErrorMessage: nil
-        )
-        try localStore.writeLegacyMigrationLedger(ledger)
+        try beginLegacyMigrationRun(ledger: &ledger, runID: runID, startedAt: now)
 
         let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
         let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
@@ -40589,11 +38536,7 @@ final class AppState: ObservableObject {
                 )
             }
 
-            ledger.mutationRun.state = "completed"
-            ledger.mutationRun.completedAt = Date()
-            ledger.mutationRun.lastErrorCategory = nil
-            ledger.mutationRun.lastErrorMessage = nil
-            try localStore.writeLegacyMigrationLedger(ledger)
+            try completeLegacyMigrationRun(ledger: &ledger)
 
             return LegacyMigrationStep2BSlice2BFinalizeResult(
                 runID: runID,
@@ -40602,23 +38545,12 @@ final class AppState: ObservableObject {
                 verifiedMediaCount: ledger.media.filter { $0.mutation.state == .verified }.count
             )
         } catch {
-            if ledger.mutationRun.currentRunID == runID {
-                if ledger.mutationRun.lastErrorCategory == nil {
-                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
-                        for: error,
-                        fallback: "step2b_slice2b_finalize_failed"
-                    )
-                }
-                ledger.mutationRun.lastErrorMessage = error.localizedDescription
-                if ledger.mutationRun.state == "in_progress" {
-                    let terminal = legacyMigrationStep2AIsTerminalError(error)
-                    ledger.mutationRun.state = terminal
-                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
-                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
-                }
-                ledger.mutationRun.completedAt = Date()
-                try? localStore.writeLegacyMigrationLedger(ledger)
-            }
+            recordLegacyMigrationRunFailure(
+                ledger: &ledger,
+                runID: runID,
+                error: error,
+                fallbackCategory: "step2b_slice2b_finalize_failed"
+            )
             throw error
         }
     }
@@ -41162,17 +39094,24 @@ final class AppState: ObservableObject {
         return category != "transient_transport_failure"
     }
 
-    private func fetchShotStorageMetadataFromSupabase(
-        sessionID: UUID,
-        shotID: UUID
-    ) async throws -> SupabaseShotStorageRecord? {
-        guard let client = supabaseClient else { return nil }
-        guard let activeOrganizationID else { return nil }
+    private static let supabasePropertyStatusSelectColumns = """
+        property_id,
+        org_id,
+        status,
+        active_session_id,
+        draft_session_id,
+        pending_export_session_id,
+        last_exported_session_id,
+        owner_user_id,
+        owner_device_id,
+        heartbeat_at,
+        updated_at,
+        updated_by,
+        status_reason,
+        revision
+        """
 
-        let rows = try await client
-            .from("shots")
-            .select(
-                """
+    private static let supabaseShotStorageSelectColumns = """
                 id,
                 org_id,
                 property_id,
@@ -41222,7 +39161,17 @@ final class AppState: ObservableObject {
                 upload_attempts,
                 last_upload_error
                 """
-            )
+
+    private func fetchShotStorageMetadataFromSupabase(
+        sessionID: UUID,
+        shotID: UUID
+    ) async throws -> SupabaseShotStorageRecord? {
+        guard let client = supabaseClient else { return nil }
+        guard let activeOrganizationID else { return nil }
+
+        let rows = try await client
+            .from("shots")
+            .select(Self.supabaseShotStorageSelectColumns)
             .eq("id", value: shotID.uuidString.lowercased())
             .eq("session_id", value: sessionID.uuidString.lowercased())
             .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
@@ -41241,58 +39190,7 @@ final class AppState: ObservableObject {
 
         let rows = try await client
             .from("shots")
-            .select(
-                """
-                id,
-                org_id,
-                property_id,
-                session_id,
-                created_at,
-                updated_at,
-                updated_by,
-                revision,
-                deleted_at,
-                building,
-                elevation,
-                detail_type,
-                angle_index,
-                shot_key,
-                logical_shot_identity,
-                capture_kind,
-                first_capture_kind,
-                is_guided,
-                is_flagged,
-                issue_id,
-                issue_status,
-                trade,
-                reason,
-                priority,
-                capture_mode,
-                lens,
-                latitude,
-                longitude,
-                accuracy_meters,
-                image_width,
-                image_height,
-                lifecycle_state,
-                retired_at,
-                retired_reason,
-                retired_by,
-                superseded_by_shot_id,
-                supersedes_shot_id,
-                replacement_reason,
-                hidden_from_reports,
-                hidden_from_gallery,
-                lifecycle_updated_at,
-                storage_bucket,
-                storage_path,
-                checksum_sha256,
-                byte_size,
-                upload_state,
-                upload_attempts,
-                last_upload_error
-                """
-            )
+            .select(Self.supabaseShotStorageSelectColumns)
             .eq("id", value: shotID.uuidString.lowercased())
             .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
             .limit(1)
@@ -41535,35 +39433,7 @@ final class AppState: ObservableObject {
             guard seenIDs.insert(record.id).inserted else {
                 throw RemotePropertyFetchError.duplicatePropertyID(record.id)
             }
-            guard remotePropertyDateIsValid(record.updatedAt) else {
-                logRemotePropertyTimestampIssue(
-                    kind: "updated_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: record.updatedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
-            if let createdAt = record.createdAt,
-               !remotePropertyDateIsValid(createdAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "created_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: createdAt
-                )
-                throw RemotePropertyFetchError.invalidCreatedAt(record.id)
-            }
-            if let deletedAt = record.deletedAt,
-               !remotePropertyDateIsValid(deletedAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "deleted_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: deletedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
+            try validateRemotePropertyDates(record)
         }
 
         return records
@@ -41757,38 +39627,42 @@ final class AppState: ObservableObject {
                     propertyID: record.id
                 )
             }
-            guard remotePropertyDateIsValid(record.updatedAt) else {
-                logRemotePropertyTimestampIssue(
-                    kind: "updated_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: record.updatedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
-            if let createdAt = record.createdAt,
-               !remotePropertyDateIsValid(createdAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "created_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: createdAt
-                )
-                throw RemotePropertyFetchError.invalidCreatedAt(record.id)
-            }
-            if let deletedAt = record.deletedAt,
-               !remotePropertyDateIsValid(deletedAt) {
-                logRemotePropertyTimestampIssue(
-                    kind: "deleted_at",
-                    propertyID: record.id,
-                    orgID: record.orgID,
-                    value: deletedAt
-                )
-                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
-            }
+            try validateRemotePropertyDates(record)
             _ = try resolvedRemotePropertyCreatedAt(for: record)
         }
         return sortedRecords
+    }
+
+    private func validateRemotePropertyDates(_ record: RemotePropertyRecord) throws {
+        guard remotePropertyDateIsValid(record.updatedAt) else {
+            logRemotePropertyTimestampIssue(
+                kind: "updated_at",
+                propertyID: record.id,
+                orgID: record.orgID,
+                value: record.updatedAt
+            )
+            throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
+        }
+        if let createdAt = record.createdAt,
+           !remotePropertyDateIsValid(createdAt) {
+            logRemotePropertyTimestampIssue(
+                kind: "created_at",
+                propertyID: record.id,
+                orgID: record.orgID,
+                value: createdAt
+            )
+            throw RemotePropertyFetchError.invalidCreatedAt(record.id)
+        }
+        if let deletedAt = record.deletedAt,
+           !remotePropertyDateIsValid(deletedAt) {
+            logRemotePropertyTimestampIssue(
+                kind: "deleted_at",
+                propertyID: record.id,
+                orgID: record.orgID,
+                value: deletedAt
+            )
+            throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
+        }
     }
 
     private func remotePropertyDateIsValid(_ value: Date) -> Bool {
@@ -41894,68 +39768,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func testFetchRemoteProperties() async {
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.supabaseReadEnabled else {
-            logRemotePropertyFetchResult(
-                outcome: "skipped_gate_disabled",
-                recordCount: nil,
-                error: nil
-            )
-            return
-        }
-
-        guard supabaseClient != nil else {
-            logRemotePropertyFetchResult(
-                outcome: "skipped_missing_client",
-                recordCount: nil,
-                error: RemotePropertyFetchError.missingClient
-            )
-            return
-        }
-
-        guard let activeOrganizationID else {
-            logRemotePropertyFetchResult(
-                outcome: "skipped_missing_active_org",
-                recordCount: nil,
-                error: RemotePropertyFetchError.missingActiveOrganization
-            )
-            return
-        }
-
-        do {
-            let localBackingCount = backingPropertyCount(for: activeOrganizationID)
-            let records = try await fetchRemotePropertyList(activeOrganizationID: activeOrganizationID)
-            let validated = try validateRemotePropertyResponse(
-                records: records,
-                localCacheCount: localBackingCount,
-                activeOrganizationID: activeOrganizationID
-            )
-            let payload = try makeRemotePropertyRefreshPayload(
-                validatedRecords: validated,
-                requestedOrganizationID: activeOrganizationID
-            )
-            logRemotePropertyFetchResult(
-                outcome: "success",
-                recordCount: payload.properties.count,
-                error: nil,
-                fingerprint: payload.fingerprint
-            )
-        } catch {
-            let outcome: String
-            if let remoteError = error as? RemotePropertyFetchError,
-               case .timedOut = remoteError {
-                outcome = "timeout"
-            } else {
-                outcome = "rejected"
-            }
-            logRemotePropertyFetchResult(
-                outcome: outcome,
-                recordCount: nil,
-                error: error
-            )
-        }
-    }
 
     func loadIfNeeded() {
         guard !didLoad else { return }
@@ -42085,6 +39897,10 @@ final class AppState: ObservableObject {
                 orgID: activeOrganizationID,
                 propertyIDs: propertyIDs
             )
+            await refreshLinkedDraftSessionVerification(
+                orgID: activeOrganizationID,
+                records: rows
+            )
             let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
             var nextCache = propertyStatusByPropertyID
             for propertyID in propertyIDs {
@@ -42145,28 +39961,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func waitForInitialPropertyRowDetailsToSettle(
-        propertyIDs: [UUID],
-        reason: String,
-        renderSettleDelayNanoseconds: UInt64 = 500_000_000
-    ) async {
-        let expectedIDs = Set(propertyIDs)
-        let start = Date()
-        while true {
-            let hydratedIDs = Set(propertyRowDetailsHydratedAtByPropertyID.keys).intersection(expectedIDs)
-            if hydratedIDs.count >= expectedIDs.count {
-                break
-            }
-            if Date().timeIntervalSince(start) >= 1.0 {
-                break
-            }
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 40_000_000)
-        }
-
-        try? await Task.sleep(nanoseconds: renderSettleDelayNanoseconds)
-        await Task.yield()
-    }
 
     func refreshProperties() {
         cloudBackupManager?.refreshStatus()
@@ -42467,17 +40261,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct RefreshLockBadgeDecision {
-        let propertyID: UUID
-        let showLocked: Bool
-        let reason: String
-        let occupancyState: PropertySessionOccupancyState?
-        let sessionLockState: (sessionID: UUID, state: SessionCoordinationState)?
-        let clearSessionIDs: [UUID]
-        let lockTimestamp: Date?
-        let finalizationTimestamp: Date?
-        let precedenceWinner: String
-    }
 
     private struct PropertyFinalizationEvidence {
         let sessionID: UUID?
@@ -42668,8 +40451,6 @@ final class AppState: ObservableObject {
     }
 
     private func refreshPropertyRowDraftBadgeCache() {
-        let currentUserID = authenticatedSupabaseUser?.id
-        let currentDeviceID = currentDeviceIdentifier()
         var next: [UUID: Bool] = [:]
 
         let propertyIDs = Set(propertyStatusByPropertyID.keys)
@@ -42677,47 +40458,7 @@ final class AppState: ObservableObject {
             .union(fastRuntimeDraftsByPropertyID.keys)
 
         for propertyID in propertyIDs {
-            let completionRequestedSessionIDs = Set(
-                fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).map { $0.context.sessionID }
-            )
-            let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
-                for: propertyID,
-                currentUserID: currentUserID,
-                currentDeviceID: currentDeviceID
-            )
-
-            if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-                let basePropertyStatusAnswer = makePropertyStatusCompareAnswer(
-                    record: propertyStatus,
-                    propertyID: propertyID,
-                    currentUserID: currentUserID,
-                    currentDeviceID: currentDeviceID
-                )
-                let canOverlayFastRuntimeDraft = fastRuntimeDraft.map { !completionRequestedSessionIDs.contains($0.sessionID) } == true &&
-                    basePropertyStatusAnswer.visibleBadgeState != .locked &&
-                    basePropertyStatusAnswer.visibleBadgeState != .pendingExport
-                let propertyStatusAnswer = canOverlayFastRuntimeDraft
-                    ? PropertyStatusCompareAnswer(
-                        visibleBadgeState: .draft,
-                        draftCountIncluded: true,
-                        pendingExportCountIncluded: false,
-                        entryBlocked: false,
-                        deleteEligible: false
-                    )
-                    : makePropertyStatusCompareAnswer(
-                        record: propertyStatus,
-                        propertyID: propertyID,
-                        currentUserID: currentUserID,
-                        currentDeviceID: currentDeviceID
-                    )
-                let draftSessionID = canOverlayFastRuntimeDraft
-                    ? fastRuntimeDraft?.sessionID : propertyStatus.draftSessionID
-                if propertyStatusAnswer.visibleBadgeState == .draft,
-                   draftSessionID.map({ !completionRequestedSessionIDs.contains($0) }) ?? true {
-                    next[propertyID] = true
-                }
-            } else if let draftSessionID = fastRuntimeDraft?.sessionID ?? draftSessionByProperty[propertyID]?.id,
-                      !completionRequestedSessionIDs.contains(draftSessionID) {
+            if propertyCardBadgeModel(for: propertyID).showDraft {
                 next[propertyID] = true
             }
         }
@@ -43563,6 +41304,30 @@ final class AppState: ObservableObject {
                 return nil
             }
 
+            if freshRecord.status == .occupied,
+               Self.propertyStatusOccupiedIsStale(freshRecord),
+               let activeSessionID = freshRecord.activeSessionID {
+                guard let activeOrganizationID else {
+                    return missingPropertyStatusEntryPreflightDecision(
+                        source: "linked_session_unverified",
+                        reason: "missing_organization_context"
+                    )
+                }
+                do {
+                    let draftIDs = try await fetchLinkedDraftSessionIDs(
+                        orgID: activeOrganizationID,
+                        records: [freshRecord]
+                    )
+                    verifiedRemoteDraftSessionIDs.remove(activeSessionID)
+                    verifiedRemoteDraftSessionIDs.formUnion(draftIDs)
+                } catch {
+                    return missingPropertyStatusEntryPreflightDecision(
+                        source: "linked_session_unverified",
+                        reason: "stale_occupied_session_read_failed"
+                    )
+                }
+            }
+
             var nextCache = propertyStatusByPropertyID
             nextCache[propertyID] = freshRecord
             propertyStatusByPropertyID = nextCache
@@ -43594,6 +41359,15 @@ final class AppState: ObservableObject {
             return resolvedDecision
         } catch {
             if let cachedRecord = propertyStatusByPropertyID[propertyID] {
+                if cachedRecord.status == .occupied,
+                   Self.propertyStatusOccupiedIsStale(cachedRecord),
+                   let activeSessionID = cachedRecord.activeSessionID,
+                   !verifiedRemoteDraftSessionIDs.contains(activeSessionID) {
+                    return missingPropertyStatusEntryPreflightDecision(
+                        source: "linked_session_unverified",
+                        reason: "fresh_status_read_failed"
+                    )
+                }
                 let cachedDecision = makePropertyStatusEntryPreflightDecision(
                     propertyID: propertyID,
                     record: cachedRecord
@@ -43657,28 +41431,6 @@ final class AppState: ObservableObject {
             context: context
         )
         return decision
-    }
-
-    @MainActor
-    func refreshLightweightPropertyEntryLocks(
-        propertyIDs: [UUID],
-        reason: String
-    ) async {
-        let uniquePropertyIDs = Array(Set(propertyIDs))
-        guard !uniquePropertyIDs.isEmpty else { return }
-
-        for propertyID in uniquePropertyIDs {
-            guard canAccessProperty(propertyID),
-                  let status = await evaluateLightweightPropertyEntryStatus(
-                    propertyID: propertyID,
-                    targetSessionID: nil
-                  ) else {
-                continue
-            }
-            if sessionEntryBlock(for: status) != nil {
-                cacheLockPresentation(from: status, reason: "\(reason)_lightweight_probe")
-            }
-        }
     }
 
     func preferredPropertyEntrySessionID(for propertyID: UUID) -> UUID {
@@ -47106,39 +44858,16 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let statuses: [PropertyStatusRecord] = try await client
-                .from("property_status")
-                .select(
-                    """
-                    property_id,
-                    org_id,
-                    status,
-                    active_session_id,
-                    draft_session_id,
-                    pending_export_session_id,
-                    last_exported_session_id,
-                    owner_user_id,
-                    owner_device_id,
-                    heartbeat_at,
-                    updated_at,
-                    updated_by,
-                    status_reason,
-                    revision
-                    """
-                )
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value
-            guard let status = statuses.first,
+            let propertyStatus = try await fetchFastRuntimeReportPropertyStatus(client: client, propertyID: propertyID)
+            guard let status = propertyStatus,
                   let sessionID = status.pendingExportSessionID else {
                 return makeFastRuntimeReportPackageDryRunBlockedResult(
                     startedAt: startedAt,
                     propertyID: propertyID,
                     sessionID: nil,
                     sessionType: sessionType,
-                    orgID: statuses.first?.orgID,
-                    propertyStatus: statuses.first?.status.rawValue,
+                    orgID: propertyStatus?.orgID,
+                    propertyStatus: propertyStatus?.status.rawValue,
                     reason: "property_status_missing_pending_export_session"
                 )
             }
@@ -47792,30 +45521,7 @@ final class AppState: ObservableObject {
                 .limit(1)
                 .execute()
                 .value
-            let statusRows: [PropertyStatusRecord] = try await client
-                .from("property_status")
-                .select(
-                    """
-                    property_id,
-                    org_id,
-                    status,
-                    active_session_id,
-                    draft_session_id,
-                    pending_export_session_id,
-                    last_exported_session_id,
-                    owner_user_id,
-                    owner_device_id,
-                    heartbeat_at,
-                    updated_at,
-                    updated_by,
-                    status_reason,
-                    revision
-                    """
-                )
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value
+            let propertyStatus = try await fetchFastRuntimeReportPropertyStatus(client: client, propertyID: propertyID)
             var shots = try await fetchFastRuntimeReportPackageShots(
                 client: client,
                 propertyID: propertyID,
@@ -47887,7 +45593,6 @@ final class AppState: ObservableObject {
                     reason: "session_row_missing"
                 )
             }
-            let propertyStatus = statusRows.first
             let resolvedOrgID = session.orgID
             if contextOrgID != nil, contextOrgID != resolvedOrgID {
                 warnings.append("context_org_id_mismatch")
@@ -48218,38 +45923,10 @@ final class AppState: ObservableObject {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
         let payloadData = try encoder.encode(payload)
-        let envelope = SessionSnapshotEnvelope(
+        let envelope = Self.makeSessionSnapshotEnvelope(
             id: sessionID,
-            snapshotSchemaVersion: payload.snapshotSchemaVersion,
-            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
-            trigger: payload.trigger,
-            generatedAt: payload.generatedAt,
-            appVersion: payload.appVersion,
-            sourceDeviceID: payload.sourceDeviceID,
-            orgID: payload.orgID,
-            propertyID: payload.propertyID,
-            sessionID: payload.sessionID,
-            sessionType: payload.sessionType,
-            status: payload.status,
-            isSealed: payload.isSealed,
-            exportedAt: payload.exportedAt,
-            firstDeliveredAt: payload.firstDeliveredAt,
-            reExportExpiresAt: payload.reExportExpiresAt,
-            actor: payload.actor,
-            capturedBy: payload.capturedBy,
-            uploadedBy: payload.uploadedBy,
-            shotCount: payload.shotCount,
-            issueCount: payload.issueCount,
-            guidedCount: payload.guidedCount,
-            mediaManifestCount: payload.mediaManifestCount,
-            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
-            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
-            rawSessionJSON: rawSessionJSON,
-            rawSessionJSONSHA256: rawChecksum,
-            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: rawData.count,
-            snapshotPayloadByteCount: payloadData.count,
-            mediaManifest: manifest
+            payload: payload,
+            payloadData: payloadData
         )
         return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
     }
@@ -48381,6 +46058,20 @@ final class AppState: ObservableObject {
         return metadata
     }
 
+    private func fetchFastRuntimeReportPropertyStatus(
+        client: SupabaseClient,
+        propertyID: UUID
+    ) async throws -> PropertyStatusRecord? {
+        let rows: [PropertyStatusRecord] = try await client
+            .from("property_status")
+            .select(Self.supabasePropertyStatusSelectColumns)
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value
+        return rows.first
+    }
+
     private func fetchFastRuntimeReportPackageShots(
         client: SupabaseClient,
         propertyID: UUID,
@@ -48388,58 +46079,7 @@ final class AppState: ObservableObject {
     ) async throws -> [SupabaseShotStorageRecord] {
         try await client
             .from("shots")
-            .select(
-                """
-                id,
-                org_id,
-                property_id,
-                session_id,
-                created_at,
-                updated_at,
-                updated_by,
-                revision,
-                deleted_at,
-                building,
-                elevation,
-                detail_type,
-                angle_index,
-                shot_key,
-                logical_shot_identity,
-                capture_kind,
-                first_capture_kind,
-                is_guided,
-                is_flagged,
-                issue_id,
-                issue_status,
-                trade,
-                reason,
-                priority,
-                capture_mode,
-                lens,
-                latitude,
-                longitude,
-                accuracy_meters,
-                image_width,
-                image_height,
-                lifecycle_state,
-                retired_at,
-                retired_reason,
-                retired_by,
-                superseded_by_shot_id,
-                supersedes_shot_id,
-                replacement_reason,
-                hidden_from_reports,
-                hidden_from_gallery,
-                lifecycle_updated_at,
-                storage_bucket,
-                storage_path,
-                checksum_sha256,
-                byte_size,
-                upload_state,
-                upload_attempts,
-                last_upload_error
-                """
-            )
+            .select(Self.supabaseShotStorageSelectColumns)
             .eq("session_id", value: sessionID.uuidString.lowercased())
             .eq("property_id", value: propertyID.uuidString.lowercased())
             .is("deleted_at", value: nil)
@@ -48607,28 +46247,6 @@ final class AppState: ObservableObject {
         return sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
     }
 
-    private func repairFastRuntimeLocalSessionShotCaptureKind(
-        propertyID: UUID,
-        sessionID: UUID,
-        shotID: UUID,
-        captureKind: String
-    ) {
-        guard var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
-              let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
-            return
-        }
-        guard metadata.shots[index].captureKind != captureKind else { return }
-        metadata.shots[index].captureKind = captureKind
-        if metadata.shots[index].firstCaptureKind == nil {
-            metadata.shots[index].firstCaptureKind = "captured"
-        }
-        metadata.shots[index].updatedAt = Date()
-        try? localStore.saveSessionMetadataAtomically(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            metadata: metadata
-        )
-    }
 
     private func repairFastRuntimeLocalSessionShotWorkflowMetadata(
         propertyID: UUID,
@@ -48981,6 +46599,7 @@ final class AppState: ObservableObject {
     ) -> FastRuntimeDraftSummary? {
         guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
               summary.photoCount > 0,
+              !isFinalSession(persistedSessionIncludingDeleted(propertyID: propertyID, sessionID: summary.sessionID)),
               !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID) else {
             return nil
         }
@@ -48995,7 +46614,10 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    func fastRuntimeDraftResumeState(for propertyID: UUID) -> FastRuntimeDraftResumeState? {
+    func fastRuntimeDraftResumeState(
+        for propertyID: UUID,
+        publishRecoveredDraft: Bool = true
+    ) -> FastRuntimeDraftResumeState? {
         let property = properties.first(where: { $0.id == propertyID }) ??
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
@@ -49007,7 +46629,8 @@ final class AppState: ObservableObject {
         guard let draftSummary = recoverUnindexedFastRuntimeDraft(
             propertyID: propertyID,
             property: property,
-            newerThan: indexedDraft
+            newerThan: indexedDraft,
+            publishRecoveredDraft: publishRecoveredDraft
         ) ?? indexedDraft else {
 #if DEBUG
             print("[FastLaneRecovery] no_draft property=\(propertyID.uuidString.prefix(8)) property_found=\(property != nil)")
@@ -49023,7 +46646,7 @@ final class AppState: ObservableObject {
               }) else {
             return nil
         }
-        if resolvedDraft.didRelocate {
+        if resolvedDraft.didRelocate && publishRecoveredDraft {
             var nextDrafts = fastRuntimeDraftsByPropertyID
             nextDrafts[propertyID] = summary
             if (try? Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))) != nil {
@@ -49075,8 +46698,106 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func recoverUnindexedStableFastRuntimeDraft(propertyID: UUID, orgID: UUID) -> FastRuntimeDraftSummary? {
+    @MainActor
+    func verifiedFastRuntimeDraftResumeState(for propertyID: UUID) async -> FastRuntimeDraftResumeState? {
+        guard let resume = fastRuntimeDraftResumeState(for: propertyID, publishRecoveredDraft: false),
+              let summary = resume.summary else { return nil }
+        guard let orgID = summary.orgID else {
+            publishVerifiedFastRuntimeDraft(summary)
+            return resume
+        }
         do {
+            guard let remote = try await fetchRemoteSessionCoordinationRecord(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: summary.sessionID
+            ) else {
+                publishVerifiedFastRuntimeDraft(summary)
+                return resume
+            }
+            guard isFinalRemoteSessionState(
+                status: remote.status,
+                completedAt: remote.completedAt,
+                exportedAt: remote.exportedAt,
+                isSealed: remote.isSealed,
+                firstDeliveredAt: remote.firstDeliveredAt
+            ) else {
+                publishVerifiedFastRuntimeDraft(summary)
+                return resume
+            }
+
+            applyRemoteFinalSessionStatesFromLockRecords([
+                RemotePropertySessionLockRecord(
+                    id: remote.id,
+                    orgID: remote.orgID,
+                    propertyID: remote.propertyID,
+                    status: remote.status,
+                    completedAt: remote.completedAt,
+                    exportedAt: remote.exportedAt,
+                    isSealed: remote.isSealed,
+                    firstDeliveredAt: remote.firstDeliveredAt,
+                    lockedByUserID: remote.lockedByUserID,
+                    lockedByDeviceID: remote.lockedByDeviceID,
+                    lockedAt: remote.lockedAt
+                )
+            ], reason: "fast_runtime_draft_remote_final")
+            guard let local = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID))?
+                .first(where: { $0.id == summary.sessionID }),
+                  isFinalSession(local) else {
+                return FastRuntimeDraftResumeState(
+                    propertyID: propertyID,
+                    propertyName: resume.propertyName,
+                    summary: summary,
+                    context: nil,
+                    storageRoot: resume.storageRoot,
+                    errorMessage: "This session is completed in the cloud, but its local draft could not be updated. Please try again."
+                )
+            }
+            if fastRuntimeDraftsByPropertyID[propertyID]?.sessionID == summary.sessionID {
+                var nextDrafts = fastRuntimeDraftsByPropertyID
+                nextDrafts.removeValue(forKey: propertyID)
+                do {
+                    try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                    fastRuntimeDraftsByPropertyID = nextDrafts
+                } catch {
+                    recordDiagnosticsError(error)
+                }
+            }
+            return nil
+        } catch {
+            recordDiagnosticsError(error)
+            return FastRuntimeDraftResumeState(
+                propertyID: propertyID,
+                propertyName: resume.propertyName,
+                summary: summary,
+                context: nil,
+                storageRoot: resume.storageRoot,
+                errorMessage: "Could not verify whether this saved session is still active. Please try again."
+            )
+        }
+    }
+
+    private func publishVerifiedFastRuntimeDraft(_ summary: FastRuntimeDraftSummary) {
+        guard fastRuntimeDraftsByPropertyID[summary.propertyID] != summary else { return }
+        var nextDrafts = fastRuntimeDraftsByPropertyID
+        nextDrafts[summary.propertyID] = summary
+        do {
+            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+            fastRuntimeDraftsByPropertyID = nextDrafts
+        } catch {
+            recordDiagnosticsError(error)
+        }
+    }
+
+    private func recoverUnindexedStableFastRuntimeDraft(
+        propertyID: UUID,
+        orgID: UUID,
+        publishRecoveredDraft: Bool
+    ) -> FastRuntimeDraftSummary? {
+        do {
+            let finalSessionIDs = Set(((try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? [])
+                .filter { isFinalSession($0) }
+                .map(\.id))
             let propertyRoot = try Self.fastRuntimeDraftsRootURL()
                 .appendingPathComponent("Drafts", isDirectory: true)
                 .appendingPathComponent(propertyID.uuidString, isDirectory: true)
@@ -49097,6 +46818,7 @@ final class AppState: ObservableObject {
                       context.propertyID == propertyID,
                       context.orgID == orgID,
                       context.status == .draft,
+                      !finalSessionIDs.contains(context.sessionID),
                       !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: context.sessionID),
                       fastRuntimeContextIsOwnedByCurrentActor(
                         ownerUserID: context.ownerUserID,
@@ -49129,10 +46851,9 @@ final class AppState: ObservableObject {
                 return (summary, newest)
             }
             guard let summary = candidates.max(by: { $0.1 < $1.1 })?.0 else { return nil }
-            var nextDrafts = fastRuntimeDraftsByPropertyID
-            nextDrafts[propertyID] = summary
-            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
-            fastRuntimeDraftsByPropertyID = nextDrafts
+            if publishRecoveredDraft {
+                publishVerifiedFastRuntimeDraft(summary)
+            }
             return summary
         } catch {
             print("[FastLaneRecovery] stable_draft_index_failed propertyID=\(propertyID.uuidString) error=\(error.localizedDescription)")
@@ -49143,7 +46864,8 @@ final class AppState: ObservableObject {
     private func recoverUnindexedFastRuntimeDraft(
         propertyID: UUID,
         property: Property?,
-        newerThan indexedDraft: FastRuntimeDraftSummary?
+        newerThan indexedDraft: FastRuntimeDraftSummary?,
+        publishRecoveredDraft: Bool
     ) -> FastRuntimeDraftSummary? {
         guard let property,
               let orgID = property.orgId else {
@@ -49290,10 +47012,9 @@ final class AppState: ObservableObject {
                     draftRootPath: root.path,
                     metadataPath: Self.fastRuntimeDraftMetadataURL(root: root).path
                 )
-                var nextDrafts = fastRuntimeDraftsByPropertyID
-                nextDrafts[propertyID] = summary
-                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
-                fastRuntimeDraftsByPropertyID = nextDrafts
+                if publishRecoveredDraft {
+                    publishVerifiedFastRuntimeDraft(summary)
+                }
 #if DEBUG
                 print("[FastLaneRecovery] restored session=\(draft.id.uuidString.prefix(8)) shots=\(records.count)")
 #endif
@@ -49303,7 +47024,11 @@ final class AppState: ObservableObject {
             print("[FastLaneRecovery] propertyID=\(propertyID.uuidString) error=\(error.localizedDescription)")
         }
         guard indexedDraft == nil else { return nil }
-        return recoverUnindexedStableFastRuntimeDraft(propertyID: propertyID, orgID: orgID)
+        return recoverUnindexedStableFastRuntimeDraft(
+            propertyID: propertyID,
+            orgID: orgID,
+            publishRecoveredDraft: publishRecoveredDraft
+        )
     }
 
     func clearFastRuntimePrototypeState() async -> FastRuntimePrototypeCleanupResult {
@@ -49913,11 +47638,7 @@ final class AppState: ObservableObject {
                 blockContext: context
             )
         case .staleClaimable:
-            return SessionEntryCoordinationBlock(
-                ownerDescription: ownerDescription,
-                lockedAt: status.lockedAt,
-                blockContext: "occupied"
-            )
+            return nil
         case .pendingExport:
             return SessionEntryCoordinationBlock(
                 ownerDescription: ownerDescription,
@@ -50307,7 +48028,8 @@ final class AppState: ObservableObject {
                 block: nil
             )
         case .occupied:
-            if isStalePropertyStatusOccupied(record) {
+            if isStalePropertyStatusOccupied(record),
+               record.activeSessionID.map({ verifiedRemoteDraftSessionIDs.contains($0) }) != true {
                 print(
                     "[PropertyStatusEntry] " +
                     "property_status_occupied_stale_recovery=\(ownedByCurrentActor ? "owned_reclaimable" : "claimable_via_rpc") " +
@@ -50585,6 +48307,13 @@ final class AppState: ObservableObject {
         deviceID: String,
         reason: String
     ) async -> Bool {
+#if DEBUG
+        if let propertyStatusShadowWriteOverrideForTests {
+            return await propertyStatusShadowWriteOverrideForTests(
+                transition.rawValue, propertyID, sessionID, deviceID, reason
+            )
+        }
+#endif
         guard let client = supabaseClient else {
             print(
                 "[PropertyStatusShadowWrite] property_status_shadow_write_failure " +
@@ -51004,6 +48733,80 @@ final class AppState: ObservableObject {
         ).first
     }
 
+    private struct LinkedDraftSessionRecord: Decodable {
+        let id: UUID
+        let status: String
+        let isSealed: Bool?
+        let completedAt: String?
+        let firstDeliveredAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, status
+            case isSealed = "is_sealed"
+            case completedAt = "completed_at"
+            case firstDeliveredAt = "first_delivered_at"
+        }
+
+        var isUnfinishedDraft: Bool {
+            status == "draft" && isSealed != true && completedAt == nil && firstDeliveredAt == nil
+        }
+    }
+
+    private func fetchLinkedDraftSessionIDs(
+        orgID: UUID,
+        records: [PropertyStatusRecord]
+    ) async throws -> Set<UUID> {
+        let sessionIDs = Array(Set(records.compactMap { record -> UUID? in
+            guard record.status == .occupied,
+                  Self.propertyStatusOccupiedIsStale(record) else { return nil }
+            return record.activeSessionID
+        }))
+        guard !sessionIDs.isEmpty else { return [] }
+#if DEBUG
+        if let linkedDraftSessionFetchOverride {
+            return try await linkedDraftSessionFetchOverride(orgID, records)
+        }
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return Set(sessionIDs.filter { sessionID in
+                guard let record = sessionCoordinationDebugRemoteRecords[sessionID] else { return false }
+                return record.status == "draft" && record.isSealed != true &&
+                    record.completedAt == nil && record.firstDeliveredAt == nil
+            })
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+        let rows: [LinkedDraftSessionRecord] = try await client
+            .from("sessions")
+            .select("id, status, is_sealed, completed_at, first_delivered_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .in("id", values: sessionIDs.map { $0.uuidString.lowercased() })
+            .is("deleted_at", value: nil)
+            .execute()
+            .value
+        return Set(rows.filter { $0.isUnfinishedDraft }.map(\.id))
+    }
+
+    @MainActor
+    private func refreshLinkedDraftSessionVerification(
+        orgID: UUID,
+        records: [PropertyStatusRecord]
+    ) async {
+        let linkedIDs = Set(records.compactMap { record -> UUID? in
+            guard record.status == .occupied else { return nil }
+            return record.activeSessionID
+        })
+        guard !linkedIDs.isEmpty else { return }
+        do {
+            let draftIDs = try await fetchLinkedDraftSessionIDs(orgID: orgID, records: records)
+            verifiedRemoteDraftSessionIDs.subtract(linkedIDs)
+            verifiedRemoteDraftSessionIDs.formUnion(draftIDs)
+        } catch {
+            print("[PropertyStatusEntry] linked_session_read_failed")
+        }
+    }
+
     private func fetchPropertyStatusRecords(
         orgID: UUID,
         propertyIDs: [UUID]
@@ -51030,24 +48833,7 @@ final class AppState: ObservableObject {
 
         return try await client
             .from("property_status")
-            .select(
-                """
-                property_id,
-                org_id,
-                status,
-                active_session_id,
-                draft_session_id,
-                pending_export_session_id,
-                last_exported_session_id,
-                owner_user_id,
-                owner_device_id,
-                heartbeat_at,
-                updated_at,
-                updated_by,
-                status_reason,
-                revision
-                """
-            )
+            .select(Self.supabasePropertyStatusSelectColumns)
             .eq("org_id", value: orgID.uuidString.lowercased())
             .in("property_id", values: uniquePropertyIDValues)
             .execute()
@@ -51179,6 +48965,7 @@ final class AppState: ObservableObject {
                 orgID: orgID,
                 propertyIDs: requestedPropertyIDs
             )
+            await refreshLinkedDraftSessionVerification(orgID: orgID, records: rows)
             let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
             let completedAt = Date()
             let elapsedMs = Int(completedAt.timeIntervalSince(start) * 1000)
@@ -51569,7 +49356,8 @@ final class AppState: ObservableObject {
         let draftHasNoMaterialLocalSession = record.status == .draft &&
             propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
         let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor &&
-            propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
+            (propertyStatusDraftRepresentsKnownNoOpSession(record, propertyID: propertyID) ||
+             propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID))
 
         if draftHasNoMaterialLocalSession,
            draftCanBeTreatedAsStaleLocalNoOp {
@@ -51581,8 +49369,20 @@ final class AppState: ObservableObject {
                 deleteEligible: true
             )
         }
+        if record.status == .occupied,
+           let activeSessionID = record.activeSessionID,
+           verifiedRemoteDraftSessionIDs.contains(activeSessionID),
+           normalizedSupabaseText(record.ownerDeviceID) != currentDeviceID {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .locked,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: true,
+                deleteEligible: false
+            )
+        }
         if locallyLockedPropertyIDs.contains(propertyID),
-           record.status == .draft || record.status == .occupied {
+           record.status == .draft || (record.status == .occupied && !Self.propertyStatusOccupiedIsStale(record)) {
             return PropertyStatusCompareAnswer(
                 visibleBadgeState: .locked,
                 draftCountIncluded: false,
@@ -52471,6 +50271,32 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    private func fetchValidatedRemotePropertyRefreshPayload(
+        organizationID: UUID,
+        userID: UUID?,
+        contextGeneration: UInt64
+    ) async throws -> PropertyRefreshPayload {
+        let localBackingCount = backingPropertyCount(for: organizationID)
+        let records = try await fetchRemotePropertyList(activeOrganizationID: organizationID)
+        let validated = try validateRemotePropertyResponse(
+            records: records,
+            localCacheCount: localBackingCount,
+            activeOrganizationID: organizationID
+        )
+        guard isCurrentAuthenticatedAccessContext(
+            userID: userID,
+            organizationID: organizationID,
+            generation: contextGeneration
+        ) else {
+            throw RemotePropertyFetchError.missingActiveOrganization
+        }
+        return try makeRemotePropertyRefreshPayload(
+            validatedRecords: validated,
+            requestedOrganizationID: organizationID
+        )
+    }
+
+    @MainActor
     private func performForegroundRemotePropertyRefresh(
         activeSessionCheckpointTrigger: String? = nil
     ) async -> Bool {
@@ -52498,23 +50324,10 @@ final class AppState: ObservableObject {
         )
 
         do {
-            let localBackingCount = backingPropertyCount(for: requestedOrganizationID)
-            let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
-            let validated = try validateRemotePropertyResponse(
-                records: records,
-                localCacheCount: localBackingCount,
-                activeOrganizationID: requestedOrganizationID
-            )
-            guard isCurrentAuthenticatedAccessContext(
-                userID: requestedUserID,
+            let payload = try await fetchValidatedRemotePropertyRefreshPayload(
                 organizationID: requestedOrganizationID,
-                generation: requestedContextGeneration
-            ) else {
-                throw RemotePropertyFetchError.missingActiveOrganization
-            }
-            let payload = try makeRemotePropertyRefreshPayload(
-                validatedRecords: validated,
-                requestedOrganizationID: requestedOrganizationID
+                userID: requestedUserID,
+                contextGeneration: requestedContextGeneration
             )
             guard isCurrentAuthenticatedAccessContext(
                 userID: requestedUserID,
@@ -52569,12 +50382,6 @@ final class AppState: ObservableObject {
                 propertyIDs: visiblePropertyIDs,
                 reason: "foreground_refresh"
             )
-            Task { @MainActor [weak self] in
-                await self?.refreshLightweightPropertyEntryLocks(
-                    propertyIDs: visiblePropertyIDs,
-                    reason: "foreground_refresh"
-                )
-            }
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
                 outcome: "foreground_success",
@@ -52635,23 +50442,10 @@ final class AppState: ObservableObject {
         )
 
         do {
-            let localBackingCount = backingPropertyCount(for: requestedOrganizationID)
-            let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
-            let validated = try validateRemotePropertyResponse(
-                records: records,
-                localCacheCount: localBackingCount,
-                activeOrganizationID: requestedOrganizationID
-            )
-            guard isCurrentAuthenticatedAccessContext(
-                userID: requestedUserID,
+            let payload = try await fetchValidatedRemotePropertyRefreshPayload(
                 organizationID: requestedOrganizationID,
-                generation: requestedContextGeneration
-            ) else {
-                throw RemotePropertyFetchError.missingActiveOrganization
-            }
-            let payload = try makeRemotePropertyRefreshPayload(
-                validatedRecords: validated,
-                requestedOrganizationID: requestedOrganizationID
+                userID: requestedUserID,
+                contextGeneration: requestedContextGeneration
             )
             guard isCurrentAuthenticatedAccessContext(
                 userID: requestedUserID,
@@ -53043,9 +50837,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func markLiveSyncBurstWindow(seconds: TimeInterval) {
-        liveSyncBurstUntil = Date().addingTimeInterval(max(seconds, 1))
-    }
 
     @discardableResult
     func createProperty(
@@ -53300,17 +51091,33 @@ final class AppState: ObservableObject {
         propertyOpenFreshnessByPropertyID[propertyID]
     }
 
+    private static func makePropertyOpenFreshnessSnapshot(
+        propertyID: UUID,
+        status: PropertyOpenFreshnessStatus,
+        localUpdatedAt: Date? = nil,
+        remoteUpdatedAt: Date? = nil,
+        remoteRevision: Int64? = nil,
+        hasUnsyncedLocalPropertyWork: Bool = false,
+        reason: String
+    ) -> PropertyOpenFreshnessSnapshot {
+        PropertyOpenFreshnessSnapshot(
+            propertyID: propertyID,
+            status: status,
+            checkedAt: Date(),
+            localUpdatedAt: localUpdatedAt,
+            remoteUpdatedAt: remoteUpdatedAt,
+            remoteRevision: remoteRevision,
+            hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+            reason: reason
+        )
+    }
+
     private func beginPropertyOpenHeaderStatusRefresh(propertyID: UUID) {
         guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
                 allProperties.first(where: { $0.id == propertyID }) else {
-            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                 propertyID: propertyID,
                 status: .unknown,
-                checkedAt: Date(),
-                localUpdatedAt: nil,
-                remoteUpdatedAt: nil,
-                remoteRevision: nil,
-                hasUnsyncedLocalPropertyWork: false,
                 reason: "local_property_missing"
             )
             return
@@ -53318,14 +51125,10 @@ final class AppState: ObservableObject {
 
         guard isRemotePropertyRefreshEnabled,
               let activeOrganizationID else {
-            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                 propertyID: propertyID,
                 status: .usingLocalCache,
-                checkedAt: Date(),
                 localUpdatedAt: localProperty.updatedAt,
-                remoteUpdatedAt: nil,
-                remoteRevision: nil,
-                hasUnsyncedLocalPropertyWork: false,
                 reason: "remote_scope_unavailable"
             )
             return
@@ -53333,14 +51136,10 @@ final class AppState: ObservableObject {
 
         guard !propertyOpenHeaderStatusCheckInFlightPropertyIDs.contains(propertyID) else { return }
         propertyOpenHeaderStatusCheckInFlightPropertyIDs.insert(propertyID)
-        propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+        propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
             propertyID: propertyID,
             status: .checkingCloudStatus,
-            checkedAt: Date(),
             localUpdatedAt: localProperty.updatedAt,
-            remoteUpdatedAt: nil,
-            remoteRevision: nil,
-            hasUnsyncedLocalPropertyWork: false,
             reason: "checking_header_status"
         )
 
@@ -53372,10 +51171,9 @@ final class AppState: ObservableObject {
                     hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork
                 )
                 await MainActor.run {
-                    self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                    self.propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                         propertyID: propertyID,
                         status: evaluation.status,
-                        checkedAt: Date(),
                         localUpdatedAt: localProperty.updatedAt,
                         remoteUpdatedAt: remote?.updatedAt,
                         remoteRevision: remote?.revision,
@@ -53386,13 +51184,10 @@ final class AppState: ObservableObject {
             } catch {
                 let status = Self.propertyOpenFreshnessStatusForRemoteFailure(error)
                 await MainActor.run {
-                    self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                    self.propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                         propertyID: propertyID,
                         status: status,
-                        checkedAt: Date(),
                         localUpdatedAt: localProperty.updatedAt,
-                        remoteUpdatedAt: nil,
-                        remoteRevision: nil,
                         hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
                         reason: "header_status_\(Self.diagnosticErrorCategory(for: error).rawValue)"
                     )
@@ -53446,14 +51241,9 @@ final class AppState: ObservableObject {
     func beginPropertyOpenFreshnessCheck(propertyID: UUID) {
         guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
                 allProperties.first(where: { $0.id == propertyID }) else {
-            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                 propertyID: propertyID,
                 status: .unknown,
-                checkedAt: Date(),
-                localUpdatedAt: nil,
-                remoteUpdatedAt: nil,
-                remoteRevision: nil,
-                hasUnsyncedLocalPropertyWork: false,
                 reason: "local_property_missing"
             )
             return
@@ -53461,14 +51251,10 @@ final class AppState: ObservableObject {
 
         guard isRemotePropertyRefreshEnabled,
               let activeOrganizationID else {
-            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                 propertyID: propertyID,
                 status: .usingLocalCache,
-                checkedAt: Date(),
                 localUpdatedAt: localProperty.updatedAt,
-                remoteUpdatedAt: nil,
-                remoteRevision: nil,
-                hasUnsyncedLocalPropertyWork: false,
                 reason: "remote_scope_unavailable"
             )
             print("[PropertyFreshness] propertyID=\(propertyID.uuidString) status=using_local_cache reason=remote_scope_unavailable")
@@ -53480,14 +51266,10 @@ final class AppState: ObservableObject {
             return
         }
         propertyOpenFreshnessCheckInFlightPropertyIDs.insert(propertyID)
-        propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+        propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
             propertyID: propertyID,
             status: .checkingCloudStatus,
-            checkedAt: Date(),
             localUpdatedAt: localProperty.updatedAt,
-            remoteUpdatedAt: nil,
-            remoteRevision: nil,
-            hasUnsyncedLocalPropertyWork: false,
             reason: "checking"
         )
 
@@ -53523,14 +51305,9 @@ final class AppState: ObservableObject {
         guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
                 allProperties.first(where: { $0.id == propertyID }) else {
             await MainActor.run {
-                self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                self.propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                     propertyID: propertyID,
                     status: .unknown,
-                    checkedAt: Date(),
-                    localUpdatedAt: nil,
-                    remoteUpdatedAt: nil,
-                    remoteRevision: nil,
-                    hasUnsyncedLocalPropertyWork: false,
                     reason: "local_property_missing"
                 )
             }
@@ -53589,10 +51366,9 @@ final class AppState: ObservableObject {
                 evaluation = (.remoteUpdatesAvailable, referenceFreshness.reason)
             }
             await MainActor.run {
-                self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                self.propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                     propertyID: propertyID,
                     status: evaluation.status,
-                    checkedAt: Date(),
                     localUpdatedAt: evaluatedProperty.updatedAt,
                     remoteUpdatedAt: remote?.updatedAt,
                     remoteRevision: remote?.revision,
@@ -53610,13 +51386,10 @@ final class AppState: ObservableObject {
         } catch {
             let status = Self.propertyOpenFreshnessStatusForRemoteFailure(error)
             await MainActor.run {
-                self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                self.propertyOpenFreshnessByPropertyID[propertyID] = Self.makePropertyOpenFreshnessSnapshot(
                     propertyID: propertyID,
                     status: status,
-                    checkedAt: Date(),
                     localUpdatedAt: localProperty.updatedAt,
-                    remoteUpdatedAt: nil,
-                    remoteRevision: nil,
                     hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
                     reason: Self.diagnosticErrorCategory(for: error).rawValue
                 )
@@ -56322,18 +54095,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func knownLocalSessionCaptureProfile(propertyID: UUID, session: Session) -> CaptureProfile? {
-        if let captureProfile = session.captureProfile {
-            return captureProfile
-        }
-        guard let metadata = try? localStore.loadSessionMetadata(
-            propertyID: propertyID,
-            sessionID: session.id
-        ) else {
-            return nil
-        }
-        return CaptureProfile(storedValue: metadata.captureProfile)
-    }
 
     private func localSessionCaptureProfileScanState(
         propertyID: UUID,
@@ -56971,15 +54732,40 @@ final class AppState: ObservableObject {
         )
     }
 
-    // A draft's photos remain available in that draft, but cannot become
-    // references in another session until the draft is completed.
+    // Only an active draft may keep its photos out of another session's
+    // checklist. Reading historical guided references can reconstruct an old
+    // local draft shell; that shell alone must not make the references vanish.
     private func fastRuntimeShotIDsExclusiveToOtherDrafts(
         propertyID: UUID,
         currentSessionID: UUID
     ) -> Set<UUID> {
+        var activeDraftSessionIDs = Set<UUID>()
+        if let indexedDraft = fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: authenticatedSupabaseUser?.id,
+            currentDeviceID: currentDeviceIdentifier()
+        ) {
+            activeDraftSessionIDs.insert(indexedDraft.sessionID)
+        }
+        if let status = propertyStatusByPropertyID[propertyID] {
+            switch status.status {
+            case .occupied:
+                if let sessionID = status.activeSessionID {
+                    activeDraftSessionIDs.insert(sessionID)
+                }
+            case .draft:
+                if let sessionID = status.draftSessionID {
+                    activeDraftSessionIDs.insert(sessionID)
+                }
+            case .idle, .pendingExport, .exported:
+                break
+            }
+        }
+        guard !activeDraftSessionIDs.isEmpty else { return [] }
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         let otherDrafts = sessions.filter {
-            $0.id != currentSessionID && $0.status == .draft && !$0.isSealed && $0.firstDeliveredAt == nil
+            $0.id != currentSessionID && activeDraftSessionIDs.contains($0.id) &&
+                $0.status == .draft && !$0.isSealed && $0.firstDeliveredAt == nil
         }
         guard !otherDrafts.isEmpty else { return [] }
 
@@ -58202,29 +55988,7 @@ final class AppState: ObservableObject {
             properties.first(where: { $0.id == id })
         let counts = propertyDataCounts(for: id)
         guard counts.isEmpty else { return false }
-        do {
-            try localStore.deleteProperty(id: id)
-            allProperties.removeAll { $0.id == id }
-            let caches = makeHubCaches(for: allProperties)
-            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
-            if selectedPropertyID == id {
-                selectedPropertyID = nil
-                clearCurrentSession()
-            }
-            cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
-            if let propertyForAudit {
-                emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
-            }
-            return true
-        } catch {
-            if handleDeletePropertyNotFound(id: id, error: error) {
-                if let propertyForAudit {
-                    emitPropertyAuditEvent(property: propertyForAudit, eventType: "property.deleted")
-                }
-                return true
-            }
-            return false
-        }
+        return deleteLocalProperty(id: id, propertyForAudit: propertyForAudit)
     }
 
     @discardableResult
@@ -58233,6 +55997,10 @@ final class AppState: ObservableObject {
         let propertyForAudit = allProperties.first(where: { $0.id == id }) ??
             properties.first(where: { $0.id == id })
         refreshProperties()
+        return deleteLocalProperty(id: id, propertyForAudit: propertyForAudit)
+    }
+
+    private func deleteLocalProperty(id: UUID, propertyForAudit: Property?) -> Bool {
         do {
             try localStore.deleteProperty(id: id)
             allProperties.removeAll { $0.id == id }
@@ -61535,8 +59303,7 @@ final class AppState: ObservableObject {
     }
 
     private func loadAndNormalizeSessions(propertyID: UUID) -> [Session] {
-        let fetched = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
-        return Self.uniqueSessionsByID(fetched).sorted { $0.startedAt < $1.startedAt }
+        Self.loadAndNormalizeSessions(propertyID: propertyID, localStore: localStore)
     }
 
     private static func loadAndNormalizeSessions(propertyID: UUID, localStore: LocalStore) -> [Session] {
@@ -61579,12 +59346,7 @@ final class AppState: ObservableObject {
     }
 
     private static func isFinalSession(_ session: Session?) -> Bool {
-        guard let session else { return false }
-        return session.status == .completed ||
-            session.endedAt != nil ||
-            session.exportedAt != nil ||
-            session.isSealed ||
-            session.firstDeliveredAt != nil
+        SessionLifecyclePolicy.isFinal(session)
     }
 
     private static func fastRuntimeCompletionWasRequested(propertyID: UUID, sessionID: UUID) -> Bool {
@@ -61607,11 +59369,7 @@ final class AppState: ObservableObject {
             return true
         }
         if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
-           metadata.status == .completed ||
-            metadata.endedAt != nil ||
-            metadata.exportedAt != nil ||
-            metadata.isSealed ||
-            metadata.firstDeliveredAt != nil {
+           SessionLifecyclePolicy.metadataIsFinal(metadata) {
             return true
         }
         guard let status = cloudStatusBySessionID[session.id],
@@ -61628,28 +59386,7 @@ final class AppState: ObservableObject {
     }
 
     private static func sessionMaterialContentCount(_ session: Session, localStore: LocalStore) -> Int {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
-            return 0
-        }
-        return metadata.shots.filter { shot in
-            guard shot.lifecycleState.isActiveForDefaultWorkflows else { return false }
-            if shot.createdAt < session.startedAt { return false }
-            if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
-            let captureKind = normalizedRowDetailText(shot.captureKind)?.lowercased()
-            if captureKind == "reference" ||
-                captureKind == "reclassified" ||
-                captureKind == "restored" ||
-                captureKind == "historical" {
-                return false
-            }
-            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !originalRelative.isEmpty else { return false }
-            return localStore.resolveSessionRelativeFileURL(
-                propertyID: session.propertyID,
-                sessionID: session.id,
-                relativePath: originalRelative
-            ) != nil
-        }.count
+        SessionLifecyclePolicy.materialContentCount(session, localStore: localStore)
     }
 
     private static func isPendingDelivery(
@@ -61971,13 +59708,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private static func normalizedRowDetailText(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed
-    }
 
     @discardableResult
     private func refreshSessionDerivedCaches(propertyID: UUID) -> [Session] {
@@ -62068,10 +59798,11 @@ final class AppState: ObservableObject {
     }
 
     private func latestVisibleDraft(in sessions: [Session]) -> Session? {
-        sessions
-            .filter { reusableDraftSession($0) }
-            .sorted { $0.startedAt > $1.startedAt }
-            .first
+        Self.latestVisibleDraft(
+            in: sessions,
+            localStore: localStore,
+            cloudStatusBySessionID: sessionSnapshotCloudStatusBySessionID
+        )
     }
 
     private func canonicalDraftSession(for propertyID: UUID, requireCaptures: Bool) -> Session? {
@@ -62101,42 +59832,23 @@ final class AppState: ObservableObject {
     }
 
     private func isFinalSession(_ session: Session?) -> Bool {
-        guard let session else { return false }
-        return session.status == .completed ||
-            session.endedAt != nil ||
-            session.exportedAt != nil ||
-            session.isSealed ||
-            session.firstDeliveredAt != nil
+        SessionLifecyclePolicy.isFinal(session)
     }
 
     private func reusableDraftSession(_ session: Session) -> Bool {
-        session.deletedAt == nil &&
-            session.status == .draft &&
-            !session.isSealed &&
-            !isFinalSession(session) &&
-            !sessionHasFinalLocalStateEvidence(session) &&
-            hasMaterialDraftCaptures(session)
+        Self.reusableDraftSession(
+            session,
+            localStore: localStore,
+            cloudStatusBySessionID: sessionSnapshotCloudStatusBySessionID
+        )
     }
 
     private func sessionHasFinalLocalStateEvidence(_ session: Session) -> Bool {
-        if Self.fastRuntimeCompletionWasRequested(propertyID: session.propertyID, sessionID: session.id) {
-            return true
-        }
-        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
-           metadata.status == .completed ||
-            metadata.endedAt != nil ||
-            metadata.exportedAt != nil ||
-            metadata.isSealed ||
-            metadata.firstDeliveredAt != nil {
-            return true
-        }
-        guard let status = sessionSnapshotCloudStatusBySessionID[session.id],
-              status.propertyID == session.propertyID,
-              status.state == .uploaded,
-              status.triggerSource == "completeCurrentSessionWithoutZIP" else {
-            return false
-        }
-        return true
+        Self.sessionHasFinalLocalStateEvidence(
+            session,
+            localStore: localStore,
+            cloudStatusBySessionID: sessionSnapshotCloudStatusBySessionID
+        )
     }
 
     private func persistedSessionIncludingDeleted(propertyID: UUID, sessionID: UUID) -> Session? {
@@ -62151,28 +59863,7 @@ final class AppState: ObservableObject {
     }
 
     private func sessionMaterialContentCount(_ session: Session) -> Int {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
-            return 0
-        }
-        return metadata.shots.filter { shot in
-            guard shot.lifecycleState.isActiveForDefaultWorkflows else { return false }
-            if shot.createdAt < session.startedAt { return false }
-            if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
-            let captureKind = normalizedSupabaseText(shot.captureKind)?.lowercased()
-            if captureKind == "reference" ||
-                captureKind == "reclassified" ||
-                captureKind == "restored" ||
-                captureKind == "historical" {
-                return false
-            }
-            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !originalRelative.isEmpty else { return false }
-            return localStore.resolveSessionRelativeFileURL(
-                propertyID: session.propertyID,
-                sessionID: session.id,
-                relativePath: originalRelative
-            ) != nil
-        }.count
+        SessionLifecyclePolicy.materialContentCount(session, localStore: localStore)
     }
 
     private func logInitialSessionTypeSelectionDecision(

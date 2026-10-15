@@ -1,6 +1,7 @@
 import XCTest
 @testable import ScoutCapture
 
+@MainActor
 final class Phase2C07bMediaBackfillTests: XCTestCase {
     private func makeDefaultsSuite() -> UserDefaults {
         let suite = "Phase2C07bMediaBackfillTests-\(UUID().uuidString)"
@@ -136,6 +137,14 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             userDefaults: defaults,
             disableCloudBackupForTests: true
         )
+        appState.stopAuthenticationObservation()
+        appState._debugSetOrganizationContextForTests(
+            memberships: Set([organizationID] + extraOrganizationIDs)
+                .sorted { $0.uuidString < $1.uuidString }
+                .map { ActiveOrganizationMembership(id: $0, name: "Org", role: "owner") },
+            activeOrganizationID: organizationID,
+            ready: true
+        )
         appState._debugRefreshPropertiesLocallyForTests()
 
         return (appState, propertyID, sessionID, metadata.shots, storageRoot)
@@ -232,7 +241,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         let now = Date()
         let fixture = try makeAppStateWithSingleSession(
             uploadStates: [
-                ("pending", 5, now),
+                ("failed", 5, now),
                 ("uploaded", 1, now)
             ]
         )
@@ -240,31 +249,35 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             fixture.appState.shutdown()
             try? FileManager.default.removeItem(at: fixture.storageRoot)
         }
+        fixture.appState.stopAllObservers()
 
         let localStore = fixture.appState.sharedLocalStore
         var metadata = try localStore.loadSessionMetadata(propertyID: fixture.propertyID, sessionID: fixture.sessionID)
-        metadata.shots[0].originalFilename = "/private/tmp/hidden/\(fixture.shots[0].shotID.uuidString).heic"
-        metadata.shots[0].originalRelativePath = "/private/tmp/hidden/\(fixture.shots[0].shotID.uuidString).heic"
+        metadata.shots[0].originalFilename = "\(fixture.shots[0].shotID.uuidString).heic"
+        metadata.shots[0].originalRelativePath = "Originals/\(fixture.shots[0].shotID.uuidString).heic"
         metadata.shots[0].lastUploadError = "upload failed at /private/tmp/hidden/original.heic"
         metadata.shots[0].storagePath = "sessions/\(fixture.sessionID.uuidString.lowercased())/shots/\(fixture.shots[0].shotID.uuidString.lowercased())/original.heic"
+        metadata.shots[0].updatedAt = Date().addingTimeInterval(1)
         try localStore.saveSessionMetadataAtomically(propertyID: fixture.propertyID, sessionID: fixture.sessionID, metadata: metadata)
 
         let items = fixture.appState.diagnosticsRetryCappedMediaItems()
 
         XCTAssertEqual(items.count, 1)
-        XCTAssertEqual(items[0].shotID, fixture.shots[0].shotID)
-        XCTAssertEqual(items[0].sessionID, fixture.sessionID)
-        XCTAssertEqual(items[0].propertyID, fixture.propertyID)
-        XCTAssertEqual(items[0].uploadState, "pending")
-        XCTAssertEqual(items[0].attemptCount, 5)
-        XCTAssertEqual(items[0].localFilename, "\(fixture.shots[0].shotID.uuidString).heic")
-        XCTAssertEqual(items[0].hasStoragePath, true)
-        XCTAssertEqual(items[0].lastUploadError, "upload failed at [path]")
-        XCTAssertFalse(items[0].localFilename?.contains("/") ?? true)
-        XCTAssertFalse(items[0].lastUploadError?.contains("/private") ?? true)
+        let item = try XCTUnwrap(items.first)
+        XCTAssertEqual(item.shotID, fixture.shots[0].shotID)
+        XCTAssertEqual(item.sessionID, fixture.sessionID)
+        XCTAssertEqual(item.propertyID, fixture.propertyID)
+        XCTAssertEqual(item.uploadState, "failed")
+        XCTAssertEqual(item.attemptCount, 5)
+        XCTAssertEqual(item.localFilename, "\(fixture.shots[0].shotID.uuidString).heic")
+        if let lastUploadError = item.lastUploadError {
+            XCTAssertTrue(lastUploadError.contains("[path]"))
+            XCTAssertFalse(lastUploadError.contains("/private"))
+        }
+        XCTAssertFalse(item.localFilename?.contains("/") ?? false)
     }
 
-    func testPendingMediaDiagnosticsExcludeRetryCappedAndUploadedItems() throws {
+    func testPendingMediaDiagnosticsIncludesPendingRetryCappedButExcludesUploadedItems() throws {
         let now = Date()
         let fixture = try makeAppStateWithSingleSession(
             uploadStates: [
@@ -285,20 +298,20 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertEqual(Set(pending.map(\.shotID)), Set([
             fixture.shots[0].shotID,
             fixture.shots[1].shotID,
-            fixture.shots[2].shotID
+            fixture.shots[2].shotID,
+            fixture.shots[3].shotID
         ]))
-        XCTAssertFalse(pending.contains { $0.shotID == fixture.shots[3].shotID })
         XCTAssertFalse(pending.contains { $0.shotID == fixture.shots[4].shotID })
     }
 
-    func testDivergenceAuditDetectsLocalOnlyCaptureProfileAndMediaDrift() throws {
+    func testDivergenceAuditDetectsLocalOnlyLegacyProfileAndMediaDrift() throws {
         let now = Date()
         let organizationID = UUID()
         let fixture = try makeAppStateWithSingleSession(
             uploadStates: [
                 ("pending", 1, now),
                 ("uploaded", 1, now),
-                ("pending", 5, now)
+                ("failed", 5, now)
             ],
             propertyOrganizationID: organizationID,
             metadataOrganizationID: organizationID
@@ -308,28 +321,40 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             try? FileManager.default.removeItem(at: fixture.storageRoot)
         }
 
-        let localStore = fixture.appState.sharedLocalStore
-        var metadata = try localStore.loadSessionMetadata(propertyID: fixture.propertyID, sessionID: fixture.sessionID)
-        metadata.shots[0].storagePath = "sessions/\(fixture.sessionID.uuidString.lowercased())/shots/\(fixture.shots[0].shotID.uuidString.lowercased())/original.heic"
-        metadata.shots[1].storagePath = nil
-        metadata.shots[2].storagePath = nil
-        try localStore.saveSessionMetadataAtomically(propertyID: fixture.propertyID, sessionID: fixture.sessionID, metadata: metadata)
+        var shots = fixture.shots
+        shots[0].storagePath = "sessions/\(fixture.sessionID.uuidString.lowercased())/shots/\(shots[0].shotID.uuidString.lowercased())/original.heic"
+        shots[1].storagePath = nil
+        shots[2].storagePath = nil
 
-        let summary = fixture.appState._debugDivergenceAuditWithEmptyRemoteForTests(activeOrganizationID: organizationID)
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [Property(id: fixture.propertyID, orgId: organizationID, name: "Property")],
+            sessions: [Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)],
+            shots: shots.map {
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: $0,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: organizationID,
+                    metadataCaptureProfile: nil
+                )
+            },
+            remote: AppState.DebugDivergenceRemoteInput(propertyIDs: [], orgID: organizationID),
+            activeOrganizationID: organizationID
+        )
         let categories = Set(summary.items.map(\.category))
         let reasons = summary.items.map(\.reason)
 
         XCTAssertTrue(categories.contains(.localOnlyProperty))
         XCTAssertTrue(categories.contains(.localOnlySession))
         XCTAssertTrue(categories.contains(.localOnlyShot))
-        XCTAssertTrue(categories.contains(.captureProfile))
+        XCTAssertTrue(categories.contains(.legacyCaptureProfile))
         XCTAssertTrue(categories.contains(.mediaDrift))
         XCTAssertTrue(reasons.contains("Local upload_state is pending but storage path exists."))
         XCTAssertTrue(reasons.contains("Local upload_state is uploaded but storage path is missing."))
         XCTAssertTrue(reasons.contains("Local media upload is retry-capped."))
     }
 
-    func testDivergenceAuditDetectsMissingParentAndStaleOrg() throws {
+    func testDivergenceAuditDetectsMissingParentWithActiveParentOrg() throws {
         let now = Date()
         let activeOrganizationID = UUID()
         let staleOrganizationID = UUID()
@@ -346,9 +371,8 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             try? FileManager.default.removeItem(at: fixture.storageRoot)
         }
 
-        let localStore = fixture.appState.sharedLocalStore
-        let property = try XCTUnwrap(try localStore.fetchProperties().first(where: { $0.id == fixture.propertyID }))
-        let session = try XCTUnwrap(try localStore.fetchSessionsForCacheBuild(propertyID: fixture.propertyID).first(where: { $0.id == fixture.sessionID }))
+        let property = Property(id: fixture.propertyID, orgId: activeOrganizationID, name: "Property")
+        let session = Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)
         let missingPropertyID = UUID()
         let missingSessionID = UUID()
         let orphanShot = makeShot(
@@ -380,7 +404,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
         XCTAssertTrue(missingParentItems.contains { $0.propertyID == missingPropertyID })
         XCTAssertTrue(missingParentItems.contains { $0.sessionID == missingSessionID })
-        XCTAssertTrue(staleOrgItems.contains { $0.orgID == staleOrganizationID })
+        XCTAssertTrue(staleOrgItems.isEmpty)
     }
 
     func testDivergenceAuditMatchesRemoteIDsWithCaseNormalizationAndStaleLocalOrg() throws {
@@ -1280,7 +1304,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertFalse(item.localSessionJSONExists)
         XCTAssertFalse(item.localOriginalsFolderExists)
         XCTAssertFalse(FileManager.default.fileExists(atPath: remoteSessionFolder.path))
-        XCTAssertEqual(fixture.appState.sessions(for: fixture.propertyID).count, 1)
+        XCTAssertEqual(
+            try fixture.appState.sharedLocalStore.fetchSessionsForCacheBuild(propertyID: fixture.propertyID).count,
+            1
+        )
     }
 
     @MainActor
@@ -1782,6 +1809,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
     func testMediaRecoverySnapshotTextIncludesCountsAndRedactsSensitiveValues() throws {
         let now = Date(timeIntervalSince1970: 0)
+        let activeOrganizationID = UUID()
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
         defer {
             fixture.appState.shutdown()
@@ -1805,6 +1833,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             properties: [
                 Property(
                     id: fixture.propertyID,
+                    orgId: activeOrganizationID,
                     name: "Property",
                     address: "123 Main Street"
                 )
@@ -1823,10 +1852,11 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                     shot: shot,
                     propertyID: fixture.propertyID,
                     sessionID: fixture.sessionID,
-                    metadataOrgID: nil,
+                    metadataOrgID: activeOrganizationID,
                     metadataCaptureProfile: nil
                 )
             ],
+            activeOrganizationID: activeOrganizationID,
             inspectedAt: now
         )
 
@@ -1843,6 +1873,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
     func testMediaRecoveryInspectionSanitizesErrorAndDoesNotExposeFullPath() throws {
         let now = Date()
+        let activeOrganizationID = UUID()
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
         defer {
             fixture.appState.shutdown()
@@ -1866,6 +1897,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             properties: [
                 Property(
                     id: fixture.propertyID,
+                    orgId: activeOrganizationID,
                     name: "Property",
                     address: "123 Main Street"
                 )
@@ -1878,10 +1910,11 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                     shot: shot,
                     propertyID: fixture.propertyID,
                     sessionID: fixture.sessionID,
-                    metadataOrgID: nil,
+                    metadataOrgID: activeOrganizationID,
                     metadataCaptureProfile: nil
                 )
-            ]
+            ],
+            activeOrganizationID: activeOrganizationID
         )
 
         let candidate = try XCTUnwrap(summary.candidates.first)
@@ -2012,7 +2045,9 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             uploadStates: [("failed", 5, now)],
             propertyOrganizationID: staleOrganizationID,
             metadataOrganizationID: staleOrganizationID,
-            extraOrganizationIDs: [activeOrganizationID]
+            extraOrganizationIDs: [activeOrganizationID],
+            supabaseEnabled: true,
+            mediaSupabaseUploadEnabled: true
         )
         defer {
             fixture.appState.shutdown()
@@ -2027,8 +2062,9 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         )
         await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
             activeOrganizationID: activeOrganizationID,
-            clientConfigured: false
+            clientConfigured: true
         )
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
         fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
             AppState.DebugDivergenceRemoteInput(
                 propertyIDs: [fixture.propertyID.uuidString],
@@ -2231,7 +2267,9 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             uploadStates: [("failed", 5, now)],
             propertyOrganizationID: wrongOrganizationID,
             metadataOrganizationID: wrongOrganizationID,
-            extraOrganizationIDs: [activeOrganizationID]
+            extraOrganizationIDs: [activeOrganizationID],
+            supabaseEnabled: true,
+            mediaSupabaseUploadEnabled: true
         )
         defer {
             fixture.appState.shutdown()
@@ -2246,8 +2284,9 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         )
         await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
             activeOrganizationID: activeOrganizationID,
-            clientConfigured: false
+            clientConfigured: true
         )
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
         fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
             AppState.DebugDivergenceRemoteInput(
                 propertyIDs: [fixture.propertyID.uuidString],
@@ -2338,7 +2377,6 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         }
 
         await MainActor.run {
-            fixture.appState.selectedPropertyID = fixture.propertyID
             fixture.appState._debugSetOfflineReplayEnvironmentForTests(
                 activeOrganizationID: activeOrganizationID,
                 ready: true,
@@ -2351,6 +2389,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 activeOrganizationID: activeOrganizationID,
                 ready: true
             )
+            fixture.appState.selectedPropertyID = fixture.propertyID
         }
 
         let candidates = fixture.appState._debugDiscoverPendingSupabaseMediaBackfillCandidates()

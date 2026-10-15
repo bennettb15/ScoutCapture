@@ -18,12 +18,15 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         isFlagged: Bool = false,
         issueID: UUID? = nil,
         issueStatus: String? = nil,
-        captureKind: String? = nil
+        captureKind: String? = nil,
+        propertyID: UUID = UUID(),
+        sessionID: UUID = UUID(),
+        originalByteSize: Int = 128
     ) -> ShotMetadata {
         ShotMetadata(
             shotID: shotID,
-            propertyID: UUID(),
-            sessionID: UUID(),
+            propertyID: propertyID,
+            sessionID: sessionID,
             createdAt: createdAt,
             capturedAtLocal: nil,
             updatedAt: updatedAt,
@@ -44,11 +47,11 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
             noteCategory: nil,
             originalFilename: URL(fileURLWithPath: originalRelativePath).lastPathComponent,
             originalRelativePath: originalRelativePath,
-            originalByteSize: 128,
+            originalByteSize: originalByteSize,
             storageBucket: nil,
             storagePath: nil,
             checksumSHA256: nil,
-            byteSize: 128,
+            byteSize: originalByteSize,
             uploadState: "pending",
             uploadAttempts: 0,
             lastUploadError: nil,
@@ -2010,7 +2013,7 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         )
         let reloadedShot = reloaded.shots.first(where: { $0.shotID == shotID })
         let reloadedIssue = reloaded.issues.first(where: { $0.issueID == issueID })
-        XCTAssertEqual(reloadedShot?.isFlagged, false)
+        XCTAssertEqual(reloadedShot?.isFlagged, true)
         XCTAssertEqual(reloadedShot?.issueStatus, "resolved")
         XCTAssertEqual(reloadedShot?.captureKind, "resolved_capture")
         XCTAssertEqual(reloadedShot?.noteText, "Resolved reason")
@@ -2715,5 +2718,104 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
                 includeResolved: true
             )
         )
+    }
+
+    func testDeletingPropertyKeepsSharedGuidedReferenceUntilLastOwnerIsDeleted() throws {
+        let root = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let organization = try store.createOrganization(Organization(name: "Reference Test"))
+        let first = try store.createProperty(Property(orgId: organization.id, name: "First"))
+        let second = try store.createProperty(Property(orgId: organization.id, name: "Second"))
+        let referenceDirectory = store.guidedReferencesDirectoryURL()
+        try FileManager.default.createDirectory(at: referenceDirectory, withIntermediateDirectories: true)
+        let referenceURL = referenceDirectory.appendingPathComponent("shared-reference.jpg")
+        try Data([1, 2, 3]).write(to: referenceURL)
+
+        try store.saveGuidedShots([makeGuidedShot(referenceImagePath: referenceURL.path)], propertyID: first.id)
+        try store.saveGuidedShots([makeGuidedShot(referenceImagePath: referenceURL.path)], propertyID: second.id)
+
+        try store.deleteProperty(id: first.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: referenceURL.path))
+        try store.deleteProperty(id: second.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: referenceURL.path))
+    }
+
+    func testLocalArchiveRestoreRebuildsResolvedIssuePhotoReference() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        let endedAt = Date(timeIntervalSinceReferenceDate: 200)
+        let session = try fixture.localStore.upsertSession(Session(
+            id: fixture.sessionID,
+            propertyID: fixture.propertyID,
+            startedAt: Date(timeIntervalSinceReferenceDate: 50),
+            status: .completed,
+            endedAt: endedAt,
+            isSealed: true
+        ))
+        let shotID = UUID()
+        let issueID = UUID()
+        let filename = "resolved-reference.jpg"
+        let originalURL = fixture.localStore.originalsFolderURL(
+            propertyID: fixture.propertyID, sessionID: fixture.sessionID
+        ).appendingPathComponent(filename)
+        try FileManager.default.createDirectory(
+            at: originalURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let photoBytes = Data([1, 2, 3, 4])
+        try photoBytes.write(to: originalURL)
+
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID, sessionID: fixture.sessionID
+        )
+        metadata.status = .completed
+        metadata.endedAt = endedAt
+        metadata.isSealed = true
+        metadata.shots = [makeShot(
+            shotID: shotID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+            originalRelativePath: "Originals/\(filename)",
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "resolved",
+            captureKind: "resolved_capture",
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            originalByteSize: photoBytes.count
+        )]
+        metadata.issues = [IssueMetadata(
+            issueID: issueID,
+            issueStatus: "resolved",
+            currentReason: "Resolved reason",
+            firstSeenAt: Date(timeIntervalSinceReferenceDate: 100),
+            lastSeenAt: Date(timeIntervalSinceReferenceDate: 120),
+            resolvedAt: Date(timeIntervalSinceReferenceDate: 120),
+            lastCaptureSessionId: fixture.sessionID,
+            detailNote: "Resolved reason",
+            shotKey: "building|north|overview|1"
+        )]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID, sessionID: fixture.sessionID, metadata: metadata
+        )
+        let archive = try XCTUnwrap(fixture.localStore.createSessionArchiveSnapshot(
+            session: session, trigger: "testRestore"
+        ))
+        try FileManager.default.removeItem(at: originalURL)
+
+        let restoredSession = try fixture.localStore.restoreSessionArchiveSnapshot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            snapshotName: archive.lastPathComponent
+        )
+        let observation = try XCTUnwrap(fixture.localStore.fetchObservations(
+            propertyID: fixture.propertyID
+        ).first(where: { $0.id == issueID }))
+        XCTAssertEqual(restoredSession.status, .completed)
+        XCTAssertEqual(observation.status, .resolved)
+        XCTAssertEqual(observation.linkedShotID, shotID)
+        XCTAssertEqual(observation.resolutionPhotoRef, originalURL.path)
+        XCTAssertEqual(observation.shots.first?.imageLocalIdentifier, originalURL.path)
+        XCTAssertEqual(try Data(contentsOf: originalURL), photoBytes)
     }
 }
