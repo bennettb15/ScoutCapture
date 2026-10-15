@@ -46585,7 +46585,10 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    func fastRuntimeDraftResumeState(for propertyID: UUID) -> FastRuntimeDraftResumeState? {
+    func fastRuntimeDraftResumeState(
+        for propertyID: UUID,
+        publishRecoveredDraft: Bool = true
+    ) -> FastRuntimeDraftResumeState? {
         let property = properties.first(where: { $0.id == propertyID }) ??
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
@@ -46597,7 +46600,8 @@ final class AppState: ObservableObject {
         guard let draftSummary = recoverUnindexedFastRuntimeDraft(
             propertyID: propertyID,
             property: property,
-            newerThan: indexedDraft
+            newerThan: indexedDraft,
+            publishRecoveredDraft: publishRecoveredDraft
         ) ?? indexedDraft else {
 #if DEBUG
             print("[FastLaneRecovery] no_draft property=\(propertyID.uuidString.prefix(8)) property_found=\(property != nil)")
@@ -46613,7 +46617,7 @@ final class AppState: ObservableObject {
               }) else {
             return nil
         }
-        if resolvedDraft.didRelocate {
+        if resolvedDraft.didRelocate && publishRecoveredDraft {
             var nextDrafts = fastRuntimeDraftsByPropertyID
             nextDrafts[propertyID] = summary
             if (try? Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))) != nil {
@@ -46667,22 +46671,31 @@ final class AppState: ObservableObject {
 
     @MainActor
     func verifiedFastRuntimeDraftResumeState(for propertyID: UUID) async -> FastRuntimeDraftResumeState? {
-        guard let resume = fastRuntimeDraftResumeState(for: propertyID),
+        guard let resume = fastRuntimeDraftResumeState(for: propertyID, publishRecoveredDraft: false),
               let summary = resume.summary else { return nil }
-        guard let orgID = summary.orgID else { return resume }
+        guard let orgID = summary.orgID else {
+            publishVerifiedFastRuntimeDraft(summary)
+            return resume
+        }
         do {
             guard let remote = try await fetchRemoteSessionCoordinationRecord(
                 orgID: orgID,
                 propertyID: propertyID,
                 sessionID: summary.sessionID
-            ) else { return resume }
+            ) else {
+                publishVerifiedFastRuntimeDraft(summary)
+                return resume
+            }
             guard isFinalRemoteSessionState(
                 status: remote.status,
                 completedAt: remote.completedAt,
                 exportedAt: remote.exportedAt,
                 isSealed: remote.isSealed,
                 firstDeliveredAt: remote.firstDeliveredAt
-            ) else { return resume }
+            ) else {
+                publishVerifiedFastRuntimeDraft(summary)
+                return resume
+            }
 
             applyRemoteFinalSessionStatesFromLockRecords([
                 RemotePropertySessionLockRecord(
@@ -46735,7 +46748,23 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func recoverUnindexedStableFastRuntimeDraft(propertyID: UUID, orgID: UUID) -> FastRuntimeDraftSummary? {
+    private func publishVerifiedFastRuntimeDraft(_ summary: FastRuntimeDraftSummary) {
+        guard fastRuntimeDraftsByPropertyID[summary.propertyID] != summary else { return }
+        var nextDrafts = fastRuntimeDraftsByPropertyID
+        nextDrafts[summary.propertyID] = summary
+        do {
+            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+            fastRuntimeDraftsByPropertyID = nextDrafts
+        } catch {
+            recordDiagnosticsError(error)
+        }
+    }
+
+    private func recoverUnindexedStableFastRuntimeDraft(
+        propertyID: UUID,
+        orgID: UUID,
+        publishRecoveredDraft: Bool
+    ) -> FastRuntimeDraftSummary? {
         do {
             let finalSessionIDs = Set(((try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? [])
                 .filter { isFinalSession($0) }
@@ -46793,10 +46822,9 @@ final class AppState: ObservableObject {
                 return (summary, newest)
             }
             guard let summary = candidates.max(by: { $0.1 < $1.1 })?.0 else { return nil }
-            var nextDrafts = fastRuntimeDraftsByPropertyID
-            nextDrafts[propertyID] = summary
-            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
-            fastRuntimeDraftsByPropertyID = nextDrafts
+            if publishRecoveredDraft {
+                publishVerifiedFastRuntimeDraft(summary)
+            }
             return summary
         } catch {
             print("[FastLaneRecovery] stable_draft_index_failed propertyID=\(propertyID.uuidString) error=\(error.localizedDescription)")
@@ -46807,7 +46835,8 @@ final class AppState: ObservableObject {
     private func recoverUnindexedFastRuntimeDraft(
         propertyID: UUID,
         property: Property?,
-        newerThan indexedDraft: FastRuntimeDraftSummary?
+        newerThan indexedDraft: FastRuntimeDraftSummary?,
+        publishRecoveredDraft: Bool
     ) -> FastRuntimeDraftSummary? {
         guard let property,
               let orgID = property.orgId else {
@@ -46954,10 +46983,9 @@ final class AppState: ObservableObject {
                     draftRootPath: root.path,
                     metadataPath: Self.fastRuntimeDraftMetadataURL(root: root).path
                 )
-                var nextDrafts = fastRuntimeDraftsByPropertyID
-                nextDrafts[propertyID] = summary
-                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
-                fastRuntimeDraftsByPropertyID = nextDrafts
+                if publishRecoveredDraft {
+                    publishVerifiedFastRuntimeDraft(summary)
+                }
 #if DEBUG
                 print("[FastLaneRecovery] restored session=\(draft.id.uuidString.prefix(8)) shots=\(records.count)")
 #endif
@@ -46967,7 +46995,11 @@ final class AppState: ObservableObject {
             print("[FastLaneRecovery] propertyID=\(propertyID.uuidString) error=\(error.localizedDescription)")
         }
         guard indexedDraft == nil else { return nil }
-        return recoverUnindexedStableFastRuntimeDraft(propertyID: propertyID, orgID: orgID)
+        return recoverUnindexedStableFastRuntimeDraft(
+            propertyID: propertyID,
+            orgID: orgID,
+            publishRecoveredDraft: publishRecoveredDraft
+        )
     }
 
     func clearFastRuntimePrototypeState() async -> FastRuntimePrototypeCleanupResult {

@@ -118,9 +118,14 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
             isCompleted: true
         )
         try store.saveGuidedShots([newerGuided], propertyID: property.id)
-        let selectedDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(for: property.id))
+        let selectedDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(
+            for: property.id,
+            publishRecoveredDraft: false
+        ))
         XCTAssertEqual(selectedDraft.context?.sessionID, newerSessionID)
         XCTAssertEqual(selectedDraft.summary?.photoCount, 1)
+        XCTAssertNotEqual(appState.fastRuntimeDraftsByPropertyID[property.id]?.sessionID, newerSessionID)
+        XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
         appState._debugSetSessionCoordinationFetchResultForTests(
             AppState.DebugSessionCoordinationRemoteInput(
                 sessionID: newerSessionID,
@@ -137,6 +142,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         )
         let verifiedLocalDraft = await appState.verifiedFastRuntimeDraftResumeState(for: property.id)
         XCTAssertEqual(verifiedLocalDraft?.context?.sessionID, newerSessionID)
+        XCTAssertEqual(appState.fastRuntimeDraftsByPropertyID[property.id]?.sessionID, newerSessionID)
+        XCTAssertTrue(appState.propertyCardBadgeModel(for: property.id).showDraft)
 
         let deliveredAt = Date()
         appState._debugSetSessionCoordinationFetchResultForTests(
