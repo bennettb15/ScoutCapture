@@ -365,14 +365,7 @@ struct BackendFeatureFlags {
             return configuredValue
         }
 
-        switch rawOverride.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "1", "true", "yes", "on":
-            return true
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return configuredValue
-        }
+        return Self.parsedBoolean(rawOverride) ?? configuredValue
     }
 
     private static func sessionSnapshotAutoUploadValue(
@@ -392,14 +385,7 @@ struct BackendFeatureFlags {
             return configuredValue
         }
 
-        switch rawOverride.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "1", "true", "yes", "on":
-            return true
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return configuredValue
-        }
+        return Self.parsedBoolean(rawOverride) ?? configuredValue
     }
 
     private static func sessionSnapshotAutoUploadKillSwitchValue(
@@ -417,20 +403,10 @@ struct BackendFeatureFlags {
         )
 
         guard allowEnvironmentOverride else { return configuredValue }
-        guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() else {
+        guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH"] else {
             return configuredValue
         }
-
-        switch rawOverride {
-        case "1", "true", "yes", "on":
-            return true
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return configuredValue
-        }
+        return Self.parsedBoolean(rawOverride) ?? configuredValue
     }
 
     private static func uuidAllowlistValue(
@@ -477,6 +453,14 @@ struct BackendFeatureFlags {
         })
     }
 
+    private static func parsedBoolean(_ value: String) -> Bool? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on": return true
+        case "0", "false", "no", "off": return false
+        default: return nil
+        }
+    }
+
     private static func boolValue(
         for key: String,
         environmentKey: String,
@@ -485,15 +469,9 @@ struct BackendFeatureFlags {
         environment: [String: String],
         preferBundleValueOverUserDefaults: Bool = false
     ) -> Bool {
-        if let rawValue = environment[environmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            switch rawValue {
-            case "1", "true", "yes", "on":
-                return true
-            case "0", "false", "no", "off":
-                return false
-            default:
-                break
-            }
+        if let rawValue = environment[environmentKey],
+           let override = Self.parsedBoolean(rawValue) {
+            return override
         }
         return Self.boolValue(
             for: key,
@@ -527,12 +505,7 @@ struct BackendFeatureFlags {
         }
 
         if let string = bundle.object(forInfoDictionaryKey: key) as? String {
-            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "1", "true", "yes", "on":
-                return true
-            default:
-                return false
-            }
+            return Self.parsedBoolean(string) ?? false
         }
 
         return nil
