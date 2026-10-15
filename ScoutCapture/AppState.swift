@@ -40400,8 +40400,6 @@ final class AppState: ObservableObject {
     }
 
     private func refreshPropertyRowDraftBadgeCache() {
-        let currentUserID = authenticatedSupabaseUser?.id
-        let currentDeviceID = currentDeviceIdentifier()
         var next: [UUID: Bool] = [:]
 
         let propertyIDs = Set(propertyStatusByPropertyID.keys)
@@ -40409,47 +40407,7 @@ final class AppState: ObservableObject {
             .union(fastRuntimeDraftsByPropertyID.keys)
 
         for propertyID in propertyIDs {
-            let completionRequestedSessionIDs = Set(
-                fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).map { $0.context.sessionID }
-            )
-            let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
-                for: propertyID,
-                currentUserID: currentUserID,
-                currentDeviceID: currentDeviceID
-            )
-
-            if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-                let basePropertyStatusAnswer = makePropertyStatusCompareAnswer(
-                    record: propertyStatus,
-                    propertyID: propertyID,
-                    currentUserID: currentUserID,
-                    currentDeviceID: currentDeviceID
-                )
-                let canOverlayFastRuntimeDraft = fastRuntimeDraft.map { !completionRequestedSessionIDs.contains($0.sessionID) } == true &&
-                    basePropertyStatusAnswer.visibleBadgeState != .locked &&
-                    basePropertyStatusAnswer.visibleBadgeState != .pendingExport
-                let propertyStatusAnswer = canOverlayFastRuntimeDraft
-                    ? PropertyStatusCompareAnswer(
-                        visibleBadgeState: .draft,
-                        draftCountIncluded: true,
-                        pendingExportCountIncluded: false,
-                        entryBlocked: false,
-                        deleteEligible: false
-                    )
-                    : makePropertyStatusCompareAnswer(
-                        record: propertyStatus,
-                        propertyID: propertyID,
-                        currentUserID: currentUserID,
-                        currentDeviceID: currentDeviceID
-                    )
-                let draftSessionID = canOverlayFastRuntimeDraft
-                    ? fastRuntimeDraft?.sessionID : propertyStatus.draftSessionID
-                if propertyStatusAnswer.visibleBadgeState == .draft,
-                   draftSessionID.map({ !completionRequestedSessionIDs.contains($0) }) ?? true {
-                    next[propertyID] = true
-                }
-            } else if let draftSessionID = fastRuntimeDraft?.sessionID ?? draftSessionByProperty[propertyID]?.id,
-                      !completionRequestedSessionIDs.contains(draftSessionID) {
+            if propertyCardBadgeModel(for: propertyID).showDraft {
                 next[propertyID] = true
             }
         }
