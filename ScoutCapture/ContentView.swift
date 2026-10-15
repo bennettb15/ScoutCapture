@@ -7767,60 +7767,15 @@ struct ContentView: View {
             }
 
             if showNotSavedToast {
-                Text("Save failed: \(notSavedToastReason)")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast("Save failed: \(notSavedToastReason)")
             }
 
             if showNoFlaggedIssuesToast {
-                Text("No active flagged issues")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast("No active flagged issues")
             }
 
             if showFlaggedActionToast {
-                Text(flaggedActionToastText)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast(flaggedActionToastText)
             }
 
             if armedUpdateObservationID != nil &&
@@ -7858,22 +7813,7 @@ struct ContentView: View {
             }
 
             if showResolutionModeToast {
-                Text("Resolution mode active. Capture a resolution photo.")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, usesLandscapeChrome ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
+                centeredCameraToast("Resolution mode active. Capture a resolution photo.")
             }
 
             if showFlaggedActionPrimaryChoice {
@@ -8712,6 +8652,25 @@ extension ContentView {
             .fill(Color.white.opacity(0.12))
             .frame(height: 1)
             .padding(.horizontal, 12)
+    }
+
+    private func centeredCameraToast(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding(.top, usesLandscapeChrome ? 44 : 0)
+            .rotationEffect(bottomGlyphRotationAngle)
+            .allowsHitTesting(false)
+            .zIndex(25)
     }
     
     private func toastPill(text: String, priority: String? = nil) -> some View {

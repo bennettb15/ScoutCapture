@@ -141,6 +141,8 @@ The local shot and lifecycle classes now pass **77 tests with 0 failures** after
 
 78. **Shared property draft badge decision.** The property-row draft cache now reads the draft decision from the same property card badge model instead of repeating the current-user/device, fast-draft overlay, completion-request, and property-status comparisons. This removes **42 production Swift lines** and prevents the two displayed draft counts from drifting apart. All **75 property-status diagnostics tests**, the iOS Release build, and built-app credential scan pass locally.
 
+79. **Shared camera toast layout.** Four identical centered camera messages now use one view helper, keeping each message, modifier, and display condition intact. `ContentView.swift` fell from **15,942 to 15,901 lines** (41 fewer production Swift lines). The iOS Simulator build passes.
+
 ## Next steps, in order
 
 1. **Restore a trustworthy test baseline.** The expanded nine-class smoke gate passes **270 tests with 0 failures**, including all 53 portal cases and the six guided durability cases. Group and reproduce the remaining prechange failures outside this gate, identify shared simulator or test-data contamination, and establish a full-suite gate. Do not attribute existing failures to the refactor.
