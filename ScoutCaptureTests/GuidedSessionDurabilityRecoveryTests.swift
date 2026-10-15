@@ -5,6 +5,59 @@ import ImageIO
 
 @MainActor
 final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
+    func testHistoricalGuidedReferencesStayVisibleUntilDraftIsVerifiedActive() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HistoricalGuidedReferences-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let org = try store.createOrganization(Organization(name: "Test Organization"))
+        let property = try store.createProperty(Property(orgId: org.id, name: "Test Property", address: "100 Test Way"))
+        let suiteName = "HistoricalGuidedReferences-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        let appState = AppState(localStore: store, userDefaults: defaults)
+        appState._debugRefreshPropertiesLocallyForTests()
+
+        let historicalSessionID = UUID()
+        let shotID = UUID()
+        try store.ensureSessionFileStorage(propertyID: property.id, sessionID: historicalSessionID)
+        let original = store.originalsDirectoryURL(propertyID: property.id, sessionID: historicalSessionID)
+            .appendingPathComponent("\(shotID.uuidString).jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: original)
+        let reference = GuidedShot(
+            id: shotID,
+            title: "B1 North Overview",
+            building: "B1",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: Shot(id: shotID, capturedAt: Date().addingTimeInterval(-86_400), imageLocalIdentifier: original.path),
+            isCompleted: true
+        )
+        try store.saveGuidedShots([reference], propertyID: property.id)
+        XCTAssertEqual(try store.fetchSessions(propertyID: property.id).map(\.id), [historicalSessionID])
+        XCTAssertNil(appState.fastRuntimeDraftsByPropertyID[property.id])
+
+        let newSessionID = UUID()
+        let historicalPanel = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: newSessionID
+        )
+        XCTAssertEqual(historicalPanel.guidedShots.map(\.id), [shotID])
+
+        let activeDraft = try XCTUnwrap(appState.fastRuntimeDraftResumeState(for: property.id))
+        XCTAssertEqual(activeDraft.context?.sessionID, historicalSessionID)
+        let activeDraftPanel = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: newSessionID
+        )
+        XCTAssertTrue(activeDraftPanel.guidedShots.isEmpty)
+    }
+
     func testElevationChecklistCountsSavedTypesAndDistinctAnglesPerElevation() {
         func capture(_ building: String, _ elevation: String, _ detail: String, _ angle: Int) -> ElevationChecklistCapture {
             ElevationChecklistCapture(

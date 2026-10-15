@@ -54615,15 +54615,40 @@ final class AppState: ObservableObject {
         )
     }
 
-    // A draft's photos remain available in that draft, but cannot become
-    // references in another session until the draft is completed.
+    // Only an active draft may keep its photos out of another session's
+    // checklist. Reading historical guided references can reconstruct an old
+    // local draft shell; that shell alone must not make the references vanish.
     private func fastRuntimeShotIDsExclusiveToOtherDrafts(
         propertyID: UUID,
         currentSessionID: UUID
     ) -> Set<UUID> {
+        var activeDraftSessionIDs = Set<UUID>()
+        if let indexedDraft = fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: authenticatedSupabaseUser?.id,
+            currentDeviceID: currentDeviceIdentifier()
+        ) {
+            activeDraftSessionIDs.insert(indexedDraft.sessionID)
+        }
+        if let status = propertyStatusByPropertyID[propertyID] {
+            switch status.status {
+            case .occupied:
+                if let sessionID = status.activeSessionID {
+                    activeDraftSessionIDs.insert(sessionID)
+                }
+            case .draft:
+                if let sessionID = status.draftSessionID {
+                    activeDraftSessionIDs.insert(sessionID)
+                }
+            case .idle, .pendingExport, .exported:
+                break
+            }
+        }
+        guard !activeDraftSessionIDs.isEmpty else { return [] }
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         let otherDrafts = sessions.filter {
-            $0.id != currentSessionID && $0.status == .draft && !$0.isSealed && $0.firstDeliveredAt == nil
+            $0.id != currentSessionID && activeDraftSessionIDs.contains($0.id) &&
+                $0.status == .draft && !$0.isSealed && $0.firstDeliveredAt == nil
         }
         guard !otherDrafts.isEmpty else { return [] }
 
