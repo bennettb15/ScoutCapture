@@ -143,6 +143,8 @@ The local shot and lifecycle classes now pass **77 tests with 0 failures** after
 
 79. **Shared camera toast layout.** Four identical centered camera messages now use one view helper, keeping each message, modifier, and display condition intact. `ContentView.swift` fell from **15,942 to 15,901 lines** (41 fewer production Swift lines). The iOS Simulator build passes.
 
+80. **Shared skipped offline replay result.** Not-ready, already-running, and queue-read-failure exits now use one result builder that preserves zero counts, the normalized in-flight count when present, and the single diagnostics write. This removes **23 production Swift lines**. Three focused offline replay tests pass.
+
 ## Next steps, in order
 
 1. **Restore a trustworthy test baseline.** The expanded nine-class smoke gate passes **270 tests with 0 failures**, including all 53 portal cases and the six guided durability cases. Group and reproduce the remaining prechange failures outside this gate, identify shared simulator or test-data contamination, and establish a full-suite gate. Do not attribute existing failures to the refactor.

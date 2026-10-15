@@ -11159,11 +11159,18 @@ final class AppState: ObservableObject {
 
     private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
         print("[OfflineReplay] skipped source=\(source) reason=not_ready detail=\(reason)")
+        return offlineReplaySkippedSummary(source: source)
+    }
+
+    private func offlineReplaySkippedSummary(
+        source: String,
+        normalizedInFlightCount: Int = 0
+    ) -> OfflineReplayRunSummary {
         let summary = OfflineReplayRunSummary(
             didStart: false,
             source: source,
             discoveredCount: 0,
-            normalizedInFlightCount: 0,
+            normalizedInFlightCount: normalizedInFlightCount,
             skippedBackoffCount: 0,
             attemptedCount: 0,
             succeededCount: 0,
@@ -11194,18 +11201,7 @@ final class AppState: ObservableObject {
         }
         guard beginOfflineReplayRun() else {
             print("[OfflineReplay] skipped source=\(source) reason=in_flight")
-            let summary = OfflineReplayRunSummary(
-                didStart: false,
-                source: source,
-                discoveredCount: 0,
-                normalizedInFlightCount: 0,
-                skippedBackoffCount: 0,
-                attemptedCount: 0,
-                succeededCount: 0,
-                failedCount: 0
-            )
-            recordOfflineReplayDiagnostics(summary)
-            return summary
+            return offlineReplaySkippedSummary(source: source)
         }
 
         let startedAt = Date()
@@ -11224,18 +11220,7 @@ final class AppState: ObservableObject {
         } catch {
             print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
             recordDiagnosticsError(error)
-            let summary = OfflineReplayRunSummary(
-                didStart: false,
-                source: source,
-                discoveredCount: 0,
-                normalizedInFlightCount: 0,
-                skippedBackoffCount: 0,
-                attemptedCount: 0,
-                succeededCount: 0,
-                failedCount: 0
-            )
-            recordOfflineReplayDiagnostics(summary)
-            return summary
+            return offlineReplaySkippedSummary(source: source)
         }
 
         var queuedMutations: [LocalStore.QueuedMutation]
@@ -11244,18 +11229,10 @@ final class AppState: ObservableObject {
         } catch {
             print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
             recordDiagnosticsError(error)
-            let summary = OfflineReplayRunSummary(
-                didStart: false,
+            return offlineReplaySkippedSummary(
                 source: source,
-                discoveredCount: 0,
-                normalizedInFlightCount: normalizedInFlightCount,
-                skippedBackoffCount: 0,
-                attemptedCount: 0,
-                succeededCount: 0,
-                failedCount: 0
+                normalizedInFlightCount: normalizedInFlightCount
             )
-            recordOfflineReplayDiagnostics(summary)
-            return summary
         }
 
         let preAcknowledgedHistoricalDebtCount: Int
