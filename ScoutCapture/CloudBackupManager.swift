@@ -1152,6 +1152,23 @@ final class CloudBackupManager: ObservableObject {
         return output
     }
 
+    private func validateBackupFile(_ file: CloudBackupManifest.FileRecord, in backupFolder: URL) throws {
+        let contentRelativePath = CloudBackupDedupeSupport.resolvedContentRelativePath(for: file)
+        let url = backupFolder.appendingPathComponent(contentRelativePath)
+        guard ensureUbiquitousItemAvailable(at: url) else {
+            throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
+            ])
+        }
+        let data = try Data(contentsOf: url)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard data.count == file.byteCount, digest == file.sha256 else {
+            throw NSError(domain: "ScoutCapture.CloudBackup", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Backup validation failed for \(file.relativePath)."
+            ])
+        }
+    }
+
     private func validateBackup(at backupFolder: URL) throws {
         let manifest = try loadManifest(at: backupFolder)
         guard isSupportedSchemaVersion(manifest.schemaVersion) else {
@@ -1161,20 +1178,7 @@ final class CloudBackupManager: ObservableObject {
         }
 
         for file in manifest.files {
-            let contentRelativePath = CloudBackupDedupeSupport.resolvedContentRelativePath(for: file)
-            let url = backupFolder.appendingPathComponent(contentRelativePath)
-            guard ensureUbiquitousItemAvailable(at: url) else {
-                throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
-                ])
-            }
-            let data = try Data(contentsOf: url)
-            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            guard data.count == file.byteCount, digest == file.sha256 else {
-                throw NSError(domain: "ScoutCapture.CloudBackup", code: 4, userInfo: [
-                    NSLocalizedDescriptionKey: "Backup validation failed for \(file.relativePath)."
-                ])
-            }
+            try validateBackupFile(file, in: backupFolder)
         }
     }
 
@@ -1192,20 +1196,7 @@ final class CloudBackupManager: ObservableObject {
                     NSLocalizedDescriptionKey: "Backup file missing: \(relativePath)"
                 ])
             }
-            let contentRelativePath = CloudBackupDedupeSupport.resolvedContentRelativePath(for: file)
-            let url = backupFolder.appendingPathComponent(contentRelativePath)
-            guard ensureUbiquitousItemAvailable(at: url) else {
-                throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
-                ])
-            }
-            let data = try Data(contentsOf: url)
-            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            guard data.count == file.byteCount, digest == file.sha256 else {
-                throw NSError(domain: "ScoutCapture.CloudBackup", code: 4, userInfo: [
-                    NSLocalizedDescriptionKey: "Backup validation failed for \(file.relativePath)."
-                ])
-            }
+            try validateBackupFile(file, in: backupFolder)
         }
     }
 
@@ -1698,52 +1689,41 @@ final class CloudBackupManager: ObservableObject {
         }
     }
 
-    private func loadProperties(in storageRoot: URL) throws -> [Property] {
+    private func loadArray<Value: Decodable>(from candidates: [URL]) throws -> [Value] {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-
-        for candidate in propertiesJSONCandidates(in: storageRoot) where fileManager.fileExists(atPath: candidate.path) {
+        for candidate in candidates where fileManager.fileExists(atPath: candidate.path) {
             let data = try Data(contentsOf: candidate)
-            return try decoder.decode([Property].self, from: data)
+            return try decoder.decode([Value].self, from: data)
         }
         return []
+    }
+
+    private func writeArray<Value: Encodable>(_ values: [Value], to target: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try writeFileData(encoder.encode(values), to: target)
+    }
+
+    private func loadProperties(in storageRoot: URL) throws -> [Property] {
+        try loadArray(from: propertiesJSONCandidates(in: storageRoot))
     }
 
     private func writeProperties(_ properties: [Property], to storageRoot: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(properties)
-        try writeFileData(data, to: propertiesJSONCandidates(in: storageRoot)[0])
+        try writeArray(properties, to: propertiesJSONCandidates(in: storageRoot)[0])
     }
 
     private func loadOrganizations(in storageRoot: URL) throws -> [Organization] {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
-        for candidate in organizationsJSONCandidates(in: storageRoot) where fileManager.fileExists(atPath: candidate.path) {
-            let data = try Data(contentsOf: candidate)
-            return try decoder.decode([Organization].self, from: data)
-        }
-        return []
+        try loadArray(from: organizationsJSONCandidates(in: storageRoot))
     }
 
     private func writeOrganizations(_ organizations: [Organization], to storageRoot: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(organizations)
-        try writeFileData(data, to: organizationsJSONCandidates(in: storageRoot)[0])
+        try writeArray(organizations, to: organizationsJSONCandidates(in: storageRoot)[0])
     }
 
     private func loadPropertyDeletionTombstones(in storageRoot: URL) throws -> [PropertyDeletionTombstone] {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        for candidate in propertyTombstonesCandidates(in: storageRoot) where fileManager.fileExists(atPath: candidate.path) {
-            let data = try Data(contentsOf: candidate)
-            return try decoder.decode([PropertyDeletionTombstone].self, from: data)
-        }
-        return []
+        try loadArray(from: propertyTombstonesCandidates(in: storageRoot))
     }
 
     private func writePropertyDeletionTombstones(_ tombstones: [PropertyDeletionTombstone], to storageRoot: URL) throws {
@@ -1754,17 +1734,13 @@ final class CloudBackupManager: ObservableObject {
             }
             return
         }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
         let normalized = tombstones.sorted { lhs, rhs in
             if lhs.deletedAt == rhs.deletedAt {
                 return lhs.propertyID.uuidString < rhs.propertyID.uuidString
             }
             return lhs.deletedAt < rhs.deletedAt
         }
-        let data = try encoder.encode(normalized)
-        try writeFileData(data, to: propertyTombstonesCandidates(in: storageRoot)[0])
+        try writeArray(normalized, to: propertyTombstonesCandidates(in: storageRoot)[0])
     }
 
     private func scoutRootURL(in storageRoot: URL) -> URL {
