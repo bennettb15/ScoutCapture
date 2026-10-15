@@ -14818,14 +14818,14 @@ extension ContentView {
 #if DEBUG
             print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
-            
+
             let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot)
             let zipURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename())
             if fileManager.fileExists(atPath: zipURL.path) {
                 try fileManager.removeItem(at: zipURL)
             }
             try StoredZipArchive.writeFileArchive(entries: zipEntries, at: zipURL, timestamped: false)
-            
+
             if !fileManager.fileExists(atPath: zipURL.path) {
                 throw ExportError.zipCreationFailed
             }

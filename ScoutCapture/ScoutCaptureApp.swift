@@ -3791,7 +3791,7 @@ struct SessionHubView: View {
     private func requestDeleteProperty(_ property: Property) {
         propertyToDelete = property
     }
-    
+
     private func customCapsuleToolbarButton(
         title: String,
         isEnabled: Bool,
