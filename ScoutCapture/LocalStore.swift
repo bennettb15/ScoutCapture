@@ -738,48 +738,35 @@ final class LocalStore {
     private let guidedShotsDirectoryURL: URL
     private let sessionsDirectoryURL: URL
 
-    init(fileManager: FileManager = .default) {
-        self.fileManager = fileManager
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        self.encoder = encoder
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        self.decoder = decoder
-
+    convenience init(fileManager: FileManager = .default) {
         let appRoot = StorageRoot.prepareStorage()
-        let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
-        self.activeRootURL = appRoot
-        self.scoutRootURL = scoutRoot
-        self.scoutRootStatusReadCandidates = StorageRoot.scoutRootCandidates()
-        self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
-        self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
-        self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
         let localAppSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScoutCapture", isDirectory: true)
-        self.localHubIndexCacheURL = localAppSupportRoot.appendingPathComponent("local-hub-index.json")
-        self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
-        self.sessionSnapshotUploadRetryQueueURL = scoutRoot.appendingPathComponent("session_snapshot_upload_retry_queue.json")
-        self.sessionSnapshotUploadStatusURL = scoutRoot.appendingPathComponent("session_snapshot_upload_status.json")
-        self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
-        self.propertySyncEventsDirectoryURL = scoutRoot
-            .appendingPathComponent("sync-events", isDirectory: true)
-            .appendingPathComponent("properties", isDirectory: true)
-        self.propertyFoldersURL = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
-        self.observationsDirectoryURL = scoutRoot.appendingPathComponent("observations", isDirectory: true)
-        self.guidedShotsDirectoryURL = scoutRoot.appendingPathComponent("guided-shots", isDirectory: true)
-        self.sessionsDirectoryURL = scoutRoot.appendingPathComponent("sessions", isDirectory: true)
-        self.fileIOQueue.setSpecific(key: fileIOQueueKey, value: fileIOQueueValue)
-
-        try? createStorageDirectories(baseDirectoryURL: scoutRoot)
-
+        self.init(
+            activeRootURL: appRoot,
+            statusReadCandidates: StorageRoot.scoutRootCandidates(),
+            localHubIndexCacheURL: localAppSupportRoot.appendingPathComponent("local-hub-index.json"),
+            fileManager: fileManager
+        )
         // Operational storage is local App Support. Legacy iCloud recovery paths are explicit.
     }
 
-    init(testStorageRootURL: URL, fileManager: FileManager = .default) {
+    convenience init(testStorageRootURL: URL, fileManager: FileManager = .default) {
+        let scoutRoot = testStorageRootURL.appendingPathComponent("SCOUT", isDirectory: true)
+        self.init(
+            activeRootURL: testStorageRootURL,
+            statusReadCandidates: [scoutRoot],
+            localHubIndexCacheURL: testStorageRootURL.appendingPathComponent("local-hub-index.json"),
+            fileManager: fileManager
+        )
+    }
+
+    private init(
+        activeRootURL appRoot: URL,
+        statusReadCandidates: [URL],
+        localHubIndexCacheURL: URL,
+        fileManager: FileManager
+    ) {
         self.fileManager = fileManager
 
         let encoder = JSONEncoder()
@@ -791,15 +778,14 @@ final class LocalStore {
         decoder.dateDecodingStrategy = .iso8601
         self.decoder = decoder
 
-        let appRoot = testStorageRootURL
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
         self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
-        self.scoutRootStatusReadCandidates = [scoutRoot]
+        self.scoutRootStatusReadCandidates = statusReadCandidates
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
-        self.localHubIndexCacheURL = appRoot.appendingPathComponent("local-hub-index.json")
+        self.localHubIndexCacheURL = localHubIndexCacheURL
         self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
         self.sessionSnapshotUploadRetryQueueURL = scoutRoot.appendingPathComponent("session_snapshot_upload_retry_queue.json")
         self.sessionSnapshotUploadStatusURL = scoutRoot.appendingPathComponent("session_snapshot_upload_status.json")
