@@ -46663,8 +46663,12 @@ final class AppState: ObservableObject {
             if fastRuntimeDraftsByPropertyID[propertyID]?.sessionID == summary.sessionID {
                 var nextDrafts = fastRuntimeDraftsByPropertyID
                 nextDrafts.removeValue(forKey: propertyID)
-                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
-                fastRuntimeDraftsByPropertyID = nextDrafts
+                do {
+                    try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                    fastRuntimeDraftsByPropertyID = nextDrafts
+                } catch {
+                    recordDiagnosticsError(error)
+                }
             }
             return nil
         } catch {
