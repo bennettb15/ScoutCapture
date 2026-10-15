@@ -734,12 +734,33 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         )
 
         fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+        fixture.appState._debugMarkPropertyLocallyLockedForTests(fixture.property.id)
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
         XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showPendingExport)
+    }
+
+    func testStaleClaimableEntryStatusDoesNotBlock() throws {
+        let fixture = try makeCutoverFixture()
+        let status = AppState.LightweightPropertyEntryStatus(
+            entryState: .staleClaimable,
+            propertyID: fixture.property.id,
+            lockSessionID: UUID(),
+            lockedByUserID: UUID(),
+            lockedByEmail: nil,
+            lockedByDeviceID: "other-device",
+            lockedAt: Date().addingTimeInterval(-4 * 60),
+            updatedAt: Date().addingTimeInterval(-4 * 60),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 240,
+            requiresFallback: false,
+            reason: "occupied_stale_claimable"
+        )
+
+        XCTAssertNil(fixture.appState.sessionEntryBlock(for: status))
     }
 
     func testOldDraftPropertyStatusStillShowsLockedBadgeForNonOwner() throws {

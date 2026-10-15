@@ -8041,6 +8041,10 @@ final class AppState: ObservableObject {
         lastPropertyStatusRefreshAt = Date()
     }
 
+    func _debugMarkPropertyLocallyLockedForTests(_ propertyID: UUID) {
+        locallyLockedPropertyIDs.insert(propertyID)
+    }
+
     func _debugRunForegroundCacheRefreshForTests(reason: String = "test_foreground_cache_refresh") {
         refreshVisiblePropertySessionCachesFromLocalStore(reason: reason)
         reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
@@ -41349,28 +41353,6 @@ final class AppState: ObservableObject {
         return decision
     }
 
-    @MainActor
-    func refreshLightweightPropertyEntryLocks(
-        propertyIDs: [UUID],
-        reason: String
-    ) async {
-        let uniquePropertyIDs = Array(Set(propertyIDs))
-        guard !uniquePropertyIDs.isEmpty else { return }
-
-        for propertyID in uniquePropertyIDs {
-            guard canAccessProperty(propertyID),
-                  let status = await evaluateLightweightPropertyEntryStatus(
-                    propertyID: propertyID,
-                    targetSessionID: nil
-                  ) else {
-                continue
-            }
-            if sessionEntryBlock(for: status) != nil {
-                cacheLockPresentation(from: status, reason: "\(reason)_lightweight_probe")
-            }
-        }
-    }
-
     func preferredPropertyEntrySessionID(for propertyID: UUID) -> UUID {
         // A capture can leave originals and guided state on disk before the
         // session index is written. Rebuild and reload that index before the
@@ -47469,11 +47451,7 @@ final class AppState: ObservableObject {
                 blockContext: context
             )
         case .staleClaimable:
-            return SessionEntryCoordinationBlock(
-                ownerDescription: ownerDescription,
-                lockedAt: status.lockedAt,
-                blockContext: "occupied"
-            )
+            return nil
         case .pendingExport:
             return SessionEntryCoordinationBlock(
                 ownerDescription: ownerDescription,
@@ -49129,7 +49107,7 @@ final class AppState: ObservableObject {
             )
         }
         if locallyLockedPropertyIDs.contains(propertyID),
-           record.status == .draft || record.status == .occupied {
+           record.status == .draft || (record.status == .occupied && !Self.propertyStatusOccupiedIsStale(record)) {
             return PropertyStatusCompareAnswer(
                 visibleBadgeState: .locked,
                 draftCountIncluded: false,
@@ -50129,12 +50107,6 @@ final class AppState: ObservableObject {
                 propertyIDs: visiblePropertyIDs,
                 reason: "foreground_refresh"
             )
-            Task { @MainActor [weak self] in
-                await self?.refreshLightweightPropertyEntryLocks(
-                    propertyIDs: visiblePropertyIDs,
-                    reason: "foreground_refresh"
-                )
-            }
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
                 outcome: "foreground_success",

@@ -1521,10 +1521,6 @@ struct SessionHubView: View {
         }
         Task {
             await appState.refreshPropertiesAwaitingForegroundRefresh()
-            await appState.refreshLightweightPropertyEntryLocks(
-                propertyIDs: filteredActiveProperties.map(\.id),
-                reason: "manual_home_refresh"
-            )
         }
     }
 
