@@ -36337,6 +36337,57 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    func cancelUnstartedSessionTypeSelection(propertyID: UUID) async -> Bool {
+        guard let session = currentSession,
+              session.propertyID == propertyID,
+              currentSessionRequiresInitialSessionTypeSelection(propertyID: propertyID),
+              !hasMaterialDraftCaptures(session) else {
+            return false
+        }
+
+        if backendFeatureFlags.sessionCoordinationEnabled &&
+            backendFeatureFlags.supabaseEnabled &&
+            backendFeatureFlags.shadowWriteEnabled {
+            guard let remoteStatus = try? await fetchPropertyStatusRecord(propertyID: propertyID) else {
+                return false
+            }
+            let ownedUnstartedClaim = remoteStatus.status == .occupied &&
+                remoteStatus.activeSessionID == session.id &&
+                normalizedSupabaseText(remoteStatus.ownerDeviceID) == currentDeviceIdentifier()
+
+            if ownedUnstartedClaim {
+                if let occupancyState = propertySessionOccupancyByPropertyID[propertyID],
+                   normalizedSupabaseText(occupancyState.occupiedByDeviceID) == currentDeviceIdentifier() {
+                    let didReleaseOccupancy = await releasePropertySessionOccupancyIfOwned(
+                        propertyID: propertyID,
+                        sessionID: session.id,
+                        emitReleasedEvent: true,
+                        ownershipState: occupancyState
+                    )
+                    guard didReleaseOccupancy else { return false }
+                }
+
+                let didReleaseStatus = await performPropertyStatusShadowWrite(
+                    transition: .release,
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    deviceID: currentDeviceIdentifier(),
+                    reason: "session_type_selection_cancelled"
+                )
+                guard didReleaseStatus,
+                      let releasedStatus = try? await fetchPropertyStatusRecord(propertyID: propertyID),
+                      releasedStatus.status == .idle || releasedStatus.status == .exported else {
+                    return false
+                }
+            }
+        }
+
+        occupancyOnlyClaimedSessionIDs.remove(session.id)
+        clearCurrentSession()
+        return true
+    }
+
+    @MainActor
     func releaseCurrentSessionCoordinationLockIfOwned() async {
         guard let propertyID = selectedPropertyID,
               let sessionID = currentSession?.id else {

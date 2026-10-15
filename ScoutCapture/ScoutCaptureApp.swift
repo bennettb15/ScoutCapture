@@ -19818,6 +19818,8 @@ struct PropertySessionView: View {
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
     @State private var isVerifyingSessionAfterPresentation: Bool = false
     @State private var didUseLightweightFastEntry: Bool = false
+    @State private var isLeavingSessionTypeSelection: Bool = false
+    @State private var sessionTypeExitError: String? = nil
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -19842,6 +19844,8 @@ struct PropertySessionView: View {
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $isAwaitingInitialSessionTypeSelection) {
                 InitialSessionTypeChoiceSheet(
+                    isLeaving: isLeavingSessionTypeSelection,
+                    exitError: sessionTypeExitError,
                     onChoose: { sessionType in
                         isAwaitingInitialSessionTypeSelection = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -19850,8 +19854,19 @@ struct PropertySessionView: View {
                         }
                     },
                     onBack: {
-                        isAwaitingInitialSessionTypeSelection = false
-                        exitCaptureScreen()
+                        guard !isLeavingSessionTypeSelection else { return }
+                        isLeavingSessionTypeSelection = true
+                        sessionTypeExitError = nil
+                        Task { @MainActor in
+                            let didRelease = await appState.cancelUnstartedSessionTypeSelection(propertyID: propertyID)
+                            isLeavingSessionTypeSelection = false
+                            if didRelease {
+                                isAwaitingInitialSessionTypeSelection = false
+                                exitCaptureScreen()
+                            } else {
+                                sessionTypeExitError = "Couldn't close this property cleanly. Check your connection and try Back again."
+                            }
+                        }
                     }
                 )
                 .interactiveDismissDisabled(true)
@@ -20397,6 +20412,8 @@ struct PropertySessionView: View {
     }
 
     private struct InitialSessionTypeChoiceSheet: View {
+        let isLeaving: Bool
+        let exitError: String?
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
         @State private var selectedSessionTypeBeingOpened: SessionType? = nil
@@ -20421,12 +20438,19 @@ struct PropertySessionView: View {
                     )
                 }
 
-                Button("Back", action: onBack)
+                if let exitError {
+                    Text(exitError)
+                        .font(.system(size: 13))
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                }
+
+                Button(isLeaving ? "Closing..." : "Back", action: onBack)
                     .font(.system(size: 16, weight: .semibold))
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .padding(.top, 2)
-                    .disabled(selectedSessionTypeBeingOpened != nil)
+                    .disabled(selectedSessionTypeBeingOpened != nil || isLeaving)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
@@ -20465,7 +20489,7 @@ struct PropertySessionView: View {
                 .frame(minHeight: 72)
             }
             .buttonStyle(SessionTypeChoiceButtonStyle(isSelected: isSelected))
-            .disabled(selectedSessionTypeBeingOpened != nil && !isSelected)
+            .disabled(isLeaving || (selectedSessionTypeBeingOpened != nil && !isSelected))
             .accessibilityValue(isSelected ? "Selected" : "")
         }
     }

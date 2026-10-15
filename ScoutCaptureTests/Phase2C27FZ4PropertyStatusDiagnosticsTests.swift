@@ -1248,6 +1248,78 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testBackingOutBeforeSessionTypeReleasesOnlyThisInstallsClaim() async throws {
+        let fixture = try makeCutoverFixture(shadowWriteEnabled: true)
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = try XCTUnwrap(
+            fixture.appState.startSession(skipPropertyStatusPreflight: true)
+        )
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        let occupiedRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: session.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        let idleRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .idle,
+            heartbeatAt: nil
+        )
+        var didCallRelease = false
+        fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in
+            [didCallRelease ? idleRecord : occupiedRecord]
+        }
+        fixture.appState._debugSetPropertyStatusShadowWriteOverrideForTests { transition, _, _, _, _ in
+            transition != "release"
+        }
+
+        let failedRelease = await fixture.appState.cancelUnstartedSessionTypeSelection(propertyID: fixture.property.id)
+        XCTAssertFalse(failedRelease)
+        XCTAssertEqual(fixture.appState.currentSession?.id, session.id)
+
+        fixture.appState._debugSetPropertyStatusShadowWriteOverrideForTests { transition, propertyID, _, _, _ in
+            if transition == "release" {
+                XCTAssertEqual(propertyID, fixture.property.id)
+                didCallRelease = true
+            }
+            return true
+        }
+        let didRelease = await fixture.appState.cancelUnstartedSessionTypeSelection(propertyID: fixture.property.id)
+        XCTAssertTrue(didRelease)
+        XCTAssertTrue(didCallRelease)
+        XCTAssertNil(fixture.appState.currentSession)
+    }
+
+    func testBackingOutDoesNotReleaseOtherInstallsClaim() async throws {
+        let fixture = try makeCutoverFixture(shadowWriteEnabled: true)
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let otherInstallRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: "other-install"
+        )
+        fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in [otherInstallRecord] }
+        var didCallRelease = false
+        fixture.appState._debugSetPropertyStatusShadowWriteOverrideForTests { transition, _, _, _, _ in
+            if transition == "release" { didCallRelease = true }
+            return true
+        }
+
+        let didLeave = await fixture.appState.cancelUnstartedSessionTypeSelection(propertyID: fixture.property.id)
+        XCTAssertTrue(didLeave)
+        XCTAssertFalse(didCallRelease)
+        XCTAssertNil(fixture.appState.currentSession)
+    }
+
     func testNoPhotoDraftCannotFastPresentFromCachedStatus() throws {
         let fixture = try makeCutoverFixture()
         fixture.appState.selectProperty(id: fixture.property.id)
@@ -2270,11 +2342,12 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         let property: Property
     }
 
-    private func makeCutoverFixture() throws -> CutoverFixture {
+    private func makeCutoverFixture(shadowWriteEnabled: Bool = false) throws -> CutoverFixture {
         let suiteName = "Phase2C27FZ4PropertyStatusCutover-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
         defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(shadowWriteEnabled, forKey: "shadow_write_enabled")
         defaults.set(true, forKey: "session_coordination_enabled")
 
         let storageRoot = FileManager.default.temporaryDirectory
