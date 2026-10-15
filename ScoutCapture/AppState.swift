@@ -26561,33 +26561,27 @@ final class AppState: ObservableObject {
         row: NormalizedObservationReplayRow,
         remoteObservations: [CanonicalReadRemoteObservationRow]
     ) -> NormalizedObservationInsertDuplicateResolution {
-        guard let remote = remoteObservations.first(where: { $0.id == row.id }) else {
-            return .unavailable
-        }
-        guard remote.orgID == row.orgID,
-              remote.propertyID == row.propertyID,
-              remote.sessionID == row.sessionID else {
-            return .conflict("remote_observation_parent_mismatch")
-        }
-        if remote.deletedAt != nil {
-            return .softDeletedPreserved
-        }
-        if let remoteUpdatedAt = remote.updatedAt,
-           remoteUpdatedAt > row.updatedAt {
-            return .newerRemotePreserved
-        }
-        return .idempotentExisting
+        normalizedObservationDuplicateResolution(row: row, remoteObservations: remoteObservations, requiresSameSession: true)
     }
 
     nonisolated static func normalizedObservationLineageInsertDuplicateResolution(
         row: NormalizedObservationReplayRow,
         remoteObservations: [CanonicalReadRemoteObservationRow]
     ) -> NormalizedObservationInsertDuplicateResolution {
+        normalizedObservationDuplicateResolution(row: row, remoteObservations: remoteObservations, requiresSameSession: false)
+    }
+
+    private nonisolated static func normalizedObservationDuplicateResolution(
+        row: NormalizedObservationReplayRow,
+        remoteObservations: [CanonicalReadRemoteObservationRow],
+        requiresSameSession: Bool
+    ) -> NormalizedObservationInsertDuplicateResolution {
         guard let remote = remoteObservations.first(where: { $0.id == row.id }) else {
             return .unavailable
         }
         guard remote.orgID == row.orgID,
-              remote.propertyID == row.propertyID else {
+              remote.propertyID == row.propertyID,
+              (!requiresSameSession || remote.sessionID == row.sessionID) else {
             return .conflict("remote_observation_parent_mismatch")
         }
         if remote.deletedAt != nil {
