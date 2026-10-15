@@ -34,7 +34,8 @@ begin
       and status_row.owner_device_id = 'd425c797-3bfa-4f98-85c7-03d9446936bb'
       and status_row.draft_session_id is null
       and status_row.pending_export_session_id is null
-      and status_row.heartbeat_at < timezone('utc', now()) - interval '3 minutes'
+      and status_row.updated_at = status_row.heartbeat_at
+      and status_row.heartbeat_at < now() - interval '3 minutes'
       and not exists (
           select 1 from public.sessions session_row
           where session_row.id = status_row.active_session_id
