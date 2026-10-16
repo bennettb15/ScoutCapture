@@ -6478,6 +6478,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct StalePropertyLockReleaseRPCPayload: Encodable {
+        let targetPropertyID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+        }
+    }
+
     private enum PropertyStatusShadowTransition: String {
         case claim = "claim"
         case heartbeat = "heartbeat"
@@ -43668,6 +43676,14 @@ final class AppState: ObservableObject {
         guard !uniquePropertyIDs.isEmpty else { return }
 
         for propertyID in uniquePropertyIDs {
+            if let currentUserID = authenticatedSupabaseUser?.id,
+               let record = propertyStatusByPropertyID[propertyID],
+               record.status == .occupied,
+               record.ownerUserID == currentUserID,
+               let ownerDeviceID = normalizedSupabaseText(record.ownerDeviceID),
+               ownerDeviceID != currentDeviceIdentifier() {
+                continue
+            }
             guard canAccessProperty(propertyID),
                   let status = await evaluateLightweightPropertyEntryStatus(
                     propertyID: propertyID,
@@ -43741,6 +43757,43 @@ final class AppState: ObservableObject {
             return status
         } catch {
             return nil
+        }
+    }
+
+    @MainActor
+    func releaseStalePropertyLock(propertyID: UUID) async -> (released: Bool, message: String) {
+        guard isNetworkAvailable, let client = supabaseClient,
+              authenticatedSupabaseUser != nil else {
+            return (false, "Connect to the internet and try again.")
+        }
+        if canonicalDraftSession(for: propertyID, requireCaptures: true) != nil ||
+            fastRuntimeDraftResumeState(for: propertyID) != nil ||
+            propertyRowPendingDeliverySession(for: propertyID) != nil ||
+            !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).isEmpty {
+            return (false, "This phone has an unfinished session or upload. Finish that work first.")
+        }
+
+        do {
+            let payload = StalePropertyLockReleaseRPCPayload(targetPropertyID: propertyID)
+            let result = try await (try client.rpc("release_stale_property_lock", params: payload))
+                .execute().value as String
+            switch result {
+            case "released", "already_unlocked":
+                await refreshPropertiesAwaitingForegroundRefresh()
+                return (true, result == "released" ? "Stale lock released. Tap the property again." : "Property is already unlocked. Tap it again.")
+            case "recent_activity":
+                return (false, "Property status was updated recently. The lock was kept.")
+            case "recent_or_other_occupancy":
+                return (false, "An occupancy claim is still recent or belongs to another user. The lock was kept.")
+            case "recent_or_other_session":
+                return (false, "A session lock is still recent or belongs to another user. The lock was kept.")
+            case "different_owner":
+                return (false, "This lock belongs to another user. Ask them to finish or release their session.")
+            default:
+                return (false, "An unfinished session or upload is still present. The lock was kept.")
+            }
+        } catch {
+            return (false, "Unable to verify the lock right now. Please try again.")
         }
     }
 
@@ -50307,6 +50360,21 @@ final class AppState: ObservableObject {
                 block: nil
             )
         case .occupied:
+            if let currentUserID,
+               record.ownerUserID == currentUserID,
+               let ownerDeviceID = normalizedSupabaseText(record.ownerDeviceID),
+               ownerDeviceID != currentDeviceID {
+                return PropertyStatusEntryPreflightDecision(
+                    source: "property_status",
+                    decision: "block",
+                    reason: "current_user_occupied_on_other_device",
+                    block: SessionEntryCoordinationBlock(
+                        ownerDescription: ownerDescription,
+                        lockedAt: occupiedLockedAt,
+                        blockContext: "occupied"
+                    )
+                )
+            }
             if isStalePropertyStatusOccupied(record) {
                 print(
                     "[PropertyStatusEntry] " +

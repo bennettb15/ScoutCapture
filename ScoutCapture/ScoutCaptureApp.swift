@@ -891,6 +891,8 @@ struct SessionHubView: View {
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
     @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
     @State private var propertyEntryLockPrompt: PropertyEntryLockPrompt? = nil
+    @State private var isCheckingStalePropertyLock = false
+    @State private var stalePropertyLockMessage: String? = nil
     @State private var showOfflinePropertyEntryAlert: Bool = false
     @State private var isPreparingPendingExport: Bool = false
     @State private var pendingExportFile: PendingExportFile? = nil
@@ -4212,6 +4214,42 @@ struct SessionHubView: View {
                     .multilineTextAlignment(.center)
                     .lineSpacing(3)
 
+                if prompt.block.blockContext == "occupied" || prompt.block.blockContext == "draft" {
+                    Text("Only release this lock if no one is capturing or has unsent photos on another device.")
+                        .font(.system(size: 13))
+                        .foregroundColor(.white.opacity(0.72))
+                        .multilineTextAlignment(.center)
+
+                    customCapsuleToolbarButton(
+                        title: isCheckingStalePropertyLock ? "Checking…" : "Check stale lock",
+                        isEnabled: !isCheckingStalePropertyLock,
+                        fill: Color.blue.opacity(0.28),
+                        stroke: Color.blue.opacity(0.65),
+                        label: .white
+                    ) {
+                        guard !isCheckingStalePropertyLock else { return }
+                        isCheckingStalePropertyLock = true
+                        stalePropertyLockMessage = nil
+                        Task { @MainActor in
+                            let result = await appState.releaseStalePropertyLock(propertyID: prompt.propertyID)
+                            isCheckingStalePropertyLock = false
+                            if result.released {
+                                propertyEntryLockPrompt = nil
+                                appState.showHubTransientStatusMessage(result.message)
+                            } else {
+                                stalePropertyLockMessage = result.message
+                            }
+                        }
+                    }
+                }
+
+                if let stalePropertyLockMessage {
+                    Text(stalePropertyLockMessage)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                }
+
                 customCapsuleToolbarButton(
                     title: "Back",
                     isEnabled: true,
@@ -4220,6 +4258,7 @@ struct SessionHubView: View {
                     label: .white
                 ) {
                     propertyEntryLockPrompt = nil
+                    stalePropertyLockMessage = nil
                 }
             }
             .padding(.horizontal, 18)
