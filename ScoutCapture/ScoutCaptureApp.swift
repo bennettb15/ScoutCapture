@@ -1294,6 +1294,7 @@ struct SessionHubView: View {
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
+                fastLaneOpeningProperty = nil
                 appState.markHomePropertyListVisible()
                 if appState.properties.isEmpty {
                     beginStartupPlaceholderHoldWindow()
@@ -3838,7 +3839,7 @@ struct SessionHubView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 14) {
-                Text("Opening Camera")
+                Text("Opening Property")
                     .font(.system(size: 24, weight: .bold))
                     .foregroundColor(.white)
 
@@ -3970,10 +3971,11 @@ struct SessionHubView: View {
             }
             return
         }
+        beginPropertyPressFeedback(propertyID: property.id)
         isOpeningProperty = true
+        fastLaneOpeningProperty = property
         propertyTapToken += 1
         let tapToken = propertyTapToken
-        beginPropertyPressFeedback(propertyID: property.id)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
             guard tapToken == propertyTapToken else { return }
@@ -3996,6 +3998,7 @@ struct SessionHubView: View {
 
                 if let block = decision?.block {
                     isOpeningProperty = false
+                    fastLaneOpeningProperty = nil
                     propertyEntryLockPrompt = PropertyEntryLockPrompt(
                         propertyID: property.id,
                         propertyName: property.name,
@@ -4047,6 +4050,7 @@ struct SessionHubView: View {
         verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pendingSession != nil) cachedPendingExport=\(hasPendingExport) draft=\(hasDraft) action=\(action) badgeSource=\(badgeModel.badgeSource)")
         if isFastLaneUploading {
             isOpeningProperty = false
+            fastLaneOpeningProperty = nil
             appState.showHubTransientStatusMessage("Uploading. Finishing this session now.")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
@@ -4056,6 +4060,7 @@ struct SessionHubView: View {
         }
         if let pendingSession {
             isOpeningProperty = false
+            fastLaneOpeningProperty = nil
             pendingExportPromptProperty = property
             pendingExportPromptSession = pendingSession
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
@@ -4065,6 +4070,7 @@ struct SessionHubView: View {
             return
         }
         if hasPendingExport {
+            fastLaneOpeningProperty = nil
             openProperty(property)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                 guard tapToken == propertyTapToken else { return }
@@ -4085,6 +4091,7 @@ struct SessionHubView: View {
                 )
             } else {
                 isOpeningProperty = false
+                fastLaneOpeningProperty = nil
                 fastLaneDraftIssue = FastLaneDraftIssue(
                     property: property,
                     message: fastDraftResumeState.errorMessage ?? "Fast-lane draft resume state is unavailable."
@@ -4098,6 +4105,7 @@ struct SessionHubView: View {
         }
         if !hasDraft {
             isOpeningProperty = false
+            fastLaneOpeningProperty = nil
             initialSessionTypePickerProperty = property
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
@@ -4105,6 +4113,7 @@ struct SessionHubView: View {
             }
             return
         }
+        fastLaneOpeningProperty = nil
         openProperty(property)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard tapToken == propertyTapToken else { return }
@@ -14287,6 +14296,26 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneFlaggedDecisionOverlay(pending)
                     .zIndex(540)
             }
+
+            if isClosing {
+                ZStack {
+                    Color.black.opacity(0.66)
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .tint(.white)
+                        Text(didCompleteUpload ? "Closing…" : "Saving draft…")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 22)
+                    .background(Color.black.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .zIndex(600)
+            }
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -14899,7 +14928,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         FastLaneSessionActionsSummary(
             guidedRemainingCount: fastLaneSideControlCounts.guidedRemainingCount,
             flaggedRemainingCount: fastLaneSideControlCounts.activeIssueCount,
-            currentSessionCaptureCount: max(capturedCount, fastLaneGalleryDisplayCount),
+            currentSessionCaptureCount: fastLaneCurrentPhotoCountForDisplay,
             sessionType: context.sessionType,
             canComplete: canRunProductionComplete,
             isComplete: productionCompleteState.isComplete || didCompleteUpload,
@@ -14907,8 +14936,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
+    private var fastLaneCurrentPhotoCountForDisplay: Int {
+        max(capturedCount, fastLaneGalleryDisplayCount)
+    }
+
     private var fastLaneEndingProgressTitle: String {
-        fastLaneCompletionCapturedPhotoCount() > 0 ? "Closing Draft..." : "Closing..."
+        fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Closing..."
     }
 
     private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
@@ -14937,7 +14970,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if isSavingFastCapture || camera.isCapturing {
             return "Complete is disabled while the current photo is saving."
         }
-        if fastLaneCompletionCapturedPhotoCount() == 0 {
+        if fastLaneCurrentPhotoCountForDisplay == 0 {
             return "\(AppState.sessionCompletionActionTitle(sessionType: context.sessionType)) is disabled until at least one photo is captured."
         }
         if hasFastLaneCompletionRemainingDebt {
@@ -15737,7 +15770,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var canRunProductionComplete: Bool {
-        fastLaneCompletionCapturedPhotoCount() > 0 &&
+        fastLaneCurrentPhotoCountForDisplay > 0 &&
             !hasFastLaneCompletionRemainingDebt &&
             !productionCompleteState.isRunning &&
             !productionCompleteState.isComplete &&
@@ -15937,7 +15970,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         guard !isFastLaneExiting else { return }
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
-        primeFastLaneSideControlSnapshot()
         showFastLaneSessionActionsSheet = true
     }
 
