@@ -14068,24 +14068,32 @@ private enum FastLaneFlaggedDecisionStage: Equatable {
     case reviseObservation
 }
 
+private enum FastLaneFlaggedSaveAction: Equatable {
+    case confirm
+    case resolve
+    case update
+}
+
 private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
     let cornerRadius: CGFloat
+    var showsPressedVisual = true
+    var manualPressedVisual = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let isPressed = configuration.isPressed
+        let isPressed = manualPressedVisual || (showsPressedVisual && configuration.isPressed)
 
         configuration.label
             .scaleEffect(isPressed ? 0.97 : 1.0)
-            .brightness(isPressed ? -0.08 : 0)
+            .brightness(manualPressedVisual ? -0.20 : (isPressed ? -0.08 : 0))
             .overlay {
-                if isPressed {
+                if isPressed && !manualPressedVisual {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(Color.white.opacity(0.16))
                         .allowsHitTesting(false)
                 }
             }
             .overlay {
-                if isPressed {
+                if isPressed && !manualPressedVisual {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
                         .allowsHitTesting(false)
@@ -14195,12 +14203,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var didRefreshFastLaneSideControlCounts: Bool = false
     @State private var didRefreshFastLaneIssuePayload: Bool = false
     @State private var isRefreshingFastLaneSideControlCounts: Bool = false
+    @State private var deferredFastLaneSideControlRefreshForce: Bool? = nil
     @State private var isSyncingFastLanePortalIssueState: Bool = false
     @State private var didSyncFastLanePortalIssueStateAfterPreview: Bool = false
     @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
     @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
+    @State private var isApplyingFastLaneFlaggedDecision = false
+    @State private var highlightedFastLaneFlaggedSaveAction: FastLaneFlaggedSaveAction?
     @State private var fastLaneFlaggedDecisionStage: FastLaneFlaggedDecisionStage = .primary
     @State private var fastLaneFlaggedRevisionText: String = ""
     @State private var fastLaneFlaggedRevisionPriority: String = "Medium"
@@ -14378,6 +14389,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneLevelModel.start()
             } else {
                 fastLaneLevelModel.stop()
+            }
+        }
+        .onChange(of: fastLaneSideControlSheetMode?.id) { _, modeID in
+            if modeID == nil {
+                resumeDeferredFastLaneSideControlRefreshIfNeeded()
             }
         }
         .sheet(item: $completeDryRunResult) { result in
@@ -16056,17 +16072,44 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneSideControlPayload = scopedPayload
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
         refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+        prewarmFastLaneGuidedThumbnails(for: scopedPayload.guidedShots)
         didRefreshFastLaneSideControlCounts = true
         didRefreshFastLaneIssuePayload = true
     }
 
+    private func prewarmFastLaneGuidedThumbnails(for guidedShots: [GuidedShot]) {
+        let pixelSize = max(120, 56 * UIScreen.currentScale * 2.0)
+        for guidedShot in guidedShots.prefix(8) {
+            guard let path = fastLaneGuidedThumbnailPathByID[guidedShot.id],
+                  let asset = fastLaneReportAsset(forLocalPath: path, creationDate: guidedShot.shot?.capturedAt),
+                  fastLaneGalleryImageCache.cachedThumbnail(for: asset, pixelSize: pixelSize) == nil else {
+                continue
+            }
+            fastLaneGalleryImageCache.requestThumbnail(for: asset, pixelSize: pixelSize) { _ in }
+        }
+    }
+
     private func refreshFastLaneSideControlCounts(force: Bool) {
-        if !force {
-            guard !isRefreshingFastLaneSideControlCounts else { return }
+        if isRefreshingFastLaneSideControlCounts {
+            if force {
+                deferredFastLaneSideControlRefreshForce = true
+            }
+            return
+        }
+        guard fastLaneSideControlSheetMode == nil else {
+            deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
+            return
         }
         isRefreshingFastLaneSideControlCounts = true
         Task {
             await syncFastLanePortalIssueStateIfAvailable(force: force)
+            guard fastLaneSideControlSheetMode == nil else {
+                await MainActor.run {
+                    deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
+                    finishFastLaneSideControlRefresh()
+                }
+                return
+            }
             let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
             await MainActor.run {
                 let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
@@ -16085,7 +16128,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
             guard context.sessionType != .punchlistVisit else {
                 await MainActor.run {
-                    isRefreshingFastLaneSideControlCounts = false
+                    finishFastLaneSideControlRefresh()
+                }
+                return
+            }
+
+            guard fastLaneSideControlSheetMode == nil else {
+                await MainActor.run {
+                    deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
+                    finishFastLaneSideControlRefresh()
                 }
                 return
             }
@@ -16105,9 +16156,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneSideControlPayload = scopedPayload
                 fastLaneSideControlCounts = counts
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
-                isRefreshingFastLaneSideControlCounts = false
+                finishFastLaneSideControlRefresh()
             }
         }
+    }
+
+    private func finishFastLaneSideControlRefresh() {
+        isRefreshingFastLaneSideControlCounts = false
+        resumeDeferredFastLaneSideControlRefreshIfNeeded()
+    }
+
+    private func resumeDeferredFastLaneSideControlRefreshIfNeeded() {
+        guard fastLaneSideControlSheetMode == nil,
+              !isRefreshingFastLaneSideControlCounts,
+              let force = deferredFastLaneSideControlRefreshForce else { return }
+        deferredFastLaneSideControlRefreshForce = nil
+        refreshFastLaneSideControlCounts(force: force)
     }
 
     private func syncFastLanePortalIssueStateIfAvailable(force: Bool) async {
@@ -17632,13 +17696,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         fastLaneFlaggedPopupActionButton(
                             "Confirm",
                             fill: Color.blue,
-                            stroke: nil
+                            stroke: nil,
+                            showsPressedVisual: false,
+                            saveFeedbackAction: .confirm
                         ) {
-                            applyFastLaneFlaggedUpdateDecision(
-                                pending,
-                                revisedReason: nil,
-                                revisedPriority: nil
-                            )
+                            performFastLaneFlaggedDecision(.confirm) {
+                                applyFastLaneFlaggedUpdateDecision(
+                                    pending,
+                                    revisedReason: nil,
+                                    revisedPriority: nil
+                                )
+                            }
                         }
 
                         fastLaneFlaggedPopupActionButton(
@@ -17654,9 +17722,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         fastLaneFlaggedPopupActionButton(
                             "Resolve",
                             fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16)
+                            stroke: Color.white.opacity(0.16),
+                            showsPressedVisual: false,
+                            saveFeedbackAction: .resolve
                         ) {
-                            applyFastLaneFlaggedResolveDecision(pending)
+                            performFastLaneFlaggedDecision(.resolve) {
+                                applyFastLaneFlaggedResolveDecision(pending)
+                            }
                         }
                     case .reviseObservation:
                         let revised = fastLaneFlaggedRevisionText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -17664,13 +17736,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             "Update",
                             fill: Color.blue,
                             stroke: nil,
-                            isEnabled: !revised.isEmpty
+                            isEnabled: !revised.isEmpty,
+                            showsPressedVisual: false,
+                            saveFeedbackAction: .update
                         ) {
-                            applyFastLaneFlaggedUpdateDecision(
-                                pending,
-                                revisedReason: revised,
-                                revisedPriority: fastLaneFlaggedRevisionPriority
-                            )
+                            performFastLaneFlaggedDecision(.update) {
+                                applyFastLaneFlaggedUpdateDecision(
+                                    pending,
+                                    revisedReason: revised,
+                                    revisedPriority: fastLaneFlaggedRevisionPriority
+                                )
+                            }
                         }
 
                         fastLaneFlaggedPopupActionButton(
@@ -17704,6 +17780,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fill: Color,
         stroke: Color?,
         isEnabled: Bool = true,
+        showsPressedVisual: Bool = true,
+        saveFeedbackAction: FastLaneFlaggedSaveAction? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -17721,7 +17799,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(FastLanePostCaptureActionButtonStyle(cornerRadius: 14))
+        .buttonStyle(FastLanePostCaptureActionButtonStyle(
+            cornerRadius: 14,
+            showsPressedVisual: showsPressedVisual,
+            manualPressedVisual: saveFeedbackAction != nil &&
+                saveFeedbackAction == highlightedFastLaneFlaggedSaveAction
+        ))
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .disabled(!isEnabled)
     }
@@ -17755,6 +17838,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneFlaggedDecisionStage = .primary
         fastLaneFlaggedRevisionText = ""
         fastLaneFlaggedRevisionPriority = displayPriority
+        isApplyingFastLaneFlaggedDecision = false
+        highlightedFastLaneFlaggedSaveAction = nil
         fastLanePendingFlaggedDecision = FastLanePendingFlaggedDecision(
             issueID: issueID,
             shotID: shotID,
@@ -17771,6 +17856,45 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         ?? fastLaneTrimmedNonEmpty(observation.resolutionStatement)
         ?? fastLaneTrimmedNonEmpty(observation.previousReason)
         ?? observation.statement
+    }
+
+    private func performFastLaneFlaggedDecision(
+        _ button: FastLaneFlaggedSaveAction,
+        action: @escaping () -> Void
+    ) {
+        guard !isApplyingFastLaneFlaggedDecision else { return }
+        isApplyingFastLaneFlaggedDecision = true
+        highlightedFastLaneFlaggedSaveAction = button
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            highlightedFastLaneFlaggedSaveAction = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                action()
+                isApplyingFastLaneFlaggedDecision = false
+            }
+        }
+    }
+
+    private func updatedFastLaneObservation(issueID: UUID) -> Observation? {
+        ((try? appState.sharedLocalStore.fetchObservations(propertyID: context.propertyID)) ?? [])
+            .first(where: { $0.id == issueID })
+    }
+
+    private func showUpdatedFastLaneObservation(_ observation: Observation) {
+        var active = fastLaneSideControlPayload.activeObservations
+        if let index = active.firstIndex(where: { $0.id == observation.id }) {
+            active[index] = observation
+        } else {
+            active.append(observation)
+        }
+        let payload = AppState.FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: fastLaneSideControlPayload.resolutionRequiredObservations,
+            activeObservations: active,
+            guidedShots: fastLaneSideControlPayload.guidedShots,
+            retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
+        )
+        fastLaneSideControlPayload = payload
+        fastLaneSideControlCounts = fastLaneSideControlCounts(from: payload)
+        refreshFastLaneSideControlMediaMaps(for: payload)
     }
 
     private func applyFastLaneFlaggedUpdateDecision(
@@ -17791,12 +17915,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneFlaggedDecisionStage = .primary
         fastLaneFlaggedRevisionText = ""
         fastLaneFlaggedRevisionPriority = "Medium"
+        let observation = didUpdate ? updatedFastLaneObservation(issueID: pending.issueID) : nil
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
             shotID: pending.shotID,
-            captureKind: "follow_up_capture"
+            captureKind: "follow_up_capture",
+            observation: observation
         )
-        reloadFastLaneSideControlPayloadFromLocalStore()
+        if let observation {
+            showUpdatedFastLaneObservation(observation)
+        }
         refreshFastLaneSideControlCounts(force: true)
         showFastLaneSideControlToast(didUpdate ? "Update captured" : "Could not save update")
     }
@@ -17813,15 +17941,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneFlaggedDecisionStage = .primary
         fastLaneFlaggedRevisionText = ""
         fastLaneFlaggedRevisionPriority = "Medium"
+        let observation = didResolve ? updatedFastLaneObservation(issueID: pending.issueID) : nil
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
             shotID: pending.shotID,
             captureKind: "resolved_capture",
             issueStatusOverride: Observation.Status.pendingReview.issueStatusValue,
             reasonOverride: pending.reason,
-            priorityOverride: pending.priority
+            priorityOverride: pending.priority,
+            observation: observation
         )
-        reloadFastLaneSideControlPayloadFromLocalStore()
+        if let observation {
+            showUpdatedFastLaneObservation(observation)
+        }
         showFastLaneSideControlToast(didResolve ? "Issue submitted for review" : "Could not resolve issue")
     }
 
@@ -17841,11 +17973,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         captureKind: String,
         issueStatusOverride: String? = nil,
         reasonOverride: String? = nil,
-        priorityOverride: String? = nil
+        priorityOverride: String? = nil,
+        observation: Observation? = nil
     ) {
-        let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
-        let observation = (issuePayload.activeObservations + issuePayload.resolutionRequiredObservations)
-            .first(where: { $0.id == issueID })
         let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         guard let root else { return }
         let metadataURL = root
