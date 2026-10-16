@@ -1272,6 +1272,12 @@ struct SessionHubView: View {
                     }
                 )
                 .environmentObject(appState)
+                .onAppear {
+                    guard fastLaneOpeningProperty?.id == request.context.propertyID else { return }
+                    fastLaneOpeningProperty = nil
+                    isOpeningProperty = false
+                    pressedPropertyID = nil
+                }
                 .interactiveDismissDisabled(true)
             }
             .alert(item: $fastLaneDraftIssue) { issue in
@@ -4129,7 +4135,8 @@ struct SessionHubView: View {
     ) {
         let buttonTappedAt = Date()
         fastLaneCloseResult = nil
-        fastLaneOpeningProperty = nil
+        fastLaneOpeningProperty = property
+        isOpeningProperty = true
         fastLanePreviewRequest = FastRuntimeCameraPreviewRequest(
             context: context,
             propertyName: property.name,
@@ -4403,8 +4410,6 @@ struct SessionHubView: View {
                    result.lockSessionID == nil || result.lockSessionID == summary.sessionID {
                     await MainActor.run {
                         guard fastLaneOpeningProperty?.id == property.id else { return }
-                        fastLaneOpeningProperty = nil
-                        isOpeningProperty = false
                         if pressedPropertyID == property.id {
                             pressedPropertyID = nil
                         }
@@ -4460,7 +4465,6 @@ struct SessionHubView: View {
                     return
                 }
 
-                fastLaneOpeningProperty = nil
                 fastLanePreviewRequest = FastRuntimeCameraPreviewRequest(
                     context: context,
                     propertyName: result.propertyName,
