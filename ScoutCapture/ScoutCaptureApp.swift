@@ -14180,6 +14180,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneIssueThumbnailPathByID: [UUID: String] = [:]
     @State private var fastLaneIssueReferencePathByID: [UUID: String] = [:]
     @State private var fastLaneMediaHydrationAttemptedKeys: Set<String> = []
+    @State private var didCheckFastLaneGuidedPanelMedia = false
+    @State private var didCheckFastLaneIssuePanelMedia = false
     @State private var fastLaneReferenceViewerState: FastLaneReferenceViewerState?
     @State private var fastLaneArmedReferenceThumbnail: UIImage?
     @State private var fastLaneArmedReferencePath: String?
@@ -14465,6 +14467,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 isRestoringPrevious: fastLanePreviousGalleryIsRestoring,
                 onRefresh: {
                     fastLaneMediaHydrationAttemptedKeys.removeAll()
+                    didCheckFastLaneGuidedPanelMedia = false
+                    didCheckFastLaneIssuePanelMedia = false
                     reloadFastLaneGalleryAssets()
                 }
             )
@@ -14864,6 +14868,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 shutterHaptic.impactOccurred(intensity: 0.45)
                 shutterHaptic.prepare()
                 fastLaneMediaHydrationAttemptedKeys.removeAll()
+                didCheckFastLaneGuidedPanelMedia = false
+                didCheckFastLaneIssuePanelMedia = false
                 reloadFastLaneGalleryAssets()
                 showFastLaneGallery = true
             },
@@ -15905,6 +15911,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             }
                             capturedCount += 1
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
+                            if let guidedID = completedIntent.guidedID,
+                               let savedShot = saveResult.shot {
+                                showFastLaneGuidedCaptureImmediately(
+                                    guidedID: guidedID,
+                                    savedShot: savedShot
+                                )
+                            }
                             let nextBaseContext: AppState.FastRuntimeCaptureMetadataContext
                             if completedIntent != .free,
                                let unarmedContext = fastLaneUnarmedMetadataSnapshot?.context {
@@ -15975,6 +15988,44 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
         showFastLaneSessionActionsSheet = true
+    }
+
+    private func showFastLaneGuidedCaptureImmediately(
+        guidedID: UUID,
+        savedShot: AppState.FastRuntimePrototypeShotRecord
+    ) {
+        guard let index = fastLaneSideControlPayload.guidedShots.firstIndex(where: { $0.id == guidedID }) else {
+            return
+        }
+        var guidedShots = fastLaneSideControlPayload.guidedShots
+        let imagePath = fastLaneResolvedLocalPath(for: savedShot)
+        guidedShots[index].shot = Shot(
+            id: savedShot.id,
+            capturedAt: savedShot.capturedAt,
+            imageLocalIdentifier: imagePath,
+            note: savedShot.metadataContext?.detailNote
+        )
+        guidedShots[index].isCompleted = true
+        guidedShots[index].skipReason = nil
+        guidedShots[index].skipReasonNote = nil
+        guidedShots[index].skipSessionID = nil
+        fastLaneSideControlPayload = AppState.FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: fastLaneSideControlPayload.resolutionRequiredObservations,
+            activeObservations: fastLaneSideControlPayload.activeObservations,
+            guidedShots: guidedShots,
+            retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
+        )
+        if let imagePath {
+            fastLaneGuidedThumbnailPathByID[guidedID] = imagePath
+        }
+        fastLaneSideControlCounts = AppState.FastRuntimePreviewSideControlCounts(
+            resolutionRequiredCount: fastLaneSideControlCounts.resolutionRequiredCount,
+            activeIssueCount: fastLaneSideControlCounts.activeIssueCount,
+            guidedRemainingCount: guidedShots.filter {
+                !$0.isRetired && $0.status != .retired && !$0.isCompleted && $0.skipReason == nil
+            }.count,
+            checklistCount: fastLaneSideControlCounts.checklistCount
+        )
     }
 
     private func refreshFastLaneSideControlCountsIfNeeded() {
@@ -16795,24 +16846,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
         if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneIssuePayload {
             fastLaneSideControlSheetMode = mode
-            isLoadingFastLaneSideControlSheet = true
+            isLoadingFastLaneSideControlSheet = false
             scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: mode)
         } else {
             showFastLaneSideControlToast(expectedEmptyText)
-        }
-
-        refreshFastLaneIssueSideControlPayload { payload in
-            let rows = payload.activeObservations
-            if rows.isEmpty {
-                if fastLaneSideControlSheetMode == mode {
-                    fastLaneSideControlSheetMode = nil
-                    showFastLaneSideControlToast(expectedEmptyText)
-                }
-            } else {
-                fastLaneSideControlSheetMode = mode
-                scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: mode)
-            }
-            isLoadingFastLaneSideControlSheet = false
         }
     }
 
@@ -16821,23 +16858,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneSideControlCounts.guidedRemainingCount > 0 ||
             !didRefreshFastLaneSideControlCounts {
             fastLaneSideControlSheetMode = .guided
-            isLoadingFastLaneSideControlSheet = true
+            isLoadingFastLaneSideControlSheet = false
             scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
         } else {
             showFastLaneSideControlToast("No guided photos")
-        }
-
-        refreshFastLaneSideControlPayload { payload in
-            if payload.guidedShots.isEmpty {
-                if fastLaneSideControlSheetMode == .guided {
-                    fastLaneSideControlSheetMode = nil
-                    showFastLaneSideControlToast("No guided photos")
-                }
-            } else {
-                fastLaneSideControlSheetMode = .guided
-                scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
-            }
-            isLoadingFastLaneSideControlSheet = false
         }
     }
 
@@ -17041,52 +17065,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
-    private func refreshFastLaneSideControlPayload(completion: @escaping (AppState.FastRuntimePreviewSideControlPayload) -> Void) {
-        isLoadingFastLaneSideControlSheet = true
-        Task {
-            let payload = appState.fastRuntimePreviewSideControlPayload(
-                propertyID: context.propertyID,
-                sessionType: context.sessionType,
-                currentSessionID: context.sessionID
-            )
-            let scopedPayload = await MainActor.run {
-                fastLanePayloadScopedToCurrentFastSession(payload)
-            }
-            let counts = await MainActor.run {
-                fastLaneSideControlCounts(from: scopedPayload)
-            }
-            await MainActor.run {
-                fastLaneSideControlPayload = scopedPayload
-                fastLaneSideControlCounts = counts
-                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
-                didRefreshFastLaneIssuePayload = true
-                completion(scopedPayload)
-            }
-        }
-    }
-
-    private func refreshFastLaneIssueSideControlPayload(completion: @escaping (AppState.FastRuntimePreviewSideControlPayload) -> Void) {
-        isLoadingFastLaneSideControlSheet = true
-        Task {
-            await syncFastLanePortalIssueStateIfAvailable(force: true)
-            let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
-            await MainActor.run {
-                let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
-                    resolutionRequiredObservations: [],
-                    activeObservations: issuePayload.activeObservations,
-                    guidedShots: fastLaneSideControlPayload.guidedShots,
-                    retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
-                )
-                let updatedPayload = fastLanePayloadScopedToCurrentFastSession(rawPayload)
-                fastLaneSideControlPayload = updatedPayload
-                fastLaneSideControlCounts = fastLaneSideControlCounts(from: updatedPayload)
-                refreshFastLaneSideControlMediaMaps(for: updatedPayload)
-                didRefreshFastLaneIssuePayload = true
-                completion(updatedPayload)
-            }
-        }
-    }
-
     private func refreshFastLaneSideControlMediaMaps(for payload: AppState.FastRuntimePreviewSideControlPayload) {
         let guidedRows = payload.guidedShots + payload.retiredGuidedShots
         let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
@@ -17164,36 +17142,63 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func scheduleFastLaneGuidedPanelMediaHydrationIfNeeded() {
-        // Current-session presentation clears historical shot IDs. Use the
-        // property rows here so media can be fetched by its original session.
-        let references = appState.fastRuntimePreviewSideControlPayload(
-            propertyID: context.propertyID,
-            sessionType: context.sessionType,
-            currentSessionID: context.sessionID
-        )
-        let guidedRows = references.guidedShots + references.retiredGuidedShots
-        let requests = appState.fastRuntimeGuidedPanelMediaHydrationRequests(
-            propertyID: context.propertyID,
-            guidedShots: guidedRows
-        )
+        guard !didCheckFastLaneGuidedPanelMedia else { return }
+        didCheckFastLaneGuidedPanelMedia = true
+        let requests = (fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots)
+            .compactMap { guidedShot -> AppState.OperationalMediaHydrationRequest? in
+                guard fastLaneGuidedThumbnailPathByID[guidedShot.id] == nil else { return nil }
+                return fastLanePanelHydrationRequest(
+                    shotID: guidedShot.shot?.id,
+                    storedPath: guidedShot.shot?.imageLocalIdentifier
+                        ?? guidedShot.referenceImagePath
+                        ?? guidedShot.referenceImageLocalIdentifier
+                )
+            }
         scheduleFastLanePanelMediaHydration(requests, kind: .guided)
     }
 
     private func scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: FastLaneSideControlSheetMode) {
+        guard !didCheckFastLaneIssuePanelMedia else { return }
+        didCheckFastLaneIssuePanelMedia = true
         let observations: [Observation]
         switch mode {
         case .activeIssues:
-            observations = appState.fastRuntimePreviewIssueSideControlPayload(
-                propertyID: context.propertyID
-            ).activeObservations
+            observations = fastLaneSideControlPayload.activeObservations
         case .guided:
             return
         }
-        let requests = appState.fastRuntimeIssuePanelMediaHydrationRequests(
-            propertyID: context.propertyID,
-            observations: observations
-        )
+        let requests = observations.compactMap { observation -> AppState.OperationalMediaHydrationRequest? in
+            guard fastLaneIssueThumbnailPathByID[observation.id] == nil,
+                  let shot = observation.shots.max(by: { $0.capturedAt < $1.capturedAt }) else {
+                return nil
+            }
+            return fastLanePanelHydrationRequest(shotID: shot.id, storedPath: shot.imageLocalIdentifier)
+        }
         scheduleFastLanePanelMediaHydration(requests, kind: .flagged)
+    }
+
+    private func fastLanePanelHydrationRequest(
+        shotID: UUID?,
+        storedPath: String?
+    ) -> AppState.OperationalMediaHydrationRequest? {
+        guard let storedPath = fastLaneTrimmedNonEmpty(storedPath),
+              fastLaneExistingLocalPath(storedPath) == nil else { return nil }
+        let filename = URL(fileURLWithPath: storedPath).lastPathComponent
+        guard let shotID = shotID ?? UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) else {
+            return nil
+        }
+        let components = URL(fileURLWithPath: storedPath).pathComponents
+        guard let sessionIndex = components.firstIndex(of: "Sessions"),
+              components.indices.contains(sessionIndex + 1),
+              let sessionID = UUID(uuidString: components[sessionIndex + 1]) else {
+            return nil
+        }
+        return AppState.OperationalMediaHydrationRequest(
+            propertyID: context.propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            relativePathOverride: "Originals/\(filename)"
+        )
     }
 
     private enum FastLanePanelMediaHydrationKind {
@@ -17297,6 +17302,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .appendingPathComponent(filename, isDirectory: false)
             if fastLaneGalleryImageIsLocallyReadable(fastRuntimeCandidate) {
                 return fastRuntimeCandidate.path
+            }
+
+            if let shotID = UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) {
+                let cached = StorageRoot.galleryMediaCacheURL(
+                    propertyID: context.propertyID,
+                    sessionID: sessionID,
+                    shotID: shotID,
+                    filename: filename
+                )
+                if fastLaneGalleryImageIsLocallyReadable(cached) {
+                    return cached.path
+                }
             }
         }
         if let shotID = UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) {
