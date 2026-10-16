@@ -14202,6 +14202,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneGalleryThumbnail: UIImage?
     @State private var fastLaneGalleryThumbnailAssetID: String = ""
     @State private var fastLaneGalleryRefreshToken = UUID()
+    @State private var fastLaneGalleryLoadGeneration = 0
+    @State private var fastLaneGalleryIsLoading = false
+    @State private var fastLanePreviousGalleryIsRestoring = false
     @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
@@ -14424,7 +14427,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 previousAssets: fastLanePreviousGalleryAssets,
                 previousMetadataByAssetID: fastLanePreviousGalleryMetadataByAssetID,
                 cache: fastLaneGalleryImageCache,
-                thumbnailRefreshToken: fastLaneGalleryRefreshToken
+                thumbnailRefreshToken: fastLaneGalleryRefreshToken,
+                isLoading: fastLaneGalleryIsLoading,
+                isRestoringPrevious: fastLanePreviousGalleryIsRestoring,
+                onRefresh: {
+                    fastLaneMediaHydrationAttemptedKeys.removeAll()
+                    reloadFastLaneGalleryAssets()
+                }
             )
         }
         .fullScreenCover(item: $fastLaneReferenceViewerState) { state in
@@ -14821,6 +14830,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             onThumbnailTapped: {
                 shutterHaptic.impactOccurred(intensity: 0.45)
                 shutterHaptic.prepare()
+                fastLaneMediaHydrationAttemptedKeys.removeAll()
                 reloadFastLaneGalleryAssets()
                 showFastLaneGallery = true
             },
@@ -16659,6 +16669,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return direct
         }
         let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let galleryCacheURL = StorageRoot.galleryMediaCacheURL(
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            shotID: shot.id,
+            filename: relativePath
+        )
+        if fastLaneGalleryImageIsLocallyReadable(galleryCacheURL) {
+            return galleryCacheURL.path
+        }
         if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
             propertyID: shot.propertyID,
             sessionID: shot.sessionID,
@@ -17190,7 +17209,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
               !trimmed.isEmpty else {
             return nil
         }
-        if FileManager.default.fileExists(atPath: trimmed) {
+        if fastLaneGalleryImageIsLocallyReadable(URL(fileURLWithPath: trimmed)) {
             return trimmed
         }
         if !trimmed.hasPrefix("/"),
@@ -17198,7 +17217,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             relativePath: trimmed
-           ) {
+           ), fastLaneGalleryImageIsLocallyReadable(resolved) {
             return resolved.path
         }
         return fastLaneRepairedPanelImagePath(fromStoredPath: trimmed)
@@ -17230,7 +17249,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             let candidate = appState.sharedLocalStore
                 .originalsFolderURL(propertyID: context.propertyID, sessionID: sessionID)
                 .appendingPathComponent(filename, isDirectory: false)
-            if FileManager.default.fileExists(atPath: candidate.path) {
+            if fastLaneGalleryImageIsLocallyReadable(candidate) {
                 return candidate.path
             }
 
@@ -17240,8 +17259,24 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .appendingPathComponent(sessionID.uuidString, isDirectory: true)
                 .appendingPathComponent("Originals", isDirectory: true)
                 .appendingPathComponent(filename, isDirectory: false)
-            if FileManager.default.fileExists(atPath: fastRuntimeCandidate.path) {
+            if fastLaneGalleryImageIsLocallyReadable(fastRuntimeCandidate) {
                 return fastRuntimeCandidate.path
+            }
+        }
+        if let shotID = UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) {
+            let cachedSessionIDs = [context.sessionID] +
+                (((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+                    .map(\.id))
+            for sessionID in Set(cachedSessionIDs) {
+                let cached = StorageRoot.galleryMediaCacheURL(
+                    propertyID: context.propertyID,
+                    sessionID: sessionID,
+                    shotID: shotID,
+                    filename: filename
+                )
+                if fastLaneGalleryImageIsLocallyReadable(cached) {
+                    return cached.path
+                }
             }
         }
         return nil
@@ -17975,6 +18010,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func reloadFastLaneGalleryAssets() {
+        fastLaneGalleryLoadGeneration += 1
+        let generation = fastLaneGalleryLoadGeneration
+        fastLaneGalleryIsLoading = true
         guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
             fastLaneGalleryAssets = []
             fastLaneGalleryMetadataByAssetID = [:]
@@ -17985,6 +18023,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneGalleryThumbnailAssetID = ""
             fastLaneGalleryDisplayCount = 0
             fastLaneGalleryRefreshToken = UUID()
+            fastLaneGalleryIsLoading = false
+            fastLanePreviousGalleryIsRestoring = false
             return
         }
 
@@ -17996,7 +18036,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 partial[observation.id] = observation
             }
         let previousSession = fastLanePreviousGallerySession()
-        let projectedGuidedRows = fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots
+        let activeGuidedRows = ((try? appState.sharedLocalStore.fetchGuidedShots(propertyID: context.propertyID)) ?? [])
+            .filter { !$0.isRetired && $0.status != .retired }
+        let activeGuidedShotIDs = Set(activeGuidedRows.compactMap { $0.shot?.id })
         let projectedObservations = Array(observationByIssueID.values)
         DispatchQueue.global(qos: .utility).async {
             let gallery: (
@@ -18014,6 +18056,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 var metadataByID: [String: FastLaneGalleryMetadata] = [:]
                 let scopedShots = shots
                     .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
+                    .filter { context.sessionType != .punchlistVisit || $0.metadataContext?.issueID != nil }
                     .sorted {
                         if $0.capturedAt != $1.capturedAt { return $0.capturedAt < $1.capturedAt }
                         return $0.id.uuidString < $1.id.uuidString
@@ -18041,12 +18084,21 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     }
                 return (assets, metadataByID, scopedShots)
             }()
+            DispatchQueue.main.async {
+                guard generation == fastLaneGalleryLoadGeneration else { return }
+                fastLaneGalleryAssets = gallery.assets
+                fastLaneGalleryMetadataByAssetID = gallery.metadata
+                fastLaneGalleryDisplayCount = gallery.assets.count
+                refreshFastLaneGalleryThumbnail(from: gallery.assets)
+                scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
+            }
             let previousGallery = fastLanePreviousGallerySnapshot(
                 session: previousSession,
-                observationByIssueID: observationByIssueID
+                observationByIssueID: observationByIssueID,
+                activeGuidedShotIDs: activeGuidedShotIDs
             )
             let projectedPreviousGallery = fastLaneProjectedPreviousGallerySnapshot(
-                guidedShots: projectedGuidedRows,
+                guidedShots: activeGuidedRows,
                 observations: projectedObservations
             )
             let mergedPreviousGallery = fastLaneMergedPreviousGallery(
@@ -18055,15 +18107,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
 
             DispatchQueue.main.async {
-                fastLaneGalleryAssets = gallery.assets
-                fastLaneGalleryMetadataByAssetID = gallery.metadata
+                guard generation == fastLaneGalleryLoadGeneration else { return }
                 fastLanePreviousGallerySessionID = previousSession?.id
                 fastLanePreviousGalleryAssets = mergedPreviousGallery.assets
                 fastLanePreviousGalleryMetadataByAssetID = mergedPreviousGallery.metadata
-                fastLaneGalleryDisplayCount = gallery.assets.count
+                fastLaneGalleryIsLoading = false
                 fastLaneGalleryRefreshToken = UUID()
-                refreshFastLaneGalleryThumbnail(from: gallery.assets)
-                scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
                 scheduleFastLanePreviousGalleryMediaHydrationIfNeeded(requests: mergedPreviousGallery.requests)
             }
         }
@@ -18086,7 +18135,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func fastLanePreviousGallerySnapshot(
         session: Session?,
-        observationByIssueID: [UUID: Observation]
+        observationByIssueID: [UUID: Observation],
+        activeGuidedShotIDs: Set<UUID>
     ) -> (
         assets: [ReportAsset],
         metadata: [String: FastLaneGalleryMetadata],
@@ -18114,11 +18164,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let assets = metadata.shots
             .filter { $0.shouldAppearInDefaultGallery }
             .filter { $0.sessionID == session.id }
+            .filter { context.sessionType != .punchlistVisit || $0.isFlagged || $0.issueID != nil }
             .filter {
                 fastLanePreviousGalleryShotIsRelevant(
                     $0,
                     issueStatusByID: issueStatusByID,
-                    observationByIssueID: observationByIssueID
+                    observationByIssueID: observationByIssueID,
+                    activeGuidedShotIDs: activeGuidedShotIDs
                 )
             }
             .sorted {
@@ -18128,29 +18180,35 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .compactMap { shot -> ReportAsset? in
                 let candidates = fastLaneGalleryRelativePathCandidates(for: shot)
                 guard let primaryRelative = candidates.first else { return nil }
+                let galleryCacheURL = StorageRoot.galleryMediaCacheURL(
+                    propertyID: context.propertyID,
+                    sessionID: session.id,
+                    shotID: shot.shotID,
+                    filename: shot.originalFilename
+                )
                 let existingURL = candidates
                     .compactMap { relative -> URL? in
                         if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
                             propertyID: context.propertyID,
                             sessionID: session.id,
                             relativePath: relative
-                        ) {
+                        ), fastLaneGalleryImageIsLocallyReadable(resolved) {
                             return resolved
                         }
                         let candidate = sessionRoot.appendingPathComponent(relative, isDirectory: false)
-                        return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+                        return fastLaneGalleryImageIsLocallyReadable(candidate) ? candidate : nil
                     }
-                    .first
+                    .first ?? (fastLaneGalleryImageIsLocallyReadable(galleryCacheURL) ? galleryCacheURL : nil)
 
-                guard let url = existingURL else {
+                if existingURL == nil {
                     requests.append(AppState.OperationalMediaHydrationRequest(
                         propertyID: context.propertyID,
                         sessionID: session.id,
                         shotID: shot.shotID,
                         relativePathOverride: primaryRelative
                     ))
-                    return nil
                 }
+                let url = existingURL ?? galleryCacheURL
 
                 metadataByID[url.path] = FastLaneGalleryMetadata(
                     propertyName: propertyName,
@@ -18190,6 +18248,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             metadata: FastLaneGalleryMetadata
         ) {
             guard let existingPath = fastLaneExistingLocalPath(path) else { return }
+            guard fastLaneGalleryImageIsLocallyReadable(URL(fileURLWithPath: existingPath)) else { return }
             guard !fastLanePathBelongsToCurrentSession(existingPath) else { return }
             guard assetsByPath[existingPath] == nil else { return }
             let url = URL(fileURLWithPath: existingPath)
@@ -18204,7 +18263,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             metadataByPath[existingPath] = metadata
         }
 
-        for guidedShot in guidedShots {
+        for guidedShot in guidedShots where context.sessionType != .punchlistVisit {
             let date = guidedShot.shot?.capturedAt ?? guidedShot.labelEditedAt ?? guidedShot.reassignedAt ?? Date.distantPast
             let metadata = FastLaneGalleryMetadata(
                 propertyName: propertyName,
@@ -18257,7 +18316,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func fastLanePreviousGalleryShotIsRelevant(
         _ shot: ShotMetadata,
         issueStatusByID: [UUID: Observation.Status],
-        observationByIssueID: [UUID: Observation]
+        observationByIssueID: [UUID: Observation],
+        activeGuidedShotIDs: Set<UUID>
     ) -> Bool {
         if shot.isFlagged || shot.issueID != nil {
             let shotStatus = Observation.Status.status(from: shot.issueStatus)
@@ -18271,7 +18331,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return status == .active && captureKind != "resolved_capture"
         }
 
-        return shot.isGuided
+        return shot.isGuided && activeGuidedShotIDs.contains(shot.shotID)
     }
 
     private func fastLanePathBelongsToCurrentSession(_ path: String) -> Bool {
@@ -18419,6 +18479,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         ]
     }
 
+    private func fastLaneGalleryImageIsLocallyReadable(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey
+        ]), values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
+            return false
+        }
+        if values.isUbiquitousItem == true,
+           values.ubiquitousItemDownloadingStatus != .current {
+            return false
+        }
+        return true
+    }
+
     private func scheduleFastLaneGalleryMediaHydrationIfNeeded(
         localShots: [AppState.FastRuntimePrototypeShotRecord]
     ) {
@@ -18454,12 +18530,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         for request in pending {
             fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
         }
+        fastLanePreviousGalleryIsRestoring = true
 
         Task {
             let didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
-            guard didStart else { return }
             await MainActor.run {
-                reloadFastLaneGalleryAssets()
+                fastLanePreviousGalleryIsRestoring = false
+                if didStart {
+                    refreshFastLaneSideControlMediaMaps(for: fastLaneSideControlPayload)
+                    reloadFastLaneGalleryAssets()
+                }
             }
         }
     }
@@ -20517,6 +20597,9 @@ private struct FastLanePhotoLibraryFullscreen: View {
     let previousMetadataByAssetID: [String: FastLaneGalleryMetadata]
     @ObservedObject var cache: AssetImageCache
     let thumbnailRefreshToken: UUID
+    let isLoading: Bool
+    let isRestoringPrevious: Bool
+    let onRefresh: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
@@ -20584,7 +20667,8 @@ private struct FastLanePhotoLibraryFullscreen: View {
                                     asset: asset,
                                     cache: cache,
                                     side: side,
-                                    refreshToken: thumbnailRefreshToken
+                                    refreshToken: thumbnailRefreshToken,
+                                    isRestoring: !viewingCurrentSession && isRestoringPrevious
                                 )
                                 .contentShape(Rectangle())
                                 .onTapGesture {
@@ -20641,7 +20725,9 @@ private struct FastLanePhotoLibraryFullscreen: View {
             Image(systemName: "photo.on.rectangle")
                 .font(.system(size: 32, weight: .medium))
                 .foregroundColor(.white.opacity(0.55))
-            Text(viewingCurrentSession ? "No Photos" : "No Previous Photos")
+            Text(isLoading || (!viewingCurrentSession && isRestoringPrevious)
+                 ? "Loading photos…"
+                 : (viewingCurrentSession ? "No Photos" : "No Previous Photos"))
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(.white.opacity(0.78))
         }
@@ -20694,6 +20780,17 @@ private struct FastLanePhotoLibraryFullscreen: View {
                         .layoutPriority(1)
 
                     Spacer(minLength: 0)
+
+                    Button(action: onRefresh) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Retry loading photos")
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, isLandscape ? 8 : 6)
@@ -20754,6 +20851,7 @@ private struct FastLaneLibraryThumb: View {
     @ObservedObject var cache: AssetImageCache
     let side: CGFloat
     let refreshToken: UUID
+    let isRestoring: Bool
 
     @State private var image: UIImage?
 
@@ -20770,6 +20868,15 @@ private struct FastLaneLibraryThumb: View {
             } else {
                 Color.white.opacity(0.06)
                     .frame(width: side, height: side)
+                    .overlay {
+                        if isRestoring {
+                            ProgressView()
+                                .tint(.white.opacity(0.7))
+                        } else {
+                            Image(systemName: "photo")
+                                .foregroundColor(.white.opacity(0.55))
+                        }
+                    }
             }
         }
         .frame(width: side, height: side)
@@ -21017,6 +21124,8 @@ private struct FastLaneFullImage: View {
 
     @State private var full: UIImage?
     @State private var thumb: UIImage?
+    @State private var fullLoadFinished = false
+    @State private var thumbLoadFinished = false
 
     var body: some View {
         ZStack {
@@ -21032,8 +21141,22 @@ private struct FastLaneFullImage: View {
                     .resizable()
                     .scaledToFit()
                     .ignoresSafeArea()
+            } else if fullLoadFinished && thumbLoadFinished {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 30))
+                    Text("Photo unavailable")
+                        .font(.headline)
+                    Text("Return to the gallery and tap refresh to retry.")
+                        .font(.subheadline)
+                }
+                .foregroundColor(.white.opacity(0.8))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
             } else {
-                Color.black.ignoresSafeArea()
+                ProgressView("Loading photo")
+                    .tint(.white)
+                    .foregroundColor(.white)
             }
         }
         .onAppear {
@@ -21042,6 +21165,8 @@ private struct FastLaneFullImage: View {
         .onChange(of: asset.localIdentifier) { _, _ in
             full = nil
             thumb = nil
+            fullLoadFinished = false
+            thumbLoadFinished = false
             loadImagesIfNeeded()
         }
     }
@@ -21052,13 +21177,16 @@ private struct FastLaneFullImage: View {
             cache.requestThumbnail(for: asset, pixelSize: px) { image in
                 DispatchQueue.main.async {
                     thumb = image
+                    thumbLoadFinished = true
                 }
             }
         }
         if full != nil { return }
-        cache.requestFull(for: asset) { image in
+        let displayPixels = min(2400, max(UIScreen.main.bounds.width, UIScreen.main.bounds.height) * UIScreen.currentScale)
+        cache.requestThumbnail(for: asset, pixelSize: displayPixels) { image in
             DispatchQueue.main.async {
                 full = image
+                fullLoadFinished = true
             }
         }
     }

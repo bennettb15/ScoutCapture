@@ -12097,7 +12097,9 @@ final class AppState: ObservableObject {
 
         var startedAny = false
         await withTaskGroup(of: Bool.self) { group in
-            for request in uniqueRequests {
+            var remaining = uniqueRequests.makeIterator()
+            func addNextRequest() -> Bool {
+                guard let request = remaining.next() else { return false }
                 group.addTask { [weak self] in
                     guard let self else { return false }
                     return await self.ensureGalleryMediaAvailableIfNeeded(
@@ -12107,12 +12109,17 @@ final class AppState: ObservableObject {
                         relativePathOverride: request.relativePathOverride
                     )
                 }
+                return true
             }
 
-            for await didStart in group {
+            for _ in 0..<min(3, uniqueRequests.count) {
+                _ = addNextRequest()
+            }
+            while let didStart = await group.next() {
                 if didStart {
                     startedAny = true
                 }
+                _ = addNextRequest()
             }
         }
 
@@ -12212,7 +12219,20 @@ final class AppState: ObservableObject {
             return false
         }
 
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        let localShot = (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID))?
+            .shots.first(where: { $0.shotID == shotID })
+        let filename = localShot?.originalFilename ?? relativePathOverride ?? ""
+        let destination = StorageRoot.galleryMediaCacheURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            filename: filename
+        )
+        if ((try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value ?? 0) > 0 {
+            return true
+        }
+
+        let operationKey = "gallery-download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
         guard beginSupabaseMediaOperation(operationKey) else { return false }
         defer { endSupabaseMediaOperation(operationKey) }
 
@@ -12221,9 +12241,11 @@ final class AppState: ObservableObject {
             sessionID: sessionID,
             shotID: shotID,
             allowRelaxedRemoteLookupFallback: true,
-            relativePathOverride: relativePathOverride
+            relativePathOverride: relativePathOverride,
+            destinationURLOverride: destination
         )
-        return true
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value ?? 0
+        return bytes > 0
     }
 
     private func ensureFlaggedHistoricalMediaAvailableIfNeeded(
@@ -34711,7 +34733,8 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         shotID: UUID,
         allowRelaxedRemoteLookupFallback: Bool = false,
-        relativePathOverride: String? = nil
+        relativePathOverride: String? = nil,
+        destinationURLOverride: URL? = nil
     ) async {
         guard let client = supabaseClient else { return }
         let localShot = (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID))?
@@ -34766,7 +34789,7 @@ final class AppState: ObservableObject {
 
         guard !bucket.isEmpty, !path.isEmpty else { return }
 
-        let destinationURL = localStore
+        let destinationURL = destinationURLOverride ?? localStore
             .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
             .appendingPathComponent(relativePath, isDirectory: false)
         if FileManager.default.fileExists(atPath: destinationURL.path) {
@@ -57481,6 +57504,13 @@ final class AppState: ObservableObject {
         for shot in shots where shot.propertyID == propertyID && shot.sessionID == sessionID {
             let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !relativePath.isEmpty else { continue }
+            let cachedURL = StorageRoot.galleryMediaCacheURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shot.id,
+                filename: relativePath
+            )
+            if FileManager.default.fileExists(atPath: cachedURL.path) { continue }
             if let resolved = fastRuntimeResolvedLocalPath(for: shot),
                FileManager.default.fileExists(atPath: resolved) {
                 continue
@@ -62561,6 +62591,9 @@ final class AppState: ObservableObject {
 
         let allProperties = (try? localStore.fetchProperties()) ?? []
         for property in allProperties {
+            // Gallery recovery writes media into completed sessions. Do not prune those
+            // files while this property is open, including during a background refresh.
+            if property.id == selectedPropertyID { continue }
             let recentlyActivated = isPropertyWithinActivationRetentionWindow(property.id, now: now)
             if recentlyActivated {
                 skippedRecentActivation += 1

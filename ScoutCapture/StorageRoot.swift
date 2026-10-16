@@ -48,6 +48,21 @@ enum StorageRoot {
         activeRootURL().appendingPathComponent("SCOUT", isDirectory: true)
     }
 
+    nonisolated static func galleryMediaCacheURL(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        filename: String
+    ) -> URL {
+        let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
+        let fileExtension = ["jpg", "jpeg", "heic", "heif", "png"].contains(ext) ? ext : "jpg"
+        return fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScoutCaptureGallery", isDirectory: true)
+            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+            .appendingPathComponent("\(shotID.uuidString).\(fileExtension)", isDirectory: false)
+    }
+
     nonisolated static func scoutRootCandidates() -> [URL] {
         let resolution = resolve()
         var candidates: [URL] = [resolution.activeRoot.appendingPathComponent("SCOUT", isDirectory: true)]
