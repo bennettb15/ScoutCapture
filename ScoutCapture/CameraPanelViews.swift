@@ -16,6 +16,25 @@ private func verboseLog(_ message: @autoclosure () -> String) {
     print(message())
 }
 
+private struct ChecklistDisplayOrder {
+    let state: Int
+    let building: String
+    let elevation: String
+    let detail: String
+    let angle: Int
+    let originalIndex: Int
+
+    func precedes(_ other: Self) -> Bool {
+        if state != other.state { return state < other.state }
+        for (left, right) in [(building, other.building), (elevation, other.elevation), (detail, other.detail)] {
+            let comparison = left.localizedStandardCompare(right)
+            if comparison != .orderedSame { return comparison == .orderedAscending }
+        }
+        if angle != other.angle { return angle < other.angle }
+        return originalIndex < other.originalIndex
+    }
+}
+
 struct ChecklistReclassifySheet: View {
     private enum DirectionChoice: String, CaseIterable, Identifiable {
         case interior = "Interior"
@@ -438,6 +457,32 @@ struct GuidedChecklistOverlay: View {
         }
     }
 
+    private struct OrderedGuidedShot: Identifiable {
+        let shot: GuidedShot
+        let captured: Bool
+        let order: ChecklistDisplayOrder
+        var id: UUID { shot.id }
+    }
+
+    private var orderedGuidedShots: [OrderedGuidedShot] {
+        guidedShots.enumerated().map { index, shot in
+            let skipped = currentSessionID != nil && shot.skipReason != nil && shot.skipSessionID == currentSessionID
+            let captured = isCapturedInCurrentSession(shot)
+            return OrderedGuidedShot(
+                shot: shot,
+                captured: captured,
+                order: ChecklistDisplayOrder(
+                    state: skipped ? 2 : (captured ? 1 : 0),
+                    building: shot.building ?? "",
+                    elevation: CanonicalElevation.normalize(shot.targetElevation) ?? "",
+                    detail: shot.detailType ?? shot.title,
+                    angle: max(1, shot.angleIndex ?? 1),
+                    originalIndex: index
+                )
+            )
+        }.sorted { $0.order.precedes($1.order) }
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
@@ -452,7 +497,8 @@ struct GuidedChecklistOverlay: View {
 
                     List {
                         Section {
-                            ForEach(guidedShots) { item in
+                            ForEach(orderedGuidedShots) { ordered in
+                                let item = ordered.shot
                                 GuidedChecklistRow(
                                     guidedShot: item,
                                     resolvedThumbnailPath: resolvedThumbnailPathByID[item.id],
@@ -460,7 +506,7 @@ struct GuidedChecklistOverlay: View {
                                     currentSessionID: currentSessionID,
                                     isBaselineSession: isBaselineSession,
                                     allowReferenceFallback: allowReferenceFallback,
-                                    isCapturedInCurrentSession: isCapturedInCurrentSession(item),
+                                    isCapturedInCurrentSession: ordered.captured,
                                     canRetire: canChangeShotLifecycle,
                                     onTapRow: {
                                         onSelectGuided(item)
@@ -1724,6 +1770,25 @@ struct ActiveIssuesSheet: View {
             .joined(separator: "|")
     }
 
+    private var orderedObservations: [Observation] {
+        guard mode == .activeIssues else { return observations }
+        return observations.enumerated().map { index, observation in
+            let captured = currentSessionID != nil &&
+                (observation.resolvedInSessionID == currentSessionID || canRetakeObservation(observation))
+            return (
+                observation: observation,
+                order: ChecklistDisplayOrder(
+                    state: captured ? 1 : 0,
+                    building: observation.building ?? "",
+                    elevation: CanonicalElevation.normalize(observation.targetElevation) ?? "",
+                    detail: observation.detailType ?? "",
+                    angle: max(1, angleIndexByIssueID[observation.id] ?? 1),
+                    originalIndex: index
+                )
+            )
+        }.sorted { $0.order.precedes($1.order) }.map { $0.observation }
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
@@ -1757,7 +1822,7 @@ struct ActiveIssuesSheet: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        List(observations) { observation in
+                        List(orderedObservations) { observation in
                             FlaggedIssueRow(
                                 observation: observation,
                                 currentSessionID: currentSessionID,
