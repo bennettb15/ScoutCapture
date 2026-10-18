@@ -35,6 +35,113 @@ private struct ChecklistDisplayOrder {
     }
 }
 
+private enum ChecklistArea: String, CaseIterable, Identifiable {
+    case all, north, east, south, west, interior
+
+    var id: Self { self }
+
+    var shortLabel: String {
+        switch self {
+        case .all: return "All"
+        case .north: return "N"
+        case .east: return "E"
+        case .south: return "S"
+        case .west: return "W"
+        case .interior: return "Int"
+        }
+    }
+
+    var fullLabel: String {
+        switch self {
+        case .all: return "All areas"
+        case .north: return "North"
+        case .east: return "East"
+        case .south: return "South"
+        case .west: return "West"
+        case .interior: return "Interior"
+        }
+    }
+
+    static func forElevation(_ elevation: String?) -> Self? {
+        let value = (CanonicalElevation.normalize(elevation) ?? elevation ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch value {
+        case "north", "n": return .north
+        case "east", "e": return .east
+        case "south", "s": return .south
+        case "west", "w": return .west
+        case "interior", "inside", "int": return .interior
+        default: return nil
+        }
+    }
+
+    static func saved(for list: String, sessionID: UUID?) -> Self {
+        guard let sessionID else { return .all }
+        let key = "ScoutCapture.checklistArea.\(list).\(sessionID.uuidString)"
+        return Self(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .all
+    }
+
+    func save(for list: String, sessionID: UUID?) {
+        guard let sessionID else { return }
+        let key = "ScoutCapture.checklistArea.\(list).\(sessionID.uuidString)"
+        if self == .all {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else {
+            UserDefaults.standard.set(rawValue, forKey: key)
+        }
+    }
+}
+
+private struct ChecklistAreaFilter: View {
+    let selection: ChecklistArea
+    let remainingCounts: [ChecklistArea: Int]
+    let onSelect: (ChecklistArea) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(ChecklistArea.allCases) { area in
+                let isSelected = selection == area
+                Button {
+                    onSelect(area)
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Circle()
+                            .fill(isSelected ? Color.blue : Color(uiColor: .tertiarySystemGroupedBackground))
+                            .overlay {
+                                Circle().stroke(isSelected ? Color.blue : Color.primary.opacity(0.22), lineWidth: 1)
+                            }
+                            .overlay {
+                                Text(area.shortLabel)
+                                    .font(.system(size: area == .interior ? 12 : 14, weight: .semibold))
+                                    .foregroundColor(isSelected ? .white : .primary)
+                            }
+                            .frame(width: 40, height: 40)
+
+                        if remainingCounts[area, default: 0] > 0 {
+                            Text("\(remainingCounts[area, default: 0])")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(isSelected ? .blue : .white)
+                                .padding(.horizontal, 4)
+                                .frame(minWidth: 18, minHeight: 18)
+                                .background(isSelected ? Color.white : Color.blue)
+                                .clipShape(Capsule())
+                                .offset(x: 5, y: -5)
+                        }
+                    }
+                    .frame(width: 48, height: 48)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("\(area.fullLabel), \(remainingCounts[area, default: 0]) remaining")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 3)
+        .padding(.bottom, 3)
+    }
+}
+
 struct ChecklistReclassifySheet: View {
     private enum DirectionChoice: String, CaseIterable, Identifiable {
         case interior = "Interior"
@@ -432,6 +539,7 @@ struct GuidedChecklistOverlay: View {
     @State private var inlineToastText: String? = nil
     @State private var inlineToastToken: Int = 0
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var selectedArea: ChecklistArea = .all
 
     private struct GuidedViewerState: Identifiable {
         let id = UUID()
@@ -483,12 +591,28 @@ struct GuidedChecklistOverlay: View {
         }.sorted { $0.order.precedes($1.order) }
     }
 
+    private func guidedRemainingCounts(in rows: [OrderedGuidedShot]) -> [ChecklistArea: Int] {
+        var counts: [ChecklistArea: Int] = [:]
+        for row in rows where row.order.state == 0 {
+            counts[.all, default: 0] += 1
+            if let area = ChecklistArea.forElevation(row.shot.targetElevation) {
+                counts[area, default: 0] += 1
+            }
+        }
+        return counts
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
             let contentW = isLandscape ? h : w
             let contentH = isLandscape ? w : h
+            let orderedShots = orderedGuidedShots
+            let visibleShots = selectedArea == .all ? orderedShots : orderedShots.filter {
+                ChecklistArea.forElevation($0.shot.targetElevation) == selectedArea
+            }
+            let remainingCounts = guidedRemainingCounts(in: orderedShots)
 
             NavigationStack {
                 ZStack {
@@ -496,8 +620,13 @@ struct GuidedChecklistOverlay: View {
                         .ignoresSafeArea()
 
                     List {
-                        Section {
-                            ForEach(orderedGuidedShots) { ordered in
+                            if visibleShots.isEmpty && !guidedShots.isEmpty {
+                                Text("No photos in this area")
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .listRowBackground(Color.clear)
+                            }
+                            ForEach(visibleShots) { ordered in
                                 let item = ordered.shot
                                 GuidedChecklistRow(
                                     guidedShot: item,
@@ -538,16 +667,16 @@ struct GuidedChecklistOverlay: View {
                                     compactContextAngle: compactContextAngle
                                 )
                             }
-                        }
-
                     }
                     .listStyle(.insetGrouped)
+                    .contentMargins(.top, 0, for: .scrollContent)
                     .scrollIndicators(.hidden)
                     .scrollContentBackground(.hidden)
                     .background(Color.clear)
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .top, spacing: 0) {
+                    VStack(spacing: 0) {
                     ZStack {
                         Text("Guided Checklist")
                             .font(.system(size: 18, weight: .medium))
@@ -595,6 +724,11 @@ struct GuidedChecklistOverlay: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 14)
                     .padding(.bottom, 4)
+                    ChecklistAreaFilter(selection: selectedArea, remainingCounts: remainingCounts) { area in
+                        selectedArea = area
+                        area.save(for: "guided", sessionID: currentSessionID)
+                    }
+                    }
                 }
                 .sheet(isPresented: $showSkipOtherSheet, onDismiss: {
                     skipOtherText = ""
@@ -772,8 +906,12 @@ struct GuidedChecklistOverlay: View {
             .position(x: w * 0.5, y: h * 0.5)
             .statusBarHidden(isLandscape)
             .onAppear {
+                selectedArea = .saved(for: "guided", sessionID: currentSessionID)
                 UIDevice.current.beginGeneratingDeviceOrientationNotifications()
                 refreshOrientation()
+            }
+            .onChange(of: currentSessionID) { _, newID in
+                selectedArea = .saved(for: "guided", sessionID: newID)
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                 refreshOrientation()
@@ -1735,6 +1873,7 @@ struct ActiveIssuesSheet: View {
     @State private var flaggedViewerState: FlaggedViewerState? = nil
     @State private var inlineToastText: String? = nil
     @State private var inlineToastToken: Int = 0
+    @State private var selectedArea: ChecklistArea = .all
 
     private var theme: ContentView.SheetControlTheme { .forScheme(colorScheme) }
 
@@ -1789,12 +1928,29 @@ struct ActiveIssuesSheet: View {
         }.sorted { $0.order.precedes($1.order) }.map { $0.observation }
     }
 
+    private var issueRemainingCounts: [ChecklistArea: Int] {
+        var counts: [ChecklistArea: Int] = [:]
+        for observation in observations {
+            let captured = currentSessionID != nil &&
+                (observation.resolvedInSessionID == currentSessionID || canRetakeObservation(observation))
+            guard !captured else { continue }
+            counts[.all, default: 0] += 1
+            if let area = ChecklistArea.forElevation(observation.targetElevation) {
+                counts[area, default: 0] += 1
+            }
+        }
+        return counts
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
             let contentW = isLandscape ? h : w
             let contentH = isLandscape ? w : h
+            let visibleIssues = mode == .activeIssues && selectedArea != .all
+                ? orderedObservations.filter { ChecklistArea.forElevation($0.targetElevation) == selectedArea }
+                : orderedObservations
 
             NavigationStack {
                 ZStack {
@@ -1822,7 +1978,14 @@ struct ActiveIssuesSheet: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        List(orderedObservations) { observation in
+                        List {
+                            if visibleIssues.isEmpty {
+                                Text("No issues in this area")
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .listRowBackground(Color.clear)
+                            }
+                            ForEach(visibleIssues) { observation in
                             FlaggedIssueRow(
                                 observation: observation,
                                 currentSessionID: currentSessionID,
@@ -1868,8 +2031,10 @@ struct ActiveIssuesSheet: View {
                                     portalNotesTargetObservation = observation
                                 }
                             )
+                            }
                         }
                         .listStyle(.insetGrouped)
+                        .contentMargins(.top, 0, for: .scrollContent)
                         .scrollIndicators(.hidden)
                         .scrollContentBackground(.hidden)
                         .background(Color.clear)
@@ -1889,6 +2054,7 @@ struct ActiveIssuesSheet: View {
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .top, spacing: 0) {
+                    VStack(spacing: 0) {
                     ZStack {
                         Text(mode.title)
                             .font(.system(size: 18, weight: .medium))
@@ -1918,6 +2084,13 @@ struct ActiveIssuesSheet: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 14)
                     .padding(.bottom, 4)
+                    if mode == .activeIssues {
+                        ChecklistAreaFilter(selection: selectedArea, remainingCounts: issueRemainingCounts) { area in
+                            selectedArea = area
+                            area.save(for: "flagged", sessionID: currentSessionID)
+                        }
+                    }
+                    }
                 }
                 .sheet(item: $reclassifyTargetObservation) { target in
                     ChecklistReclassifySheet(
@@ -1994,8 +2167,12 @@ struct ActiveIssuesSheet: View {
             .position(x: w * 0.5, y: h * 0.5)
             .statusBarHidden(isLandscape)
             .onAppear {
+                selectedArea = .saved(for: "flagged", sessionID: currentSessionID)
                 UIDevice.current.beginGeneratingDeviceOrientationNotifications()
                 refreshOrientation()
+            }
+            .onChange(of: currentSessionID) { _, newID in
+                selectedArea = .saved(for: "flagged", sessionID: newID)
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                 refreshOrientation()
