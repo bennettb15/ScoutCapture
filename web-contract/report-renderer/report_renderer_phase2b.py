@@ -73,10 +73,8 @@ PRIORITY_LABELS = {
 }
 
 BASE_FOOTER = (
-    "This visual property record provides visual documentation only. It does not "
-    "constitute an inspection, assessment, certification, or determination of "
-    "condition, safety, or compliance. Documentation reflects only what was "
-    "visually captured at the time of the site visit."
+    "This visual record presents captured photos and notes at the documented "
+    "times. SCOUT provides the software used to organize and generate this report."
 )
 PRIORITY_FOOTER = (
     "Priority levels (Critical, High, Medium, Low) are used solely for "
@@ -1163,7 +1161,7 @@ def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_
     index_pages: list[list[dict[str, Any]]] = []
     section_page_ranges: list[dict[str, Any]] = []
     for _ in range(3):
-        start_page = 3 + assumed_index_pages
+        start_page = 2 + assumed_index_pages
         page_cursor = start_page
         lines: list[dict[str, Any]] = []
         section_page_ranges = []
@@ -1204,9 +1202,8 @@ def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_
     cover_entry = next((entry for entry in entries if entry.get("kind") != "skipped" and entry.get("media_path")), None)
     pages = [
         {"number": 1, "kind": "cover", "title": "Visual Property Record", "cover_media_path": cover_entry.get("media_path") if cover_entry else None},
-        {"number": 2, "kind": "scope", "footer_extra": PRIORITY_FOOTER},
     ]
-    page_number = 3
+    page_number = 2
     for lines in index_pages:
         pages.append({"number": page_number, "kind": "index", "supporting_line": None, "lines": lines})
         page_number += 1
@@ -1260,7 +1257,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
     index_pages: list[list[dict[str, Any]]] = []
     section_ranges: list[dict[str, Any]] = []
     for _ in range(3):
-        content_start = 3 + assumed_index_pages
+        content_start = 2 + assumed_index_pages
         cursor = content_start
         lines = []
         section_ranges = []
@@ -1311,9 +1308,8 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             "supporting_line": "Items are grouped by priority level for tracking and visibility only.",
             "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None,
         },
-        {"number": 2, "kind": "scope", "footer_extra": PRIORITY_FOOTER},
     ]
-    number = 3
+    number = 2
     for lines in index_pages:
         pages.append(
             {
@@ -1487,16 +1483,24 @@ def build_comparison_plan(
             entry["current"].get("original_filename") or "",
         )
     )
-    lines = [
-        {"kind": "sectionHeader", "text": "Flagged Items", "page_number": None, "is_flagged": False, "visual_state": "none"}
-    ]
-    for index, entry in enumerate(entries):
-        current = entry["current"]
-        previous = entry["previous"]
-        resolved_suffix = " | Resolved" if current["visual_state"] == "resolved" else ""
-        text = f"{current['caption']} | {current['month_year']} vs {previous['month_year']}{resolved_suffix}"
-        lines.append({"kind": "photoItem", "text": text, "page_number": 4 + index, "is_flagged": True, "visual_state": current["visual_state"]})
-    index_pages = index_page_plans(lines)
+    assumed_index_pages = 1
+    index_pages: list[list[dict[str, Any]]] = []
+    for _ in range(3):
+        first_photo_page = 2 + assumed_index_pages
+        lines = [
+            {"kind": "sectionHeader", "text": "Flagged Items", "page_number": None, "is_flagged": False, "visual_state": "none"}
+        ]
+        for index, entry in enumerate(entries):
+            current = entry["current"]
+            previous = entry["previous"]
+            resolved_suffix = " | Resolved" if current["visual_state"] == "resolved" else ""
+            text = f"{current['caption']} | {current['month_year']} vs {previous['month_year']}{resolved_suffix}"
+            lines.append({"kind": "photoItem", "text": text, "page_number": first_photo_page + index, "is_flagged": True, "visual_state": current["visual_state"]})
+        index_pages = index_page_plans(lines)
+        resolved = max(1, len(index_pages))
+        if resolved == assumed_index_pages:
+            break
+        assumed_index_pages = resolved
     if not index_pages:
         index_pages = [[]]
     cover_entries = [
@@ -1510,9 +1514,8 @@ def build_comparison_plan(
     cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
     pages = [
         {"number": 1, "kind": "cover", "title": "Flagged Comparison Report", "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None},
-        {"number": 2, "kind": "scope", "footer_extra": PRIORITY_FOOTER},
     ]
-    number = 3
+    number = 2
     for page_lines in index_pages:
         pages.append({"number": number, "kind": "index", "supporting_line": None, "lines": page_lines})
         number += 1
@@ -1677,6 +1680,7 @@ def make_plan(
             "session_type": session.get("session_type") or validation.get("session_type") or "full_documentation",
             "sessionType": session.get("sessionType") or validation.get("sessionType") or session.get("session_type") or validation.get("session_type") or "full_documentation",
             "property_name": session.get("property_name"),
+            "org_name": trim(session.get("org_name")),
             "property_address": formatted_address(session),
             "started_at_utc": session.get("started_at_utc"),
             "ended_at_utc": session.get("ended_at_utc"),
@@ -2123,9 +2127,8 @@ def draw_cover(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], wor
         ("Time Window:", session.get("time_window") or "Unknown"),
         ("Report Reference ID:", session.get("report_reference_id") or ""),
         (None, ""),
-        ("Prepared by:", ""),
-        (None, "SCOUT - Visual Documentation Services"),
-        (None, "Clear, time-stamped visual documentation of observable property conditions."),
+        ("Prepared by:", session.get("org_name") or "Organization not provided"),
+        (None, "Generated with SCOUT software"),
         ("Report Date:", session.get("report_date") or ""),
     ]
     if session.get("weather_summary"):
@@ -2161,55 +2164,6 @@ def draw_centered_labeled(c: canvas.Canvas, label: str, value: str, rect: dict[s
         c.setFont(value_font, 11)
         c.drawString(x + text_width(label, label_font, 11) + 4, y, value)
     c.restoreState()
-
-
-def draw_scope(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], logo_png: str | None) -> None:
-    draw_logo(c, logo_png)
-    left = 64
-    y = PAGE_HEIGHT - 126
-    sections = [
-        ("Documentation Scope", [
-            "SCOUT documents observable property features as they appear at the time of service. Deliverables consist of time-stamped photographs and structured notes intended for reference and visual comparison over time.",
-        ]),
-        ("Inclusions", [
-            "• Visual documentation of accessible exterior areas",
-            "• Visual documentation of accessible interior common areas (if applicable)",
-            "• Time-stamped photographs organized by area or elevation",
-        ]),
-        ("Exclusions", [
-            "This report does not include:",
-            "• Inspections, evaluations, or professional assessments",
-            "• Engineering, architectural, or code compliance analysis",
-            "• Testing, probing, monitoring, or measurements",
-            "• Identification of concealed or latent conditions",
-            "• Opinions regarding cause, severity, responsibility, or repair methods",
-            "• Cost estimates, pricing, or scope recommendations",
-        ]),
-        ("Limitations", [
-            "Documentation was limited by accessibility, visibility, weather conditions, lighting, and site conditions present at the time of service.",
-            "Location-based descriptive notes are limited to factual identification of visually observable conditions only.",
-            "This record reflects conditions observed only at the documented date and time. No ongoing monitoring or updates are implied.",
-        ]),
-        ("Use of record", [
-            "This report is intended for documentation and recordkeeping purposes only. It is not suitable for design, construction planning, engineering evaluation, or regulatory compliance.",
-            "Use of this report is limited to the client identified on Page 1 unless otherwise authorized in writing by SCOUT.",
-        ]),
-    ]
-    for title, paragraphs in sections:
-        draw_text(c, title, {"x": left, "y": y, "width": PAGE_WIDTH - 128, "height": 22}, "Helvetica-Bold", 19)
-        y -= 22
-        for paragraph in paragraphs:
-            size = 10.5 if title == "Use of record" else 11
-            lines = wrap_lines(paragraph, "Helvetica", size, PAGE_WIDTH - 128)
-            c.saveState()
-            c.setFont("Helvetica", size)
-            c.setFillColor(black)
-            for line in lines:
-                c.drawString(left, y, line)
-                y -= size * 1.25
-            c.restoreState()
-        y -= 14
-    draw_footer(c, page["number"], plan["session"]["property_address"], page.get("footer_extra"))
 
 
 def draw_index(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], logo_png: str | None) -> None:
@@ -2325,8 +2279,6 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
         kind = page["kind"]
         if kind == "cover":
             draw_cover(c, plan, page, work_dir, warnings, logo_asset)
-        elif kind == "scope":
-            draw_scope(c, plan, page, logo_asset)
         elif kind == "index":
             draw_index(c, plan, page, logo_asset)
         elif kind == "photo":
