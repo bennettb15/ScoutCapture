@@ -46,6 +46,7 @@ def validation(path: Path, previous_mode: str) -> None:
         "inputs": {
             "session": {
                 "session_id": "current-session",
+                "org_name": "Example Property Group",
                 "property_name": "Prior Date Fixture",
                 "property_street": "1 Fixture Way",
                 "property_city": "Raleigh",
@@ -179,7 +180,15 @@ current_caption_rect = no_previous_page["slots"][0]["caption_rect"]
 assert placeholder_frame["y"] + placeholder_frame["height"] <= current_caption_rect["y"]
 
 pdf = next((root / "with_date" / "comparison").glob("*.pdf"))
-text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf)).pages)
+pdf_pages = PdfReader(str(pdf)).pages
+assert len(pdf_pages) == 3
+text = "\n".join(page.extract_text() or "" for page in pdf_pages)
+normalized_text = " ".join(text.split())
+assert "Prepared by: Example Property Group" in normalized_text
+assert "Generated with SCOUT software" in normalized_text
+assert "SCOUT provides the software used to organize and generate this report." in normalized_text
+assert "Documentation Scope" not in text
+assert "does not constitute an inspection" not in text
 assert "Previous Session: August 18, 2026" in text
 assert "Previous Session: Unknown" not in text
 no_previous_pdf = next((root / "no_previous" / "comparison").glob("*.pdf"))
