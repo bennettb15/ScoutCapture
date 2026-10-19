@@ -130,6 +130,37 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
+    def test_customer_report_plans_omit_scope_and_keep_index_page_numbers(self) -> None:
+        payload = validation()
+        payload["inputs"]["session"]["org_name"] = "Example Property Group"
+        for builder in (
+            renderer.build_property_plan,
+            renderer.build_priority_plan,
+            renderer.build_comparison_plan,
+        ):
+            with self.subTest(report=builder.__name__):
+                plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
+                pages = plan["pages"]
+                self.assertEqual("Example Property Group", plan["session"]["org_name"])
+                self.assertEqual("cover", pages[0]["kind"])
+                self.assertEqual("index", pages[1]["kind"])
+                self.assertNotIn("scope", [page["kind"] for page in pages])
+                self.assertEqual(list(range(1, len(pages) + 1)), [page["number"] for page in pages])
+                photo_numbers = {
+                    page["number"]
+                    for page in pages
+                    if page["kind"] in ("photo", "priority_photo", "comparison_photo")
+                }
+                index_references = {
+                    line["page_number"]
+                    for page in pages
+                    if page["kind"] == "index"
+                    for line in page["lines"]
+                    if line["kind"] == "photoItem"
+                }
+                self.assertTrue(index_references)
+                self.assertTrue(index_references <= photo_numbers)
+
     def test_actor_email_from_snapshot_is_not_rendered_in_report_plans(self) -> None:
         payload = validation()
         payload["inputs"]["session"]["capturedByEmail"] = "former@example.com"
