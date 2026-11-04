@@ -6031,6 +6031,7 @@ struct ContentView: View {
 
     private var isElevationHeadingAligned: Bool {
         guard shouldShowElevationAlignmentDot else { return false }
+        guard locationManager.cameraFacingHeadingDegrees != nil else { return false }
         guard let rawHeading = locationManager.headingDegrees else { return false }
         let currentHeading = normalizedHeadingForAlignment(rawHeading)
         guard let ideal = idealFacingHeading(for: CanonicalElevation.normalize(elevation) ?? elevation) else { return false }
@@ -6040,6 +6041,7 @@ struct ContentView: View {
 
     private var liveElevationReference: String? {
         guard locationMode == .exterior,
+              locationManager.cameraFacingHeadingDegrees != nil,
               let rawHeading = locationManager.headingDegrees,
               rawHeading.isFinite else { return nil }
         let currentHeading = normalizedHeadingForAlignment(rawHeading)
@@ -13558,7 +13560,7 @@ extension ContentView {
 
     private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
         guard !isEndingSession else { return }
-        endingSessionProgressTitle = summary.hasCaptures ? "Closing Draft..." : "Closing..."
+        endingSessionProgressTitle = summary.hasCaptures ? "Closing Draft..." : "Exiting"
         isEndingSession = true
         showSessionActionsSheet = false
         DispatchQueue.main.async {

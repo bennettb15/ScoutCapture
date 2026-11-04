@@ -47,6 +47,21 @@ final class LocationPermissionRevocationTests: XCTestCase {
         ))
     }
 
+    func testRearCameraHeadingRejectsFlatPhoneAndAcceptsPortraitAndLandscape() {
+        let north = SIMD3<Double>(0, 0, -1)
+        XCTAssertNil(LocationManager.cameraFacingHeadingDegrees(
+            gravity: SIMD3<Double>(0, -0.2, -0.98),
+            magneticField: north
+        ))
+        for gravity in [SIMD3<Double>(0, -1, 0), SIMD3<Double>(-1, 0, 0)] {
+            let heading = LocationManager.cameraFacingHeadingDegrees(
+                gravity: gravity,
+                magneticField: north
+            )
+            XCTAssertEqual(heading ?? -1, 0, accuracy: 0.01)
+        }
+    }
+
     func testRelaunchAfterRevocationHasNoGPSUntilNewAuthorizedFix() {
         var status: CLAuthorizationStatus = .authorizedWhenInUse
         let delegateManager = CLLocationManager()

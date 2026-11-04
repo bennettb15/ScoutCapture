@@ -14322,7 +14322,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .tint(.white)
-                        Text(didCompleteUpload ? "Closing…" : "Saving draft…")
+                        Text(didCompleteUpload ? "Closing…" : (fastLaneCurrentPhotoCountForDisplay > 0 ? "Saving draft…" : "Exiting"))
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundColor(.white)
                     }
@@ -14985,7 +14985,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneEndingProgressTitle: String {
-        fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Closing..."
+        fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Exiting"
     }
 
     private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
