@@ -779,8 +779,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         )
     }
 
-    func testPunchlistCompletionIgnoresGuidedRemainingWhileFullDocumentationDoesNot() {
-        XCTAssertTrue(
+    func testPunchlistCompletionAllowsPartialVisitsWithNewCapture() {
+        XCTAssertFalse(
             AppState.sessionCanComplete(
                 sessionType: .punchlistVisit,
                 hasBaseline: true,
@@ -815,9 +815,27 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
                 hasBaseline: false,
                 guidedRemainingCount: 0,
                 flaggedRemainingCount: 1,
-                currentSessionCaptureCount: 1
+                currentSessionCaptureCount: 0
             )
         )
+        for remaining in [1, 3, 8] {
+            XCTAssertTrue(
+                AppState.sessionCanComplete(
+                    sessionType: .punchlistVisit,
+                    hasBaseline: true,
+                    guidedRemainingCount: 8,
+                    flaggedRemainingCount: remaining,
+                    currentSessionCaptureCount: 1
+                )
+            )
+            XCTAssertFalse(
+                AppState.sessionCompletionHasOutstandingChecklistItems(
+                    sessionType: .punchlistVisit,
+                    guidedRemainingCount: 8,
+                    flaggedRemainingCount: remaining
+                )
+            )
+        }
 
         XCTAssertFalse(
             AppState.sessionCanComplete(
@@ -839,6 +857,73 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             AppState.sessionCompletionActionTitle(sessionType: .fullDocumentation),
             "Complete Session"
         )
+    }
+
+    func testEmptyPunchlistCannotBeSealedByAnyCompletionPath() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+        fixture.appState.sealCurrentSessionForExportNow()
+        fixture.appState.sealCurrentSessionForExportLater()
+
+        let unchanged = try XCTUnwrap(fixture.appState.currentSession)
+        XCTAssertEqual(unchanged.id, punchlist.id)
+        XCTAssertEqual(unchanged.status, .draft)
+        XCTAssertFalse(unchanged.isSealed)
+    }
+
+    func testPartialPunchlistCompletionPreservesUntouchedIssuePhotosAndStatus() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let priorSessionID = UUID()
+        let historicalAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let untouched = try [Observation.Status.active, .resolutionRequired].map { status in
+            let shot = Shot(
+                id: UUID(),
+                capturedAt: historicalAt,
+                imageLocalIdentifier: "historical-\(status.rawValue).jpg",
+                note: "Original issue photo"
+            )
+            return try fixture.localStore.createObservation(Observation(
+                propertyID: fixture.property.id,
+                sessionID: priorSessionID,
+                createdAt: historicalAt,
+                updatedAt: historicalAt,
+                statement: "Existing condition",
+                status: status,
+                linkedShotID: shot.id,
+                updatedInSessionID: priorSessionID,
+                historyEvents: [
+                    ObservationHistoryEvent(timestamp: historicalAt, sessionID: priorSessionID, kind: .captured, shotID: shot.id)
+                ],
+                shots: [shot]
+            ))
+        }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true, captureKind: "follow_up_capture")
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: punchlist), 1)
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        let after = try fixture.localStore.fetchObservations(propertyID: fixture.property.id)
+        for original in untouched {
+            XCTAssertEqual(after.first(where: { $0.id == original.id }), original)
+        }
+        let completed = try XCTUnwrap(
+            fixture.localStore.fetchSessions(propertyID: fixture.property.id)
+                .first(where: { $0.id == punchlist.id })
+        )
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertTrue(completed.isSealed)
     }
 
     func testGuidedChecklistCanOpenForCompletedRowsWhenRemainingIsZero() {
@@ -867,6 +952,7 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         fixture.appState.selectProperty(id: fixture.property.id)
         _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true, captureKind: "follow_up_capture")
         fixture.appState.completeCurrentSessionWithoutZIP()
 
         let afterPunchlist = try fixture.localStore.fetchGuidedShots(propertyID: fixture.property.id)
