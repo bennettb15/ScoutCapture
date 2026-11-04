@@ -4325,7 +4325,8 @@ struct ContentView: View {
         let newFlaggedReferenceIDs = Set(
             allObservations.compactMap { observation -> UUID? in
                 guard observation.createdAt < currentSession.startedAt else { return nil }
-                if observation.status == .active || observation.updatedInSessionID == currentSession.id || observation.resolvedInSessionID == currentSession.id {
+                if observation.status == .active || observation.status == .resolutionRequired ||
+                    observation.updatedInSessionID == currentSession.id || observation.resolvedInSessionID == currentSession.id {
                     return observation.id
                 }
                 return nil
@@ -5897,14 +5898,14 @@ struct ContentView: View {
             if canSealNow {
                 return nil
             }
+            if isPunchlistVisit && currentSessionCaptureCount == 0 {
+                return "Complete Punchlist is disabled until at least one new photo is captured."
+            }
             if !hasBaseline && currentSessionCaptureCount == 0 {
                 return "Complete Session is disabled until at least one photo is captured."
             }
             if !hasBaseline {
                 return "\(exportActionTitle) is disabled until at least one photo is captured."
-            }
-            if isPunchlistVisit {
-                return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }
@@ -15989,7 +15990,10 @@ extension ContentView {
                                 .foregroundColor(.white)
 
                             VStack(spacing: 8) {
-                                summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
+                                summaryRow(
+                                    title: summary.isPunchlistVisit ? "Prior Items Not Revisited" : "Flagged Remaining",
+                                    value: summary.flaggedRemainingCount
+                                )
                                 if !summary.isPunchlistVisit {
                                     summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
                                 }
@@ -16087,7 +16091,7 @@ extension ContentView {
                 return "\(summary.exportActionTitle) is disabled until at least one photo is captured."
             }
             if summary.isPunchlistVisit {
-                return "Complete Punchlist is disabled until all active and resolution required items are complete."
+                return "Complete Punchlist is disabled until at least one new photo is captured."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }
