@@ -14779,6 +14779,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             profileSystemImage: profile == .residential ? "house.fill" : "building.2.fill",
             profileAccentColor: accent,
             isProfileLocked: isFastLaneCaptureProfileLocked,
+            liveElevationReference: fastLaneLiveElevationReference,
             propertyName: propertyName,
             cloudStatus: fastLaneChromeCloudStatus,
             showsPunchlistBadge: context.sessionType == .punchlistVisit,
@@ -14850,6 +14851,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         CameraChromeActions(
             onProfileTapped: {
                 toggleFastLaneCaptureProfileIfAllowed()
+            },
+            onElevationReferenceTapped: {
+                guard chromeLocationMode == .exterior,
+                      !isFastLaneCaptureIntentArmed,
+                      let reference = fastLaneLiveElevationReference else { return }
+                let current = fastMetadataContext
+                applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                    captureProfile: current.captureProfile,
+                    locationMode: CameraChromeLocationMode.exterior.rawValue,
+                    building: current.building,
+                    elevation: reference,
+                    detailType: current.detailType,
+                    trade: current.trade,
+                    detailNote: current.detailNote,
+                    priority: current.priority,
+                    angleIndex: current.angleIndex
+                ))
             },
             onEndTapped: {
                 presentFastLaneSessionActionsSheet()
@@ -19049,6 +19067,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return false
         }
         return angularFastLaneDifferenceDegrees(currentHeading, ideal) <= 45
+    }
+
+    private var fastLaneLiveElevationReference: String? {
+        guard chromeLocationMode == .exterior,
+              let currentHeading = locationManager.cameraFacingHeadingDegrees,
+              currentHeading.isFinite else { return nil }
+        return ["North", "East", "South", "West"].min { lhs, rhs in
+            guard let lhsHeading = idealFastLaneFacingHeading(for: lhs),
+                  let rhsHeading = idealFastLaneFacingHeading(for: rhs) else { return false }
+            return angularFastLaneDifferenceDegrees(currentHeading, lhsHeading)
+                < angularFastLaneDifferenceDegrees(currentHeading, rhsHeading)
+        }
     }
 
     private func idealFastLaneFacingHeading(for normalizedElevation: String) -> Double? {

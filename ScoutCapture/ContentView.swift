@@ -6037,6 +6037,19 @@ struct ContentView: View {
         return angularDifferenceDegrees(currentHeading, ideal) <= 45
     }
 
+    private var liveElevationReference: String? {
+        guard locationMode == .exterior,
+              let rawHeading = locationManager.headingDegrees,
+              rawHeading.isFinite else { return nil }
+        let currentHeading = normalizedHeadingForAlignment(rawHeading)
+        return ["North", "East", "South", "West"].min { lhs, rhs in
+            guard let lhsHeading = idealFacingHeading(for: lhs),
+                  let rhsHeading = idealFacingHeading(for: rhs) else { return false }
+            return angularDifferenceDegrees(currentHeading, lhsHeading)
+                < angularDifferenceDegrees(currentHeading, rhsHeading)
+        }
+    }
+
     private func normalizedHeadingForAlignment(_ heading: Double) -> Double {
         // CLLocation heading is based on the device top edge. In landscape UI, compensate
         // so alignment represents the same camera-facing direction as portrait.
@@ -7424,7 +7437,7 @@ struct ContentView: View {
 
             let rowPadding: CGFloat = 16
             let titleFontSize: CGFloat = usesLandscapeChrome ? 36 : 33
-            let titleSideInset: CGFloat = usesLandscapeChrome ? 78 : 70
+            let titleSideInset: CGFloat = 108
 
             VStack(spacing: usesLandscapeChrome ? 0 : 10) {
                 VStack(spacing: 2) {
@@ -7454,9 +7467,12 @@ struct ContentView: View {
                         .padding(.horizontal, titleSideInset)
                         .frame(maxWidth: .infinity, alignment: .center)
 
-                        HStack(spacing: 0) {
+                        HStack(spacing: 2) {
                             profileToggleControl()
                                 .padding(.leading, rowPadding)
+                            if locationMode == .exterior {
+                                liveElevationReferenceControl()
+                            }
                             Spacer(minLength: 0)
                             endSessionControl()
                                 .padding(.trailing, rowPadding)
@@ -7953,6 +7969,28 @@ struct ContentView: View {
         .opacity(isCaptureProfileLocked ? 0.76 : 1.0)
             .rotationEffect(usesLandscapeChrome ? bottomGlyphRotationAngle : .zero)
         .accessibilityLabel(captureProfile == .residential ? "Residential capture mode" : "Commercial capture mode")
+    }
+
+    private func liveElevationReferenceControl() -> some View {
+        let reference = liveElevationReference
+        return Button {
+            guard let reference, !isCaptureTargetArmed else { return }
+            elevation = reference
+            scheduleHudAngleIndexRefresh()
+        } label: {
+            Text(reference == nil ? "–" : Self.shortElevationLabel(reference))
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundColor(reference == nil ? .white.opacity(0.55) : .white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.white.opacity(0.12)))
+                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(reference == nil || isCaptureTargetArmed)
+        .rotationEffect(usesLandscapeChrome ? bottomGlyphRotationAngle : .zero)
+        .accessibilityLabel(reference.map { "Facing \($0) elevation. Tap to select." } ?? "Elevation direction unavailable")
     }
 
     private func detailTypeSelectionBinding() -> Binding<String> {
