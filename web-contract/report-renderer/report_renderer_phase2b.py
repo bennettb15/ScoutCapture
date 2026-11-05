@@ -1021,7 +1021,7 @@ def property_entries(validation: dict[str, Any], lookup: MediaLookup) -> list[di
         media = media_for(lookup, "current", entry.get("shot_id"))
         entry["media"] = media
         entry["media_path"] = trim(media.get("temporary_prepared_path")) if media else None
-        entry["caption"] = caption_identity(entry) + (" | FOLLOW-UP PHOTO" if entry.get("follow_up_photo") else "")
+        entry["caption"] = caption_identity(entry)
         entry["visual_state"] = visual_state(entry)
         entry["captured_at_display"] = " " if kind == "skipped" else (display_datetime(entry.get("captured_at_utc")) or "Unknown")
         entry["slot_key"] = slot_key(entry)
@@ -1148,7 +1148,6 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "visualState",
         "media_path",
         "original_filename",
-        "follow_up_photo",
         "suppress_session_label",
     ]
     return {key: entry.get(key) for key in keys if key in entry}
