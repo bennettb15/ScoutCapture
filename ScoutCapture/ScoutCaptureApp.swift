@@ -20101,13 +20101,9 @@ private struct FastLaneCaptureCellBackground: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(Color.black.opacity(isCaptured ? 0.65 : idleBlackOpacity))
-            .overlay {
-                if isCaptured {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.green.opacity(0.40))
-                }
-            }
+            .fill(isCaptured
+                ? Color(red: 0.04, green: 0.42, blue: 0.14).opacity(0.88)
+                : Color.black.opacity(idleBlackOpacity))
     }
 }
 
@@ -20266,7 +20262,7 @@ private struct FastLaneIssueListRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(isHandledInCurrentSession ? Color.green.opacity(0.75) : Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(isHandledInCurrentSession ? Color.green.opacity(0.90) : Color.white.opacity(0.12), lineWidth: isHandledInCurrentSession ? 1.5 : 1)
         )
         .opacity(observation.status == .resolved && !isHandledInCurrentSession ? 0.70 : 1.0)
         .contentShape(Rectangle())
@@ -20578,7 +20574,7 @@ private struct FastLaneGuidedChecklistRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isCaptured ? Color.green.opacity(0.75) : Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(isCaptured ? Color.green.opacity(0.90) : Color.white.opacity(0.12), lineWidth: isCaptured ? 1.5 : 1)
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
