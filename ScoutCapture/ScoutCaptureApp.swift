@@ -16984,6 +16984,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             !didRefreshFastLaneSideControlCounts {
             fastLaneSideControlSheetMode = .guided
             isLoadingFastLaneSideControlSheet = false
+            didCheckFastLaneGuidedPanelMedia = false
             scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
         } else {
             showFastLaneSideControlToast("No guided photos")
@@ -17192,10 +17193,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func refreshFastLaneSideControlMediaMaps(for payload: AppState.FastRuntimePreviewSideControlPayload) {
         let guidedRows = payload.guidedShots + payload.retiredGuidedShots
+        let previousGuidedThumbnailPathByID = fastLaneGuidedThumbnailPathByID
         let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
         let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
         fastLaneGuidedThumbnailPathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
-            if let path = fastLaneGuidedDisplayImagePath(for: guidedShot) {
+            if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
+                ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
                 partial[guidedShot.id] = path
             }
         }
@@ -17350,6 +17353,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 didStart = await appState.ensureGuidedHistoricalMediaAvailableForRequests(pending)
             case .flagged:
                 didStart = await appState.ensureFlaggedHistoricalMediaAvailableForRequests(pending)
+            }
+            await MainActor.run {
+                for request in pending {
+                    fastLaneMediaHydrationAttemptedKeys.remove(fastLaneHydrationKey(for: request))
+                }
             }
             guard didStart else { return }
             let payload = appState.fastRuntimePreviewSideControlPayload(

@@ -1446,6 +1446,7 @@ struct GuidedChecklistRow: View {
     @State private var thumbnail: UIImage? = nil
     @State private var loadedID: String = ""
     @State private var isThumbnailLoading: Bool = false
+    @State private var thumbnailLoadToken = UUID()
 
     private var status: RowStatus {
         if isSkippedInCurrentSession { return .skipped }
@@ -1588,6 +1589,9 @@ struct GuidedChecklistRow: View {
         .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
             loadThumbnailIfNeeded()
         }
+        .onChange(of: referencePath ?? "") { _, _ in
+            loadThumbnailIfNeeded()
+        }
         .onChange(of: currentSessionID) { _, _ in
             loadedID = ""
             thumbnail = nil
@@ -1597,8 +1601,6 @@ struct GuidedChecklistRow: View {
             loadThumbnailIfNeeded()
         }
         .onChange(of: refreshToken) { _, _ in
-            loadedID = ""
-            thumbnail = nil
             loadThumbnailIfNeeded()
         }
     }
@@ -1721,12 +1723,22 @@ struct GuidedChecklistRow: View {
         let chosenPath = thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sourceID = "chosen:\(sessionIDText):\(chosenPath)"
         guard sourceID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
+        if sourceID != loadedID {
+            thumbnail = nil
+        }
         loadedID = sourceID
+        let requestToken = UUID()
+        thumbnailLoadToken = requestToken
 
         guard !chosenPath.isEmpty else {
             thumbnail = nil
             isThumbnailLoading = false
             return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            guard self.thumbnailLoadToken == requestToken else { return }
+            self.isThumbnailLoading = false
         }
 
         if let asset = ContentView.reportAsset(fromPath: chosenPath) {
@@ -1740,6 +1752,7 @@ struct GuidedChecklistRow: View {
             isThumbnailLoading = true
             cache.requestThumbnail(for: asset, pixelSize: px) { image in
                 DispatchQueue.main.async {
+                    guard self.thumbnailLoadToken == requestToken else { return }
                     self.thumbnail = image
                     self.isThumbnailLoading = false
                     if image == nil {
@@ -1753,7 +1766,7 @@ struct GuidedChecklistRow: View {
         isThumbnailLoading = true
         DispatchQueue.global(qos: .utility).async {
             ContentView.requestUbiquitousDownloadIfNeeded(path: chosenPath)
-            let maxAttempts = 75
+            let maxAttempts = 25
             for attempt in 0..<maxAttempts {
                 if FileManager.default.fileExists(atPath: chosenPath) { break }
                 if attempt % 5 == 0 {
@@ -1762,7 +1775,7 @@ struct GuidedChecklistRow: View {
                 Thread.sleep(forTimeInterval: 0.20)
             }
             DispatchQueue.main.async {
-                guard self.loadedID == sourceID else { return }
+                guard self.thumbnailLoadToken == requestToken else { return }
                 guard let asset = ContentView.reportAsset(fromPath: chosenPath) else {
                     self.thumbnail = nil
                     self.isThumbnailLoading = false
@@ -1772,6 +1785,7 @@ struct GuidedChecklistRow: View {
                 let px = max(120, 56 * UIScreen.currentScale * 2.0)
                 cache.requestThumbnail(for: asset, pixelSize: px) { image in
                     DispatchQueue.main.async {
+                        guard self.thumbnailLoadToken == requestToken else { return }
                         self.thumbnail = image
                         self.isThumbnailLoading = false
                         if image == nil {

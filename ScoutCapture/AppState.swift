@@ -7813,7 +7813,10 @@ final class AppState: ObservableObject {
         }
     }
     @Published private(set) var fastRuntimeDraftsByPropertyID: [UUID: FastRuntimeDraftSummary] = AppState.loadFastRuntimeDraftIndexFromDisk() {
-        didSet { refreshPropertyRowDraftBadgeCache() }
+        didSet {
+            refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowLockBadgeCache()
+        }
     }
     @Published private(set) var propertyRowDraftCount: Int = 0
     @Published private(set) var propertyRowDraftBadgeByPropertyID: [UUID: Bool] = [:]
@@ -45364,6 +45367,22 @@ final class AppState: ObservableObject {
             nextDrafts[context.propertyID] = summary
             try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
             fastRuntimeDraftsByPropertyID = nextDrafts
+            let canPresentSavedDraft = propertyStatusByPropertyID[context.propertyID].map {
+                Self.savedDraftCanPresentOverPropertyStatus(
+                    record: $0, draftSessionID: context.sessionID,
+                    currentUserID: authenticatedSupabaseUser?.id,
+                    currentDeviceID: currentDeviceIdentifier()
+                )
+            } ?? true
+            if canPresentSavedDraft {
+                locallyLockedPropertyIDs.remove(context.propertyID)
+                updateLocalPropertyStatusPresentationCache(
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    status: .draft,
+                    reason: "fast_runtime_saved_draft"
+                )
+            }
             if let property, let orgID = property.orgId {
                 var payload = propertyAuditPayload(property: property)
                 payload["session_id"] = context.sessionID.uuidString.lowercased()
@@ -51647,6 +51666,17 @@ final class AppState: ObservableObject {
         currentUserID: UUID?,
         currentDeviceID: String
     ) -> PropertyStatusCompareAnswer {
+        if let draft = fastRuntimeDraftBadgeSummary(
+            for: propertyID, currentUserID: currentUserID, currentDeviceID: currentDeviceID
+        ), Self.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: draft.sessionID,
+            currentUserID: currentUserID, currentDeviceID: currentDeviceID
+        ) {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .draft, draftCountIncluded: true,
+                pendingExportCountIncluded: false, entryBlocked: false, deleteEligible: false
+            )
+        }
         let answer = Self.makePropertyStatusCompareAnswer(
             record: record,
             currentUserID: currentUserID,
@@ -51775,6 +51805,24 @@ final class AppState: ObservableObject {
                 sessionHasCaptures(session)
             }
             .sorted { $0.startedAt > $1.startedAt }
+    }
+
+    static func savedDraftCanPresentOverPropertyStatus(
+        record: PropertyStatusRecord,
+        draftSessionID: UUID,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> Bool {
+        guard record.status == .occupied || record.status == .draft,
+              record.activeSessionID == draftSessionID || record.draftSessionID == draftSessionID else {
+            return false
+        }
+        if let ownerDeviceID = record.ownerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !ownerDeviceID.isEmpty {
+            return ownerDeviceID == currentDeviceID &&
+                (record.ownerUserID == nil || record.ownerUserID == currentUserID)
+        }
+        return currentUserID != nil && record.ownerUserID == currentUserID
     }
 
     static func makePropertyStatusCompareAnswer(

@@ -3,6 +3,44 @@ import XCTest
 
 @MainActor
 final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
+    func testSavedLocalDraftWinsOverItsOwnOccupiedStatusButNotAnotherSession() {
+        let userID = UUID()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .occupied,
+            activeSessionID: sessionID, ownerUserID: userID, ownerDeviceID: "this-device"
+        )
+        XCTAssertTrue(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: userID, currentDeviceID: "this-device"
+        ))
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: UUID(),
+            currentUserID: userID, currentDeviceID: "this-device"
+        ))
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: UUID(), currentDeviceID: "this-device"
+        ))
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: userID, currentDeviceID: "another-device"
+        ))
+    }
+
+    func testSavedLocalDraftDoesNotHidePendingExport() {
+        let userID = UUID()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .pendingExport,
+            pendingExportSessionID: sessionID, ownerUserID: userID, ownerDeviceID: "this-device"
+        )
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: userID, currentDeviceID: "this-device"
+        ))
+    }
+
     func testPropertyStatusRecordDecodesOperationalFields() throws {
         let propertyID = UUID()
         let orgID = UUID()
