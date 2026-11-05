@@ -1,6 +1,7 @@
 """On-demand tenant PDFs using the existing report input, media, and renderer."""
 from __future__ import annotations
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import os
@@ -115,7 +116,7 @@ def process_request(args, client, repo, request_id, worker):
     if not rows:
         return
     row = rows[0]
-    claimed = client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.queued'}, {'status':'generating', 'locked_at':worker.safe_iso_now()})
+    claimed = client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.queued'}, {'status':'generating', 'locked_at':worker.safe_iso_now(), 'last_error':None})
     if not claimed:
         return
     root = Path(args.output_dir).resolve() / 'tenant-comparisons' / row['id']
@@ -129,8 +130,7 @@ def process_request(args, client, repo, request_id, worker):
         properties = client.select('properties', {'select':'id', 'id':f'eq.{row["property_id"]}', 'org_id':f'eq.{row["org_id"]}', 'deleted_at':'is.null'})
         if not properties:
             raise ValueError('Property is unavailable.')
-        validations, prepared = [], []
-        for label, package in (('before',before), ('after',after)):
+        def prepare_version(label, package):
             folder = root / label
             folder.mkdir()
             validation_path = folder / 'validation.json'
@@ -172,8 +172,12 @@ def process_request(args, client, repo, request_id, worker):
             media = worker.read_json(media_dir/'prepared_report_media.json')
             if media.get('errors'):
                 raise ValueError('Photo preparation failed.')
-            validations.append(validation)
-            prepared.append(media)
+            return validation, media
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(prepare_version, label, package) for label, package in (('before', before), ('after', after))]
+            results = [future.result() for future in futures]
+        validations = [result[0] for result in results]
+        prepared = [result[1] for result in results]
         renderer = load_renderer(repo)
         plan = build_plan(renderer, *validations, *prepared, renderer.logo_info(None, str(repo/worker.PACKAGED_LOGO_SVG)))
         filename = 'Tenant Comparison Report.pdf'

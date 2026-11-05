@@ -31,9 +31,32 @@ test('tenant dispatch targets the existing workflow on main without triggering a
   assert.match(calls[0].url, /kind=eq.tenant_comparison/);
   const body = JSON.parse(calls[1].options.body);
   assert.equal(body.ref, 'main');
+  assert.equal(calls[1].options.headers['user-agent'], 'scoutcapture-report-package-dispatch');
   assert.deepEqual(body.inputs, { tenant_comparison_request_id: id, trigger_source: 'on_demand_tenant_comparison' });
 });
 test('the original snapshot webhook still requires its existing secret', async () => {
   const response = await handler(new Request('https://example.test', { method: 'POST', body: JSON.stringify({ type: 'INSERT', table: 'session_snapshots' }) }));
   assert.equal(response.status, 401);
+});
+
+test('registered current secret keys work when legacy keys are disabled, and other keys fail closed', async () => {
+  values.SUPABASE_SECRET_KEYS = JSON.stringify({ default: 'sb_secret_current', rotated: 'sb_secret_rotated' });
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls++;
+    if (calls % 2 === 1) {
+      assert.equal(options.headers.apikey, 'sb_secret_rotated');
+      return new Response(JSON.stringify([{ id }]), { status: 200 });
+    }
+    return new Response(null, { status: 204 });
+  };
+  try {
+    assert.equal((await handler(request('test-service'))).status, 401);
+    assert.equal((await handler(request('sb_secret_other_project'))).status, 401);
+    assert.equal((await handler(request('sb_publishable_public'))).status, 401);
+    assert.equal(calls, 0);
+    assert.equal((await handler(request('sb_secret_rotated'))).status, 202);
+    values.SUPABASE_SECRET_KEYS = '{bad json';
+    assert.equal((await handler(request('test-service'))).status, 401);
+  } finally { delete values.SUPABASE_SECRET_KEYS; }
 });

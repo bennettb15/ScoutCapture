@@ -2304,19 +2304,32 @@ def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: di
             draw_text(c, "No photo documented" if not entry or entry.get('kind') != 'photo' else "Image unavailable",
                       {"x": x, "y": 460, "width": width, "height": 18}, size=11, align="center")
             draw_text(c, "in this version", {"x": x, "y": 440, "width": width, "height": 18}, size=11, align="center")
-        draw_wrapped(c, entry.get("caption") or "No matching documented view", {"x": x, "y": 202, "width": width, "height": 46}, size=9)
-        draw_text(c, f"Photo: {entry.get('captured_at_display') or 'Not documented'}", {"x": x, "y": 177, "width": width, "height": 18}, size=9, align="center")
-        if entry.get("flagged_reason"):
-            draw_wrapped(c, entry['flagged_reason'], {"x": x, "y": 124, "width": width, "height": 40}, size=9)
+        caption_lines = wrap_lines(entry.get('caption') or 'No matching documented view', 'Helvetica-Bold', 9, width - 16)
+        reason_lines = wrap_lines(entry.get('flagged_reason') or '', 'Helvetica', 9, width - 16)[:4]
+        panel_top = fitted['y'] - 8
+        panel_height = 26 + len(caption_lines) * 11 + 17 + (len(reason_lines) * 11 + 6 if reason_lines else 0)
+        c.setFillColor(Color(0.97, 0.98, 0.99))
+        c.roundRect(x, panel_top - panel_height, width, panel_height, 6, stroke=0, fill=1)
+        line_y = panel_top - 18
+        for line in caption_lines:
+            draw_text(c, line, {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, 'Helvetica-Bold', 9, align='center')
+            line_y -= 11
+        line_y -= 6
+        draw_text(c, f"Captured: {entry.get('captured_at_display') or 'Not documented'}", {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, size=9, fill=Color(0.3, 0.35, 0.4), align='center')
+        line_y -= 17
+        for line in reason_lines:
+            draw_text(c, line, {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, size=9)
+            line_y -= 11
     if page.get("same_photo"):
         note = "Same photo - no newer documentation."
     elif page.get("matching_basis") == "documented_view":
-        note = "Matched by the documented view; no shared item identity was available."
+        note = "Views matched by location and angle."
     elif page.get("matching_basis") == "unmatched":
         note = "No matching photo is documented in the other selected version."
     else:
-        note = "Photo dates show when each image was captured."
-    draw_text(c, note, {"x": 42, "y": 94, "width": 528, "height": 18}, size=9, align="center")
+        note = None
+    if note:
+        draw_text(c, note, {"x": 42, "y": 106, "width": 528, "height": 18}, size=9, fill=Color(0.3, 0.35, 0.4), align="center")
     draw_footer(c, page['number'], plan['session']['property_address'])
 
 
