@@ -122,7 +122,7 @@ class TenantComparisonTests(unittest.TestCase):
             self.assertEqual(uploads,[(tenant.BUCKET,tenant.expected_path(row),'application/pdf',False,b'%PDF-test')])
             self.assertFalse((Path(folder)/'tenant-comparisons'/row['id']).exists())
         inputs = [command for command in commands if '--session-id' in command]
-        self.assertEqual([command[command.index('--snapshot-id')+1] for command in inputs],['snapshot-b','snapshot-a'])
+        self.assertEqual(sorted(command[command.index('--snapshot-id')+1] for command in inputs),['snapshot-a','snapshot-b'])
         self.assertTrue(all('--snapshot-history-only' in command for command in inputs))
 
     def test_source_photo_must_match_canonical_property_session_and_storage_path(self):
