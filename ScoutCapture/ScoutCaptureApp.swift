@@ -17754,10 +17754,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 VStack(spacing: 10) {
                     switch fastLaneFlaggedDecisionStage {
                     case .primary:
-                        fastLaneFlaggedPopupActionButton(
-                            "Confirm",
-                            fill: Color.blue,
-                            stroke: nil
+                        FastLanePopupActionButton(
+                            title: "Confirm",
+                            role: .primary,
+                            isEnabled: !isApplyingFastLaneFlaggedDecision
                         ) {
                             performFastLaneFlaggedDecision {
                                 applyFastLaneFlaggedUpdateDecision(
@@ -17768,20 +17768,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             }
                         }
 
-                        fastLaneFlaggedPopupActionButton(
-                            "Revise",
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16)
+                        FastLanePopupActionButton(
+                            title: "Revise",
+                            role: .secondary,
+                            isEnabled: !isApplyingFastLaneFlaggedDecision
                         ) {
                             fastLaneFlaggedRevisionText = pending.reason
                             fastLaneFlaggedRevisionPriority = pending.priority
                             fastLaneFlaggedDecisionStage = .reviseObservation
                         }
 
-                        fastLaneFlaggedPopupActionButton(
-                            "Resolve",
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16)
+                        FastLanePopupActionButton(
+                            title: "Resolve",
+                            role: .secondary,
+                            isEnabled: !isApplyingFastLaneFlaggedDecision
                         ) {
                             performFastLaneFlaggedDecision {
                                 applyFastLaneFlaggedResolveDecision(pending)
@@ -17789,11 +17789,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         }
                     case .reviseObservation:
                         let revised = fastLaneFlaggedRevisionText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        fastLaneFlaggedPopupActionButton(
-                            "Update",
-                            fill: Color.blue,
-                            stroke: nil,
-                            isEnabled: !revised.isEmpty
+                        FastLanePopupActionButton(
+                            title: "Update",
+                            role: .primary,
+                            isEnabled: !revised.isEmpty && !isApplyingFastLaneFlaggedDecision
                         ) {
                             performFastLaneFlaggedDecision {
                                 applyFastLaneFlaggedUpdateDecision(
@@ -17804,10 +17803,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             }
                         }
 
-                        fastLaneFlaggedPopupActionButton(
-                            "Back",
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16)
+                        FastLanePopupActionButton(
+                            title: "Back",
+                            role: .secondary,
+                            isEnabled: !isApplyingFastLaneFlaggedDecision
                         ) {
                             fastLaneFlaggedDecisionStage = .primary
                         }
@@ -17826,35 +17825,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .padding(.horizontal, 24)
             .rotationEffect(.degrees(glyphAngleDegrees))
         }
-    }
-
-    @ViewBuilder
-    private func fastLaneFlaggedPopupActionButton(
-        _ title: String,
-        fontSize: CGFloat = 18,
-        fill: Color,
-        stroke: Color?,
-        isEnabled: Bool = true,
-        action: @escaping () -> Void
-    ) -> some View {
-        return Button(action: action) {
-            Text(title)
-                .font(.system(size: fontSize, weight: .semibold))
-                .foregroundColor(.white.opacity(isEnabled ? 1.0 : 0.55))
-                .frame(maxWidth: .infinity, minHeight: 50)
-                .background(fill)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay {
-                    if let stroke {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(stroke.opacity(isEnabled ? 1.0 : 0.55), lineWidth: 1)
-                    }
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .disabled(!isEnabled || isApplyingFastLaneFlaggedDecision)
     }
 
     private var fastLaneFlaggedDecisionTitle: String {
@@ -19649,14 +19619,18 @@ private struct FastLaneSessionActionsSummary: Equatable {
     }
 }
 
-private struct FastLaneSessionActionsSheet: View {
+private struct FastLanePopupActionButton: View {
+    enum Role {
+        case primary
+        case secondary
+        case tertiary
+    }
+
     @Environment(\.colorScheme) private var colorScheme
-    let summary: FastLaneSessionActionsSummary
-    let isEndingSession: Bool
-    let endingTitle: String
-    let onResume: () -> Void
-    let onSaveDraftAndExit: () -> Void
-    let onComplete: () -> Void
+    let title: String
+    let role: Role
+    let isEnabled: Bool
+    let action: () -> Void
 
     private var neutralFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -19669,6 +19643,56 @@ private struct FastLaneSessionActionsSheet: View {
     private var neutralLabel: Color {
         colorScheme == .light ? Color.black.opacity(0.88) : .white
     }
+
+    var body: some View {
+        let fill: Color = {
+            switch role {
+            case .primary: return .blue
+            case .secondary: return neutralFill
+            case .tertiary: return .white
+            }
+        }()
+        let stroke: Color = {
+            switch role {
+            case .primary: return .blue.opacity(0.85)
+            case .secondary: return neutralStroke
+            case .tertiary: return Color.red.opacity(0.30)
+            }
+        }()
+        let label: Color = {
+            switch role {
+            case .primary: return .white
+            case .secondary: return neutralLabel
+            case .tertiary: return .red.opacity(0.88)
+            }
+        }()
+
+        return Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(isEnabled ? label : label.opacity(0.45))
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .background(isEnabled ? fill : fill.opacity(0.45))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
+                )
+        }
+        .opacity(isEnabled ? 1.0 : 0.72)
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+}
+
+private struct FastLaneSessionActionsSheet: View {
+    let summary: FastLaneSessionActionsSummary
+    let isEndingSession: Bool
+    let endingTitle: String
+    let onResume: () -> Void
+    let onSaveDraftAndExit: () -> Void
+    let onComplete: () -> Void
 
     var body: some View {
         GeometryReader { geo in
@@ -19746,19 +19770,19 @@ private struct FastLaneSessionActionsSheet: View {
     @ViewBuilder
     private var actionButtonsStack: some View {
         VStack(spacing: 10) {
-            actionButton(
+            FastLanePopupActionButton(
                 title: "Resume",
                 role: .primary,
                 isEnabled: !isEndingSession,
                 action: onResume
             )
-            actionButton(
+            FastLanePopupActionButton(
                 title: summary.exitActionTitle,
                 role: .secondary,
                 isEnabled: !isEndingSession,
                 action: onSaveDraftAndExit
             )
-            actionButton(
+            FastLanePopupActionButton(
                 title: isEndingSession ? endingTitle : summary.exportActionTitle,
                 role: .tertiary,
                 isEnabled: !isEndingSession && summary.isExportActionEnabled,
@@ -19773,68 +19797,6 @@ private struct FastLaneSessionActionsSheet: View {
                     .padding(.top, 2)
             }
         }
-    }
-
-    private enum ActionRole {
-        case primary
-        case secondary
-        case tertiary
-    }
-
-    @ViewBuilder
-    private func actionButton(
-        title: String,
-        role: ActionRole,
-        isEnabled: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        let fill: Color = {
-            switch role {
-            case .primary:
-                return .blue
-            case .secondary:
-                return neutralFill
-            case .tertiary:
-                return .white
-            }
-        }()
-        let stroke: Color = {
-            switch role {
-            case .primary:
-                return .blue.opacity(0.85)
-            case .secondary:
-                return neutralStroke
-            case .tertiary:
-                return Color.red.opacity(0.30)
-            }
-        }()
-        let label: Color = {
-            switch role {
-            case .primary:
-                return .white
-            case .secondary:
-                return neutralLabel
-            case .tertiary:
-                return .red.opacity(0.88)
-            }
-        }()
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? label : label.opacity(0.45))
-                .frame(maxWidth: .infinity)
-                .frame(height: 46)
-                .background(isEnabled ? fill : fill.opacity(0.45))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
-                )
-        }
-        .opacity(isEnabled ? 1.0 : 0.72)
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
     }
 }
 
