@@ -2111,7 +2111,11 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
         note = f"Updated note: {current}"
         if state == "resolved":
             note = f"Resolved - {note}"
-        draw_note(c, note, {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, state)
+        note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
+        if priority and state != "resolved":
+            draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
+        else:
+            draw_note(c, note, note_rect, state)
         draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if priority:
