@@ -886,6 +886,8 @@ struct SessionHubView: View {
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
     @State private var initialSessionTypePickerProperty: Property? = nil
+    @State private var shouldRecommendInitialOverview = false
+    @State private var showInitialPunchlistConfirmation = false
     @State private var fastLaneOpeningProperty: Property? = nil
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
@@ -3678,7 +3680,7 @@ struct SessionHubView: View {
 
             VStack(spacing: 16) {
                 VStack(spacing: 5) {
-                    Text("Session Type")
+                    Text(showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(headerPrimaryLabel)
 
@@ -3699,28 +3701,85 @@ struct SessionHubView: View {
                 }
 
                 VStack(spacing: 10) {
-                    initialSessionChoiceButton(
-                        title: "Full Documentation",
-                        subtitle: "Complete property walkthrough with guided photos and flags",
-                        systemImage: "camera.metering.matrix",
-                        isEnabled: true,
-                        disabledCaption: nil
-                    ) {
-                        beginInitialFullDocumentationEntry(for: property)
-                    }
-                    initialSessionChoiceButton(
-                        title: "Punchlist Visit",
-                        subtitle: "Flag follow-up visit without guided photos",
-                        systemImage: "checklist",
-                        isEnabled: true,
-                        disabledCaption: nil
-                    ) {
-                        beginInitialPunchlistEntry(for: property)
+                    if showInitialPunchlistConfirmation {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundColor(.red)
+                            Text("Are you sure? Punchlist photos document issues only. Property reports will not have a front Overview cover photo until you take one in Full Documentation and complete and export that session.")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(headerPrimaryLabel)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.red.opacity(colorScheme == .light ? 0.12 : 0.22))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.red.opacity(0.45), lineWidth: 1)
+                        )
+
+                        initialSessionChoiceButton(
+                            title: "Start Full Documentation",
+                            subtitle: "Take a front Overview photo first",
+                            systemImage: "camera.metering.matrix",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialFullDocumentationEntry(for: property)
+                        }
+                        initialSessionChoiceButton(
+                            title: "Continue Punchlist",
+                            subtitle: "Proceed without a front Overview cover photo",
+                            systemImage: "checklist",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+                        }
+                    } else {
+                        if shouldRecommendInitialOverview {
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .foregroundColor(.blue)
+                                Text("For property reports, we recommend starting with a clear front Overview photo in Full Documentation, then completing and exporting that session. Punchlist captures issue photos only, but you can still choose it now.")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(headerPrimaryLabel)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.blue.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+
+                        initialSessionChoiceButton(
+                            title: "Full Documentation",
+                            subtitle: "Complete property walkthrough with guided photos and flags",
+                            systemImage: "camera.metering.matrix",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialFullDocumentationEntry(for: property)
+                        }
+                        initialSessionChoiceButton(
+                            title: "Punchlist Visit",
+                            subtitle: "Issue photos only; no guided Overview photo",
+                            systemImage: "checklist",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialPunchlistEntry(for: property)
+                        }
                     }
                 }
 
                 Button {
-                    dismissInitialSessionTypePicker(for: property)
+                    if showInitialPunchlistConfirmation {
+                        showInitialPunchlistConfirmation = false
+                    } else {
+                        dismissInitialSessionTypePicker(for: property)
+                    }
                 } label: {
                     Text("Back")
                         .font(.system(size: 16, weight: .semibold))
@@ -4112,6 +4171,8 @@ struct SessionHubView: View {
         if !hasDraft {
             isOpeningProperty = false
             fastLaneOpeningProperty = nil
+            shouldRecommendInitialOverview = appState.sessions(for: property.id).isEmpty
+            showInitialPunchlistConfirmation = false
             initialSessionTypePickerProperty = property
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
@@ -4328,6 +4389,8 @@ struct SessionHubView: View {
     private func dismissInitialSessionTypePicker(for property: Property) {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
         initialSessionTypePickerProperty = nil
+        shouldRecommendInitialOverview = false
+        showInitialPunchlistConfirmation = false
         isOpeningProperty = false
         if pressedPropertyID == property.id {
             pressedPropertyID = nil
@@ -4340,7 +4403,12 @@ struct SessionHubView: View {
     }
 
     private func beginInitialPunchlistEntry(for property: Property) {
-        beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+        guard initialSessionTypePickerProperty?.id == property.id else { return }
+        if shouldRecommendInitialOverview {
+            showInitialPunchlistConfirmation = true
+        } else {
+            beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+        }
     }
 
     private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
@@ -4357,6 +4425,8 @@ struct SessionHubView: View {
             guard initialSessionTypePickerProperty?.id == property.id else { return }
             if let block = decision?.block {
                 initialSessionTypePickerProperty = nil
+                shouldRecommendInitialOverview = false
+                showInitialPunchlistConfirmation = false
                 isOpeningProperty = false
                 propertyEntryLockPrompt = PropertyEntryLockPrompt(
                     propertyID: property.id,
@@ -4370,6 +4440,8 @@ struct SessionHubView: View {
             }
 
             initialSessionTypePickerProperty = nil
+            shouldRecommendInitialOverview = false
+            showInitialPunchlistConfirmation = false
             isOpeningProperty = true
             propertyTapToken += 1
             if pressedPropertyID == property.id {
@@ -14063,49 +14135,11 @@ private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
     let priority: String
 }
 
-private enum FastLaneFlaggedDecisionStage: Equatable {
-    case primary
-    case reviseObservation
-}
-
-private enum FastLaneFlaggedSaveAction: Equatable {
-    case confirm
-    case resolve
-    case update
-}
-
-private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
-    let cornerRadius: CGFloat
-    var showsPressedVisual = true
-    var manualPressedVisual = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        let isPressed = manualPressedVisual || (showsPressedVisual && configuration.isPressed)
-
-        configuration.label
-            .scaleEffect(isPressed ? 0.97 : 1.0)
-            .brightness(manualPressedVisual ? -0.20 : (isPressed ? -0.08 : 0))
-            .overlay {
-                if isPressed && !manualPressedVisual {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(Color.white.opacity(0.16))
-                        .allowsHitTesting(false)
-                }
-            }
-            .overlay {
-                if isPressed && !manualPressedVisual {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
-                        .allowsHitTesting(false)
-                }
-            }
-    }
-}
-
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let confirmationHaptic = UIImpactFeedbackGenerator(style: .light)
 
     let context: ActiveCaptureContext
     let propertyName: String
@@ -14211,10 +14245,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneSideControlToastToken: Int = 0
     @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
     @State private var isApplyingFastLaneFlaggedDecision = false
-    @State private var highlightedFastLaneFlaggedSaveAction: FastLaneFlaggedSaveAction?
-    @State private var fastLaneFlaggedDecisionStage: FastLaneFlaggedDecisionStage = .primary
-    @State private var fastLaneFlaggedRevisionText: String = ""
-    @State private var fastLaneFlaggedRevisionPriority: String = "Medium"
     @State private var fastLaneRetakeIssueID: UUID?
     @State private var fastLaneRetakeGuidedID: UUID?
     @State private var fastLaneGalleryDisplayCount: Int = 0
@@ -14322,7 +14352,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .tint(.white)
-                        Text(didCompleteUpload ? "Closing…" : "Saving draft…")
+                        Text(didCompleteUpload ? "Closing…" : (fastLaneCurrentPhotoCountForDisplay > 0 ? "Saving draft…" : "Exiting"))
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundColor(.white)
                     }
@@ -14779,6 +14809,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             profileSystemImage: profile == .residential ? "house.fill" : "building.2.fill",
             profileAccentColor: accent,
             isProfileLocked: isFastLaneCaptureProfileLocked,
+            liveElevationReference: fastLaneLiveElevationReference,
             propertyName: propertyName,
             cloudStatus: fastLaneChromeCloudStatus,
             showsPunchlistBadge: context.sessionType == .punchlistVisit,
@@ -14850,6 +14881,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         CameraChromeActions(
             onProfileTapped: {
                 toggleFastLaneCaptureProfileIfAllowed()
+            },
+            onElevationReferenceTapped: {
+                guard chromeLocationMode == .exterior,
+                      !isFastLaneCaptureIntentArmed,
+                      let reference = fastLaneLiveElevationReference else { return }
+                let current = fastMetadataContext
+                applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                    captureProfile: current.captureProfile,
+                    locationMode: CameraChromeLocationMode.exterior.rawValue,
+                    building: current.building,
+                    elevation: reference,
+                    detailType: current.detailType,
+                    trade: current.trade,
+                    detailNote: current.detailNote,
+                    priority: current.priority,
+                    angleIndex: current.angleIndex
+                ))
             },
             onEndTapped: {
                 presentFastLaneSessionActionsSheet()
@@ -14967,7 +15015,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneEndingProgressTitle: String {
-        fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Closing..."
+        fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Exiting"
     }
 
     private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
@@ -15438,6 +15486,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             },
             onSave: { newValue in
                 let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let issueID = fastLaneCaptureIntent.issueID {
+                    guard appState.updateFlagReason(
+                        propertyID: context.propertyID, observationID: issueID,
+                        sessionID: context.sessionID, reason: trimmed
+                    ) else {
+                        showFastLaneSideControlToast("Could not save reason")
+                        return
+                    }
+                    if let updated = updatedFastLaneObservation(issueID: issueID) {
+                        showUpdatedFastLaneObservation(updated)
+                    }
+                }
                 let stagedPriority = fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
                 applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
                     locationMode: fastMetadataContext.locationMode,
@@ -16712,6 +16772,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if fastLaneTrimmedNonEmpty(scoped.currentReason) == nil {
             scoped.currentReason = localObservation.currentReason
         }
+        if localObservation.updatedAt > scoped.updatedAt {
+            scoped.currentReason = localObservation.currentReason ?? scoped.currentReason
+            scoped.previousReason = localObservation.previousReason ?? scoped.previousReason
+            scoped.note = localObservation.note ?? scoped.note
+            scoped.statement = localObservation.statement
+        }
         if fastLaneTrimmedNonEmpty(scoped.note) == nil {
             scoped.note = localObservation.note
         }
@@ -16785,13 +16851,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneGuidedReferencePath(for guidedShot: GuidedShot) -> String? {
-        [
+        let candidates = [
             guidedShot.referenceImagePath,
             guidedShot.referenceImageLocalIdentifier,
             guidedShot.shot?.imageLocalIdentifier
         ]
         .compactMap(fastLaneTrimmedNonEmpty)
-        .first(where: { FileManager.default.fileExists(atPath: $0) })
+        // Keep the historical session/shot identity even when its local file
+        // has been offloaded, so the reference can be fetched again.
+        return candidates.first(where: { fastLaneExistingLocalPath($0) != nil }) ?? candidates.first
     }
 
     private func fastLaneLocalShotRecords() -> [AppState.FastRuntimePrototypeShotRecord] {
@@ -16926,8 +16994,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if !fastLaneSideControlPayload.guidedShots.isEmpty ||
             fastLaneSideControlCounts.guidedRemainingCount > 0 ||
             !didRefreshFastLaneSideControlCounts {
+            refreshFastLaneSideControlMediaMaps(for: fastLaneSideControlPayload)
             fastLaneSideControlSheetMode = .guided
             isLoadingFastLaneSideControlSheet = false
+            didCheckFastLaneGuidedPanelMedia = false
             scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
         } else {
             showFastLaneSideControlToast("No guided photos")
@@ -17136,10 +17206,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func refreshFastLaneSideControlMediaMaps(for payload: AppState.FastRuntimePreviewSideControlPayload) {
         let guidedRows = payload.guidedShots + payload.retiredGuidedShots
+        let previousGuidedThumbnailPathByID = fastLaneGuidedThumbnailPathByID
         let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
         let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
         fastLaneGuidedThumbnailPathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
-            if let path = fastLaneGuidedDisplayImagePath(for: guidedShot) {
+            if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
+                ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
                 partial[guidedShot.id] = path
             }
         }
@@ -17215,7 +17287,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         didCheckFastLaneGuidedPanelMedia = true
         let requests = (fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots)
             .compactMap { guidedShot -> AppState.OperationalMediaHydrationRequest? in
-                guard fastLaneGuidedThumbnailPathByID[guidedShot.id] == nil else { return nil }
+                guard fastLaneExistingLocalPath(fastLaneGuidedThumbnailPathByID[guidedShot.id]) == nil else { return nil }
                 return fastLanePanelHydrationRequest(
                     shotID: guidedShot.shot?.id,
                     storedPath: guidedShot.shot?.imageLocalIdentifier
@@ -17294,6 +17366,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 didStart = await appState.ensureGuidedHistoricalMediaAvailableForRequests(pending)
             case .flagged:
                 didStart = await appState.ensureFlaggedHistoricalMediaAvailableForRequests(pending)
+            }
+            await MainActor.run {
+                for request in pending {
+                    fastLaneMediaHydrationAttemptedKeys.remove(fastLaneHydrationKey(for: request))
+                }
             }
             guard didStart else { return }
             let payload = appState.fastRuntimePreviewSideControlPayload(
@@ -17632,7 +17709,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     .foregroundColor(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
 
-                if fastLaneFlaggedDecisionStage != .reviseObservation, !pending.reason.isEmpty {
+                if !pending.reason.isEmpty {
                     Text(pending.reason)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(.white.opacity(0.95))
@@ -17644,122 +17721,21 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
 
-                if fastLaneFlaggedDecisionStage == .reviseObservation {
-                    TextEditor(text: $fastLaneFlaggedRevisionText)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.white)
-                        .scrollContentBackground(.hidden)
-                        .padding(10)
-                        .frame(minHeight: 112, maxHeight: 132)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                        )
-
-                    HStack(spacing: 10) {
-                        Text("Priority")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Menu {
-                            ForEach(Self.priorityOptions, id: \.self) { option in
-                                Button(option) {
-                                    fastLaneFlaggedRevisionPriority = option
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                let normalizedPriority = normalizedFastLaneDetailPriority(fastLaneFlaggedRevisionPriority)
-                                if !normalizedPriority.isEmpty {
-                                    Circle()
-                                        .fill(fastLaneDetailPriorityColor(normalizedPriority))
-                                        .frame(width: 10, height: 10)
-                                }
-                                Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
-                                    .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.72))
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 42)
-                            .background(Color.white.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
                 VStack(spacing: 10) {
-                    switch fastLaneFlaggedDecisionStage {
-                    case .primary:
-                        fastLaneFlaggedPopupActionButton(
-                            "Confirm",
-                            fill: Color.blue,
-                            stroke: nil,
-                            showsPressedVisual: false,
-                            saveFeedbackAction: .confirm
-                        ) {
-                            performFastLaneFlaggedDecision(.confirm) {
-                                applyFastLaneFlaggedUpdateDecision(
-                                    pending,
-                                    revisedReason: nil,
-                                    revisedPriority: nil
-                                )
-                            }
+                    FastLanePopupActionButton(
+                        title: "Confirm", role: .primary,
+                        isEnabled: !isApplyingFastLaneFlaggedDecision
+                    ) {
+                        performFastLaneFlaggedDecision {
+                            applyFastLaneFlaggedUpdateDecision(pending)
                         }
-
-                        fastLaneFlaggedPopupActionButton(
-                            "Revise",
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16)
-                        ) {
-                            fastLaneFlaggedRevisionText = pending.reason
-                            fastLaneFlaggedRevisionPriority = pending.priority
-                            fastLaneFlaggedDecisionStage = .reviseObservation
-                        }
-
-                        fastLaneFlaggedPopupActionButton(
-                            "Resolve",
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16),
-                            showsPressedVisual: false,
-                            saveFeedbackAction: .resolve
-                        ) {
-                            performFastLaneFlaggedDecision(.resolve) {
-                                applyFastLaneFlaggedResolveDecision(pending)
-                            }
-                        }
-                    case .reviseObservation:
-                        let revised = fastLaneFlaggedRevisionText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        fastLaneFlaggedPopupActionButton(
-                            "Update",
-                            fill: Color.blue,
-                            stroke: nil,
-                            isEnabled: !revised.isEmpty,
-                            showsPressedVisual: false,
-                            saveFeedbackAction: .update
-                        ) {
-                            performFastLaneFlaggedDecision(.update) {
-                                applyFastLaneFlaggedUpdateDecision(
-                                    pending,
-                                    revisedReason: revised,
-                                    revisedPriority: fastLaneFlaggedRevisionPriority
-                                )
-                            }
-                        }
-
-                        fastLaneFlaggedPopupActionButton(
-                            "Back",
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16)
-                        ) {
-                            fastLaneFlaggedDecisionStage = .primary
+                    }
+                    FastLanePopupActionButton(
+                        title: "Resolve", role: .secondary,
+                        isEnabled: !isApplyingFastLaneFlaggedDecision
+                    ) {
+                        performFastLaneFlaggedDecision {
+                            applyFastLaneFlaggedResolveDecision(pending)
                         }
                     }
                 }
@@ -17778,59 +17754,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
-    @ViewBuilder
-    private func fastLaneFlaggedPopupActionButton(
-        _ title: String,
-        fontSize: CGFloat = 18,
-        fill: Color,
-        stroke: Color?,
-        isEnabled: Bool = true,
-        showsPressedVisual: Bool = true,
-        saveFeedbackAction: FastLaneFlaggedSaveAction? = nil,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: fontSize, weight: .semibold))
-                .foregroundColor(.white.opacity(isEnabled ? 1.0 : 0.55))
-                .frame(maxWidth: .infinity, minHeight: 50)
-                .background(fill)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay {
-                    if let stroke {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(stroke.opacity(isEnabled ? 1.0 : 0.55), lineWidth: 1)
-                    }
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-        .buttonStyle(FastLanePostCaptureActionButtonStyle(
-            cornerRadius: 14,
-            showsPressedVisual: showsPressedVisual,
-            manualPressedVisual: saveFeedbackAction != nil &&
-                saveFeedbackAction == highlightedFastLaneFlaggedSaveAction
-        ))
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .disabled(!isEnabled)
-    }
+    private var fastLaneFlaggedDecisionTitle: String { "Flagged Capture" }
 
-    private var fastLaneFlaggedDecisionTitle: String {
-        switch fastLaneFlaggedDecisionStage {
-        case .primary:
-            return "Flagged Capture"
-        case .reviseObservation:
-            return "Update Observation"
-        }
-    }
-
-    private var fastLaneFlaggedDecisionMessage: String {
-        switch fastLaneFlaggedDecisionStage {
-        case .primary:
-            return "Confirm this capture, revise the observation, or resolve it?"
-        case .reviseObservation:
-            return "Update the reason and priority for this observation."
-        }
-    }
+    private var fastLaneFlaggedDecisionMessage: String { "Confirm this capture or resolve the issue?" }
 
     private func presentFastLaneFlaggedDecision(issueID: UUID, shotID: UUID) {
         let observation = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
@@ -17840,17 +17766,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let reason = observation.map(fastLaneObservationReasonText) ?? "Flagged issue"
         let priority = normalizedFastLaneDetailPriority(observation?.priority)
         let displayPriority = priority.isEmpty ? "Medium" : priority
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = displayPriority
         isApplyingFastLaneFlaggedDecision = false
-        highlightedFastLaneFlaggedSaveAction = nil
         fastLanePendingFlaggedDecision = FastLanePendingFlaggedDecision(
             issueID: issueID,
             shotID: shotID,
             reason: reason,
             priority: displayPriority
         )
+        confirmationHaptic.prepare()
     }
 
     private func fastLaneObservationReasonText(_ observation: Observation) -> String {
@@ -17863,20 +17786,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         ?? observation.statement
     }
 
-    private func performFastLaneFlaggedDecision(
-        _ button: FastLaneFlaggedSaveAction,
-        action: @escaping () -> Void
-    ) {
+    private func performFastLaneFlaggedDecision(action: () -> Void) {
         guard !isApplyingFastLaneFlaggedDecision else { return }
+        confirmationHaptic.impactOccurred()
+        confirmationHaptic.prepare()
         isApplyingFastLaneFlaggedDecision = true
-        highlightedFastLaneFlaggedSaveAction = button
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-            highlightedFastLaneFlaggedSaveAction = nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                action()
-                isApplyingFastLaneFlaggedDecision = false
-            }
-        }
+        action()
+        isApplyingFastLaneFlaggedDecision = false
     }
 
     private func updatedFastLaneObservation(issueID: UUID) -> Observation? {
@@ -17903,23 +17819,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func applyFastLaneFlaggedUpdateDecision(
-        _ pending: FastLanePendingFlaggedDecision,
-        revisedReason: String?,
-        revisedPriority: String?
+        _ pending: FastLanePendingFlaggedDecision
     ) {
         guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
         let didUpdate = appState.fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             observationID: pending.issueID,
-            shotID: pending.shotID,
-            revisedReason: revisedReason,
-            revisedPriority: revisedPriority
+            shotID: pending.shotID
         )
         fastLanePendingFlaggedDecision = nil
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = "Medium"
         let observation = didUpdate ? updatedFastLaneObservation(issueID: pending.issueID) : nil
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
@@ -17943,9 +17852,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             shotID: pending.shotID
         )
         fastLanePendingFlaggedDecision = nil
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = "Medium"
         let observation = didResolve ? updatedFastLaneObservation(issueID: pending.issueID) : nil
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
@@ -19056,6 +18962,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         return angularFastLaneDifferenceDegrees(currentHeading, ideal) <= 45
     }
 
+    private var fastLaneLiveElevationReference: String? {
+        guard chromeLocationMode == .exterior,
+              let currentHeading = locationManager.cameraFacingHeadingDegrees,
+              currentHeading.isFinite else { return nil }
+        return ["North", "East", "South", "West"].min { lhs, rhs in
+            guard let lhsHeading = idealFastLaneFacingHeading(for: lhs),
+                  let rhsHeading = idealFastLaneFacingHeading(for: rhs) else { return false }
+            return angularFastLaneDifferenceDegrees(currentHeading, lhsHeading)
+                < angularFastLaneDifferenceDegrees(currentHeading, rhsHeading)
+        }
+    }
+
     private func idealFastLaneFacingHeading(for normalizedElevation: String) -> Double? {
         switch normalizedElevation {
         case "North":
@@ -19117,9 +19035,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneExitIntentActive = true
         isClosing = true
         fastLanePendingFlaggedDecision = nil
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = "Medium"
         fastLaneRetakeGuidedID = nil
         fastLaneRetakeIssueID = nil
         releaseStartedAt = Date()
@@ -19601,14 +19516,18 @@ private struct FastLaneSessionActionsSummary: Equatable {
     }
 }
 
-private struct FastLaneSessionActionsSheet: View {
+private struct FastLanePopupActionButton: View {
+    enum Role {
+        case primary
+        case secondary
+        case tertiary
+    }
+
     @Environment(\.colorScheme) private var colorScheme
-    let summary: FastLaneSessionActionsSummary
-    let isEndingSession: Bool
-    let endingTitle: String
-    let onResume: () -> Void
-    let onSaveDraftAndExit: () -> Void
-    let onComplete: () -> Void
+    let title: String
+    let role: Role
+    let isEnabled: Bool
+    let action: () -> Void
 
     private var neutralFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -19621,6 +19540,56 @@ private struct FastLaneSessionActionsSheet: View {
     private var neutralLabel: Color {
         colorScheme == .light ? Color.black.opacity(0.88) : .white
     }
+
+    var body: some View {
+        let fill: Color = {
+            switch role {
+            case .primary: return .blue
+            case .secondary: return neutralFill
+            case .tertiary: return .white
+            }
+        }()
+        let stroke: Color = {
+            switch role {
+            case .primary: return .blue.opacity(0.85)
+            case .secondary: return neutralStroke
+            case .tertiary: return Color.red.opacity(0.30)
+            }
+        }()
+        let label: Color = {
+            switch role {
+            case .primary: return .white
+            case .secondary: return neutralLabel
+            case .tertiary: return .red.opacity(0.88)
+            }
+        }()
+
+        return Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(isEnabled ? label : label.opacity(0.45))
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .background(isEnabled ? fill : fill.opacity(0.45))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
+                )
+        }
+        .opacity(isEnabled ? 1.0 : 0.72)
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+}
+
+private struct FastLaneSessionActionsSheet: View {
+    let summary: FastLaneSessionActionsSummary
+    let isEndingSession: Bool
+    let endingTitle: String
+    let onResume: () -> Void
+    let onSaveDraftAndExit: () -> Void
+    let onComplete: () -> Void
 
     var body: some View {
         GeometryReader { geo in
@@ -19698,19 +19667,19 @@ private struct FastLaneSessionActionsSheet: View {
     @ViewBuilder
     private var actionButtonsStack: some View {
         VStack(spacing: 10) {
-            actionButton(
+            FastLanePopupActionButton(
                 title: "Resume",
                 role: .primary,
                 isEnabled: !isEndingSession,
                 action: onResume
             )
-            actionButton(
+            FastLanePopupActionButton(
                 title: summary.exitActionTitle,
                 role: .secondary,
                 isEnabled: !isEndingSession,
                 action: onSaveDraftAndExit
             )
-            actionButton(
+            FastLanePopupActionButton(
                 title: isEndingSession ? endingTitle : summary.exportActionTitle,
                 role: .tertiary,
                 isEnabled: !isEndingSession && summary.isExportActionEnabled,
@@ -19725,68 +19694,6 @@ private struct FastLaneSessionActionsSheet: View {
                     .padding(.top, 2)
             }
         }
-    }
-
-    private enum ActionRole {
-        case primary
-        case secondary
-        case tertiary
-    }
-
-    @ViewBuilder
-    private func actionButton(
-        title: String,
-        role: ActionRole,
-        isEnabled: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        let fill: Color = {
-            switch role {
-            case .primary:
-                return .blue
-            case .secondary:
-                return neutralFill
-            case .tertiary:
-                return .white
-            }
-        }()
-        let stroke: Color = {
-            switch role {
-            case .primary:
-                return .blue.opacity(0.85)
-            case .secondary:
-                return neutralStroke
-            case .tertiary:
-                return Color.red.opacity(0.30)
-            }
-        }()
-        let label: Color = {
-            switch role {
-            case .primary:
-                return .white
-            case .secondary:
-                return neutralLabel
-            case .tertiary:
-                return .red.opacity(0.88)
-            }
-        }()
-
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(isEnabled ? label : label.opacity(0.45))
-                .frame(maxWidth: .infinity)
-                .frame(height: 46)
-                .background(isEnabled ? fill : fill.opacity(0.45))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
-                )
-        }
-        .opacity(isEnabled ? 1.0 : 0.72)
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
     }
 }
 
@@ -20085,6 +19992,18 @@ private struct FastLanePanelThumbnail: View {
     }
 }
 
+private struct FastLaneCaptureCellBackground: View {
+    let isCaptured: Bool
+    let idleBlackOpacity: Double
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(isCaptured
+                ? Color(red: 0.04, green: 0.42, blue: 0.14).opacity(0.88)
+                : Color.black.opacity(idleBlackOpacity))
+    }
+}
+
 private struct FastLaneIssueListRow: View {
     let observation: Observation
     let mode: FastLaneIssueListSheet.Mode
@@ -20141,6 +20060,7 @@ private struct FastLaneIssueListRow: View {
     }
 
     private var statusColor: Color {
+        if isHandledInCurrentSession { return .white }
         switch observation.status {
         case .resolutionRequired, .resolved:
             return .green
@@ -20183,7 +20103,7 @@ private struct FastLaneIssueListRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(observation.status == .resolved ? .secondary : .primary)
+                    .foregroundColor(isHandledInCurrentSession ? .white : (observation.status == .resolved ? .secondary : .primary))
                     .lineLimit(1)
 
                 if !statusLabel.isEmpty {
@@ -20217,13 +20137,13 @@ private struct FastLaneIssueListRow: View {
                 }
 
                 Text("\(Text("Reason: ").font(.system(size: 12, weight: .semibold)))\(Text(reasonText).font(.system(size: 12, weight: .regular)))")
-                    .foregroundColor(.white.opacity(0.86))
+                    .foregroundColor(.white.opacity(isHandledInCurrentSession ? 1.0 : 0.86))
                     .lineLimit(2)
 
                 if let supportingReasonText {
                     Text(supportingReasonText)
                         .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.white.opacity(0.66))
+                        .foregroundColor(.white.opacity(isHandledInCurrentSession ? 0.86 : 0.66))
                         .lineLimit(1)
                 }
             }
@@ -20232,13 +20152,16 @@ private struct FastLaneIssueListRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.35))
+        .background(FastLaneCaptureCellBackground(
+            isCaptured: isHandledInCurrentSession,
+            idleBlackOpacity: 0.35
+        ))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(isHandledInCurrentSession ? Color.green.opacity(0.90) : Color.white.opacity(0.12), lineWidth: isHandledInCurrentSession ? 1.5 : 1)
         )
-        .opacity(observation.status == .resolved ? 0.70 : 1.0)
+        .opacity(observation.status == .resolved && !isHandledInCurrentSession ? 0.70 : 1.0)
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
@@ -20472,10 +20395,14 @@ private struct FastLaneGuidedChecklistRow: View {
         return "Pending"
     }
 
+    private var isCaptured: Bool {
+        statusLabel == "Captured"
+    }
+
     private var statusColor: Color {
         switch statusLabel {
         case "Captured":
-            return .green
+            return .white
         case "Skipped", "Retired":
             return .gray
         default:
@@ -20505,7 +20432,7 @@ private struct FastLaneGuidedChecklistRow: View {
             }
             .buttonStyle(.borderless)
             .overlay(alignment: .topTrailing) {
-                if statusLabel == "Captured" {
+                if isCaptured {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.white)
@@ -20517,7 +20444,7 @@ private struct FastLaneGuidedChecklistRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.primary)
+                    .foregroundColor(isCaptured ? .white : .primary)
                     .lineLimit(1)
 
                 Text(statusLabel)
@@ -20527,7 +20454,7 @@ private struct FastLaneGuidedChecklistRow: View {
                 if let detailLine {
                     Text(detailLine)
                         .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.white.opacity(0.66))
+                        .foregroundColor(.white.opacity(isCaptured ? 0.86 : 0.66))
                         .lineLimit(1)
                 }
             }
@@ -20537,11 +20464,14 @@ private struct FastLaneGuidedChecklistRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.55))
+        .background(FastLaneCaptureCellBackground(
+            isCaptured: isCaptured,
+            idleBlackOpacity: 0.55
+        ))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(isCaptured ? Color.green.opacity(0.90) : Color.white.opacity(0.12), lineWidth: isCaptured ? 1.5 : 1)
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)

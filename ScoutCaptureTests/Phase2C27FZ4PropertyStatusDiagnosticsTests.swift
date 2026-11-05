@@ -3,6 +3,162 @@ import XCTest
 
 @MainActor
 final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
+    func testReasonAdjustmentPreservesEveryIssueStatusAndPhotoProvenance() {
+        for status: Observation.Status in [.active, .pendingReview, .resolved, .resolutionRequired] {
+            let photo = Shot(id: UUID(), capturedAt: Date(), imageLocalIdentifier: "original.jpg", note: "Original wording")
+            let captureSession = UUID()
+            var issue = Observation(
+                propertyID: UUID(), sessionID: captureSession, statement: "Original wording",
+                status: status, linkedShotID: photo.id, resolutionPhotoRef: "resolution.jpg",
+                resolutionStatement: "Resolved statement", updatedInSessionID: captureSession,
+                resolvedInSessionID: captureSession, currentReason: "Original wording", shots: [photo]
+            )
+            let identity = issue.id
+            XCTAssertTrue(issue.updateCurrentReason(" Updated wording ", sessionID: UUID()))
+            XCTAssertEqual(issue.id, identity)
+            XCTAssertEqual(issue.status, status)
+            XCTAssertEqual(issue.linkedShotID, photo.id)
+            XCTAssertEqual(issue.updatedInSessionID, captureSession)
+            XCTAssertEqual(issue.resolvedInSessionID, captureSession)
+            XCTAssertEqual(issue.resolutionPhotoRef, "resolution.jpg")
+            XCTAssertEqual(issue.resolutionStatement, "Resolved statement")
+            XCTAssertEqual(issue.previousReason, "Original wording")
+            XCTAssertEqual(issue.currentReason, "Updated wording")
+            XCTAssertEqual(issue.shots.first?.note, "Original wording")
+            XCTAssertFalse(issue.historyEvents.contains { $0.field == "status" })
+            XCTAssertFalse(issue.updateCurrentReason("Updated wording", sessionID: UUID()))
+            XCTAssertFalse(issue.updateCurrentReason("  ", sessionID: UUID()))
+            XCTAssertEqual(issue.historyEvents.count, 1)
+            XCTAssertTrue(issue.updateCurrentReason("Final wording", sessionID: UUID()))
+            XCTAssertEqual(issue.previousReason, "Original wording")
+            XCTAssertEqual(issue.shots.first?.note, "Original wording")
+            XCTAssertEqual(issue.status, status)
+        }
+    }
+
+    func testFlagControlsReasonAndFollowUpKeepOriginalMetadataAndIssueIdentity() throws {
+        for captureReason in ["Updated wording", "Original wording"] {
+            let fixture = try makeCutoverFixture()
+            let originalSession = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+            let originalMetadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: originalSession.id)
+            let originalShot = Shot(
+                id: originalMetadata.shots[0].shotID, capturedAt: Date(),
+                imageLocalIdentifier: "original.jpg", note: "Original wording"
+            )
+            var issue = Observation(
+                propertyID: fixture.property.id, sessionID: originalSession.id,
+                statement: "Original wording", status: .active, linkedShotID: originalShot.id,
+                currentReason: "Original wording", shots: [originalShot]
+            )
+            _ = try fixture.localStore.createObservation(issue)
+            _ = try fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                propertyID: fixture.property.id, sessionID: originalSession.id,
+                observation: issue, shotID: originalShot.id, trade: nil, activeCaptureKind: "captured"
+            )
+            let followUpSession = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+            XCTAssertTrue(fixture.appState.updateFlagReason(
+                propertyID: fixture.property.id, observationID: issue.id,
+                sessionID: followUpSession.id, reason: captureReason
+            ))
+            issue = try XCTUnwrap(fixture.localStore.fetchObservations(propertyID: fixture.property.id).first { $0.id == issue.id })
+            XCTAssertEqual(issue.status, .active)
+            XCTAssertEqual(issue.linkedShotID, originalShot.id)
+            let followUpMetadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: followUpSession.id)
+            let followUpShot = Shot(
+                id: followUpMetadata.shots[0].shotID, capturedAt: Date(),
+                imageLocalIdentifier: "followup.jpg", note: issue.currentReason
+            )
+            issue.shots.append(followUpShot)
+            _ = try fixture.localStore.updateObservation(issue)
+            XCTAssertTrue(fixture.appState.fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
+                propertyID: fixture.property.id, sessionID: followUpSession.id,
+                observationID: issue.id, shotID: followUpShot.id
+            ))
+            let confirmed = try XCTUnwrap(fixture.localStore.fetchObservations(propertyID: fixture.property.id).first { $0.id == issue.id })
+            _ = try fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                propertyID: fixture.property.id, sessionID: followUpSession.id,
+                observation: confirmed, shotID: followUpShot.id, trade: nil, activeCaptureKind: "follow_up_capture"
+            )
+            let old = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: originalSession.id)
+            let new = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: followUpSession.id)
+            XCTAssertEqual(old.shots[0].noteText, "Original wording")
+            XCTAssertEqual(new.shots[0].noteText, captureReason)
+            XCTAssertEqual(old.shots[0].issueID, issue.id)
+            XCTAssertEqual(new.shots[0].issueID, issue.id)
+            XCTAssertEqual(confirmed.shots.first { $0.id == originalShot.id }?.note, "Original wording")
+            XCTAssertEqual(confirmed.shots.first { $0.id == followUpShot.id }?.note, captureReason)
+            XCTAssertEqual(confirmed.previousReason, captureReason == "Original wording" ? nil : "Original wording")
+            XCTAssertEqual(confirmed.status, .active)
+        }
+    }
+
+    func testHistoricalDisplayCacheSurvivesUploadedOriginalPruning() throws {
+        let fixture = try makeCutoverFixture()
+        let session = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        var metadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: session.id)
+        metadata.shots[0].storageBucket = "originals"
+        metadata.shots[0].storagePath = "test/draft.jpg"
+        metadata.shots[0].uploadState = "uploaded"
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: session.id, metadata: metadata
+        )
+        let cached = StorageRoot.galleryMediaCacheURL(
+            propertyID: fixture.property.id, sessionID: session.id,
+            shotID: metadata.shots[0].shotID, filename: metadata.shots[0].originalFilename
+        )
+        try FileManager.default.createDirectory(at: cached.deletingLastPathComponent(), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cached.deletingLastPathComponent()) }
+        try Data([1]).write(to: cached)
+
+        let result = fixture.localStore.pruneUploadedSessionMediaAssets(
+            propertyID: fixture.property.id, sessionID: session.id
+        )
+        XCTAssertEqual(result.removedFiles, 1)
+        XCTAssertEqual(try Data(contentsOf: cached), Data([1]))
+        XCTAssertEqual(cached, StorageRoot.galleryMediaCacheURL(
+            propertyID: fixture.property.id, sessionID: session.id,
+            shotID: metadata.shots[0].shotID, filename: "Originals/draft.jpg"
+        ))
+    }
+
+    func testSavedLocalDraftWinsOverItsOwnOccupiedStatusButNotAnotherSession() {
+        let userID = UUID()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .occupied,
+            activeSessionID: sessionID, ownerUserID: userID, ownerDeviceID: "this-device"
+        )
+        XCTAssertTrue(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: userID, currentDeviceID: "this-device"
+        ))
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: UUID(),
+            currentUserID: userID, currentDeviceID: "this-device"
+        ))
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: UUID(), currentDeviceID: "this-device"
+        ))
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: userID, currentDeviceID: "another-device"
+        ))
+    }
+
+    func testSavedLocalDraftDoesNotHidePendingExport() {
+        let userID = UUID()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .pendingExport,
+            pendingExportSessionID: sessionID, ownerUserID: userID, ownerDeviceID: "this-device"
+        )
+        XCTAssertFalse(AppState.savedDraftCanPresentOverPropertyStatus(
+            record: record, draftSessionID: sessionID,
+            currentUserID: userID, currentDeviceID: "this-device"
+        ))
+    }
+
     func testPropertyStatusRecordDecodesOperationalFields() throws {
         let propertyID = UUID()
         let orgID = UUID()

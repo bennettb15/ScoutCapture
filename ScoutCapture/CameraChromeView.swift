@@ -57,6 +57,7 @@ struct CameraChromeDisplayModel {
     var profileSystemImage: String
     var profileAccentColor: Color
     var isProfileLocked: Bool
+    var liveElevationReference: String? = nil
     var propertyName: String
     var cloudStatus: CameraChromeStatusModel?
     var showsPunchlistBadge: Bool
@@ -87,6 +88,7 @@ struct CameraChromeArmedReferenceModel {
 
 struct CameraChromeActions {
     var onProfileTapped: () -> Void = {}
+    var onElevationReferenceTapped: () -> Void = {}
     var onEndTapped: () -> Void = {}
     var onMetadataTapped: () -> Void = {}
     var onSideControlTapped: (CameraChromeSideControl.ID) -> Void = { _ in }
@@ -169,7 +171,7 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
 
             let rowPadding: CGFloat = 16
             let titleFontSize: CGFloat = usesLandscapeChrome ? 36 : 33
-            let titleSideInset: CGFloat = usesLandscapeChrome ? 78 : 70
+            let titleSideInset: CGFloat = 108
 
             VStack(spacing: usesLandscapeChrome ? 0 : 10) {
                 VStack(spacing: 2) {
@@ -203,9 +205,12 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                         .padding(.horizontal, titleSideInset)
                         .frame(maxWidth: .infinity, alignment: .center)
 
-                        HStack(spacing: 0) {
+                        HStack(spacing: 2) {
                             profileToggleControl()
                                 .padding(.leading, rowPadding)
+                            if display.locationMode == .exterior {
+                                liveElevationReferenceControl()
+                            }
                             Spacer(minLength: 0)
                             endSessionControl()
                                 .padding(.trailing, rowPadding)
@@ -427,6 +432,25 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
         .rotationEffect(usesLandscapeChrome ? display.glyphRotationAngle : .zero)
         .animation(glyphRotationAnimation, value: glyphRotationDegrees)
         .accessibilityLabel(display.profileTitle)
+    }
+
+    private func liveElevationReferenceControl() -> some View {
+        let reference = display.liveElevationReference
+        return Button(action: actions.onElevationReferenceTapped) {
+            Text(reference.map { String($0.prefix(1)) } ?? "–")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundColor(reference == nil ? .white.opacity(0.55) : .white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.white.opacity(0.12)))
+                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(reference == nil || !display.metadata.isFilterAvailable)
+        .rotationEffect(usesLandscapeChrome ? display.glyphRotationAngle : .zero)
+        .animation(glyphRotationAnimation, value: glyphRotationDegrees)
+        .accessibilityLabel(reference.map { "Facing \($0) elevation. Tap to select." } ?? "Elevation direction unavailable")
     }
 
     private func previewAreaView(w: CGFloat, previewH: CGFloat) -> some View {

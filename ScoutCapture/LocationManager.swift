@@ -19,6 +19,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
     private let manager = CLLocationManager()
     private let motion = CMMotionManager()
+    private var cameraHeadingEligibleSince: TimeInterval?
     private let authorizationStatusProvider: (CLLocationManager) -> CLAuthorizationStatus
 
     private static func permitsLocation(_ status: CLAuthorizationStatus) -> Bool {
@@ -33,6 +34,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         lastLocation = nil
         headingDegrees = nil
         cameraFacingHeadingDegrees = nil
+        cameraHeadingEligibleSince = nil
     }
 
     func currentLocationForCapture() -> CLLocation? {
@@ -97,16 +99,38 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         motion.startDeviceMotionUpdates(using: .xMagneticNorthZVertical, to: .main) { [weak self] sample, _ in
             guard let self else { return }
             guard let sample, sample.magneticField.accuracy != .uncalibrated else {
+                self.cameraHeadingEligibleSince = nil
                 self.cameraFacingHeadingDegrees = nil
                 return
             }
             let gravity = sample.gravity
+            let gravityVector = SIMD3(gravity.x, gravity.y, gravity.z)
+            guard Self.isCameraHeldForHeading(gravity: gravityVector) else {
+                self.cameraHeadingEligibleSince = nil
+                self.cameraFacingHeadingDegrees = nil
+                return
+            }
+            if self.cameraHeadingEligibleSince == nil {
+                self.cameraHeadingEligibleSince = sample.timestamp
+            }
+            guard sample.timestamp - (self.cameraHeadingEligibleSince ?? sample.timestamp) >= 0.9 else {
+                self.cameraFacingHeadingDegrees = nil
+                return
+            }
             let field = sample.magneticField.field
             self.cameraFacingHeadingDegrees = Self.cameraFacingHeadingDegrees(
-                gravity: SIMD3(gravity.x, gravity.y, gravity.z),
+                gravity: gravityVector,
                 magneticField: SIMD3(field.x, field.y, field.z)
             )
         }
+    }
+
+    static func isCameraHeldForHeading(gravity: SIMD3<Double>) -> Bool {
+        let magnitude = sqrt(gravity.x * gravity.x + gravity.y * gravity.y + gravity.z * gravity.z)
+        guard magnitude > 0.05 else { return false }
+        // Portrait and landscape both pass when the phone is held up for a photo.
+        // Near-flat positions make the rear camera's compass bearing unstable.
+        return hypot(gravity.x, gravity.y) / magnitude >= 0.6
     }
 
     static func cameraFacingHeadingDegrees(
@@ -122,7 +146,8 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
             return vector / magnitude
         }
 
-        guard let down = normalized(gravity) else { return nil }
+        guard isCameraHeldForHeading(gravity: gravity),
+              let down = normalized(gravity) else { return nil }
         let horizontalNorth = magneticField - down * dot(magneticField, down)
         guard let north = normalized(horizontalNorth) else { return nil }
         let east = SIMD3(
