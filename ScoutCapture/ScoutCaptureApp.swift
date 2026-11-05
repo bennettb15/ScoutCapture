@@ -17875,17 +17875,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         saveFeedbackAction: FastLaneFlaggedSaveAction? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        let isSaving = isApplyingFastLaneFlaggedDecision &&
-            saveFeedbackAction != nil &&
-            saveFeedbackAction == highlightedFastLaneFlaggedSaveAction
         return Button(action: action) {
-            HStack(spacing: 8) {
-                if isSaving {
-                    ProgressView()
-                        .tint(.white)
-                }
-                Text(isSaving ? "Saving…" : title)
-            }
+            Text(title)
                 .font(.system(size: fontSize, weight: .semibold))
                 .foregroundColor(.white.opacity(isEnabled ? 1.0 : 0.55))
                 .frame(maxWidth: .infinity, minHeight: 50)
@@ -17918,9 +17909,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneFlaggedDecisionMessage: String {
-        if isApplyingFastLaneFlaggedDecision {
-            return "Saving capture…"
-        }
         switch fastLaneFlaggedDecisionStage {
         case .primary:
             return "Confirm this capture, revise the observation, or resolve it?"
