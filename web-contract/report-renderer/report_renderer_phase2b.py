@@ -1113,6 +1113,8 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "kind",
         "shot_id",
+        "issue_id",
+        "guided_row_id",
         "session_id",
         "building",
         "elevation",
@@ -2136,6 +2138,10 @@ def draw_cover(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], wor
         (None, "Generated with SCOUT software"),
         ("Report Date:", session.get("report_date") or ""),
     ]
+    if plan.get("report_type") == "tenant_comparison":
+        versions = plan.get("comparison_versions") or {}
+        details[2:4] = [("Before version:", display_datetime(versions.get("before_date")) or "Unknown"),
+                        ("After version:", display_datetime(versions.get("after_date")) or "Unknown")]
     if session.get("weather_summary"):
         details.insert(4, ("Weather at service start:", session["weather_summary"]))
         details.insert(5, (None, "Weather data provided by Open-Meteo."))
@@ -2270,6 +2276,50 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
 
+def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], work_dir: pathlib.Path, warnings: list[str], logo_asset: Any) -> None:
+    draw_logo(c, logo_asset)
+    versions = plan.get("comparison_versions") or {}
+    for index, role in enumerate(("before", "after")):
+        entry = page.get(role) or {}
+        x = 42 + index * 273
+        width = 255
+        draw_text(c, role.title(), {"x": x, "y": 704, "width": width, "height": 18}, "Helvetica-Bold", 14, align="center")
+        version_date = display_datetime(versions.get(f"{role}_date")) or "Unknown"
+        draw_text(c, f"Report version: {version_date}", {"x": x, "y": 683, "width": width, "height": 16}, size=8, align="center")
+        area = {"x": x, "y": 258, "width": width, "height": 405}
+        source = entry.get("media_path")
+        size = None
+        if source and pathlib.Path(source).exists():
+            with Image.open(source) as image:
+                size = image.size
+        fitted = aspect_fit_rect(size, area) if size else area
+        reason = "No photo documented in this version" if not entry or entry.get("kind") != "photo" else "Image unavailable"
+        if source:
+            draw_image_slot(c, source, fitted, reason, "none", None, work_dir, f"tenant-{page['number']}-{role}", warnings)
+        else:
+            c.saveState()
+            c.setStrokeColor(Color(0.8, 0.82, 0.85))
+            c.roundRect(area['x'], area['y'], area['width'], area['height'], 12, stroke=1, fill=0)
+            c.restoreState()
+            draw_text(c, "No photo documented" if not entry or entry.get('kind') != 'photo' else "Image unavailable",
+                      {"x": x, "y": 460, "width": width, "height": 18}, size=11, align="center")
+            draw_text(c, "in this version", {"x": x, "y": 440, "width": width, "height": 18}, size=11, align="center")
+        draw_wrapped(c, entry.get("caption") or "No matching documented view", {"x": x, "y": 202, "width": width, "height": 46}, size=9)
+        draw_text(c, f"Photo: {entry.get('captured_at_display') or 'Not documented'}", {"x": x, "y": 177, "width": width, "height": 18}, size=9, align="center")
+        if entry.get("flagged_reason"):
+            draw_wrapped(c, entry['flagged_reason'], {"x": x, "y": 124, "width": width, "height": 40}, size=9)
+    if page.get("same_photo"):
+        note = "Same photo - no newer documentation."
+    elif page.get("matching_basis") == "documented_view":
+        note = "Matched by the documented view; no shared item identity was available."
+    elif page.get("matching_basis") == "unmatched":
+        note = "No matching photo is documented in the other selected version."
+    else:
+        note = "Photo dates show when each image was captured."
+    draw_text(c, note, {"x": 42, "y": 94, "width": 528, "height": 18}, size=9, align="center")
+    draw_footer(c, page['number'], plan['session']['property_address'])
+
+
 def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any]:
     warnings = list(plan.get("warnings") or [])
     work_dir = output_path.parent / "_pdf_image_cache" / output_path.stem
@@ -2294,6 +2344,8 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
             draw_photo_page(c, plan, page, work_dir, warnings, logo_asset, priority=page["priority"])
         elif kind == "comparison_photo":
             draw_comparison_page(c, plan, page, work_dir, warnings, logo_asset)
+        elif kind == "tenant_comparison":
+            draw_tenant_comparison_page(c, plan, page, work_dir, warnings, logo_asset)
         else:
             raise Phase2BError(f"Unsupported page kind: {kind}")
         c.showPage()

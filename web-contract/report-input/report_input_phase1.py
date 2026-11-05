@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--storage-fixture", help="Local JSON fixture describing existing storage objects.")
     parser.add_argument("--canonical-fixture", help="Local JSON fixture for remote historical sessions/shots.")
     parser.add_argument("--history-fixture", help="Local JSON fixture containing scoped completed snapshot rows and payloads.")
+    parser.add_argument("--snapshot-history-only", action="store_true", help="Use sealed documentation without current portal workflow overlays.")
     parser.add_argument("--output", help="Write validation JSON to this path.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print deterministic JSON.")
     parser.add_argument(
@@ -353,6 +354,9 @@ def report_shot(
         "source_session_started_at_utc": iso(metadata.get("startedAt")),
         "source_session_completed_at_utc": iso(metadata.get("endedAt")),
         "issue_id": issue_id(shot),
+        "guided_row_id": trim(shot.get("guidedRowID") or shot.get("guided_row_id")) or next(
+            (str(row.get("id")) for row in report_guided_rows(metadata)
+             if str((row.get("shot") or {}).get("id") or row.get("shotID") or "").lower() == sid_shot.lower()), None),
         "building": trim(shot.get("building")),
         "elevation": trim(shot.get("elevation")),
         "detail_type": trim(shot.get("detailType")),
@@ -1211,7 +1215,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     if session_type == "punchlist_visit":
         sources = scoped_snapshot_history(args, client, row, payload, metadata)
         composition = compose_punchlist_history(sources, storage)
-        operational_overlays = operational_issue_overlays(
+        operational_overlays = {} if getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
             client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
         apply_operational_overlays(composition, operational_overlays)
         shots = composition["shots"]
