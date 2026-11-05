@@ -116,7 +116,7 @@ def process_request(args, client, repo, request_id, worker):
     if not rows:
         return
     row = rows[0]
-    claimed = client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.queued'}, {'status':'generating', 'locked_at':worker.safe_iso_now(), 'last_error':None})
+    claimed = client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.queued'}, {'status':'generating', 'progress_step':'validating', 'locked_at':worker.safe_iso_now(), 'last_error':None})
     if not claimed:
         return
     root = Path(args.output_dir).resolve() / 'tenant-comparisons' / row['id']
@@ -130,6 +130,7 @@ def process_request(args, client, repo, request_id, worker):
         properties = client.select('properties', {'select':'id', 'id':f'eq.{row["property_id"]}', 'org_id':f'eq.{row["org_id"]}', 'deleted_at':'is.null'})
         if not properties:
             raise ValueError('Property is unavailable.')
+        client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'progress_step':'preparing_photos'})
         def prepare_version(label, package):
             folder = root / label
             folder.mkdir()
@@ -178,21 +179,23 @@ def process_request(args, client, repo, request_id, worker):
             results = [future.result() for future in futures]
         validations = [result[0] for result in results]
         prepared = [result[1] for result in results]
+        client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'progress_step':'rendering'})
         renderer = load_renderer(repo)
         plan = build_plan(renderer, *validations, *prepared, renderer.logo_info(None, str(repo/worker.PACKAGED_LOGO_SVG)))
         filename = 'Tenant Comparison Report.pdf'
         pdf = root/filename
         renderer.render_pdf(plan, pdf)
+        client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'progress_step':'uploading'})
         # Recheck live property/package scope before making the temporary output available.
         validate_packages(row, worker.select_ready_package(client, before['id']), worker.select_ready_package(client, after['id']))
         client.upload_object(BUCKET, path, pdf, 'application/pdf', upsert=False)
         uploaded = True
-        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
-        client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'status':'ready', 'storage_path':path, 'filename':filename, 'expires_at':expiry, 'locked_at':None})
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24)).isoformat()
+        client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'status':'ready', 'progress_step':'ready', 'storage_path':path, 'filename':filename, 'expires_at':expiry, 'locked_at':None})
     except Exception as error:
         if uploaded:
             client.delete_object(BUCKET, path)
-        client.patch(TABLE, {'id':f'eq.{row["id"]}'}, {'status':'failed','last_error':str(error)[:1000], 'locked_at':None})
+        client.patch(TABLE, {'id':f'eq.{row["id"]}'}, {'status':'failed','progress_step':'failed','last_error':str(error)[:1000], 'locked_at':None})
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -208,7 +211,7 @@ def drain(args, client, repo, worker):
                 raise
         client.delete_rows(TABLE, {'id':f'eq.{row["id"]}'})
     cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)).isoformat()
-    client.patch(TABLE, {'status':'eq.generating', 'locked_at':f'lt.{cutoff}'}, {'status':'failed', 'last_error':'Generation interrupted; please retry.', 'locked_at':None})
+    client.patch(TABLE, {'status':'eq.generating', 'locked_at':f'lt.{cutoff}'}, {'status':'failed', 'progress_step':'failed', 'last_error':'Generation interrupted; please retry.', 'locked_at':None})
     rows = client.select(TABLE, {'select':'id', 'kind':'eq.tenant_comparison', 'status':'eq.queued', 'expires_at':f'gt.{worker.safe_iso_now()}', 'order':'requested_at.asc', 'limit':'3'})
     for row in rows:
         process_request(args, client, repo, row['id'], worker)
