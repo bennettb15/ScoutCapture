@@ -48,7 +48,7 @@ from scout_report_visuals import (
 
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "phase2c-shadow-reportlab-refinement-1"
+GENERATOR_VERSION = "phase2c-photo-notes-3"
 PAGE_WIDTH = 612.0
 PAGE_HEIGHT = 792.0
 PAGE_SIZE = (PAGE_WIDTH, PAGE_HEIGHT)
@@ -441,7 +441,7 @@ def visual_state(item: dict[str, Any]) -> str:
 
 
 def is_overview_material_shot(item: dict[str, Any]) -> bool:
-    return (trim(item.get("detail_type")) or "").strip().lower() == "overview" and visual_state(item) == "none"
+    return (trim(item.get("detail_type")) or "").strip().lower() == "overview"
 
 
 def cover_candidate_score(item: dict[str, Any]) -> tuple[int, int, dt.datetime, str]:
@@ -493,6 +493,19 @@ def media_lookup(prepared: dict[str, Any]) -> MediaLookup:
 def media_for(lookup: MediaLookup, role: str, shot_id: Any) -> dict[str, Any] | None:
     sid = (trim(shot_id) or "").lower()
     return lookup.by_role_shot.get((role.lower(), sid)) if sid else None
+
+
+def cover_photo_entry(validation: dict[str, Any], lookup: MediaLookup) -> dict[str, Any] | None:
+    """Choose the first available Overview from the full scoped photo collection.
+
+    Punchlist-only collections deliberately omit unflagged Guided Shots and must
+    never be the cover source when the full documentation photos are available.
+    """
+    inputs = validation.get("inputs") or {}
+    shots = inputs.get("ordered_shots") or inputs.get("punchlist_shots") or []
+    candidates = [{**shot, "media_path": trim((media_for(lookup, "current", shot.get("shot_id")) or {}).get("temporary_prepared_path"))}
+                  for shot in shots if shot.get("kind") != "skipped"]
+    return next((shot for shot in sorted(candidates, key=cover_candidate_score) if shot.get("media_path")), None)
 
 
 def logo_info(logo_pdf: str | None, logo_svg: str | None) -> dict[str, Any]:
@@ -1113,6 +1126,8 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "kind",
         "shot_id",
+        "issue_id",
+        "guided_row_id",
         "session_id",
         "building",
         "elevation",
@@ -1124,6 +1139,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "session_date_utc",
         "captured_at_display",
         "flagged_reason",
+        "original_flagged_reason",
         "priority",
         "normalized_priority",
         "issue_status",
@@ -1199,9 +1215,9 @@ def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_
         assumed_index_pages = resolved
     if not index_pages:
         index_pages = [[]]
-    cover_entry = next((entry for entry in entries if entry.get("kind") != "skipped" and entry.get("media_path")), None)
+    cover_entry = cover_photo_entry(validation, lookup)
     pages = [
-        {"number": 1, "kind": "cover", "title": "Visual Property Record", "cover_media_path": cover_entry.get("media_path") if cover_entry else None},
+        {"number": 1, "kind": "cover", "title": "Visual Property Record", "cover_shot_id": cover_entry.get("shot_id") if cover_entry else None, "cover_media_path": cover_entry.get("media_path") if cover_entry else None},
     ]
     page_number = 2
     for lines in index_pages:
@@ -1290,14 +1306,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
         if resolved == assumed_index_pages:
             break
         assumed_index_pages = resolved
-    cover_entries = [
-        {
-            **shot,
-            "media_path": trim((media_for(lookup, "current", shot.get("shot_id")) or {}).get("temporary_prepared_path")),
-        }
-        for shot in shots
-    ]
-    cover_shot = next((shot for shot in sorted(cover_entries, key=cover_candidate_score) if shot.get("media_path")), None)
+    cover_shot = cover_photo_entry(validation, lookup)
     cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
     pages = [
         {
@@ -1306,6 +1315,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             "title": "PRIORITY REPORT",
             "subtitle": "Organized Summary of Documented Observations",
             "supporting_line": "Items are grouped by priority level for tracking and visibility only.",
+            "cover_shot_id": cover_shot.get("shot_id") if cover_shot else None,
             "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None,
         },
     ]
@@ -1426,6 +1436,18 @@ def build_comparison_plan(
         previous_session_id = trim(item.get("previous_session_id"))
         previous_shot_id = trim(item.get("previous_shot_id"))
         previous_session, previous_shot = previous_shot_metadata(validation_lookup_dir, previous_session_id, previous_shot_id)
+        embedded_previous = item.get("previous_shot")
+        if isinstance(embedded_previous, dict):
+            if ((trim(embedded_previous.get("shot_id")) or "").lower() != (previous_shot_id or "").lower() or
+                    (trim(embedded_previous.get("session_id")) or "").lower() != (previous_session_id or "").lower()):
+                raise Phase2BError("Previous comparison photo metadata identity mismatch.")
+            current_issue = (trim(current.get("issue_id")) or "").lower()
+            previous_issue = (trim(embedded_previous.get("issue_id")) or "").lower()
+            if current_issue and previous_issue and current_issue != previous_issue:
+                raise Phase2BError("Previous comparison photo issue identity mismatch.")
+            # Phase 1 pins this metadata to the exact historical photo. A fresh
+            # worker need not have another session's validation JSON on disk.
+            previous_shot = embedded_previous
         previous_session_date = previous_session_date_source(item, previous_session, previous_media)
         previous_captured_date = previous_captured_date_source(item, previous_shot, previous_media)
         previous_display_date = previous_session_date or previous_captured_date
@@ -1442,7 +1464,7 @@ def build_comparison_plan(
             "angle_index": (previous_shot or {}).get("angle_index") or current.get("angle_index"),
             "shot_key": (previous_shot or {}).get("shot_key") or current.get("shot_key"),
             "visual_state": previous_visual_state,
-            "flagged_reason": (previous_shot or {}).get("flagged_reason") or current.get("flagged_reason"),
+            "flagged_reason": first_trimmed(previous_shot or {}, ["flagged_reason", "reason", "noteText"]),
             "captured_at_utc": previous_captured_date,
             "session_date_utc": previous_session_date,
         }
@@ -1503,17 +1525,10 @@ def build_comparison_plan(
         assumed_index_pages = resolved
     if not index_pages:
         index_pages = [[]]
-    cover_entries = [
-        {
-            **shot,
-            "media_path": trim((media_for(lookup, "current", shot.get("shot_id")) or {}).get("temporary_prepared_path")),
-        }
-        for shot in shots
-    ]
-    cover_shot = next((shot for shot in sorted(cover_entries, key=cover_candidate_score) if shot.get("media_path")), None)
+    cover_shot = cover_photo_entry(validation, lookup)
     cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
     pages = [
-        {"number": 1, "kind": "cover", "title": "Flagged Comparison Report", "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None},
+        {"number": 1, "kind": "cover", "title": "Flagged Comparison Report", "cover_shot_id": cover_shot.get("shot_id") if cover_shot else None, "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None},
     ]
     number = 2
     for page_lines in index_pages:
@@ -1626,7 +1641,7 @@ def build_punchlist_update_plan(
     index_pages = index_page_plans(lines)
     if not index_pages:
         index_pages = [[]]
-    cover_entry = next((entry for entry in entries if entry.get("media_path")), entries[0])
+    cover_entry = cover_photo_entry(validation, lookup) or entries[0]
     pages = [
         {
             "number": 1,
@@ -1634,6 +1649,7 @@ def build_punchlist_update_plan(
             "title": "Punchlist Update",
             "subtitle": f"{len(entries)} photo{'' if len(entries) == 1 else 's'} documented",
             "supporting_line": "Fast follow-up capture package for portal review.",
+            "cover_shot_id": cover_entry.get("shot_id"),
             "cover_media_path": cover_entry.get("media_path"),
         },
     ]
@@ -1737,12 +1753,16 @@ def make_plan(
 
 
 def time_window(validation: dict[str, Any]) -> str:
+    session = validation.get("inputs", {}).get("session") or {}
     shots = validation.get("inputs", {}).get("ordered_shots") or []
+    session_type = validation.get("session_type") or session.get("session_type")
+    if session_type == "punchlist_visit":
+        session_id = trim(validation.get("session_id") or session.get("session_id"))
+        shots = [shot for shot in shots if (trim(shot.get("session_id")) or "").lower() == (session_id or "").lower()]
     shot_dates = [local_datetime(shot.get("captured_at_utc")) for shot in shots]
     shot_dates = [value for value in shot_dates if value is not None]
-    session = validation.get("inputs", {}).get("session") or {}
-    first = shot_dates[0] if shot_dates else local_datetime(session.get("started_at_utc"))
-    last = shot_dates[-1] if shot_dates else local_datetime(session.get("ended_at_utc") or session.get("started_at_utc"))
+    first = min(shot_dates) if shot_dates else local_datetime(session.get("started_at_utc"))
+    last = max(shot_dates) if shot_dates else local_datetime(session.get("ended_at_utc") or session.get("started_at_utc"))
     if not first:
         return "Unknown"
     first_text = first.strftime("%-I:%M %p")
@@ -2084,6 +2104,20 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     top_y = rect["y"] + rect["height"] - 14
     draw_text(c, entry.get("caption") or "", {"x": rect["x"], "y": top_y, "width": rect["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
     state = entry.get("visual_state") or "none"
+    original = trim(entry.get("original_flagged_reason"))
+    current = trim(entry.get("flagged_reason"))
+    if state != "none" and original and current and original != current:
+        draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, size=10, align="center")
+        note = f"Updated note: {current}"
+        if state == "resolved":
+            note = f"Resolved - {note}"
+        note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
+        if priority and state != "resolved":
+            draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
+        else:
+            draw_note(c, note, note_rect, state)
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
+        return
     if priority:
         if state == "resolved":
             reason = trim(entry.get("flagged_reason"))
@@ -2132,6 +2166,10 @@ def draw_cover(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], wor
         (None, "Generated with SCOUT software"),
         ("Report Date:", session.get("report_date") or ""),
     ]
+    if plan.get("report_type") == "tenant_comparison":
+        versions = plan.get("comparison_versions") or {}
+        details[2:4] = [("Before version:", display_datetime(versions.get("before_date")) or "Unknown"),
+                        ("After version:", display_datetime(versions.get("after_date")) or "Unknown")]
     if session.get("weather_summary"):
         details.insert(4, ("Weather at service start:", session["weather_summary"]))
         details.insert(5, (None, "Weather data provided by Open-Meteo."))
@@ -2266,6 +2304,63 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
 
+def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], work_dir: pathlib.Path, warnings: list[str], logo_asset: Any) -> None:
+    draw_logo(c, logo_asset)
+    versions = plan.get("comparison_versions") or {}
+    for index, role in enumerate(("before", "after")):
+        entry = page.get(role) or {}
+        x = 42 + index * 273
+        width = 255
+        draw_text(c, role.title(), {"x": x, "y": 704, "width": width, "height": 18}, "Helvetica-Bold", 14, align="center")
+        version_date = display_datetime(versions.get(f"{role}_date")) or "Unknown"
+        draw_text(c, f"Report version: {version_date}", {"x": x, "y": 683, "width": width, "height": 16}, size=8, align="center")
+        area = {"x": x, "y": 258, "width": width, "height": 405}
+        source = entry.get("media_path")
+        size = None
+        if source and pathlib.Path(source).exists():
+            with Image.open(source) as image:
+                size = image.size
+        fitted = aspect_fit_rect(size, area) if size else area
+        reason = "No photo documented in this version" if not entry or entry.get("kind") != "photo" else "Image unavailable"
+        if source:
+            draw_image_slot(c, source, fitted, reason, "none", None, work_dir, f"tenant-{page['number']}-{role}", warnings)
+        else:
+            c.saveState()
+            c.setStrokeColor(Color(0.8, 0.82, 0.85))
+            c.roundRect(area['x'], area['y'], area['width'], area['height'], 12, stroke=1, fill=0)
+            c.restoreState()
+            draw_text(c, "No photo documented" if not entry or entry.get('kind') != 'photo' else "Image unavailable",
+                      {"x": x, "y": 460, "width": width, "height": 18}, size=11, align="center")
+            draw_text(c, "in this version", {"x": x, "y": 440, "width": width, "height": 18}, size=11, align="center")
+        caption_lines = wrap_lines(entry.get('caption') or 'No matching documented view', 'Helvetica-Bold', 9, width - 16)
+        reason_lines = wrap_lines(entry.get('flagged_reason') or '', 'Helvetica', 9, width - 16)[:4]
+        panel_top = fitted['y'] - 8
+        panel_height = 26 + len(caption_lines) * 11 + 17 + (len(reason_lines) * 11 + 6 if reason_lines else 0)
+        c.setFillColor(Color(0.97, 0.98, 0.99))
+        c.roundRect(x, panel_top - panel_height, width, panel_height, 6, stroke=0, fill=1)
+        line_y = panel_top - 18
+        for line in caption_lines:
+            draw_text(c, line, {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, 'Helvetica-Bold', 9, align='center')
+            line_y -= 11
+        line_y -= 6
+        draw_text(c, f"Captured: {entry.get('captured_at_display') or 'Not documented'}", {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, size=9, fill=Color(0.3, 0.35, 0.4), align='center')
+        line_y -= 17
+        for line in reason_lines:
+            draw_text(c, line, {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, size=9)
+            line_y -= 11
+    if page.get("same_photo"):
+        note = "Same photo - no newer documentation."
+    elif page.get("matching_basis") == "documented_view":
+        note = "Views matched by location and angle."
+    elif page.get("matching_basis") == "unmatched":
+        note = "No matching photo is documented in the other selected version."
+    else:
+        note = None
+    if note:
+        draw_text(c, note, {"x": 42, "y": 106, "width": 528, "height": 18}, size=9, fill=Color(0.3, 0.35, 0.4), align="center")
+    draw_footer(c, page['number'], plan['session']['property_address'])
+
+
 def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any]:
     warnings = list(plan.get("warnings") or [])
     work_dir = output_path.parent / "_pdf_image_cache" / output_path.stem
@@ -2290,6 +2385,8 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
             draw_photo_page(c, plan, page, work_dir, warnings, logo_asset, priority=page["priority"])
         elif kind == "comparison_photo":
             draw_comparison_page(c, plan, page, work_dir, warnings, logo_asset)
+        elif kind == "tenant_comparison":
+            draw_tenant_comparison_page(c, plan, page, work_dir, warnings, logo_asset)
         else:
             raise Phase2BError(f"Unsupported page kind: {kind}")
         c.showPage()
@@ -2520,6 +2617,7 @@ def main() -> int:
             "generator_version": GENERATOR_VERSION,
             "report_plan_path": str(plan_path),
             "report_plan_sha256": plan["report_plan_sha256"],
+                "cover_shot_id": plan["pages"][0].get("cover_shot_id"),
             "prepared_media_hashes": plan["prepared_media_hashes"],
             "pdf_path": str(pdf_path),
             **validation_info,
@@ -2536,6 +2634,7 @@ def main() -> int:
                 "validation_path": str(validation_path_out),
                 "pdf_path": str(pdf_path),
                 "report_plan_sha256": plan["report_plan_sha256"],
+                "cover_shot_id": plan["pages"][0].get("cover_shot_id"),
                 "pdf_sha256": validation_info["pdf_sha256"],
                 "page_count": validation_info["page_count"],
                 **preview,
@@ -2575,6 +2674,7 @@ def main() -> int:
                 "generator_version": GENERATOR_VERSION,
                 "report_plan_path": str(plan_path),
                 "report_plan_sha256": plan["report_plan_sha256"],
+                "cover_shot_id": plan["pages"][0].get("cover_shot_id"),
                 "prepared_media_hashes": plan["prepared_media_hashes"],
                 "pdf_path": str(pdf_path),
                 **validation_info,
@@ -2591,6 +2691,7 @@ def main() -> int:
                     "validation_path": str(validation_path_out),
                     "pdf_path": str(pdf_path),
                     "report_plan_sha256": plan["report_plan_sha256"],
+                "cover_shot_id": plan["pages"][0].get("cover_shot_id"),
                     "pdf_sha256": validation_info["pdf_sha256"],
                     "page_count": validation_info["page_count"],
                     **preview,

@@ -12,6 +12,11 @@ spec = importlib.util.spec_from_file_location('report_input_phase1', MODULE_PATH
 report_input = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = report_input
 spec.loader.exec_module(report_input)
+RENDERER_PATH = ROOT / 'report-renderer' / 'report_renderer_phase2b.py'
+renderer_spec = importlib.util.spec_from_file_location('report_renderer_phase2b', RENDERER_PATH)
+report_renderer = importlib.util.module_from_spec(renderer_spec)
+sys.modules[renderer_spec.name] = report_renderer
+renderer_spec.loader.exec_module(report_renderer)
 
 ORG = 'org-a'
 PROPERTY = 'property-a'
@@ -67,20 +72,71 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.visit2 = source('visit2', 3, 'punchlist_visit',
                              [shot(1, 'visit2', 3, kind='follow_up_capture')], [issue(1)])
 
-    def test_one_of_eight_retains_all_and_guided_originals(self):
+    def test_original_and_updated_reasons_survive_selective_composition(self):
+        self.visit1['metadata']['issues'][0]['currentReason']='Updated observation'
+        result=report_input.compose_punchlist_history([self.baseline,self.visit1],Storage())
+        current=next(s for s in result['punchlist_shots'] if s['issue_id']=='issue-0')
+        previous=next(i for i in result['comparisons'] if i['issue_id']=='issue-0')['previous_shot']
+        self.assertEqual(current['original_flagged_reason'],'Observation 0')
+        self.assertEqual(current['flagged_reason'],'Updated observation')
+        self.assertEqual(previous['flagged_reason'],'Observation 0')
+        displayed=next(s for s in result['shots'] if s['shot_id']=='photo-0-visit1')
+        self.assertEqual(displayed['original_flagged_reason'],'Observation 0')
+
+    def test_one_of_eight_replaces_only_updated_property_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         self.assertEqual(len(result['punchlist_shots']), 8)
         self.assertEqual({s['shot_id'] for s in result['punchlist_shots']},
                          {'photo-0-visit1'} | {f'photo-{i}-full' for i in range(1, 8)})
-        self.assertEqual(len(result['entries']), 9)
-        self.assertEqual([e['shot_id'] for e in result['entries'][:8]],
-                         [e['shot_id'] for e in report_input.property_report_entries(
-                             self.baseline['metadata'], [report_input.report_shot(
-                                 self.baseline['metadata'], row,
-                                 report_input.issue_by_id(self.baseline['metadata']), {})
-                                 for row in self.baseline['metadata']['shots']]) if e['kind'] == 'photo'])
+        self.assertEqual(len(result['entries']), 8)
+        self.assertEqual({e['shot_id'] for e in result['entries']},
+                         {'photo-0-visit1'} | {f'photo-{i}-full' for i in range(1, 8)})
+        self.assertNotIn('photo-0-full', [e['shot_id'] for e in result['entries']])
         self.assertEqual(result['baseline']['session_id'], 'session-full')
         self.assertEqual(result['comparisons'][0]['matching_rule'], 'same_issue_id')
+        self.assertEqual(next(item['previous_shot_id'] for item in result['comparisons']
+                              if item['issue_id'] == 'issue-0'), 'photo-0-full')
+
+    def test_property_shows_only_latest_photo_and_uses_current_visit_time(self):
+        self.visit1['metadata']['shots'][0]['createdAt'] = '2026-10-02T10:45:00Z'
+        result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
+        validation = {
+            'session_id': 'session-visit1', 'session_type': 'punchlist_visit',
+            'inputs': {'session': {'session_id': 'session-visit1',
+                                   'started_at_utc': '2026-10-02T10:00:00Z',
+                                   'ended_at_utc': '2026-10-02T11:00:00Z'},
+                       'ordered_shots': result['shots'],
+                       'punchlist_shots': result['punchlist_shots'],
+                       'property_report_entries': result['entries']},
+        }
+        entries = report_renderer.property_entries(validation, report_renderer.media_lookup({}))
+        self.assertEqual(len(entries), 8)
+        self.assertEqual(sum(e['shot_id'] == 'photo-0-visit1' for e in entries), 1)
+        self.assertNotIn('photo-0-full', [e['shot_id'] for e in entries])
+        self.assertFalse(any('FOLLOW-UP PHOTO' in e['caption'] for e in entries))
+        self.assertEqual(next(e['captured_at_utc'] for e in entries if e['shot_id'] == 'photo-0-visit1'),
+                         '2026-10-02T10:45:00Z')
+        self.assertEqual(next(e['captured_at_utc'] for e in entries if e['shot_id'] == 'photo-1-full'),
+                         '2026-10-01T10:30:00Z')
+        self.assertEqual(report_renderer.time_window(validation), '6:45 AM')
+        priority = report_renderer.build_priority_plan(
+            validation, report_renderer.media_lookup({}), '10/02/2026', {}, {})
+        priority_shot_ids = [slot['entry']['shot_id'] for page in priority['pages']
+                             for slot in page.get('slots', [])]
+        self.assertIn('photo-0-visit1', priority_shot_ids)
+        self.assertNotIn('photo-0-full', priority_shot_ids)
+        self.assertEqual(len(priority_shot_ids), 8)
+
+    def test_status_only_visit_time_does_not_claim_old_photo_time(self):
+        result = report_input.compose_punchlist_history([self.baseline], Storage())
+        validation = {
+            'session_id': 'session-status', 'session_type': 'punchlist_visit',
+            'inputs': {'session': {'session_id': 'session-status',
+                                   'started_at_utc': '2026-10-02T10:00:00Z',
+                                   'ended_at_utc': '2026-10-02T11:00:00Z'},
+                       'ordered_shots': result['shots']},
+        }
+        self.assertEqual(report_renderer.time_window(validation), '6:00 AM to 7:00 AM')
 
     def test_multiple_visits_and_resolved_state(self):
         self.visit2['metadata']['issues'].append(issue(0, 'resolved'))
@@ -104,6 +160,9 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(len(result['punchlist_shots']), 8)
         self.assertEqual(result['baseline']['snapshot_id'], 'snapshot-full')
         self.assertEqual(result['punchlist_shots'][-1]['shot_id'], 'photo-6-visit-6')
+        self.assertEqual(len(result['entries']), 8)
+        self.assertEqual({e['shot_id'] for e in result['entries']},
+                         {f'photo-{i}-visit-{i}' for i in range(7)} | {'photo-7-full'})
 
     def test_untyped_follow_up_is_not_a_full_baseline(self):
         metadata = dict(self.visit1['metadata'])
@@ -118,7 +177,32 @@ class SelectiveHistoryTests(unittest.TestCase):
             [self.baseline, self.visit1, full2, visit3], Storage())
         self.assertEqual(result['baseline']['session_id'], 'session-full2')
         self.assertEqual([e['shot_id'] for e in result['entries']],
-                         ['photo-0-full2', 'photo-0-visit3'])
+                         ['photo-0-visit3'])
+
+    def test_repeated_updates_replace_by_issue_identity(self):
+        # Two different issues share a location; only the updated issue is replaced.
+        self.baseline['metadata']['shots'][1]['angleIndex'] = 1
+        self.baseline['metadata']['shots'][0]['angleIndex'] = 1
+        repeat = source('repeat', 4, 'punchlist_visit',
+                        [shot(0, 'repeat', 4, kind='follow_up_capture')], [issue(0)])
+        result = report_input.compose_punchlist_history(
+            [self.baseline, self.visit1, repeat], Storage())
+        ids = [e['shot_id'] for e in result['entries']]
+        self.assertEqual(len(ids), 8)
+        self.assertIn('photo-0-repeat', ids)
+        self.assertIn('photo-1-full', ids)
+        self.assertNotIn('photo-0-full', ids)
+        self.assertNotIn('photo-0-visit1', ids)
+        previous = next(item for item in result['comparisons'] if item['issue_id'] == 'issue-0')
+        self.assertEqual(previous['previous_shot_id'], 'photo-0-visit1')
+
+    def test_new_issue_is_added_without_replacing_an_unrelated_guided_photo(self):
+        new_issue = source('new', 4, 'punchlist_visit',
+                           [shot(8, 'new', 4, kind='follow_up_capture')], [issue(8)])
+        result = report_input.compose_punchlist_history([self.baseline, new_issue], Storage())
+        self.assertEqual(len(result['entries']), 9)
+        self.assertEqual({e['shot_id'] for e in result['entries']},
+                         {f'photo-{i}-full' for i in range(8)} | {'photo-8-new'})
 
     def test_no_full_baseline_and_reference_does_not_replace_photo(self):
         reference = source('reference', 4, 'punchlist_visit',

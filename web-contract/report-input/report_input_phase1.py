@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--storage-fixture", help="Local JSON fixture describing existing storage objects.")
     parser.add_argument("--canonical-fixture", help="Local JSON fixture for remote historical sessions/shots.")
     parser.add_argument("--history-fixture", help="Local JSON fixture containing scoped completed snapshot rows and payloads.")
+    parser.add_argument("--snapshot-history-only", action="store_true", help="Use sealed documentation without current portal workflow overlays.")
     parser.add_argument("--output", help="Write validation JSON to this path.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print deterministic JSON.")
     parser.add_argument(
@@ -353,6 +354,9 @@ def report_shot(
         "source_session_started_at_utc": iso(metadata.get("startedAt")),
         "source_session_completed_at_utc": iso(metadata.get("endedAt")),
         "issue_id": issue_id(shot),
+        "guided_row_id": trim(shot.get("guidedRowID") or shot.get("guided_row_id")) or next(
+            (str(row.get("id")) for row in report_guided_rows(metadata)
+             if str((row.get("shot") or {}).get("id") or row.get("shotID") or "").lower() == sid_shot.lower()), None),
         "building": trim(shot.get("building")),
         "elevation": trim(shot.get("elevation")),
         "detail_type": trim(shot.get("detailType")),
@@ -884,6 +888,7 @@ def comparison_validations(
                     "angle_index": current.get("angle_index"),
                 },
                 "previous_shot_id": previous.get("shot_id") if previous else None,
+                "previous_shot": previous,
                 "previous_session_id": previous.get("session_id") if previous else None,
                 "previous_session_started_at_utc": previous.get("session_started_at") if previous else None,
                 "previous_session_completed_at_utc": previous.get("session_completed_at") if previous else None,
@@ -1022,7 +1027,7 @@ def scoped_snapshot_history(
 
 
 def compose_punchlist_history(sources: list[dict[str, Any]], storage: StorageProbe) -> dict[str, Any]:
-    """Keep Guided Shots from the newest full visit and one latest real photo per issue."""
+    """Use the newest full visit's layout and the latest real photo per issue."""
     baseline = next((source for source in reversed(sources)
                      if source["session_type"] == "full_documentation" and
                      (source.get("declared_type") == "full_documentation" or
@@ -1058,6 +1063,7 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
     comparisons = []
     for iid, history in sorted(issue_photos.items()):
         current = dict(history[-1])
+        current["original_flagged_reason"] = history[0].get("flagged_reason")
         current["is_flagged"] = True
         issue = latest_issue.get(iid) or {}
         status = (trim(issue.get("issueStatus") or issue.get("status")) or trim(current.get("issue_status")) or "").lower()
@@ -1086,13 +1092,33 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
         if shot["shot_id"].lower() not in seen:
             all_shots.append(shot)
             seen.add(shot["shot_id"].lower())
-    entries = list(baseline_entries)
+    original_reasons = {iid: history[0].get("flagged_reason") for iid, history in issue_photos.items()}
+    all_shots = [{**shot, "original_flagged_reason": original_reasons.get((trim(shot.get("issue_id")) or "").lower())}
+                 for shot in all_shots]
     baseline_ids = {shot["shot_id"].lower() for shot in baseline_shots}
     since_baseline = {str(source["row"].get("session_id") or "").lower()
                       for source in sources[sources.index(baseline):]} if baseline else set()
-    for shot in latest_shots:
-        if (baseline and shot["session_id"].lower() in since_baseline and
-                shot["shot_id"].lower() not in baseline_ids):
+    replacements = {shot["issue_id"].lower(): shot for shot in latest_shots
+                    if (baseline and shot["session_id"].lower() in since_baseline and
+                        shot["shot_id"].lower() not in baseline_ids)}
+    baseline_by_id = {shot["shot_id"].lower(): shot for shot in baseline_shots}
+    entries = []
+    placed_issues = set()
+    # Replace an updated issue in its baseline position; history remains available
+    # to the comparison report without adding old photos to the Property Report.
+    for entry in baseline_entries:
+        original = baseline_by_id.get((trim(entry.get("shot_id")) or "").lower())
+        issue_id = (trim((original or {}).get("issue_id")) or "").lower()
+        replacement = replacements.get(issue_id) if entry.get("kind") == "photo" else None
+        if replacement:
+            if issue_id in placed_issues:
+                continue
+            entries.append({"kind": "photo", "shot_id": replacement["shot_id"]})
+            placed_issues.add(issue_id)
+        else:
+            entries.append(entry)
+    for issue_id, shot in replacements.items():
+        if issue_id not in placed_issues:
             entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
     return {"shots": all_shots if baseline else latest_shots, "punchlist_shots": latest_shots,
             "entries": entries, "guided": baseline_guided, "comparisons": comparisons,
@@ -1194,7 +1220,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     if session_type == "punchlist_visit":
         sources = scoped_snapshot_history(args, client, row, payload, metadata)
         composition = compose_punchlist_history(sources, storage)
-        operational_overlays = operational_issue_overlays(
+        operational_overlays = {} if getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
             client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
         apply_operational_overlays(composition, operational_overlays)
         shots = composition["shots"]

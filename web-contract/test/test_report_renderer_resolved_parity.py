@@ -161,6 +161,92 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                 self.assertTrue(index_references)
                 self.assertTrue(index_references <= photo_numbers)
 
+    def test_overview_cover_uses_full_photo_collection_for_all_report_types(self) -> None:
+        payload = validation()
+        flagged = payload["inputs"]["ordered_shots"][0]
+        # The overview was taken after the first detail photo and is deliberately
+        # absent from the current punchlist-only collection.
+        overview = {**flagged, "shot_id": "overview-first", "detail_type": "Overview",
+                    "is_flagged": False, "is_resolved_in_session": False,
+                    "issueStatus": "", "captureKind": "captured", "captured_at_utc": "2026-09-22T14:45:00Z"}
+        later = {**overview, "shot_id": "overview-later", "captured_at_utc": "2026-09-22T14:50:00Z"}
+        payload["inputs"]["ordered_shots"] = [flagged, later, overview]
+        payload["inputs"]["punchlist_shots"] = [flagged]
+        lookup = renderer.media_lookup({"items": [{"role": "current", "shot_id": item["shot_id"],
+            "temporary_prepared_path": f"/{item['shot_id']}.jpg"} for item in [flagged, overview, later]]})
+        for builder in (renderer.build_property_plan, renderer.build_priority_plan, renderer.build_comparison_plan):
+            with self.subTest(report=builder.__name__):
+                plan = builder(payload, lookup, "09/22/2026", {}, {})
+                self.assertEqual("/overview-first.jpg", plan["pages"][0]["cover_media_path"])
+                self.assertEqual("overview-first", plan["pages"][0]["cover_shot_id"])
+        # Cover selection must not add an unflagged overview to the issue pages.
+        priority = renderer.build_priority_plan(payload, lookup, "09/22/2026", {}, {})
+        body = [slot["entry"]["shot_id"] for page in priority["pages"] if page["kind"] == "priority_photo" for slot in page["slots"]]
+        self.assertEqual([CURRENT_SHOT_ID], body)
+        comparison = renderer.build_comparison_plan(payload, lookup, "09/22/2026", {}, {})
+        current = [slot["entry"]["shot_id"] for page in comparison["pages"] if page["kind"] == "comparison_photo" for slot in page["slots"] if slot["role"] == "current"]
+        self.assertEqual([CURRENT_SHOT_ID], current)
+
+    def test_punchlist_update_cover_also_uses_the_first_overview(self) -> None:
+        payload = validation()
+        detail = {**payload['inputs']['ordered_shots'][0], 'capture_kind':'follow_up_capture'}
+        overview = {**detail, 'shot_id':'overview', 'detail_type':'Overview', 'capture_kind':'captured'}
+        payload['inputs']['ordered_shots'] = [detail, overview]
+        lookup = renderer.media_lookup({'items':[{'role':'current','shot_id':s['shot_id'],'temporary_prepared_path':f"/{s['shot_id']}.jpg"} for s in [detail,overview]]})
+        plan = renderer.build_punchlist_update_plan(payload,lookup,'11/05/2026',{}, {})
+        self.assertEqual(plan['pages'][0]['cover_shot_id'],'overview')
+
+    def test_flagged_overview_still_beats_an_unflagged_detail_and_missing_overview_falls_back(self) -> None:
+        payload = validation()
+        detail = payload["inputs"]["ordered_shots"][0]
+        overview = {**detail, "shot_id": "flagged-overview", "detail_type": "Overview"}
+        payload["inputs"]["ordered_shots"] = [detail, overview]
+        lookup = renderer.media_lookup({"items": [{"role": "current", "shot_id": item["shot_id"],
+            "temporary_prepared_path": f"/{item['shot_id']}.jpg"} for item in [detail, overview]]})
+        self.assertEqual("flagged-overview", renderer.cover_photo_entry(payload, lookup)["shot_id"])
+        lookup.by_role_shot.pop(("current", "flagged-overview"))
+        self.assertEqual(CURRENT_SHOT_ID, renderer.cover_photo_entry(payload, lookup)["shot_id"])
+        self.assertIsNone(renderer.cover_photo_entry(payload, media_lookup()))
+
+    def test_comparison_keeps_each_photos_own_message_and_repeats_unchanged_text(self) -> None:
+        for original, updated in [('Broken downspout','Repaired downspout'), ('Same note','Same note')]:
+            with self.subTest(original=original,updated=updated):
+                payload = validation()
+                payload['inputs']['ordered_shots'][0]['flagged_reason'] = updated
+                item = payload['comparisons']['items'][0]
+                item['previous_shot'] = dict(shot_id=PREVIOUS_SHOT_ID,session_id=item['previous_session_id'],flagged_reason=original)
+                plan = renderer.build_comparison_plan(payload,media_lookup(),'11/05/2026',{}, {})
+                page = next(p for p in plan['pages'] if p['kind']=='comparison_photo')
+                slots = {slot['role']:slot['entry'] for slot in page['slots']}
+                self.assertEqual(slots['previous']['flagged_reason'],original)
+                self.assertEqual(slots['current']['flagged_reason'],updated)
+
+    def test_missing_previous_note_does_not_borrow_current_note(self) -> None:
+        payload = validation()
+        plan = renderer.build_comparison_plan(payload,media_lookup(),'11/05/2026',{}, {})
+        page = next(p for p in plan['pages'] if p['kind']=='comparison_photo')
+        previous = next(s['entry'] for s in page['slots'] if s['role']=='previous')
+        self.assertIsNone(previous['flagged_reason'])
+
+    def test_comparison_rejects_mismatched_historical_photo_metadata(self) -> None:
+        for changed in [{'shot_id':'different-photo'},{'session_id':'different-session'},{'issue_id':'different-issue'}]:
+            payload = validation()
+            payload['inputs']['ordered_shots'][0]['issue_id']='issue'
+            item=payload['comparisons']['items'][0]
+            item['previous_shot'] = dict(shot_id=PREVIOUS_SHOT_ID,session_id=item['previous_session_id'],issue_id='issue',flagged_reason='Original')
+            item['previous_shot'].update(changed)
+            with self.assertRaises(renderer.Phase2BError):
+                renderer.build_comparison_plan(payload,media_lookup(),'11/05/2026',{}, {})
+
+    def test_current_photo_plans_preserve_original_and_updated_messages(self) -> None:
+        payload = validation()
+        payload['inputs']['ordered_shots'][0]['original_flagged_reason'] = 'Original issue'
+        for builder in (renderer.build_property_plan,renderer.build_priority_plan):
+            plan=builder(payload,media_lookup(),'11/05/2026',{}, {})
+            entries=[s['entry'] for p in plan['pages'] for s in p.get('slots',[])]
+            self.assertEqual(entries[0]['original_flagged_reason'],'Original issue')
+            self.assertEqual(entries[0]['flagged_reason'],'Paint touched up')
+
     def test_actor_email_from_snapshot_is_not_rendered_in_report_plans(self) -> None:
         payload = validation()
         payload["inputs"]["session"]["capturedByEmail"] = "former@example.com"
