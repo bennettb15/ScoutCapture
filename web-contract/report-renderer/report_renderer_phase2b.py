@@ -1021,7 +1021,7 @@ def property_entries(validation: dict[str, Any], lookup: MediaLookup) -> list[di
         media = media_for(lookup, "current", entry.get("shot_id"))
         entry["media"] = media
         entry["media_path"] = trim(media.get("temporary_prepared_path")) if media else None
-        entry["caption"] = caption_identity(entry)
+        entry["caption"] = caption_identity(entry) + (" | FOLLOW-UP PHOTO" if entry.get("follow_up_photo") else "")
         entry["visual_state"] = visual_state(entry)
         entry["captured_at_display"] = " " if kind == "skipped" else (display_datetime(entry.get("captured_at_utc")) or "Unknown")
         entry["slot_key"] = slot_key(entry)
@@ -1148,6 +1148,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "visualState",
         "media_path",
         "original_filename",
+        "follow_up_photo",
         "suppress_session_label",
     ]
     return {key: entry.get(key) for key in keys if key in entry}
@@ -1737,12 +1738,16 @@ def make_plan(
 
 
 def time_window(validation: dict[str, Any]) -> str:
+    session = validation.get("inputs", {}).get("session") or {}
     shots = validation.get("inputs", {}).get("ordered_shots") or []
+    session_type = validation.get("session_type") or session.get("session_type")
+    if session_type == "punchlist_visit":
+        session_id = trim(validation.get("session_id") or session.get("session_id"))
+        shots = [shot for shot in shots if (trim(shot.get("session_id")) or "").lower() == (session_id or "").lower()]
     shot_dates = [local_datetime(shot.get("captured_at_utc")) for shot in shots]
     shot_dates = [value for value in shot_dates if value is not None]
-    session = validation.get("inputs", {}).get("session") or {}
-    first = shot_dates[0] if shot_dates else local_datetime(session.get("started_at_utc"))
-    last = shot_dates[-1] if shot_dates else local_datetime(session.get("ended_at_utc") or session.get("started_at_utc"))
+    first = min(shot_dates) if shot_dates else local_datetime(session.get("started_at_utc"))
+    last = max(shot_dates) if shot_dates else local_datetime(session.get("ended_at_utc") or session.get("started_at_utc"))
     if not first:
         return "Unknown"
     first_text = first.strftime("%-I:%M %p")

@@ -12,6 +12,11 @@ spec = importlib.util.spec_from_file_location('report_input_phase1', MODULE_PATH
 report_input = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = report_input
 spec.loader.exec_module(report_input)
+RENDERER_PATH = ROOT / 'report-renderer' / 'report_renderer_phase2b.py'
+renderer_spec = importlib.util.spec_from_file_location('report_renderer_phase2b', RENDERER_PATH)
+report_renderer = importlib.util.module_from_spec(renderer_spec)
+sys.modules[renderer_spec.name] = report_renderer
+renderer_spec.loader.exec_module(report_renderer)
 
 ORG = 'org-a'
 PROPERTY = 'property-a'
@@ -81,6 +86,43 @@ class SelectiveHistoryTests(unittest.TestCase):
                                  for row in self.baseline['metadata']['shots']]) if e['kind'] == 'photo'])
         self.assertEqual(result['baseline']['session_id'], 'session-full')
         self.assertEqual(result['comparisons'][0]['matching_rule'], 'same_issue_id')
+
+    def test_property_distinguishes_follow_up_and_uses_current_visit_time(self):
+        self.visit1['metadata']['shots'][0]['createdAt'] = '2026-10-02T10:45:00Z'
+        result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
+        validation = {
+            'session_id': 'session-visit1', 'session_type': 'punchlist_visit',
+            'inputs': {'session': {'session_id': 'session-visit1',
+                                   'started_at_utc': '2026-10-02T10:00:00Z',
+                                   'ended_at_utc': '2026-10-02T11:00:00Z'},
+                       'ordered_shots': result['shots'],
+                       'punchlist_shots': result['punchlist_shots'],
+                       'property_report_entries': result['entries']},
+        }
+        entries = report_renderer.property_entries(validation, report_renderer.media_lookup({}))
+        self.assertEqual(len(entries), 9)
+        self.assertEqual(sum('FOLLOW-UP PHOTO' in e['caption'] for e in entries), 1)
+        self.assertIn('FOLLOW-UP PHOTO', next(e['caption'] for e in entries if e['shot_id'] == 'photo-0-visit1'))
+        self.assertNotIn('FOLLOW-UP PHOTO', next(e['caption'] for e in entries if e['shot_id'] == 'photo-0-full'))
+        self.assertEqual(report_renderer.time_window(validation), '6:45 AM')
+        priority = report_renderer.build_priority_plan(
+            validation, report_renderer.media_lookup({}), '10/02/2026', {}, {})
+        priority_shot_ids = [slot['entry']['shot_id'] for page in priority['pages']
+                             for slot in page.get('slots', [])]
+        self.assertIn('photo-0-visit1', priority_shot_ids)
+        self.assertNotIn('photo-0-full', priority_shot_ids)
+        self.assertEqual(len(priority_shot_ids), 8)
+
+    def test_status_only_visit_time_does_not_claim_old_photo_time(self):
+        result = report_input.compose_punchlist_history([self.baseline], Storage())
+        validation = {
+            'session_id': 'session-status', 'session_type': 'punchlist_visit',
+            'inputs': {'session': {'session_id': 'session-status',
+                                   'started_at_utc': '2026-10-02T10:00:00Z',
+                                   'ended_at_utc': '2026-10-02T11:00:00Z'},
+                       'ordered_shots': result['shots']},
+        }
+        self.assertEqual(report_renderer.time_window(validation), '6:00 AM to 7:00 AM')
 
     def test_multiple_visits_and_resolved_state(self):
         self.visit2['metadata']['issues'].append(issue(0, 'resolved'))

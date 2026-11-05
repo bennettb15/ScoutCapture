@@ -1093,7 +1093,7 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
     for shot in latest_shots:
         if (baseline and shot["session_id"].lower() in since_baseline and
                 shot["shot_id"].lower() not in baseline_ids):
-            entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
+            entries.append({"kind": "photo", "shot_id": shot["shot_id"], "follow_up_photo": True})
     return {"shots": all_shots if baseline else latest_shots, "punchlist_shots": latest_shots,
             "entries": entries, "guided": baseline_guided, "comparisons": comparisons,
             "baseline": all_sources[sources.index(baseline)] if baseline else None,
