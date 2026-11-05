@@ -1,4 +1,5 @@
 import importlib.util
+import datetime as dt
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,8 +118,13 @@ class TenantComparisonTests(unittest.TestCase):
             read_json=lambda path:json.loads(path.read_text()), write_json=write_json, PACKAGED_LOGO_SVG='logo.svg')
         renderer = SimpleNamespace(logo_info=lambda *args:{}, render_pdf=lambda plan,path:path.write_bytes(b'%PDF-test'))
         with tempfile.TemporaryDirectory() as folder, patch.object(tenant,'load_renderer',return_value=renderer), patch.object(tenant,'build_plan',return_value={}):
+            started = dt.datetime.now(dt.timezone.utc)
             tenant.process_request(SimpleNamespace(output_dir=folder),Client(),ROOT.parent,row['id'],worker)
             self.assertEqual(updates[-1]['status'],'ready')
+            self.assertEqual([u['progress_step'] for u in updates], ['validating','preparing_photos','rendering','uploading','ready'])
+            expiry = dt.datetime.fromisoformat(updates[-1]['expires_at'])
+            self.assertGreaterEqual(expiry, started + dt.timedelta(hours=24))
+            self.assertLess(expiry, dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24, seconds=1))
             self.assertEqual(uploads,[(tenant.BUCKET,tenant.expected_path(row),'application/pdf',False,b'%PDF-test')])
             self.assertFalse((Path(folder)/'tenant-comparisons'/row['id']).exists())
         inputs = [command for command in commands if '--session-id' in command]
