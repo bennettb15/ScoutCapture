@@ -887,6 +887,7 @@ struct SessionHubView: View {
     @State private var pendingExportPromptProperty: Property? = nil
     @State private var initialSessionTypePickerProperty: Property? = nil
     @State private var shouldRecommendInitialOverview = false
+    @State private var showInitialPunchlistConfirmation = false
     @State private var fastLaneOpeningProperty: Property? = nil
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
@@ -3679,7 +3680,7 @@ struct SessionHubView: View {
 
             VStack(spacing: 16) {
                 VStack(spacing: 5) {
-                    Text("Session Type")
+                    Text(showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(headerPrimaryLabel)
 
@@ -3700,11 +3701,11 @@ struct SessionHubView: View {
                 }
 
                 VStack(spacing: 10) {
-                    if shouldRecommendInitialOverview {
+                    if showInitialPunchlistConfirmation {
                         HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "photo.on.rectangle.angled")
+                            Image(systemName: "exclamationmark.circle.fill")
                                 .foregroundColor(.blue)
-                            Text("For property reports, we recommend starting with a clear front Overview photo in Full Documentation, then completing and exporting that session. Punchlist captures issue photos only, but you can still choose it now.")
+                            Text("Are you sure? Punchlist photos document issues only. Property reports will not have a front Overview cover photo until you take one in Full Documentation and complete and export that session.")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(headerPrimaryLabel)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -3713,30 +3714,68 @@ struct SessionHubView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.blue.opacity(0.10))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
 
-                    initialSessionChoiceButton(
-                        title: "Full Documentation",
-                        subtitle: "Complete property walkthrough with guided photos and flags",
-                        systemImage: "camera.metering.matrix",
-                        isEnabled: true,
-                        disabledCaption: nil
-                    ) {
-                        beginInitialFullDocumentationEntry(for: property)
-                    }
-                    initialSessionChoiceButton(
-                        title: "Punchlist Visit",
-                        subtitle: "Issue photos only; no guided Overview photo",
-                        systemImage: "checklist",
-                        isEnabled: true,
-                        disabledCaption: nil
-                    ) {
-                        beginInitialPunchlistEntry(for: property)
+                        initialSessionChoiceButton(
+                            title: "Start Full Documentation",
+                            subtitle: "Take a front Overview photo first",
+                            systemImage: "camera.metering.matrix",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialFullDocumentationEntry(for: property)
+                        }
+                        initialSessionChoiceButton(
+                            title: "Continue Punchlist",
+                            subtitle: "Proceed without a front Overview cover photo",
+                            systemImage: "checklist",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+                        }
+                    } else {
+                        if shouldRecommendInitialOverview {
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .foregroundColor(.blue)
+                                Text("For property reports, we recommend starting with a clear front Overview photo in Full Documentation, then completing and exporting that session. Punchlist captures issue photos only, but you can still choose it now.")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(headerPrimaryLabel)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.blue.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+
+                        initialSessionChoiceButton(
+                            title: "Full Documentation",
+                            subtitle: "Complete property walkthrough with guided photos and flags",
+                            systemImage: "camera.metering.matrix",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialFullDocumentationEntry(for: property)
+                        }
+                        initialSessionChoiceButton(
+                            title: "Punchlist Visit",
+                            subtitle: "Issue photos only; no guided Overview photo",
+                            systemImage: "checklist",
+                            isEnabled: true,
+                            disabledCaption: nil
+                        ) {
+                            beginInitialPunchlistEntry(for: property)
+                        }
                     }
                 }
 
                 Button {
-                    dismissInitialSessionTypePicker(for: property)
+                    if showInitialPunchlistConfirmation {
+                        showInitialPunchlistConfirmation = false
+                    } else {
+                        dismissInitialSessionTypePicker(for: property)
+                    }
                 } label: {
                     Text("Back")
                         .font(.system(size: 16, weight: .semibold))
@@ -4129,6 +4168,7 @@ struct SessionHubView: View {
             isOpeningProperty = false
             fastLaneOpeningProperty = nil
             shouldRecommendInitialOverview = appState.sessions(for: property.id).isEmpty
+            showInitialPunchlistConfirmation = false
             initialSessionTypePickerProperty = property
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
@@ -4346,6 +4386,7 @@ struct SessionHubView: View {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
         initialSessionTypePickerProperty = nil
         shouldRecommendInitialOverview = false
+        showInitialPunchlistConfirmation = false
         isOpeningProperty = false
         if pressedPropertyID == property.id {
             pressedPropertyID = nil
@@ -4358,7 +4399,12 @@ struct SessionHubView: View {
     }
 
     private func beginInitialPunchlistEntry(for property: Property) {
-        beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+        guard initialSessionTypePickerProperty?.id == property.id else { return }
+        if shouldRecommendInitialOverview {
+            showInitialPunchlistConfirmation = true
+        } else {
+            beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+        }
     }
 
     private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
@@ -4376,6 +4422,7 @@ struct SessionHubView: View {
             if let block = decision?.block {
                 initialSessionTypePickerProperty = nil
                 shouldRecommendInitialOverview = false
+                showInitialPunchlistConfirmation = false
                 isOpeningProperty = false
                 propertyEntryLockPrompt = PropertyEntryLockPrompt(
                     propertyID: property.id,
@@ -4390,6 +4437,7 @@ struct SessionHubView: View {
 
             initialSessionTypePickerProperty = nil
             shouldRecommendInitialOverview = false
+            showInitialPunchlistConfirmation = false
             isOpeningProperty = true
             propertyTapToken += 1
             if pressedPropertyID == property.id {
