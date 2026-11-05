@@ -887,7 +887,6 @@ struct SessionHubView: View {
     @State private var pendingExportPromptProperty: Property? = nil
     @State private var initialSessionTypePickerProperty: Property? = nil
     @State private var shouldRecommendInitialOverview = false
-    @State private var initialPunchlistAdvisoryProperty: Property? = nil
     @State private var fastLaneOpeningProperty: Property? = nil
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
@@ -1400,11 +1399,6 @@ struct SessionHubView: View {
             .overlay {
                 if let property = initialSessionTypePickerProperty {
                     initialSessionTypePickerOverlay(for: property)
-                }
-            }
-            .overlay {
-                if let property = initialPunchlistAdvisoryProperty {
-                    initialPunchlistAdvisoryOverlay(for: property)
                 }
             }
             .overlay {
@@ -3710,7 +3704,7 @@ struct SessionHubView: View {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "photo.on.rectangle.angled")
                                 .foregroundColor(.blue)
-                            Text("We recommend starting with a clear front Overview photo in a Full Documentation session. Complete and export that session so the portal can use it in property reports.")
+                            Text("For property reports, we recommend starting with a clear front Overview photo in Full Documentation, then completing and exporting that session. Punchlist captures issue photos only, but you can still choose it now.")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(headerPrimaryLabel)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -3765,51 +3759,6 @@ struct SessionHubView: View {
             .padding(.horizontal, 20)
         }
         .allowsHitTesting(true)
-    }
-
-    @ViewBuilder
-    private func initialPunchlistAdvisoryOverlay(for property: Property) -> some View {
-        ZStack {
-            Color.black.opacity(0.62)
-                .ignoresSafeArea()
-
-            VStack(spacing: 14) {
-                Text("Start with Punchlist?")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundColor(headerPrimaryLabel)
-
-                Text("Punchlist visits capture issue photos only. For a front Overview in property reports, start with Full Documentation, then complete and export that session. You can still continue with Punchlist now.")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button("Start Full Documentation") {
-                    initialPunchlistAdvisoryProperty = nil
-                    beginInitialFullDocumentationEntry(for: property)
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
-
-                Button("Continue Punchlist") {
-                    initialPunchlistAdvisoryProperty = nil
-                    beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
-                }
-                .buttonStyle(.bordered)
-
-                Button("Back") {
-                    initialPunchlistAdvisoryProperty = nil
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.blue)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 22)
-            .frame(maxWidth: 430)
-            .background(colorScheme == .light ? Color(.systemBackground) : Color(.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .padding(.horizontal, 20)
-        }
     }
 
     private func initialSessionChoiceButton(
@@ -4396,7 +4345,6 @@ struct SessionHubView: View {
     private func dismissInitialSessionTypePicker(for property: Property) {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
         initialSessionTypePickerProperty = nil
-        initialPunchlistAdvisoryProperty = nil
         shouldRecommendInitialOverview = false
         isOpeningProperty = false
         if pressedPropertyID == property.id {
@@ -4410,11 +4358,7 @@ struct SessionHubView: View {
     }
 
     private func beginInitialPunchlistEntry(for property: Property) {
-        if shouldRecommendInitialOverview {
-            initialPunchlistAdvisoryProperty = property
-        } else {
-            beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
-        }
+        beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
     }
 
     private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
@@ -4431,7 +4375,6 @@ struct SessionHubView: View {
             guard initialSessionTypePickerProperty?.id == property.id else { return }
             if let block = decision?.block {
                 initialSessionTypePickerProperty = nil
-                initialPunchlistAdvisoryProperty = nil
                 shouldRecommendInitialOverview = false
                 isOpeningProperty = false
                 propertyEntryLockPrompt = PropertyEntryLockPrompt(
@@ -4446,7 +4389,6 @@ struct SessionHubView: View {
             }
 
             initialSessionTypePickerProperty = nil
-            initialPunchlistAdvisoryProperty = nil
             shouldRecommendInitialOverview = false
             isOpeningProperty = true
             propertyTapToken += 1
@@ -14154,11 +14096,10 @@ private enum FastLaneFlaggedSaveAction: Equatable {
 
 private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
     let cornerRadius: CGFloat
-    var showsPressedVisual = true
     var manualPressedVisual = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let isPressed = manualPressedVisual || (showsPressedVisual && configuration.isPressed)
+        let isPressed = manualPressedVisual || configuration.isPressed
 
         configuration.label
             .scaleEffect(isPressed ? 0.97 : 1.0)
@@ -14184,6 +14125,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let confirmationHaptic = UIImpactFeedbackGenerator(style: .light)
 
     let context: ActiveCaptureContext
     let propertyName: String
@@ -17798,7 +17740,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             "Confirm",
                             fill: Color.blue,
                             stroke: nil,
-                            showsPressedVisual: false,
                             saveFeedbackAction: .confirm
                         ) {
                             performFastLaneFlaggedDecision(.confirm) {
@@ -17824,7 +17765,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             "Resolve",
                             fill: Color.white.opacity(0.10),
                             stroke: Color.white.opacity(0.16),
-                            showsPressedVisual: false,
                             saveFeedbackAction: .resolve
                         ) {
                             performFastLaneFlaggedDecision(.resolve) {
@@ -17838,7 +17778,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             fill: Color.blue,
                             stroke: nil,
                             isEnabled: !revised.isEmpty,
-                            showsPressedVisual: false,
                             saveFeedbackAction: .update
                         ) {
                             performFastLaneFlaggedDecision(.update) {
@@ -17881,7 +17820,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fill: Color,
         stroke: Color?,
         isEnabled: Bool = true,
-        showsPressedVisual: Bool = true,
         saveFeedbackAction: FastLaneFlaggedSaveAction? = nil,
         action: @escaping () -> Void
     ) -> some View {
@@ -17911,7 +17849,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .buttonStyle(FastLanePostCaptureActionButtonStyle(
             cornerRadius: 14,
-            showsPressedVisual: showsPressedVisual,
             manualPressedVisual: saveFeedbackAction != nil &&
                 saveFeedbackAction == highlightedFastLaneFlaggedSaveAction
         ))
@@ -17959,6 +17896,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             reason: reason,
             priority: displayPriority
         )
+        confirmationHaptic.prepare()
     }
 
     private func fastLaneObservationReasonText(_ observation: Observation) -> String {
@@ -17976,10 +17914,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         action: @escaping () -> Void
     ) {
         guard !isApplyingFastLaneFlaggedDecision else { return }
+        confirmationHaptic.impactOccurred()
+        confirmationHaptic.prepare()
         isApplyingFastLaneFlaggedDecision = true
         highlightedFastLaneFlaggedSaveAction = button
-        // Give SwiftUI a frame to show feedback, then perform the local save.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+        DispatchQueue.main.async {
             action()
             highlightedFastLaneFlaggedSaveAction = nil
             isApplyingFastLaneFlaggedDecision = false
