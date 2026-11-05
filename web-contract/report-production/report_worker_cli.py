@@ -110,9 +110,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--retention-mode",
-        choices=["dry-run", "apply"],
+        choices=["dry-run"],
         default="dry-run",
-        help="Apply or dry-run latest-2 package retention. Default is dry-run.",
+        help="Report packages are preserved; this option is retained for existing dry-run callers.",
     )
     parser.add_argument(
         "--allow-remote-validation",
@@ -535,13 +535,13 @@ class SupabaseServiceClient:
         )
         return json.loads(value.decode("utf-8"))
 
-    def upload_object(self, bucket: str, path: str, file_path: pathlib.Path, mime_type: str) -> None:
+    def upload_object(self, bucket: str, path: str, file_path: pathlib.Path, mime_type: str, upsert: bool = True) -> None:
         encoded_path = "/".join(urllib.parse.quote(part) for part in path.split("/"))
         self.request(
             "POST",
             f"{self.url}/storage/v1/object/{urllib.parse.quote(bucket)}/{encoded_path}",
             body=file_path.read_bytes(),
-            headers={"Content-Type": mime_type, "x-upsert": "true"},
+            headers={"Content-Type": mime_type, "x-upsert": "true" if upsert else "false"},
             timeout=120,
         )
 
@@ -1549,6 +1549,9 @@ def get_or_create_package(
     session_id = str(snapshot_row["session_id"])
     org_id = str(snapshot_row["org_id"])
     property_id = str(snapshot_row["property_id"])
+    if any(str(session.get(key) or "").lower() != str(snapshot_row.get(key) or "").lower()
+           for key in ("session_id", "org_id", "property_id")):
+        raise WorkerError("ReportInput identity does not match the sealed source snapshot.")
     actor = validation_actor(validation)
     idempotency_key = f"pdf-package:{snapshot_id}:{RENDERER_VERSION}"
     existing = client.select(
@@ -1562,6 +1565,8 @@ def get_or_create_package(
     )
     if existing:
         package = existing[0]
+        if package.get("status") == "ready":
+            return package, "already_ready"
         rows = client.patch(
             "report_packages",
             {"id": f"eq.{package['id']}"},
@@ -1702,10 +1707,14 @@ def upload_pdf_with_retry(
     sleep_func: Any = time.sleep,
 ) -> None:
     attempts = max(1, int(attempts or 1))
+    if client.object_exists(bucket, storage_path):
+        if hashlib.sha256(client.download_object(bucket, storage_path)).hexdigest() == sha256_file(pdf_path):
+            return
+        raise WorkerError(f"Refusing to overwrite an existing PDF: {storage_path}")
     last_error: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
-            client.upload_object(bucket, storage_path, pdf_path, mime_type)
+            client.upload_object(bucket, storage_path, pdf_path, mime_type, upsert=False)
             if attempt > 1:
                 print(
                     stable_json(
@@ -2192,36 +2201,10 @@ def retention_candidates(client: SupabaseServiceClient, property_id: str) -> lis
 
 
 def apply_retention(client: SupabaseServiceClient, candidates: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for package in candidates:
-        files = client.select(
-            "report_package_files",
-            {
-                "select": "id,storage_bucket,storage_path,storage_deleted_at",
-                "package_id": f"eq.{package['id']}",
-                "deleted_at": "is.null",
-            },
-        )
-        entry = {"package_id": package["id"], "mode": mode, "files": []}
-        for file_row in files:
-            file_entry = {
-                "file_id": file_row["id"],
-                "storage_bucket": file_row["storage_bucket"],
-                "storage_path": file_row["storage_path"],
-                "action": "would_delete" if mode == "dry-run" else "deleted",
-            }
-            if mode == "apply" and file_row.get("storage_deleted_at") is None:
-                client.delete_object(file_row["storage_bucket"], file_row["storage_path"])
-                client.patch(
-                    "report_package_files",
-                    {"id": f"eq.{file_row['id']}"},
-                    {"storage_deleted_at": safe_iso_now()},
-                )
-            entry["files"].append(file_entry)
-        if mode == "apply":
-            client.patch("report_packages", {"id": f"eq.{package['id']}"}, {"status": "pruned", "storage_pruned_at": safe_iso_now()})
-        results.append(entry)
-    return results
+    if mode != "dry-run":
+        raise WorkerError("Historical report PDF retention is disabled; existing packages must be preserved.")
+    return [{"package_id": package["id"], "mode": mode, "action": "preserved"}
+            for package in candidates]
 
 
 def allowed_session_ids(args: argparse.Namespace) -> set[str]:
@@ -2565,6 +2548,9 @@ def process_session(
     try:
         snapshot_row = snapshot_metadata(client, validation["source_snapshot_id"])
         package, package_action = get_or_create_package(client, validation, snapshot_row, attempt_started_at)
+        if package_action == "already_ready":
+            return {"ok": True, "package_id": package["id"], "package_action": package_action,
+                    "source_provenance": validation.get("source_provenance")}
 
         run_step(
             [
@@ -2695,6 +2681,7 @@ def process_session(
                     "sessionType": package_session_type,
                     "session_type": package_session_type,
                     "skipped_reports": render_summary.get("skipped_reports", []),
+                    "source_provenance": validation.get("source_provenance"),
                     "pdf_validation_failures": [],
                     "actor": package_actor,
                     "actor_user_id": package_actor.get("user_id"),
@@ -2713,6 +2700,7 @@ def process_session(
                     "actor_email": package_actor.get("email"),
                     "original_photos": original_photo_actors,
                     "reports": uploaded_files,
+                    "source_provenance": validation.get("source_provenance"),
                     "skipped_reports": render_summary.get("skipped_reports", []),
                 },
             },
