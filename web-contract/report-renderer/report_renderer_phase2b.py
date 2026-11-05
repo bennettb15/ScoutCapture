@@ -48,7 +48,7 @@ from scout_report_visuals import (
 
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "phase2c-overview-covers-2"
+GENERATOR_VERSION = "phase2c-photo-notes-3"
 PAGE_WIDTH = 612.0
 PAGE_HEIGHT = 792.0
 PAGE_SIZE = (PAGE_WIDTH, PAGE_HEIGHT)
@@ -1139,6 +1139,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "session_date_utc",
         "captured_at_display",
         "flagged_reason",
+        "original_flagged_reason",
         "priority",
         "normalized_priority",
         "issue_status",
@@ -1435,6 +1436,18 @@ def build_comparison_plan(
         previous_session_id = trim(item.get("previous_session_id"))
         previous_shot_id = trim(item.get("previous_shot_id"))
         previous_session, previous_shot = previous_shot_metadata(validation_lookup_dir, previous_session_id, previous_shot_id)
+        embedded_previous = item.get("previous_shot")
+        if isinstance(embedded_previous, dict):
+            if ((trim(embedded_previous.get("shot_id")) or "").lower() != (previous_shot_id or "").lower() or
+                    (trim(embedded_previous.get("session_id")) or "").lower() != (previous_session_id or "").lower()):
+                raise Phase2BError("Previous comparison photo metadata identity mismatch.")
+            current_issue = (trim(current.get("issue_id")) or "").lower()
+            previous_issue = (trim(embedded_previous.get("issue_id")) or "").lower()
+            if current_issue and previous_issue and current_issue != previous_issue:
+                raise Phase2BError("Previous comparison photo issue identity mismatch.")
+            # Phase 1 pins this metadata to the exact historical photo. A fresh
+            # worker need not have another session's validation JSON on disk.
+            previous_shot = embedded_previous
         previous_session_date = previous_session_date_source(item, previous_session, previous_media)
         previous_captured_date = previous_captured_date_source(item, previous_shot, previous_media)
         previous_display_date = previous_session_date or previous_captured_date
@@ -1451,7 +1464,7 @@ def build_comparison_plan(
             "angle_index": (previous_shot or {}).get("angle_index") or current.get("angle_index"),
             "shot_key": (previous_shot or {}).get("shot_key") or current.get("shot_key"),
             "visual_state": previous_visual_state,
-            "flagged_reason": (previous_shot or {}).get("flagged_reason") or current.get("flagged_reason"),
+            "flagged_reason": first_trimmed(previous_shot or {}, ["flagged_reason", "reason", "noteText"]),
             "captured_at_utc": previous_captured_date,
             "session_date_utc": previous_session_date,
         }
@@ -2091,6 +2104,20 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     top_y = rect["y"] + rect["height"] - 14
     draw_text(c, entry.get("caption") or "", {"x": rect["x"], "y": top_y, "width": rect["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
     state = entry.get("visual_state") or "none"
+    original = trim(entry.get("original_flagged_reason"))
+    current = trim(entry.get("flagged_reason"))
+    if state != "none" and original and current and original != current:
+        draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, size=10, align="center")
+        note = f"Updated note: {current}"
+        if state == "resolved":
+            note = f"Resolved - {note}"
+        note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
+        if priority and state != "resolved":
+            draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
+        else:
+            draw_note(c, note, note_rect, state)
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
+        return
     if priority:
         if state == "resolved":
             reason = trim(entry.get("flagged_reason"))

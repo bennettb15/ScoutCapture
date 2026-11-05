@@ -888,6 +888,7 @@ def comparison_validations(
                     "angle_index": current.get("angle_index"),
                 },
                 "previous_shot_id": previous.get("shot_id") if previous else None,
+                "previous_shot": previous,
                 "previous_session_id": previous.get("session_id") if previous else None,
                 "previous_session_started_at_utc": previous.get("session_started_at") if previous else None,
                 "previous_session_completed_at_utc": previous.get("session_completed_at") if previous else None,
@@ -1062,6 +1063,7 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
     comparisons = []
     for iid, history in sorted(issue_photos.items()):
         current = dict(history[-1])
+        current["original_flagged_reason"] = history[0].get("flagged_reason")
         current["is_flagged"] = True
         issue = latest_issue.get(iid) or {}
         status = (trim(issue.get("issueStatus") or issue.get("status")) or trim(current.get("issue_status")) or "").lower()
@@ -1090,6 +1092,9 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
         if shot["shot_id"].lower() not in seen:
             all_shots.append(shot)
             seen.add(shot["shot_id"].lower())
+    original_reasons = {iid: history[0].get("flagged_reason") for iid, history in issue_photos.items()}
+    all_shots = [{**shot, "original_flagged_reason": original_reasons.get((trim(shot.get("issue_id")) or "").lower())}
+                 for shot in all_shots]
     baseline_ids = {shot["shot_id"].lower() for shot in baseline_shots}
     since_baseline = {str(source["row"].get("session_id") or "").lower()
                       for source in sources[sources.index(baseline):]} if baseline else set()

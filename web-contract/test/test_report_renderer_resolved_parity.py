@@ -208,6 +208,45 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
         self.assertEqual(CURRENT_SHOT_ID, renderer.cover_photo_entry(payload, lookup)["shot_id"])
         self.assertIsNone(renderer.cover_photo_entry(payload, media_lookup()))
 
+    def test_comparison_keeps_each_photos_own_message_and_repeats_unchanged_text(self) -> None:
+        for original, updated in [('Broken downspout','Repaired downspout'), ('Same note','Same note')]:
+            with self.subTest(original=original,updated=updated):
+                payload = validation()
+                payload['inputs']['ordered_shots'][0]['flagged_reason'] = updated
+                item = payload['comparisons']['items'][0]
+                item['previous_shot'] = dict(shot_id=PREVIOUS_SHOT_ID,session_id=item['previous_session_id'],flagged_reason=original)
+                plan = renderer.build_comparison_plan(payload,media_lookup(),'11/05/2026',{}, {})
+                page = next(p for p in plan['pages'] if p['kind']=='comparison_photo')
+                slots = {slot['role']:slot['entry'] for slot in page['slots']}
+                self.assertEqual(slots['previous']['flagged_reason'],original)
+                self.assertEqual(slots['current']['flagged_reason'],updated)
+
+    def test_missing_previous_note_does_not_borrow_current_note(self) -> None:
+        payload = validation()
+        plan = renderer.build_comparison_plan(payload,media_lookup(),'11/05/2026',{}, {})
+        page = next(p for p in plan['pages'] if p['kind']=='comparison_photo')
+        previous = next(s['entry'] for s in page['slots'] if s['role']=='previous')
+        self.assertIsNone(previous['flagged_reason'])
+
+    def test_comparison_rejects_mismatched_historical_photo_metadata(self) -> None:
+        for changed in [{'shot_id':'different-photo'},{'session_id':'different-session'},{'issue_id':'different-issue'}]:
+            payload = validation()
+            payload['inputs']['ordered_shots'][0]['issue_id']='issue'
+            item=payload['comparisons']['items'][0]
+            item['previous_shot'] = dict(shot_id=PREVIOUS_SHOT_ID,session_id=item['previous_session_id'],issue_id='issue',flagged_reason='Original')
+            item['previous_shot'].update(changed)
+            with self.assertRaises(renderer.Phase2BError):
+                renderer.build_comparison_plan(payload,media_lookup(),'11/05/2026',{}, {})
+
+    def test_current_photo_plans_preserve_original_and_updated_messages(self) -> None:
+        payload = validation()
+        payload['inputs']['ordered_shots'][0]['original_flagged_reason'] = 'Original issue'
+        for builder in (renderer.build_property_plan,renderer.build_priority_plan):
+            plan=builder(payload,media_lookup(),'11/05/2026',{}, {})
+            entries=[s['entry'] for p in plan['pages'] for s in p.get('slots',[])]
+            self.assertEqual(entries[0]['original_flagged_reason'],'Original issue')
+            self.assertEqual(entries[0]['flagged_reason'],'Paint touched up')
+
     def test_actor_email_from_snapshot_is_not_rendered_in_report_plans(self) -> None:
         payload = validation()
         payload["inputs"]["session"]["capturedByEmail"] = "former@example.com"
