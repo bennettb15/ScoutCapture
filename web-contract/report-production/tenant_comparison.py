@@ -58,7 +58,8 @@ def build_plan(renderer, before, after, before_media, after_media, logo):
     pairs = pair_entries(old, new)
     if not pairs:
         raise ValueError('No documented views are available for comparison.')
-    pages = [{'number': 1, 'kind': 'cover', 'title': 'Tenant Comparison Report', 'cover_media_path': next((e.get('media_path') for e in new if e.get('media_path')), None)}]
+    cover = renderer.cover_photo_entry(after, renderer.media_lookup(after_media))
+    pages = [{'number': 1, 'kind': 'cover', 'title': 'Tenant Comparison Report', 'cover_shot_id': (cover or {}).get('shot_id'), 'cover_media_path': (cover or {}).get('media_path')}]
     for number, (left, right, basis) in enumerate(pairs, 2):
         pages.append({'number': number, 'kind': 'tenant_comparison', 'before': renderer.compact_entry(left or {}),
                       'after': renderer.compact_entry(right or {}), 'matching_basis': basis,

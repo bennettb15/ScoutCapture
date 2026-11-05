@@ -32,7 +32,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 
 DELIVERABLES_BUCKET = "scoutcapture-deliverables"
-RENDERER_VERSION = "phase2c-shadow-reportlab-refinement-1"
+RENDERER_VERSION = "phase2c-overview-covers-2"
 MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
 ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
@@ -2653,6 +2653,7 @@ def process_session(
                     "storage_bucket": DELIVERABLES_BUCKET,
                     "storage_path": storage_path,
                     "pdf_sha256": pdf_sha,
+                    "cover_shot_id": report.get("cover_shot_id"),
                     "page_count": report["page_count"],
                     "byte_size": pdf_path.stat().st_size,
                     "local_pdf_path": str(pdf_path),

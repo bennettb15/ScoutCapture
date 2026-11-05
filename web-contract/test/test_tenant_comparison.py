@@ -24,6 +24,16 @@ class TenantComparisonTests(unittest.TestCase):
         new = photo('new', 'issue-1', angle=5)
         self.assertEqual(tenant.pair_entries([old], [new]), [(old, new, 'issue_id')])
 
+    def test_tenant_cover_uses_the_same_first_overview_rule(self):
+        renderer = tenant.load_renderer(ROOT.parent)
+        detail = dict(shot_id='detail',session_id='session',detail_type='Door',captured_at_utc='2026-11-05T10:00:00Z')
+        overview = dict(shot_id='overview',session_id='session',detail_type='Overview',captured_at_utc='2026-11-05T10:01:00Z')
+        validation = dict(session_id='session',source_snapshot_id='snapshot',inputs=dict(session=dict(session_id='session'),
+            ordered_shots=[detail,overview],property_report_entries=[dict(kind='photo',shot_id='detail'),dict(kind='photo',shot_id='overview')]))
+        media = {'items':[dict(role='current',shot_id=s['shot_id'],temporary_prepared_path=f"/{s['shot_id']}.jpg") for s in [detail,overview]]}
+        plan = tenant.build_plan(renderer,validation,validation,media,media,{})
+        self.assertEqual(plan['pages'][0]['cover_shot_id'],'overview')
+
     def test_distinct_issues_at_same_location_are_not_matched(self):
         pairs = tenant.pair_entries([photo('a', 'issue-a')], [photo('b', 'issue-b')])
         self.assertEqual(len(pairs), 2)
