@@ -1022,7 +1022,7 @@ def scoped_snapshot_history(
 
 
 def compose_punchlist_history(sources: list[dict[str, Any]], storage: StorageProbe) -> dict[str, Any]:
-    """Keep Guided Shots from the newest full visit and one latest real photo per issue."""
+    """Use the newest full visit's layout and the latest real photo per issue."""
     baseline = next((source for source in reversed(sources)
                      if source["session_type"] == "full_documentation" and
                      (source.get("declared_type") == "full_documentation" or
@@ -1086,14 +1086,31 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
         if shot["shot_id"].lower() not in seen:
             all_shots.append(shot)
             seen.add(shot["shot_id"].lower())
-    entries = list(baseline_entries)
     baseline_ids = {shot["shot_id"].lower() for shot in baseline_shots}
     since_baseline = {str(source["row"].get("session_id") or "").lower()
                       for source in sources[sources.index(baseline):]} if baseline else set()
-    for shot in latest_shots:
-        if (baseline and shot["session_id"].lower() in since_baseline and
-                shot["shot_id"].lower() not in baseline_ids):
-            entries.append({"kind": "photo", "shot_id": shot["shot_id"], "follow_up_photo": True})
+    replacements = {shot["issue_id"].lower(): shot for shot in latest_shots
+                    if (baseline and shot["session_id"].lower() in since_baseline and
+                        shot["shot_id"].lower() not in baseline_ids)}
+    baseline_by_id = {shot["shot_id"].lower(): shot for shot in baseline_shots}
+    entries = []
+    placed_issues = set()
+    # Replace an updated issue in its baseline position; history remains available
+    # to the comparison report without adding old photos to the Property Report.
+    for entry in baseline_entries:
+        original = baseline_by_id.get((trim(entry.get("shot_id")) or "").lower())
+        issue_id = (trim((original or {}).get("issue_id")) or "").lower()
+        replacement = replacements.get(issue_id) if entry.get("kind") == "photo" else None
+        if replacement:
+            if issue_id in placed_issues:
+                continue
+            entries.append({"kind": "photo", "shot_id": replacement["shot_id"]})
+            placed_issues.add(issue_id)
+        else:
+            entries.append(entry)
+    for issue_id, shot in replacements.items():
+        if issue_id not in placed_issues:
+            entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
     return {"shots": all_shots if baseline else latest_shots, "punchlist_shots": latest_shots,
             "entries": entries, "guided": baseline_guided, "comparisons": comparisons,
             "baseline": all_sources[sources.index(baseline)] if baseline else None,
