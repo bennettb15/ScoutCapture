@@ -2329,6 +2329,32 @@ struct Observation: Codable, Identifiable, Equatable {
     var shots: [Shot]
     var guidedShots: [GuidedShot]
 
+    /// Edit the issue's current wording without changing status or capture provenance.
+    @discardableResult
+    nonisolated mutating func updateCurrentReason(_ text: String, sessionID: UUID?, at timestamp: Date = Date()) -> Bool {
+        let reason = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reason.isEmpty else { return false }
+        let prior = Self.inferredCurrentReason(note: currentReason ?? note, statement: statement)
+        guard reason != prior else { return false }
+        if let linkedShotID, let index = shots.firstIndex(where: { $0.id == linkedShotID }),
+           Self.trimmedNonEmpty(shots[index].note) == nil {
+            shots[index].note = prior
+        }
+        previousReason = linkedShotID.flatMap { id in
+            Self.trimmedNonEmpty(shots.first(where: { $0.id == id })?.note)
+        } ?? prior
+        currentReason = reason
+        note = reason
+        statement = reason
+        updatedAt = timestamp
+        historyEvents.append(ObservationHistoryEvent(
+            timestamp: timestamp, sessionID: sessionID, kind: .reasonUpdated,
+            beforeValue: prior, afterValue: reason, field: "reason"
+        ))
+        historyEvents.sort { $0.timestamp < $1.timestamp }
+        return true
+    }
+
     nonisolated init(
         id: UUID = UUID(),
         propertyID: UUID,

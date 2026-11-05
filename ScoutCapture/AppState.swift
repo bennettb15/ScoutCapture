@@ -45192,13 +45192,27 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
+    func updateFlagReason(propertyID: UUID, observationID: UUID, sessionID: UUID?, reason: String) -> Bool {
+        guard canAccessProperty(propertyID), !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        do {
+            guard var observation = try localStore.fetchObservations(propertyID: propertyID)
+                .first(where: { $0.id == observationID }) else { return false }
+            if observation.updateCurrentReason(reason, sessionID: sessionID) {
+                _ = try localStore.updateObservation(observation)
+            }
+            return true
+        } catch {
+            print("[FlagReason] update_failed issueID=\(observationID) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
     func fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
         propertyID: UUID,
         sessionID: UUID,
         observationID: UUID,
-        shotID: UUID,
-        revisedReason: String? = nil,
-        revisedPriority: String? = nil
+        shotID: UUID
     ) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
         do {
@@ -45246,51 +45260,14 @@ final class AppState: ObservableObject {
                 ))
             }
 
-            let trimmedReason = revisedReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmedReason.isEmpty {
-                let priorReason = Observation.inferredCurrentReason(
-                    note: observation.currentReason ?? observation.note,
-                    statement: observation.statement
-                )
-                observation.previousReason = priorReason
-                observation.currentReason = trimmedReason
-                observation.note = trimmedReason
-                observation.statement = trimmedReason
-                observation.updateHistory.append(ObservationUpdateEntry(
-                    kind: .revisedObservation,
-                    text: trimmedReason,
-                    shotID: shotID
-                ))
-                observation.historyEvents.append(ObservationHistoryEvent(
-                    timestamp: Date(),
-                    sessionID: sessionID,
-                    kind: .reasonUpdated,
-                    beforeValue: priorReason,
-                    afterValue: trimmedReason,
-                    field: "reason",
-                    shotID: shotID
-                ))
-            } else {
-                observation.updateHistory.append(ObservationUpdateEntry(
-                    kind: .followUpCapture,
-                    shotID: shotID
-                ))
+            // The photo owns the reason staged in the flag controls at shutter time.
+            // Confirm keeps that capture snapshot; editing the issue never rewrites older shots.
+            if let capturedReason = shot?.note {
+                observation.updateCurrentReason(capturedReason, sessionID: sessionID)
             }
-
-            let trimmedPriority = revisedPriority?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmedPriority.isEmpty, trimmedPriority != observation.priority {
-                let priorPriority = observation.priority
-                observation.priority = trimmedPriority
-                observation.historyEvents.append(ObservationHistoryEvent(
-                    timestamp: Date(),
-                    sessionID: sessionID,
-                    kind: .reasonUpdated,
-                    beforeValue: priorPriority,
-                    afterValue: trimmedPriority,
-                    field: "priority",
-                    shotID: shotID
-                ))
-            }
+            observation.updateHistory.append(ObservationUpdateEntry(
+                kind: .followUpCapture, shotID: shotID
+            ))
 
             observation.historyEvents.sort { $0.timestamp < $1.timestamp }
             _ = try localStore.updateObservation(observation)

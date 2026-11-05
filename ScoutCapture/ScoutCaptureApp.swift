@@ -14135,11 +14135,6 @@ private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
     let priority: String
 }
 
-private enum FastLaneFlaggedDecisionStage: Equatable {
-    case primary
-    case reviseObservation
-}
-
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
@@ -14250,9 +14245,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneSideControlToastToken: Int = 0
     @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
     @State private var isApplyingFastLaneFlaggedDecision = false
-    @State private var fastLaneFlaggedDecisionStage: FastLaneFlaggedDecisionStage = .primary
-    @State private var fastLaneFlaggedRevisionText: String = ""
-    @State private var fastLaneFlaggedRevisionPriority: String = "Medium"
     @State private var fastLaneRetakeIssueID: UUID?
     @State private var fastLaneRetakeGuidedID: UUID?
     @State private var fastLaneGalleryDisplayCount: Int = 0
@@ -15494,6 +15486,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             },
             onSave: { newValue in
                 let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let issueID = fastLaneCaptureIntent.issueID {
+                    guard appState.updateFlagReason(
+                        propertyID: context.propertyID, observationID: issueID,
+                        sessionID: context.sessionID, reason: trimmed
+                    ) else {
+                        showFastLaneSideControlToast("Could not save reason")
+                        return
+                    }
+                    if let updated = updatedFastLaneObservation(issueID: issueID) {
+                        showUpdatedFastLaneObservation(updated)
+                    }
+                }
                 let stagedPriority = fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
                 applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
                     locationMode: fastMetadataContext.locationMode,
@@ -16768,6 +16772,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if fastLaneTrimmedNonEmpty(scoped.currentReason) == nil {
             scoped.currentReason = localObservation.currentReason
         }
+        if localObservation.updatedAt > scoped.updatedAt {
+            scoped.currentReason = localObservation.currentReason ?? scoped.currentReason
+            scoped.previousReason = localObservation.previousReason ?? scoped.previousReason
+            scoped.note = localObservation.note ?? scoped.note
+            scoped.statement = localObservation.statement
+        }
         if fastLaneTrimmedNonEmpty(scoped.note) == nil {
             scoped.note = localObservation.note
         }
@@ -17699,7 +17709,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     .foregroundColor(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
 
-                if fastLaneFlaggedDecisionStage != .reviseObservation, !pending.reason.isEmpty {
+                if !pending.reason.isEmpty {
                     Text(pending.reason)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(.white.opacity(0.95))
@@ -17711,115 +17721,21 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
 
-                if fastLaneFlaggedDecisionStage == .reviseObservation {
-                    TextEditor(text: $fastLaneFlaggedRevisionText)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.white)
-                        .scrollContentBackground(.hidden)
-                        .padding(10)
-                        .frame(minHeight: 112, maxHeight: 132)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                        )
-
-                    HStack(spacing: 10) {
-                        Text("Priority")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Menu {
-                            ForEach(Self.priorityOptions, id: \.self) { option in
-                                Button(option) {
-                                    fastLaneFlaggedRevisionPriority = option
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                let normalizedPriority = normalizedFastLaneDetailPriority(fastLaneFlaggedRevisionPriority)
-                                if !normalizedPriority.isEmpty {
-                                    Circle()
-                                        .fill(fastLaneDetailPriorityColor(normalizedPriority))
-                                        .frame(width: 10, height: 10)
-                                }
-                                Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
-                                    .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.72))
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 42)
-                            .background(Color.white.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
                 VStack(spacing: 10) {
-                    switch fastLaneFlaggedDecisionStage {
-                    case .primary:
-                        FastLanePopupActionButton(
-                            title: "Confirm",
-                            role: .primary,
-                            isEnabled: !isApplyingFastLaneFlaggedDecision
-                        ) {
-                            performFastLaneFlaggedDecision {
-                                applyFastLaneFlaggedUpdateDecision(
-                                    pending,
-                                    revisedReason: nil,
-                                    revisedPriority: nil
-                                )
-                            }
+                    FastLanePopupActionButton(
+                        title: "Confirm", role: .primary,
+                        isEnabled: !isApplyingFastLaneFlaggedDecision
+                    ) {
+                        performFastLaneFlaggedDecision {
+                            applyFastLaneFlaggedUpdateDecision(pending)
                         }
-
-                        FastLanePopupActionButton(
-                            title: "Revise",
-                            role: .secondary,
-                            isEnabled: !isApplyingFastLaneFlaggedDecision
-                        ) {
-                            fastLaneFlaggedRevisionText = pending.reason
-                            fastLaneFlaggedRevisionPriority = pending.priority
-                            fastLaneFlaggedDecisionStage = .reviseObservation
-                        }
-
-                        FastLanePopupActionButton(
-                            title: "Resolve",
-                            role: .secondary,
-                            isEnabled: !isApplyingFastLaneFlaggedDecision
-                        ) {
-                            performFastLaneFlaggedDecision {
-                                applyFastLaneFlaggedResolveDecision(pending)
-                            }
-                        }
-                    case .reviseObservation:
-                        let revised = fastLaneFlaggedRevisionText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        FastLanePopupActionButton(
-                            title: "Update",
-                            role: .primary,
-                            isEnabled: !revised.isEmpty && !isApplyingFastLaneFlaggedDecision
-                        ) {
-                            performFastLaneFlaggedDecision {
-                                applyFastLaneFlaggedUpdateDecision(
-                                    pending,
-                                    revisedReason: revised,
-                                    revisedPriority: fastLaneFlaggedRevisionPriority
-                                )
-                            }
-                        }
-
-                        FastLanePopupActionButton(
-                            title: "Back",
-                            role: .secondary,
-                            isEnabled: !isApplyingFastLaneFlaggedDecision
-                        ) {
-                            fastLaneFlaggedDecisionStage = .primary
+                    }
+                    FastLanePopupActionButton(
+                        title: "Resolve", role: .secondary,
+                        isEnabled: !isApplyingFastLaneFlaggedDecision
+                    ) {
+                        performFastLaneFlaggedDecision {
+                            applyFastLaneFlaggedResolveDecision(pending)
                         }
                     }
                 }
@@ -17838,23 +17754,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
-    private var fastLaneFlaggedDecisionTitle: String {
-        switch fastLaneFlaggedDecisionStage {
-        case .primary:
-            return "Flagged Capture"
-        case .reviseObservation:
-            return "Update Observation"
-        }
-    }
+    private var fastLaneFlaggedDecisionTitle: String { "Flagged Capture" }
 
-    private var fastLaneFlaggedDecisionMessage: String {
-        switch fastLaneFlaggedDecisionStage {
-        case .primary:
-            return "Confirm this capture, revise the observation, or resolve it?"
-        case .reviseObservation:
-            return "Update the reason and priority for this observation."
-        }
-    }
+    private var fastLaneFlaggedDecisionMessage: String { "Confirm this capture or resolve the issue?" }
 
     private func presentFastLaneFlaggedDecision(issueID: UUID, shotID: UUID) {
         let observation = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
@@ -17864,9 +17766,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let reason = observation.map(fastLaneObservationReasonText) ?? "Flagged issue"
         let priority = normalizedFastLaneDetailPriority(observation?.priority)
         let displayPriority = priority.isEmpty ? "Medium" : priority
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = displayPriority
         isApplyingFastLaneFlaggedDecision = false
         fastLanePendingFlaggedDecision = FastLanePendingFlaggedDecision(
             issueID: issueID,
@@ -17920,23 +17819,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func applyFastLaneFlaggedUpdateDecision(
-        _ pending: FastLanePendingFlaggedDecision,
-        revisedReason: String?,
-        revisedPriority: String?
+        _ pending: FastLanePendingFlaggedDecision
     ) {
         guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
         let didUpdate = appState.fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             observationID: pending.issueID,
-            shotID: pending.shotID,
-            revisedReason: revisedReason,
-            revisedPriority: revisedPriority
+            shotID: pending.shotID
         )
         fastLanePendingFlaggedDecision = nil
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = "Medium"
         let observation = didUpdate ? updatedFastLaneObservation(issueID: pending.issueID) : nil
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
@@ -17960,9 +17852,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             shotID: pending.shotID
         )
         fastLanePendingFlaggedDecision = nil
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = "Medium"
         let observation = didResolve ? updatedFastLaneObservation(issueID: pending.issueID) : nil
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
@@ -19146,9 +19035,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneExitIntentActive = true
         isClosing = true
         fastLanePendingFlaggedDecision = nil
-        fastLaneFlaggedDecisionStage = .primary
-        fastLaneFlaggedRevisionText = ""
-        fastLaneFlaggedRevisionPriority = "Medium"
         fastLaneRetakeGuidedID = nil
         fastLaneRetakeIssueID = nil
         releaseStartedAt = Date()

@@ -3755,7 +3755,6 @@ struct ContentView: View {
     @State private var showFlaggedActionToast: Bool = false
     @State private var flaggedActionToastText: String = ""
     @State private var flaggedActionToastToken: Int = 0
-    @State private var isArmedIssueDetailNoteReadOnly: Bool = false
     
     @State private var focusPoint: CGPoint? = nil
     @State private var showFocusRing: Bool = false
@@ -3834,19 +3833,12 @@ struct ContentView: View {
     @State private var referenceOverlayOpacity: Double = 0.45
     @State private var armedUpdateObservationID: UUID? = nil
     @State private var armedIssueNoteText: String = ""
-    @State private var armedIssueRevisedObservationText: String? = nil
     @State private var showArmedReferenceMenu: Bool = false
     @State private var armedReferenceViewerState: ArmedReferenceViewerState? = nil
     @State private var flaggedActionTargetObservation: Observation? = nil
     @State private var pendingFlaggedDecisionShot: Shot? = nil
     @State private var pendingFlaggedDecisionPhotoRef: String? = nil
     @State private var showFlaggedActionPrimaryChoice: Bool = false
-    @State private var showFlaggedUpdateCommentChoice: Bool = false
-    @State private var showFlaggedUpdatedObservationInput: Bool = false
-    @State private var draftUpdatedObservation: String = ""
-    @State private var draftUpdatedPriority: String = ""
-    @State private var draftUpdatedTrade: String = ""
-    @State private var draftUpdatedTradeManuallyChanged: Bool = false
     @State private var resolutionTargetObservation: Observation? = nil
     @State private var resolutionCapturedShot: Shot? = nil
     @State private var resolutionCapturedPhotoRef: String? = nil
@@ -6865,7 +6857,7 @@ struct ContentView: View {
                     elevation: elevation,
                     detailType: currentDetailType,
                     existingNote: detailNote,
-                    isNoteEditable: !isArmedIssueDetailNoteReadOnly,
+                    isNoteEditable: true,
                     tradeOptions: tradePickerOptions,
                     priorityOptions: Self.priorityOptions,
                     selectedTrade: selectedTradeBinding(),
@@ -6874,7 +6866,27 @@ struct ContentView: View {
                         showDetailOverlay = false
                     },
                     onSave: { newValue in
-                        detailNote = newValue
+                        let reason = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let issue = flaggedActionTargetObservation ?? resolutionTargetObservation,
+                           let captureTarget = appState.activeCaptureTarget() {
+                            guard appState.updateFlagReason(
+                                propertyID: captureTarget.propertyID, observationID: issue.id,
+                                sessionID: captureTarget.sessionID, reason: reason
+                            ) else {
+                                showFlaggedActionToastNow("Could not save reason")
+                                return
+                            }
+                            armedIssueNoteText = reason
+                            let updated = (try? localStore.fetchObservations(propertyID: captureTarget.propertyID))?
+                                .first(where: { $0.id == issue.id })
+                            if flaggedActionTargetObservation?.id == issue.id {
+                                flaggedActionTargetObservation = updated
+                            }
+                            if resolutionTargetObservation?.id == issue.id {
+                                resolutionTargetObservation = updated
+                            }
+                        }
+                        detailNote = reason
                         if newValue.isEmpty {
                             selectedPriority = ""
                         }
@@ -8563,9 +8575,7 @@ struct ContentView: View {
             if hasDetailNote &&
                 armedUpdateObservationID == nil &&
                 resolutionTargetObservation == nil &&
-                !showFlaggedActionPrimaryChoice &&
-                !showFlaggedUpdateCommentChoice &&
-                !showFlaggedUpdatedObservationInput {
+                !showFlaggedActionPrimaryChoice {
                 let isLandscape = (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight)
 
                 if isLandscape {
@@ -8690,9 +8700,7 @@ struct ContentView: View {
             }
 
             if armedUpdateObservationID != nil &&
-                !showFlaggedActionPrimaryChoice &&
-                !showFlaggedUpdateCommentChoice &&
-                !showFlaggedUpdatedObservationInput {
+                !showFlaggedActionPrimaryChoice {
                 let isLandscape = (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight)
                 if isLandscape {
                     if !showGuidedAlignmentOverlay {
@@ -8770,216 +8778,6 @@ struct ContentView: View {
                             fill: Color.white.opacity(0.10),
                             stroke: Color.white.opacity(0.16),
                             action: selectFlaggedPrimaryResolve
-                        )
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 18)
-                .background(Color.black.opacity(0.76))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .rotationEffect(bottomGlyphRotationAngle)
-                .zIndex(97)
-            }
-
-            if showFlaggedUpdateCommentChoice {
-                Color.black.opacity(0.62)
-                    .frame(width: w, height: previewH)
-                    .zIndex(96)
-
-                VStack(spacing: 12) {
-                    Text("Update Observation")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.white)
-
-                    Text("Choose how to handle the observation text for this update.")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.9))
-                        .multilineTextAlignment(.center)
-
-                    if let original = flaggedActionTargetObservationTextForPopup {
-                        Text(original)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.95))
-                            .lineLimit(3)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-
-                    VStack(spacing: 10) {
-                        flaggedPopupActionButton(
-                            "Leave Observation Unchanged",
-                            fontSize: 16,
-                            fill: Color.blue,
-                            stroke: nil,
-                            action: selectFlaggedUpdateLeaveUnchanged
-                        )
-
-                        flaggedPopupActionButton(
-                            "Revise Observation",
-                            fontSize: 16,
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16),
-                            action: selectFlaggedUpdateRevise
-                        )
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 18)
-                .background(Color.black.opacity(0.76))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .rotationEffect(bottomGlyphRotationAngle)
-                .zIndex(97)
-            }
-
-            if showFlaggedUpdatedObservationInput {
-                Color.black.opacity(0.62)
-                    .frame(width: w, height: previewH)
-                    .zIndex(96)
-
-                VStack(spacing: 12) {
-                    let normalizedDraftPriority = Self.normalizedPriority(draftUpdatedPriority)
-                    let hasValidDraftPriority = !normalizedDraftPriority.isEmpty
-
-                    Text("Updated Observation")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.white)
-
-                    Text("Describe visible condition only. No measurements or structural conclusions.")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.88))
-                        .multilineTextAlignment(.center)
-
-                    if let original = flaggedActionTargetObservationTextForPopup {
-                        Text(original)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.94))
-                            .lineLimit(3)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-
-                    TextField("Updated Observation", text: $draftUpdatedObservation, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textInputAutocapitalization(.sentences)
-                        .autocorrectionDisabled(false)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .foregroundColor(.primary)
-
-                    HStack(spacing: 10) {
-                        Text("Priority")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Menu {
-                            ForEach(Self.priorityOptions, id: \.self) { option in
-                                Button(option) {
-                                    draftUpdatedPriority = option
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                if !normalizedDraftPriority.isEmpty {
-                                    Circle()
-                                        .fill(Self.priorityColor(normalizedDraftPriority))
-                                        .frame(width: 10, height: 10)
-                                }
-                                Text(normalizedDraftPriority.isEmpty ? "Required" : normalizedDraftPriority)
-                                    .foregroundColor(.white.opacity(normalizedDraftPriority.isEmpty ? 0.75 : 0.95))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.72))
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 42)
-                            .background(Color.white.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    HStack(spacing: 10) {
-                        Text("Trade")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Menu {
-                            Button("None") {
-                                draftUpdatedTrade = ""
-                                draftUpdatedTradeManuallyChanged = true
-                            }
-                            ForEach(tradePickerOptions, id: \.self) { option in
-                                Button(option) {
-                                    draftUpdatedTrade = option
-                                    draftUpdatedTradeManuallyChanged = true
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text(draftUpdatedTrade.isEmpty ? "Optional" : draftUpdatedTrade)
-                                    .foregroundColor(.white.opacity(draftUpdatedTrade.isEmpty ? 0.75 : 0.95))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.72))
-                            }
-                            .padding(.horizontal, 12)
-                            .frame(height: 42)
-                            .background(Color.white.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if !hasValidDraftPriority {
-                        Text("Priority is required for flagged items.")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.red.opacity(0.95))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    VStack(spacing: 10) {
-                        flaggedPopupActionButton(
-                            "Save and Capture",
-                            fontSize: 16,
-                            fill: (draftUpdatedObservation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !hasValidDraftPriority) ? Color.blue.opacity(0.35) : Color.blue,
-                            stroke: nil,
-                            isEnabled: !draftUpdatedObservation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && hasValidDraftPriority,
-                            action: commitFlaggedUpdatedObservationAndArm
-                        )
-
-                        flaggedPopupActionButton(
-                            "Back",
-                            fontSize: 16,
-                            fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16),
-                            action: {
-                                showFlaggedUpdatedObservationInput = false
-                                showFlaggedUpdateCommentChoice = true
-                            }
                         )
                     }
                 }
@@ -11086,7 +10884,6 @@ extension ContentView {
             reportLibrary.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
             detailNote = ""
             selectedPriority = ""
-            isArmedIssueDetailNoteReadOnly = false
             setCaptureIntent(.free)
             if let sessionID = created.sessionID,
                let property = appState.properties.first(where: { $0.id == created.propertyID }) ?? appState.selectedProperty,
@@ -14779,9 +14576,6 @@ extension ContentView {
         pendingFlaggedDecisionShot = shot
         pendingFlaggedDecisionPhotoRef = shot.imageLocalIdentifier
         showFlaggedActionPrimaryChoice = true
-        showFlaggedUpdateCommentChoice = false
-        showFlaggedUpdatedObservationInput = false
-        draftUpdatedObservation = ""
         return true
     }
 
@@ -14790,7 +14584,6 @@ extension ContentView {
         guard !isFinalizingCapturePersistence else { return }
         refreshActiveIssues()
         guard !showDetailOverlay,
-              !showFlaggedUpdatedObservationInput,
               let armedID = armedUpdateObservationID,
               let propertyID = appState.selectedPropertyID,
               let updated = (try? localStore.fetchObservations(propertyID: propertyID))?
@@ -14809,12 +14602,6 @@ extension ContentView {
         pendingFlaggedDecisionShot = nil
         pendingFlaggedDecisionPhotoRef = nil
         showFlaggedActionPrimaryChoice = false
-        showFlaggedUpdateCommentChoice = false
-        showFlaggedUpdatedObservationInput = false
-        draftUpdatedObservation = ""
-        draftUpdatedPriority = ""
-        draftUpdatedTrade = ""
-        draftUpdatedTradeManuallyChanged = false
         showArmedReferenceMenu = false
     }
 
@@ -14822,7 +14609,6 @@ extension ContentView {
         clearArmedIssueTradeScope()
         armedUpdateObservationID = nil
         armedIssueNoteText = ""
-        armedIssueRevisedObservationText = nil
         guidedReferenceAssetLocalID = nil
         guidedReferenceThumbnail = nil
         showGuidedAlignmentOverlay = false
@@ -14843,7 +14629,6 @@ extension ContentView {
         clearArmedIssueState()
         resolutionTargetObservation = nil
         resetResolutionCapturePreview()
-        isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         selectedPriority = ""
     }
@@ -14862,7 +14647,6 @@ extension ContentView {
         armedGuidedRetakeShotID = nil
         retakeContext = nil
         currentCaptureIntent = .free
-        isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         selectedPriority = ""
     }
@@ -14886,7 +14670,6 @@ extension ContentView {
         clearPendingFlaggedDecision()
         clearArmedIssueState()
         currentCaptureIntent = .free
-        isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         selectedPriority = ""
     }
@@ -14895,14 +14678,13 @@ extension ContentView {
         clearPendingFlaggedDecision()
         clearArmedIssueState()
         currentCaptureIntent = .free
-        isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         selectedPriority = ""
     }
 
     private func beginFlaggedIssueInteraction(_ observation: Observation) {
         resetSelectionForSwitch()
-        armIssueUpdate(observation, revisedObservationText: nil)
+        armIssueUpdate(observation)
     }
 
     private func armFlaggedRetake(_ observation: Observation) {
@@ -14939,7 +14721,6 @@ extension ContentView {
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
         armIssueScopedTrade(observation.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: observation.id))
-        isArmedIssueDetailNoteReadOnly = true
         if let referencePath = flaggedReferencePathByID[observation.id],
            !referencePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             loadGuidedReferenceThumbnail(referencePath: referencePath, localIdentifier: nil)
@@ -14972,51 +14753,9 @@ extension ContentView {
 
     private func selectFlaggedPrimaryUpdate() {
         showFlaggedActionPrimaryChoice = false
-        showFlaggedUpdateCommentChoice = true
-    }
-
-    private func selectFlaggedUpdateLeaveUnchanged() {
-        showFlaggedUpdateCommentChoice = false
         showFlaggedActionToastNow("Saving update...")
         DispatchQueue.main.async {
-            applyPendingFlaggedUpdate(
-                revisedObservationText: nil,
-                revisedPriority: nil,
-                revisedTrade: nil
-            )
-        }
-    }
-
-    private func selectFlaggedUpdateRevise() {
-        showFlaggedUpdateCommentChoice = false
-        showFlaggedUpdatedObservationInput = true
-        draftUpdatedObservation = ""
-        draftUpdatedPriority = Self.flaggedPriorityOrDefault(selectedPriority)
-        draftUpdatedTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
-        draftUpdatedTradeManuallyChanged = false
-    }
-
-    private func commitFlaggedUpdatedObservationAndArm() {
-        let revised = draftUpdatedObservation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !revised.isEmpty else { return }
-        let revisedPriority = Self.normalizedPriority(draftUpdatedPriority)
-        guard !revisedPriority.isEmpty else { return }
-        let revisedTrade = draftUpdatedTradeManuallyChanged
-            ? Self.canonicalTradeLabel(draftUpdatedTrade, preferredOptions: tradeOptions)
-            : nil
-
-        if containsMeasurementIndicator(in: revised) {
-            showFlaggedActionToastNow("Reminder: SCOUT records visual observations only.")
-        }
-
-        showFlaggedUpdatedObservationInput = false
-        showFlaggedActionToastNow("Saving update...")
-        DispatchQueue.main.async {
-            applyPendingFlaggedUpdate(
-                revisedObservationText: revised,
-                revisedPriority: revisedPriority,
-                revisedTrade: revisedTrade
-            )
+            applyPendingFlaggedUpdate()
         }
     }
 
@@ -15099,11 +14838,7 @@ extension ContentView {
         }
     }
 
-    private func applyPendingFlaggedUpdate(
-        revisedObservationText: String?,
-        revisedPriority: String?,
-        revisedTrade: String?
-    ) {
+    private func applyPendingFlaggedUpdate() {
         guard let captureTarget = appState.activeCaptureTarget() else { return }
         let propertyID = captureTarget.propertyID
         let sessionID = captureTarget.sessionID
@@ -15143,17 +14878,12 @@ extension ContentView {
             if updated.detailType?.isEmpty ?? true {
                 updated.detailType = currentDetailType
             }
-            if let revisedPriority {
-                updated.priority = Self.normalizedPriority(revisedPriority)
-            } else if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+            if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
                 updated.priority = Self.flaggedPriorityOrDefault(selectedPriority)
             }
-            if let revisedTrade {
-                let trade = revisedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+            if updated.trade?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                let trade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
                 updated.trade = trade.isEmpty ? nil : trade
-            } else if updated.trade?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                let selectedTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
-                updated.trade = selectedTrade.isEmpty ? nil : selectedTrade
             }
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
@@ -15179,41 +14909,12 @@ extension ContentView {
                 )
             }
 
-            let revisedText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let revisedText, !revisedText.isEmpty {
-                let priorReason = Self.observationCurrentReasonText(updated)
-                updated.previousReason = priorReason
-                updated.currentReason = revisedText
-                updated.note = revisedText
-                updated.statement = revisedText
-                updated.updateHistory.append(
-                    ObservationUpdateEntry(
-                        kind: .revisedObservation,
-                        text: revisedText,
-                        shotID: shot.id
-                    )
-                )
-                appendObservationHistoryEvent(
-                    ObservationHistoryEvent(
-                        timestamp: Date(),
-                        sessionID: sessionID,
-                        kind: .reasonUpdated,
-                        beforeValue: priorReason,
-                        afterValue: revisedText,
-                        field: "reason",
-                        shotID: shot.id
-                    ),
-                    to: &updated
-                )
-            } else {
-                updated.updateHistory.append(
-                    ObservationUpdateEntry(
-                        kind: .followUpCapture,
-                        text: nil,
-                        shotID: shot.id
-                    )
-                )
+            if let capturedReason = shot.note {
+                updated.updateCurrentReason(capturedReason, sessionID: sessionID)
             }
+            updated.updateHistory.append(ObservationUpdateEntry(
+                kind: .followUpCapture, shotID: shot.id
+            ))
 
             let persisted = try localStore.updateObservation(updated)
             do {
@@ -15222,7 +14923,7 @@ extension ContentView {
                     sessionID: sessionID,
                     observation: persisted,
                     shotID: shot.id,
-                    trade: revisedTrade ?? Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
+                    trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
                     activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
                 )
                 appState.scheduleShotMetadataSupabaseWriteIfNeeded(
@@ -15233,20 +14934,6 @@ extension ContentView {
                 )
             } catch {
                 // Keep flagged update flow resilient if metadata persistence fails.
-            }
-            if revisedPriority != nil || revisedTrade != nil {
-                if revisedTrade != nil {
-                    armedIssueTradeManuallyChanged = true
-                }
-                applyFlaggedShotMetadataOverrides(
-                    propertyID: propertyID,
-                    sessionID: sessionID,
-                    shotID: shot.id,
-                    priority: revisedPriority ?? "",
-                    trade: revisedTrade ?? ""
-                )
-                selectedPriority = Self.normalizedPriority(revisedPriority ?? "")
-                setSelectedTrade(revisedTrade ?? "", manual: revisedTrade != nil)
             }
             let note = Self.observationCurrentReasonText(updated) ?? ""
             if note.isEmpty {
@@ -15688,7 +15375,7 @@ extension ContentView {
         refreshSessionActionsSummaryIfVisible()
     }
 
-    private func armIssueUpdate(_ observation: Observation, revisedObservationText: String?) {
+    private func armIssueUpdate(_ observation: Observation) {
         dismissActiveIssuesSheet()
         armedGuidedShotID = nil
         armedGuidedRetakeShotID = nil
@@ -15696,12 +15383,10 @@ extension ContentView {
         resolutionTargetObservation = nil
         resetResolutionCapturePreview()
         flaggedActionTargetObservation = observation
-        armedIssueRevisedObservationText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
         armIssueScopedTrade(observation.trade ?? latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id))
-        isArmedIssueDetailNoteReadOnly = true
         if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
            !resolvedFlaggedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             loadGuidedReferenceThumbnail(referencePath: resolvedFlaggedPath, localIdentifier: nil)
@@ -15723,10 +15408,6 @@ extension ContentView {
         armedUpdateObservationID = observation.id
         setCaptureIntent(.flagged(observation.id))
         syncGlyphRotationWithoutAnimation()
-    }
-
-    private func armIssueUpdate(_ observation: Observation) {
-        armIssueUpdate(observation, revisedObservationText: nil)
     }
 
     private func beginResolutionRequiredCapture(_ observation: Observation) {
@@ -15754,7 +15435,6 @@ extension ContentView {
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
         armIssueScopedTrade(observation.trade ?? latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id))
-        isArmedIssueDetailNoteReadOnly = true
         if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
            !resolvedFlaggedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             loadGuidedReferenceThumbnail(referencePath: resolvedFlaggedPath, localIdentifier: nil)
