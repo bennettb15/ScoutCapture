@@ -15,6 +15,11 @@ on:
         description: "Optional triggering session_snapshots UUID. Used for trace logging; poll mode still dedupes to the latest completed sealed snapshot for the session."
         required: false
         type: string
+      suppress_report_email:
+        description: "Suppress report-ready email for an explicit correction run. Normal generation keeps its existing email setting."
+        required: false
+        type: boolean
+        default: false
       trigger_source:
         description: "Optional source label for diagnostics."
         required: false
@@ -43,7 +48,7 @@ jobs:
       REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
       REPORTS_PORTAL_BASE_URL: ${{ secrets.REPORTS_PORTAL_BASE_URL }}
       REPORT_EMAIL_REPLY_TO: ${{ secrets.REPORT_EMAIL_REPLY_TO }}
-      REPORT_EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.REPORT_EMAIL_NOTIFICATIONS_ENABLED || 'true' }}
+      REPORT_EMAIL_NOTIFICATIONS_ENABLED: ${{ inputs.suppress_report_email == true && 'false' || vars.REPORT_EMAIL_NOTIFICATIONS_ENABLED || 'true' }}
       REPORT_EMAIL_ALLOWLIST: ${{ vars.REPORT_EMAIL_ALLOWLIST || '' }}
       REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
       TENANT_COMPARISON_REQUEST_ID: ${{ inputs.tenant_comparison_request_id || '' }}
