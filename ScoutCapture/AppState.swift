@@ -58821,7 +58821,8 @@ final class AppState: ObservableObject {
         flaggedRemainingCount: Int
     ) -> Bool {
         if sessionType == .punchlistVisit {
-            return flaggedRemainingCount > 0
+            // Open issues carry forward; they do not block completion of a focused visit.
+            return false
         }
         return guidedRemainingCount > 0 || flaggedRemainingCount > 0
     }
@@ -58834,7 +58835,7 @@ final class AppState: ObservableObject {
         currentSessionCaptureCount: Int
     ) -> Bool {
         if sessionType == .punchlistVisit {
-            return flaggedRemainingCount == 0 && (hasBaseline || currentSessionCaptureCount > 0)
+            return currentSessionCaptureCount > 0
         }
         return hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
     }
@@ -59562,6 +59563,7 @@ final class AppState: ObservableObject {
 
     func sealCurrentSessionForExportLater() {
         guard var session = currentSession else { return }
+        guard session.sessionType != .punchlistVisit || sessionHasCaptures(session) else { return }
         let wasAlreadyCompleted = session.status == .completed
         session.status = .completed
         if session.endedAt == nil {
@@ -59597,6 +59599,7 @@ final class AppState: ObservableObject {
 
     func completeCurrentSessionWithoutZIP() {
         guard var session = currentSession else { return }
+        guard session.sessionType != .punchlistVisit || sessionHasCaptures(session) else { return }
         let wasAlreadyCompleted = session.status == .completed
         let completedAt = Date()
         session.status = .completed
@@ -59645,6 +59648,7 @@ final class AppState: ObservableObject {
 
     func sealCurrentSessionForExportNow() {
         guard var session = currentSession else { return }
+        guard session.sessionType != .punchlistVisit || sessionHasCaptures(session) else { return }
         let wasAlreadyCompleted = session.status == .completed
         session.status = .completed
         if session.endedAt == nil {

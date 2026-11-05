@@ -1218,7 +1218,7 @@ def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_
 
 def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
-    shots = validation.get("inputs", {}).get("ordered_shots") or []
+    shots = validation.get("inputs", {}).get("punchlist_shots") or validation.get("inputs", {}).get("ordered_shots") or []
     entries = []
     for shot in shots:
         state = visual_state(shot)
@@ -1412,7 +1412,7 @@ def build_comparison_plan(
     validation_lookup_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
-    shots = validation.get("inputs", {}).get("ordered_shots") or []
+    shots = validation.get("inputs", {}).get("punchlist_shots") or validation.get("inputs", {}).get("ordered_shots") or []
     shot_by_id = {(trim(shot.get("shot_id")) or "").lower(): shot for shot in shots}
     comparison_items = validation.get("comparisons", {}).get("items") or []
     entries = []
@@ -1676,6 +1676,7 @@ def make_plan(
         "session_type": validation.get("session_type") or session.get("session_type") or "full_documentation",
         "sessionType": validation.get("sessionType") or session.get("sessionType") or validation.get("session_type") or session.get("session_type") or "full_documentation",
         "source_snapshot_id": validation.get("source_snapshot_id"),
+        "source_provenance": validation.get("source_provenance"),
         "session": {
             "session_type": session.get("session_type") or validation.get("session_type") or "full_documentation",
             "sessionType": session.get("sessionType") or validation.get("sessionType") or session.get("session_type") or validation.get("session_type") or "full_documentation",
@@ -2467,7 +2468,7 @@ def main() -> int:
     report_date = args.report_date or dt.datetime.now(DISPLAY_TZ).strftime("%m/%d/%Y")
     reports = {
         "all": ["property", "priority", "comparison"],
-        "punchlist": ["priority", "comparison"],
+        "punchlist": (["property"] if validation.get("reports", {}).get("property_report", {}).get("applicable") else []) + ["priority", "comparison"],
     }.get(args.report, [args.report])
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -2511,6 +2512,7 @@ def main() -> int:
             "phase": "ScoutCapture Phase 2C PDF Validation",
             "session_id": plan.get("session_id"),
             "source_snapshot_id": plan.get("source_snapshot_id"),
+            "source_provenance": plan.get("source_provenance"),
             "session_type": plan.get("session_type"),
             "sessionType": plan.get("sessionType"),
             "report_type": report_type,

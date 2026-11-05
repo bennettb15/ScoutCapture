@@ -14980,7 +14980,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var hasFastLaneCompletionRemainingDebt: Bool {
         let counts = fastLaneCompletionRemainingCounts
-        return counts.flagged > 0 || counts.guided > 0
+        return AppState.sessionCompletionHasOutstandingChecklistItems(
+            sessionType: context.sessionType,
+            guidedRemainingCount: counts.guided,
+            flaggedRemainingCount: counts.flagged
+        )
     }
 
     private var fastLaneSessionActionsCompleteDisabledReason: String? {
@@ -14997,7 +15001,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return "Complete is disabled while the current photo is saving."
         }
         if fastLaneCurrentPhotoCountForDisplay == 0 {
-            return "\(AppState.sessionCompletionActionTitle(sessionType: context.sessionType)) is disabled until at least one photo is captured."
+            let qualifier = context.sessionType == .punchlistVisit ? "new photo" : "photo"
+            return "\(AppState.sessionCompletionActionTitle(sessionType: context.sessionType)) is disabled until at least one \(qualifier) is captured."
         }
         if hasFastLaneCompletionRemainingDebt {
             let counts = fastLaneCompletionRemainingCounts
@@ -19635,7 +19640,10 @@ private struct FastLaneSessionActionsSheet: View {
                             .foregroundColor(.white)
 
                         VStack(spacing: 8) {
-                            summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
+                            summaryRow(
+                                title: summary.isPunchlistVisit ? "Open Issues" : "Flagged Remaining",
+                                value: summary.flaggedRemainingCount
+                            )
                             if !summary.isPunchlistVisit {
                                 summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
                             }

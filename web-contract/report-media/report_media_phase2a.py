@@ -491,9 +491,9 @@ def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
                 captured_by_email=shot.get("captured_by_email"),
                 uploaded_by_user_id=shot.get("uploaded_by_user_id"),
                 uploaded_by_email=shot.get("uploaded_by_email"),
-                session_completed_at_utc=session.get("ended_at_utc"),
-                session_exported_at_utc=session.get("exported_at_utc"),
-                session_ended_at_utc=session.get("ended_at_utc"),
+                session_completed_at_utc=shot.get("source_session_completed_at_utc") or session.get("ended_at_utc"),
+                session_exported_at_utc=None if shot.get("session_id") != session.get("session_id") else session.get("exported_at_utc"),
+                session_ended_at_utc=shot.get("source_session_completed_at_utc") or session.get("ended_at_utc"),
                 is_flagged=bool(shot.get("is_flagged")),
                 is_resolved_in_session=is_current_resolved_for_media(shot),
             )
@@ -516,14 +516,27 @@ def previous_media_items(validation: dict[str, Any], client: SupabaseReadClient)
         }
     )
     for shot_id in previous_ids:
-        rows = client.select_rows(
-            "shots",
-            {
-                "select": "id,session_id,building,elevation,detail_type,angle_index,shot_key,captured_at,storage_bucket,storage_path,is_flagged,issue_status",
-                "id": f"eq.{shot_id}",
-                "limit": "1",
-            },
-        )
+        comparison = comparison_by_previous_id.get(str(shot_id).lower()) or {}
+        embedded = comparison.get("previous_shot")
+        if embedded and comparison.get("matching_rule") == "same_issue_id":
+            media = embedded.get("media") or {}
+            rows = [{
+                "id": embedded.get("shot_id"), "session_id": embedded.get("session_id"),
+                "building": embedded.get("building"), "elevation": embedded.get("elevation"),
+                "detail_type": embedded.get("detail_type"), "angle_index": embedded.get("angle_index"),
+                "shot_key": embedded.get("shot_key"), "captured_at": embedded.get("captured_at_utc"),
+                "storage_bucket": media.get("bucket"), "storage_path": media.get("path"),
+                "is_flagged": embedded.get("is_flagged"), "issue_status": embedded.get("issue_status"),
+            }]
+        else:
+            rows = client.select_rows(
+                "shots",
+                {
+                    "select": "id,session_id,building,elevation,detail_type,angle_index,shot_key,captured_at,storage_bucket,storage_path,is_flagged,issue_status",
+                    "id": f"eq.{shot_id}",
+                    "limit": "1",
+                },
+            )
         if not rows:
             continue
         row = rows[0]
