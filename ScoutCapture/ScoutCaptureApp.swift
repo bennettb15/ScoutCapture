@@ -3704,7 +3704,7 @@ struct SessionHubView: View {
                     if showInitialPunchlistConfirmation {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "exclamationmark.circle.fill")
-                                .foregroundColor(.blue)
+                                .foregroundColor(.red)
                             Text("Are you sure? Punchlist photos document issues only. Property reports will not have a front Overview cover photo until you take one in Full Documentation and complete and export that session.")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(headerPrimaryLabel)
@@ -3712,8 +3712,12 @@ struct SessionHubView: View {
                         }
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.blue.opacity(0.10))
+                        .background(Color.red.opacity(colorScheme == .light ? 0.12 : 0.22))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.red.opacity(0.45), lineWidth: 1)
+                        )
 
                         initialSessionChoiceButton(
                             title: "Start Full Documentation",
