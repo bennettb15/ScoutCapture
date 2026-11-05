@@ -14140,39 +14140,6 @@ private enum FastLaneFlaggedDecisionStage: Equatable {
     case reviseObservation
 }
 
-private enum FastLaneFlaggedSaveAction: Equatable {
-    case confirm
-    case resolve
-    case update
-}
-
-private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
-    let cornerRadius: CGFloat
-    var manualPressedVisual = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        let isPressed = manualPressedVisual || configuration.isPressed
-
-        configuration.label
-            .scaleEffect(isPressed ? 0.97 : 1.0)
-            .brightness(manualPressedVisual ? -0.20 : (isPressed ? -0.08 : 0))
-            .overlay {
-                if isPressed && !manualPressedVisual {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(Color.white.opacity(0.16))
-                        .allowsHitTesting(false)
-                }
-            }
-            .overlay {
-                if isPressed && !manualPressedVisual {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
-                        .allowsHitTesting(false)
-                }
-            }
-    }
-}
-
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
@@ -14283,7 +14250,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneSideControlToastToken: Int = 0
     @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
     @State private var isApplyingFastLaneFlaggedDecision = false
-    @State private var highlightedFastLaneFlaggedSaveAction: FastLaneFlaggedSaveAction?
     @State private var fastLaneFlaggedDecisionStage: FastLaneFlaggedDecisionStage = .primary
     @State private var fastLaneFlaggedRevisionText: String = ""
     @State private var fastLaneFlaggedRevisionPriority: String = "Medium"
@@ -17791,10 +17757,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         fastLaneFlaggedPopupActionButton(
                             "Confirm",
                             fill: Color.blue,
-                            stroke: nil,
-                            saveFeedbackAction: .confirm
+                            stroke: nil
                         ) {
-                            performFastLaneFlaggedDecision(.confirm) {
+                            performFastLaneFlaggedDecision {
                                 applyFastLaneFlaggedUpdateDecision(
                                     pending,
                                     revisedReason: nil,
@@ -17816,10 +17781,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         fastLaneFlaggedPopupActionButton(
                             "Resolve",
                             fill: Color.white.opacity(0.10),
-                            stroke: Color.white.opacity(0.16),
-                            saveFeedbackAction: .resolve
+                            stroke: Color.white.opacity(0.16)
                         ) {
-                            performFastLaneFlaggedDecision(.resolve) {
+                            performFastLaneFlaggedDecision {
                                 applyFastLaneFlaggedResolveDecision(pending)
                             }
                         }
@@ -17829,10 +17793,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             "Update",
                             fill: Color.blue,
                             stroke: nil,
-                            isEnabled: !revised.isEmpty,
-                            saveFeedbackAction: .update
+                            isEnabled: !revised.isEmpty
                         ) {
-                            performFastLaneFlaggedDecision(.update) {
+                            performFastLaneFlaggedDecision {
                                 applyFastLaneFlaggedUpdateDecision(
                                     pending,
                                     revisedReason: revised,
@@ -17872,7 +17835,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fill: Color,
         stroke: Color?,
         isEnabled: Bool = true,
-        saveFeedbackAction: FastLaneFlaggedSaveAction? = nil,
         action: @escaping () -> Void
     ) -> some View {
         return Button(action: action) {
@@ -17890,11 +17852,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(FastLanePostCaptureActionButtonStyle(
-            cornerRadius: 14,
-            manualPressedVisual: saveFeedbackAction != nil &&
-                saveFeedbackAction == highlightedFastLaneFlaggedSaveAction
-        ))
+        .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .disabled(!isEnabled || isApplyingFastLaneFlaggedDecision)
     }
@@ -17929,7 +17887,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneFlaggedRevisionText = ""
         fastLaneFlaggedRevisionPriority = displayPriority
         isApplyingFastLaneFlaggedDecision = false
-        highlightedFastLaneFlaggedSaveAction = nil
         fastLanePendingFlaggedDecision = FastLanePendingFlaggedDecision(
             issueID: issueID,
             shotID: shotID,
@@ -17949,20 +17906,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         ?? observation.statement
     }
 
-    private func performFastLaneFlaggedDecision(
-        _ button: FastLaneFlaggedSaveAction,
-        action: @escaping () -> Void
-    ) {
+    private func performFastLaneFlaggedDecision(action: () -> Void) {
         guard !isApplyingFastLaneFlaggedDecision else { return }
         confirmationHaptic.impactOccurred()
         confirmationHaptic.prepare()
         isApplyingFastLaneFlaggedDecision = true
-        highlightedFastLaneFlaggedSaveAction = button
-        DispatchQueue.main.async {
-            action()
-            highlightedFastLaneFlaggedSaveAction = nil
-            isApplyingFastLaneFlaggedDecision = false
-        }
+        action()
+        isApplyingFastLaneFlaggedDecision = false
     }
 
     private func updatedFastLaneObservation(issueID: UUID) -> Observation? {
