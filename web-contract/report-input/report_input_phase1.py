@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snapshot-payload-fixture", help="Local JSON fixture for snapshot payload object.")
     parser.add_argument("--storage-fixture", help="Local JSON fixture describing existing storage objects.")
     parser.add_argument("--canonical-fixture", help="Local JSON fixture for remote historical sessions/shots.")
+    parser.add_argument("--history-fixture", help="Local JSON fixture containing scoped completed snapshot rows and payloads.")
     parser.add_argument("--output", help="Write validation JSON to this path.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print deterministic JSON.")
     parser.add_argument(
@@ -348,6 +349,10 @@ def report_shot(
     return {
         "shot_id": sid_shot,
         "session_id": sid,
+        "source_shot_session_id": trim(shot.get("sessionID") or shot.get("sessionId")) or sid,
+        "source_session_started_at_utc": iso(metadata.get("startedAt")),
+        "source_session_completed_at_utc": iso(metadata.get("endedAt")),
+        "issue_id": issue_id(shot),
         "building": trim(shot.get("building")),
         "elevation": trim(shot.get("elevation")),
         "detail_type": trim(shot.get("detailType")),
@@ -938,15 +943,238 @@ def session_input(metadata: dict[str, Any], payload: dict[str, Any], row: dict[s
 
 
 def normalized_session_type(metadata: dict[str, Any], payload: dict[str, Any] | None = None) -> str:
-    raw = (
-        metadata.get("sessionType")
-        or metadata.get("session_type")
-        or (payload or {}).get("sessionType")
-        or (payload or {}).get("session_type")
-        or "full_documentation"
-    )
-    value = trim(raw).lower()
-    return "punchlist_visit" if value == "punchlist_visit" else "full_documentation"
+    raw = (metadata.get("sessionType") or metadata.get("session_type") or
+           (payload or {}).get("sessionType") or (payload or {}).get("session_type"))
+    if raw:
+        return "punchlist_visit" if trim(raw).lower() == "punchlist_visit" else "full_documentation"
+    shots = exported_shots(metadata)
+    if (not report_guided_rows(metadata) and shots and
+            all(issue_id(shot) and (trim(shot.get("captureKind")) or "").lower() in
+                {"follow_up_capture", "punchlist_capture", "resolved_capture"} for shot in shots)):
+        return "punchlist_visit"
+    return "full_documentation"
+
+
+def scoped_snapshot_history(
+    args: argparse.Namespace,
+    client: SupabaseReadClient | None,
+    current_row: dict[str, Any],
+    current_payload: dict[str, Any],
+    current_metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Read immutable, completed snapshots for this organization and property only."""
+    org_id = str(current_row.get("org_id") or current_metadata.get("orgID") or "").lower()
+    property_id = str(current_row.get("property_id") or current_metadata.get("propertyID") or "").lower()
+    if not org_id or not property_id:
+        raise Phase1Error("Snapshot history requires organization and property IDs.")
+    if args.history_fixture:
+        sources = read_json_file(args.history_fixture)
+    elif client:
+        sources = []
+        offset = 0
+        while True:
+            page = client.select_rows("session_snapshots", {
+                "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,payload_storage_bucket,payload_storage_path,created_at,deleted_at",
+                "org_id": f"eq.{org_id}", "property_id": f"eq.{property_id}",
+                "snapshot_kind": "eq.completed", "session_status": "eq.completed",
+                "is_sealed": "eq.true", "deleted_at": "is.null",
+                "order": "created_at.desc", "limit": "200", "offset": str(offset),
+            })
+            sources.extend({"row": row} for row in page)
+            if len(page) < 200:
+                break
+            offset += len(page)
+    else:
+        sources = []
+    sources.append({"row": current_row, "payload": current_payload})
+    result = []
+    seen_sessions = set()
+    current_started = parse_date(current_metadata.get("startedAt"))
+    for source in sorted(sources, key=lambda item: str(item["row"].get("created_at") or ""), reverse=True):
+        row = source["row"]
+        if str(row.get("org_id") or "").lower() != org_id or str(row.get("property_id") or "").lower() != property_id:
+            raise Phase1Error("Cross-organization or cross-property snapshot in report history.")
+        if row.get("snapshot_kind") not in (None, "completed") or row.get("session_status") not in (None, "completed") or not bool_value(row.get("is_sealed", True)) or row.get("deleted_at"):
+            continue
+        sid = str(row.get("session_id") or "").lower()
+        if not sid or sid in seen_sessions:
+            continue
+        if sid == str(current_row.get("session_id") or "").lower() and str(row.get("id") or "").lower() != str(current_row.get("id") or "").lower():
+            continue
+        payload = source.get("payload") or (client.download_storage_json(str(row["payload_storage_bucket"]), str(row["payload_storage_path"])) if client else None)
+        if not isinstance(payload, dict):
+            raise Phase1Error("Snapshot history payload is unavailable.")
+        metadata = payload_raw_metadata(payload)
+        if str(metadata.get("sessionID") or "").lower() != sid or str(metadata.get("propertyID") or "").lower() != property_id:
+            raise Phase1Error("Snapshot history payload identity mismatch.")
+        metadata_org = trim(metadata.get("orgID") or payload.get("orgID"))
+        if metadata_org and metadata_org.lower() != org_id:
+            raise Phase1Error("Snapshot history organization identity mismatch.")
+        started = parse_date(metadata.get("startedAt"))
+        if current_started and started and started > current_started:
+            continue
+        seen_sessions.add(sid)
+        result.append({"row": row, "payload": payload, "metadata": metadata,
+                       "session_type": normalized_session_type(metadata, payload),
+                       "declared_type": trim(metadata.get("sessionType") or metadata.get("session_type") or payload.get("sessionType") or payload.get("session_type")),
+                       "started": started or dt.datetime.min.replace(tzinfo=dt.timezone.utc)})
+    return sorted(result, key=lambda item: (item["started"], str(item["row"].get("created_at") or "")))
+
+
+def compose_punchlist_history(sources: list[dict[str, Any]], storage: StorageProbe) -> dict[str, Any]:
+    """Keep Guided Shots from the newest full visit and one latest real photo per issue."""
+    baseline = next((source for source in reversed(sources)
+                     if source["session_type"] == "full_documentation" and
+                     (source.get("declared_type") == "full_documentation" or
+                      report_guided_rows(source["metadata"]) or
+                      any(bool_value(shot.get("isGuided")) for shot in exported_shots(source["metadata"])))), None)
+    issue_photos: dict[str, list[dict[str, Any]]] = {}
+    latest_issue: dict[str, dict[str, Any]] = {}
+    all_sources = []
+    baseline_shots = []
+    baseline_entries = []
+    baseline_guided = {"skipped_placeholders": [], "retired_notes": [], "skipped_placeholder_count": 0, "retired_note_count": 0}
+    for source in sources:
+        row, payload, metadata = source["row"], source["payload"], source["metadata"]
+        actor = merge_actor_identity(actor_identity(metadata), merge_actor_identity(actor_identity(payload), actor_identity(row)))
+        issues = issue_by_id(metadata)
+        shots = [report_shot(metadata, shot, issues, actor) for shot in exported_shots(metadata)]
+        shots.sort(key=lambda shot: (shot.get("captured_at_utc") or "", shot["shot_id"]))
+        all_sources.append({"snapshot_id": str(row.get("id") or ""), "session_id": str(row.get("session_id") or ""),
+                            "session_type": source["session_type"]})
+        if source is baseline:
+            baseline_shots = shots
+            baseline_entries = property_report_entries(metadata, shots)
+            baseline_guided = guided_placeholders(metadata, shots)
+        for iid, issue in issues.items():
+            latest_issue[iid.lower()] = issue
+        for shot in shots:
+            iid = trim(shot.get("issue_id"))
+            if (not iid or shot["source_shot_session_id"].lower() != str(row.get("session_id") or "").lower()
+                    or (trim(shot.get("capture_kind")) or "").lower() in {"reference", "carried_forward"}):
+                continue
+            issue_photos.setdefault(iid.lower(), []).append(shot)
+    latest_shots = []
+    comparisons = []
+    for iid, history in sorted(issue_photos.items()):
+        current = dict(history[-1])
+        current["is_flagged"] = True
+        issue = latest_issue.get(iid) or {}
+        status = (trim(issue.get("issueStatus") or issue.get("status")) or trim(current.get("issue_status")) or "").lower()
+        if status:
+            current["issue_status"] = status
+            current["is_resolved_in_session"] = status in {"resolved", "pending_review"}
+        current["flagged_reason"] = trim(issue.get("currentReason") or issue.get("detailNote")) or current.get("flagged_reason")
+        current["priority"] = trim(issue.get("priority")) or current.get("priority")
+        current["normalized_priority"] = normalized_priority(current.get("priority"))
+        latest_shots.append(current)
+        previous = next((shot for shot in reversed(history[:-1]) if shot["shot_id"] != current["shot_id"]), None)
+        previous_media = previous.get("media") if previous else {}
+        comparisons.append({"current_shot_id": current["shot_id"], "issue_id": iid,
+                            "previous_shot_id": previous.get("shot_id") if previous else None,
+                            "previous_session_id": previous.get("session_id") if previous else None,
+                            "previous_captured_at_utc": previous.get("captured_at_utc") if previous else None,
+                            "previous_session_completed_at_utc": previous.get("source_session_completed_at_utc") if previous else None,
+                            "previous_media_exists": storage.exists(previous_media.get("bucket"), previous_media.get("path")) if previous else False,
+                            "previous_media": previous_media if previous else None,
+                            "previous_shot": previous if previous else None,
+                            "matching_rule": "same_issue_id"})
+    latest_shots.sort(key=lambda shot: (shot.get("captured_at_utc") or "", shot["shot_id"]))
+    all_shots = list(baseline_shots)
+    seen = {shot["shot_id"].lower() for shot in all_shots}
+    for shot in latest_shots:
+        if shot["shot_id"].lower() not in seen:
+            all_shots.append(shot)
+            seen.add(shot["shot_id"].lower())
+    entries = list(baseline_entries)
+    baseline_ids = {shot["shot_id"].lower() for shot in baseline_shots}
+    since_baseline = {str(source["row"].get("session_id") or "").lower()
+                      for source in sources[sources.index(baseline):]} if baseline else set()
+    for shot in latest_shots:
+        if (baseline and shot["session_id"].lower() in since_baseline and
+                shot["shot_id"].lower() not in baseline_ids):
+            entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
+    return {"shots": all_shots if baseline else latest_shots, "punchlist_shots": latest_shots,
+            "entries": entries, "guided": baseline_guided, "comparisons": comparisons,
+            "baseline": all_sources[sources.index(baseline)] if baseline else None,
+            "sources": all_sources}
+
+
+def operational_issue_overlays(
+    client: SupabaseReadClient | None, row: dict[str, Any], issue_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Apply the same latest workflow status/priority precedence as the portal."""
+    if not client or not issue_ids:
+        return {}
+    org_id = str(row["org_id"]).lower()
+    property_id = str(row["property_id"]).lower()
+    result: dict[str, dict[str, Any]] = {}
+    for offset in range(0, len(issue_ids), 100):
+        ids = issue_ids[offset:offset + 100]
+        filter_ids = ",".join(ids)
+        observations = client.select_rows("observations", {
+            "select": "id,org_id,property_id,status,priority,deleted_at",
+            "id": f"in.({filter_ids})", "org_id": f"eq.{org_id}",
+            "property_id": f"eq.{property_id}", "deleted_at": "is.null",
+        })
+        for observation in observations:
+            if str(observation.get("org_id") or "").lower() != org_id or str(observation.get("property_id") or "").lower() != property_id:
+                raise Phase1Error("Cross-scope observation in report history.")
+            result[str(observation["id"]).lower()] = {
+                "observation_id": str(observation["id"]),
+                "status": trim(observation.get("status")),
+                "priority": trim(observation.get("priority")),
+            }
+        activity = []
+        activity_offset = 0
+        try:
+            while True:
+                page = client.select_rows("punchlist_activity", {
+                    "select": "id,observation_id,org_id,property_id,activity_type,to_value,created_at,deleted_at",
+                    "observation_id": f"in.({filter_ids})", "org_id": f"eq.{org_id}",
+                    "property_id": f"eq.{property_id}", "deleted_at": "is.null",
+                    "activity_type": "in.(status_changed,priority_changed,completion_submitted,completion_approved,completion_rejected)",
+                    "order": "created_at.desc,id.desc", "limit": "200", "offset": str(activity_offset),
+                })
+                activity.extend(page)
+                if len(page) < 200:
+                    break
+                activity_offset += len(page)
+        except Phase1Error:
+            activity = []
+        for event in activity:
+            if str(event.get("org_id") or "").lower() != org_id or str(event.get("property_id") or "").lower() != property_id:
+                raise Phase1Error("Cross-scope punchlist activity in report history.")
+            iid = str(event.get("observation_id") or "").lower()
+            if iid not in result:
+                continue
+            overlay = result[iid]
+            kind = event.get("activity_type")
+            if kind == "priority_changed" and "activity_priority" not in overlay:
+                overlay["activity_priority"] = trim(event.get("to_value"))
+                overlay["activity_priority_id"] = str(event.get("id") or "")
+            if kind in {"status_changed", "completion_submitted", "completion_approved", "completion_rejected"} and "activity_status" not in overlay:
+                overlay["activity_status_id"] = str(event.get("id") or "")
+                overlay["activity_status"] = ({"completion_submitted": "pending_review",
+                                                "completion_approved": "resolved",
+                                                "completion_rejected": "active"}.get(kind)
+                                              or trim(event.get("to_value")))
+    return result
+
+
+def apply_operational_overlays(composition: dict[str, Any], overlays: dict[str, dict[str, Any]]) -> None:
+    for shot in composition["punchlist_shots"]:
+        overlay = overlays.get(str(shot.get("issue_id") or "").lower())
+        if not overlay:
+            continue
+        status = (overlay.get("activity_status") or (overlay.get("status") if not shot.get("issue_status") else None) or "").lower()
+        if status:
+            shot["issue_status"] = status
+            shot["is_resolved_in_session"] = status in {"resolved", "pending_review"}
+        priority = overlay.get("activity_priority") or (overlay.get("priority") if not shot.get("priority") else None)
+        if priority:
+            shot["priority"] = priority
+            shot["normalized_priority"] = normalized_priority(priority)
 
 
 def build_validation(args: argparse.Namespace) -> dict[str, Any]:
@@ -961,24 +1189,31 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     session_actor = merge_actor_identity(actor_identity(metadata), merge_actor_identity(actor_identity(payload), actor_identity(row)))
     shots = [report_shot(metadata, shot, issues, session_actor) for shot in exported_shots(metadata)]
     shots.sort(key=lambda item: (item.get("captured_at_utc") or "", item.get("original_filename") or ""))
-
+    composition = None
+    operational_overlays = {}
+    if session_type == "punchlist_visit":
+        sources = scoped_snapshot_history(args, client, row, payload, metadata)
+        composition = compose_punchlist_history(sources, storage)
+        operational_overlays = operational_issue_overlays(
+            client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
+        apply_operational_overlays(composition, operational_overlays)
+        shots = composition["shots"]
+    punchlist_shots = composition["punchlist_shots"] if composition else shots
     media = media_validations(shots, storage)
     missing_media = [item for item in media if not item["exists"]]
     current_comparison_shots = [
-        shot for shot in shots if shot["is_flagged"] or shot["is_resolved_in_session"]
+        shot for shot in punchlist_shots if shot["is_flagged"] or shot["is_resolved_in_session"]
     ]
     current_comparison_shots.sort(key=comparison_sort_key)
-    priority_shots = [
-        shot for shot in shots if shot["is_flagged"] or shot["is_resolved_in_session"]
-    ]
+    priority_shots = list(current_comparison_shots)
     priority_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for shot in priority_shots:
         priority_counts[shot["normalized_priority"]] += 1
 
-    history = load_canonical_history(args, client, metadata)
-    comparisons = comparison_validations(metadata, current_comparison_shots, history, storage)
-    guided = guided_placeholders(metadata, shots)
-    entries = property_report_entries(metadata, shots)
+    history = load_canonical_history(args, client, metadata) if not composition else {"source": "scoped_session_snapshots", "shots": [], "sessions": []}
+    comparisons = composition["comparisons"] if composition else comparison_validations(metadata, current_comparison_shots, history, storage)
+    guided = composition["guided"] if composition else guided_placeholders(metadata, shots)
+    entries = composition["entries"] if composition else property_report_entries(metadata, shots)
 
     gaps = []
     warnings = []
@@ -1031,7 +1266,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
             "property_report": {
                 "generator_method": "generateSessionReport",
                 "source_of_truth": REPORT_GENERATOR_SOURCE,
-                "applicable": session_type == "full_documentation",
+                "applicable": session_type == "full_documentation" or bool(composition and composition["baseline"]),
                 "reconstructable": len(missing_media) == 0,
                 "photo_entry_count": len([item for item in entries if item["kind"] == "photo"]),
                 "skipped_placeholder_count": guided["skipped_placeholder_count"],
@@ -1064,6 +1299,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         "inputs": {
             "session": session_input(metadata, payload, row),
             "ordered_shots": shots,
+            "punchlist_shots": punchlist_shots if composition else None,
             "property_report_entries": entries,
         },
         "media": {
@@ -1078,13 +1314,22 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
             "matching_rule": {
                 "property": "same property_id",
                 "session": "sessions.started_at_utc < current_session.started_at_utc",
-                "identity": "case-insensitive building, elevation, detail_type; angle_index equality",
-                "order": "sessions.started_at_utc DESC, shots.captured_at_utc DESC, limit 1",
-                "source_of_truth": "PDFSessionReportGenerator.fetchPreviousComparableShot",
+                "identity": "same issue_id" if composition else "case-insensitive building, elevation, detail_type; angle_index equality",
+                "order": "latest earlier issue photo" if composition else "sessions.started_at_utc DESC, shots.captured_at_utc DESC, limit 1",
+                "source_of_truth": "scoped sealed snapshots" if composition else "PDFSessionReportGenerator.fetchPreviousComparableShot",
             },
             "items": comparisons,
         },
         "guided_placeholders": guided,
+        "source_provenance": {
+            "source_snapshots": composition["sources"] if composition else [{"snapshot_id": str(row.get("id") or ""), "session_id": str(row.get("session_id") or ""), "session_type": session_type}],
+            "guided_baseline": composition["baseline"] if composition else None,
+            "punchlist_identity": "issue_id" if composition else None,
+            "operational_observation_ids": sorted(overlay["observation_id"] for overlay in operational_overlays.values()),
+            "operational_activity_ids": sorted({value for overlay in operational_overlays.values()
+                                                for key in ("activity_priority_id", "activity_status_id")
+                                                if (value := overlay.get(key))}),
+        },
         "data_sources": {
             "session_snapshot_row": "session_snapshots",
             "snapshot_payload": "Supabase Storage scoutcapture-session-snapshots or fixture",
@@ -1117,7 +1362,7 @@ def field_provenance() -> dict[str, Any]:
         ],
         "property_display_fields": ["session_snapshots.rawSessionJSON"],
         "session_timestamps": ["session_snapshots.rawSessionJSON"],
-        "ordered_shots": ["session_snapshots.rawSessionJSON", "derived_report_rule: exported active shots ordered by captured_at_utc, original_filename"],
+        "ordered_shots": ["scoped completed session_snapshots.rawSessionJSON", "derived_report_rule: latest actual capture per issue_id and Guided Shot baseline"],
         "guided_rows": ["session_snapshots.rawSessionJSON", "PDF generator input: all session guided rows"],
         "guided_skipped_placeholders": ["session_snapshots.rawSessionJSON", "derived_report_rule: skipped current-session slot with no shot"],
         "guided_retired_notes": ["session_snapshots.rawSessionJSON", "derived_report_rule: retired during session"],
@@ -1133,7 +1378,7 @@ def field_provenance() -> dict[str, Any]:
         "flagged_reason": ["session_snapshots.rawSessionJSON shot.noteText/reason", "session_snapshots.rawSessionJSON issue.currentReason"],
         "priority": ["session_snapshots.rawSessionJSON", "derived_report_rule default Medium"],
         "current_media_path": ["session_snapshots.rawSessionJSON storageBucket/storagePath", "derived_report_rule operationalMediaStoragePath fallback", "Supabase Storage object"],
-        "previous_comparable_shot": ["normalized canonical Supabase sessions/shots", "derived_report_rule mirroring fetchPreviousComparableShot"],
+        "previous_comparable_shot": ["same-issue sealed snapshot history for punchlist visits", "normalized canonical Supabase sessions/shots for full sessions"],
         "previous_session_completed_at_utc": ["normalized canonical Supabase sessions.completed_at"],
         "previous_captured_at_utc": ["normalized canonical Supabase shots.captured_at"],
         "previous_media_path": ["normalized canonical Supabase shots.storage_bucket/storage_path", "Supabase Storage object"],

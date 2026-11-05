@@ -225,7 +225,7 @@ class FakeSupabaseClient:
         self.tables.setdefault(table, []).append(stored)
         return dict(stored)
 
-    def upload_object(self, bucket: str, path: str, source_path: pathlib.Path, content_type: str) -> None:
+    def upload_object(self, bucket: str, path: str, source_path: pathlib.Path, content_type: str, upsert: bool = True) -> None:
         if self.upload_failures_remaining > 0:
             self.upload_failures_remaining -= 1
             raise TimeoutError("The read operation timed out")
@@ -288,6 +288,9 @@ def validation() -> dict[str, Any]:
     return {
         "inputs": {
             "session": {
+                "session_id": SESSION_ID,
+                "org_id": ORG_ID,
+                "property_id": PROPERTY_ID,
                 "property_name": "Test New Property",
                 "property_address": "123 Portal Way, Austin, TX",
                 "ended_at_utc": "2026-09-07T14:30:00Z",
@@ -324,6 +327,7 @@ def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
                 output,
                 {
                     "source_snapshot_id": SNAPSHOT_ID,
+                    "source_provenance": {"source_snapshots": [{"snapshot_id": SNAPSHOT_ID, "session_id": SESSION_ID}]},
                     "session_type": session_type,
                     "sessionType": session_type,
                     "renderable_remotely": True,
@@ -331,6 +335,8 @@ def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
                     "inputs": {
                         "session": {
                             "session_id": SESSION_ID,
+                            "org_id": ORG_ID,
+                            "property_id": PROPERTY_ID,
                             "property_name": "Test New Property",
                             "property_address": "123 Portal Way, Austin, TX",
                             "started_at_utc": "2026-09-07T14:00:00Z",
@@ -603,6 +609,43 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
             ["property_report", "flagged_observations", "flagged_comparison"],
             [item["report_type"] for item in summary["uploaded_files"]],
         )
+
+    def test_punchlist_package_can_include_baseline_property_report(self) -> None:
+        client = FakeSupabaseClient()
+        original_run_step = worker.run_step
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_step = fake_worker_run_step(
+                "punchlist_visit", ["property", "priority", "comparison"])
+            try:
+                worker.process_session(worker_args(pathlib.Path(tmp)), client,
+                                       ROOT, SESSION_ID, SNAPSHOT_ID)
+            finally:
+                worker.run_step = original_run_step
+        manifest = client.tables["report_packages"][0]["manifest"]
+        self.assertEqual(["property_report", "flagged_observations", "flagged_comparison"],
+                         [row["report_type"] for row in manifest["reports"]])
+        self.assertEqual(SNAPSHOT_ID, manifest["source_provenance"]["source_snapshots"][0]["snapshot_id"])
+
+    def test_existing_pdf_is_never_overwritten(self) -> None:
+        class ExistingPdfClient(FakeSupabaseClient):
+            def object_exists(self, bucket, path):
+                return True
+            def download_object(self, bucket, path):
+                return b"%PDF-1.4\nold content"
+        client = ExistingPdfClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf = pathlib.Path(tmp) / "new.pdf"
+            pdf.write_bytes(b"%PDF-1.4\nnew content")
+            with self.assertRaisesRegex(worker.WorkerError, "Refusing to overwrite"):
+                worker.upload_pdf_with_retry(client, worker.DELIVERABLES_BUCKET,
+                                             "orgs/test/new.pdf", pdf)
+        self.assertEqual([], client.uploads)
+
+    def test_retention_cannot_delete_historical_pdfs(self) -> None:
+        client = FakeSupabaseClient()
+        with self.assertRaisesRegex(worker.WorkerError, "retention is disabled"):
+            worker.apply_retention(client, [{"id": "older-package"}], "apply")
+        self.assertEqual([], client.uploads)
 
     def test_pdf_upload_retries_transient_timeout(self) -> None:
         client = FakeSupabaseClient()
