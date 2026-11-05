@@ -1934,6 +1934,8 @@ struct ActiveIssuesSheet: View {
     private var issueRemainingCounts: [ChecklistArea: Int] {
         var counts: [ChecklistArea: Int] = [:]
         for observation in observations {
+            guard observation.status == .active || observation.status == .resolutionRequired else { continue }
+            guard !selectionDisabledIssueIDs.contains(observation.id) else { continue }
             let captured = currentSessionID != nil &&
                 (observation.resolvedInSessionID == currentSessionID || canRetakeObservation(observation))
             guard !captured else { continue }
