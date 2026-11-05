@@ -12190,24 +12190,14 @@ final class AppState: ObservableObject {
         shotID: UUID,
         relativePathOverride: String? = nil
     ) async -> Bool {
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.mediaSupabaseUploadEnabled,
-              supabaseClient != nil else {
-            return false
-        }
-
-        guard beginSupabaseMediaOperation(operationKey) else { return false }
-        defer { endSupabaseMediaOperation(operationKey) }
-
-        await performOperationalMediaHydration(
+        // Historical originals may be pruned after export. Reference downloads
+        // belong in the reusable display cache, alongside gallery downloads.
+        await ensureGalleryMediaAvailableIfNeeded(
             propertyID: propertyID,
             sessionID: sessionID,
             shotID: shotID,
-            allowRelaxedRemoteLookupFallback: true,
             relativePathOverride: relativePathOverride
         )
-        return true
     }
 
     private func ensureGalleryMediaAvailableIfNeeded(

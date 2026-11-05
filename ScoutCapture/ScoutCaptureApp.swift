@@ -16841,13 +16841,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneGuidedReferencePath(for guidedShot: GuidedShot) -> String? {
-        [
+        let candidates = [
             guidedShot.referenceImagePath,
             guidedShot.referenceImageLocalIdentifier,
             guidedShot.shot?.imageLocalIdentifier
         ]
         .compactMap(fastLaneTrimmedNonEmpty)
-        .first(where: { FileManager.default.fileExists(atPath: $0) })
+        // Keep the historical session/shot identity even when its local file
+        // has been offloaded, so the reference can be fetched again.
+        return candidates.first(where: { fastLaneExistingLocalPath($0) != nil }) ?? candidates.first
     }
 
     private func fastLaneLocalShotRecords() -> [AppState.FastRuntimePrototypeShotRecord] {
@@ -16982,6 +16984,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if !fastLaneSideControlPayload.guidedShots.isEmpty ||
             fastLaneSideControlCounts.guidedRemainingCount > 0 ||
             !didRefreshFastLaneSideControlCounts {
+            refreshFastLaneSideControlMediaMaps(for: fastLaneSideControlPayload)
             fastLaneSideControlSheetMode = .guided
             isLoadingFastLaneSideControlSheet = false
             didCheckFastLaneGuidedPanelMedia = false
@@ -17274,7 +17277,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         didCheckFastLaneGuidedPanelMedia = true
         let requests = (fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots)
             .compactMap { guidedShot -> AppState.OperationalMediaHydrationRequest? in
-                guard fastLaneGuidedThumbnailPathByID[guidedShot.id] == nil else { return nil }
+                guard fastLaneExistingLocalPath(fastLaneGuidedThumbnailPathByID[guidedShot.id]) == nil else { return nil }
                 return fastLanePanelHydrationRequest(
                     shotID: guidedShot.shot?.id,
                     storedPath: guidedShot.shot?.imageLocalIdentifier

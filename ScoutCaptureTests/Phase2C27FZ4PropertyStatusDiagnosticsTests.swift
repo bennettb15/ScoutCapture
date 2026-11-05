@@ -3,6 +3,35 @@ import XCTest
 
 @MainActor
 final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
+    func testHistoricalDisplayCacheSurvivesUploadedOriginalPruning() throws {
+        let fixture = try makeCutoverFixture()
+        let session = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        var metadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: session.id)
+        metadata.shots[0].storageBucket = "originals"
+        metadata.shots[0].storagePath = "test/draft.jpg"
+        metadata.shots[0].uploadState = "uploaded"
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: session.id, metadata: metadata
+        )
+        let cached = StorageRoot.galleryMediaCacheURL(
+            propertyID: fixture.property.id, sessionID: session.id,
+            shotID: metadata.shots[0].shotID, filename: metadata.shots[0].originalFilename
+        )
+        try FileManager.default.createDirectory(at: cached.deletingLastPathComponent(), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cached.deletingLastPathComponent()) }
+        try Data([1]).write(to: cached)
+
+        let result = fixture.localStore.pruneUploadedSessionMediaAssets(
+            propertyID: fixture.property.id, sessionID: session.id
+        )
+        XCTAssertEqual(result.removedFiles, 1)
+        XCTAssertEqual(try Data(contentsOf: cached), Data([1]))
+        XCTAssertEqual(cached, StorageRoot.galleryMediaCacheURL(
+            propertyID: fixture.property.id, sessionID: session.id,
+            shotID: metadata.shots[0].shotID, filename: "Originals/draft.jpg"
+        ))
+    }
+
     func testSavedLocalDraftWinsOverItsOwnOccupiedStatusButNotAnotherSession() {
         let userID = UUID()
         let sessionID = UUID()
