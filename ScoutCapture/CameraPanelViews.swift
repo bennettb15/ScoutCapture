@@ -1470,7 +1470,7 @@ struct GuidedChecklistRow: View {
     private var statusColor: Color {
         switch status {
         case .pending: return .orange
-        case .captured: return .green
+        case .captured: return .white
         case .skipped: return .gray
         }
     }
@@ -1613,11 +1613,14 @@ struct GuidedChecklistRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.55))
+        .background(status == .captured
+            ? Color(red: 0.04, green: 0.42, blue: 0.14).opacity(0.88)
+            : Color.black.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(status == .captured ? Color.green.opacity(0.90) : Color.white.opacity(0.12),
+                        lineWidth: status == .captured ? 1.5 : 1)
         )
         .contentShape(Rectangle())
     }
@@ -1666,7 +1669,7 @@ struct GuidedChecklistRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(primaryContextLabel)
                 .font(.system(size: 15, weight: .medium))
-                .foregroundColor(.primary)
+                .foregroundColor(status == .captured ? .white : .primary)
                 .lineLimit(1)
 
             if !compactContextAngle {
@@ -2838,6 +2841,9 @@ struct ActiveIssuesSheet: View {
         }
 
         private var statusColor: Color {
+            if isCapturedInCurrentSession {
+                return .white
+            }
             if observation.status == .resolutionRequired {
                 return .green
             }
@@ -2860,6 +2866,13 @@ struct ActiveIssuesSheet: View {
             return .orange
         }
 
+        private var isCapturedInCurrentSession: Bool {
+            guard currentSessionID != nil else { return false }
+            return hasCapturedImage || canRetake ||
+                observation.resolvedInSessionID == currentSessionID ||
+                (compactContextAngle && statusLabel == "Captured")
+        }
+
         private var reasonText: String {
             ContentView.observationCurrentReasonText(observation) ?? "No reason"
         }
@@ -2879,7 +2892,8 @@ struct ActiveIssuesSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(contextLabel)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(observation.status == .resolved ? .secondary : .primary)
+                        .foregroundColor(isCapturedInCurrentSession ? .white :
+                            (observation.status == .resolved ? .secondary : .primary))
                         .lineLimit(1)
 
                     if !statusLabel.isEmpty {
@@ -2930,13 +2944,16 @@ struct ActiveIssuesSheet: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Color.black.opacity(0.35))
+            .background(isCapturedInCurrentSession
+                ? Color(red: 0.04, green: 0.42, blue: 0.14).opacity(0.88)
+                : Color.black.opacity(0.35))
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .overlay(
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(isCapturedInCurrentSession ? Color.green.opacity(0.90) : Color.white.opacity(0.12),
+                            lineWidth: isCapturedInCurrentSession ? 1.5 : 1)
             )
-            .opacity(observation.status == .resolved ? 0.70 : 1.0)
+            .opacity(observation.status == .resolved && !isCapturedInCurrentSession ? 0.70 : 1.0)
             .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             .listRowBackground(Color.clear)
             .onTapGesture {
