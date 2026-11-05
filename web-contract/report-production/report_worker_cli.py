@@ -28,6 +28,8 @@ import zipfile
 from zoneinfo import ZoneInfo
 from typing import Any
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
 
 DELIVERABLES_BUCKET = "scoutcapture-deliverables"
 RENDERER_VERSION = "phase2c-shadow-reportlab-refinement-1"
@@ -55,6 +57,7 @@ REPORT_TYPE_MAP = {
     "punchlist_update": "punchlist_update",
 }
 REQUIRED_RUNTIME_PATHS = [
+    pathlib.Path("web-contract/report-production/tenant_comparison.py"),
     pathlib.Path("web-contract/report-input/report_input_phase1.py"),
     pathlib.Path("web-contract/report-media/report_media_phase2a.py"),
     pathlib.Path("web-contract/report-renderer/report_renderer_phase2b.py"),
@@ -70,6 +73,7 @@ class WorkerError(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-id", help="Completed ScoutCapture session UUID to process.")
+    parser.add_argument("--tenant-comparison-request-id", help="Process an authorized on-demand tenant comparison request.")
     parser.add_argument(
         "--snapshot-id",
         help="Specific completed sealed session_snapshots.id to process with --session-id.",
@@ -313,7 +317,7 @@ def execution_environment(url: str, args: argparse.Namespace) -> str:
     if expected_ref != project_ref:
         raise WorkerError("--expected-project-ref does not match SUPABASE_URL project ref.")
     has_allowlist = bool(args.allow_session_id or args.allow_org_property or args.allow_org_id)
-    if not args.poll_once and not has_allowlist:
+    if not args.poll_once and not getattr(args, "tenant_comparison_request_id", None) and not has_allowlist:
         raise WorkerError("Remote validation requires at least one --allow-session-id, --allow-org-property, or --allow-org-id.")
     if args.session_id and args.session_id.lower() not in allowed_session_ids(args):
         raise WorkerError("Remote validation --session-id must be explicitly included in --allow-session-id.")
@@ -534,6 +538,10 @@ class SupabaseServiceClient:
             },
         )
         return json.loads(value.decode("utf-8"))
+
+    def delete_rows(self, table: str, query: dict[str, str]) -> None:
+        encoded = urllib.parse.urlencode(query, safe="(),.*")
+        self.request("DELETE", f"{self.url}/rest/v1/{table}?{encoded}")
 
     def upload_object(self, bucket: str, path: str, file_path: pathlib.Path, mime_type: str, upsert: bool = True) -> None:
         encoded_path = "/".join(urllib.parse.quote(part) for part in path.split("/"))
@@ -1613,7 +1621,7 @@ def snapshot_metadata(client: SupabaseServiceClient, snapshot_id: str) -> dict[s
     rows = client.select(
         "session_snapshots",
         {
-            "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,raw_session_json_sha256,snapshot_payload_sha256",
+            "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,raw_session_json_sha256,snapshot_payload_sha256,payload_storage_bucket,payload_storage_path,created_at,deleted_at",
             "id": f"eq.{snapshot_id}",
             "snapshot_kind": "eq.completed",
             "session_status": "eq.completed",
@@ -2763,6 +2771,15 @@ def run_poll_once(
     allowed_orgs = allowed_org_ids(args)
     allowed_pairs = allowed_org_properties(args)
 
+    on_demand_error = None
+    if not args.poll_dry_run and not (allowed_sessions or allowed_orgs or allowed_pairs):
+        from tenant_comparison import drain
+        try:
+            drain(args, client, repo, sys.modules[__name__])
+        except WorkerError as error:
+            # Temporary downloads must not block ordinary package processing.
+            on_demand_error = str(error)[:1000]
+
     discovered = discover_poll_snapshots(client)
     latest_snapshots, superseded_snapshots = latest_snapshots_per_session(discovered)
     poll_summary: dict[str, Any] = {
@@ -2782,6 +2799,7 @@ def run_poll_once(
         "processed": [],
         "skipped": [],
         "would_process": [],
+        "on_demand_error": on_demand_error,
     }
 
     for snapshot in superseded_snapshots:
@@ -2848,6 +2866,13 @@ def main() -> int:
 
     repo = pathlib.Path(__file__).resolve().parents[2]
     client = SupabaseServiceClient.from_env(args)
+
+    if args.tenant_comparison_request_id:
+        import uuid
+        uuid.UUID(args.tenant_comparison_request_id)
+        from tenant_comparison import process_request
+        process_request(args, client, repo, args.tenant_comparison_request_id, sys.modules[__name__])
+        return 0
 
     if args.stamped_zip_poll_once:
         run_stamped_zip_poll_once(args, client, repo)

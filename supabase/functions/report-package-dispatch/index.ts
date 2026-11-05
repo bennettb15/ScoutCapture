@@ -14,6 +14,7 @@ type SnapshotRecord = {
 };
 
 type DatabaseWebhookPayload = {
+  tenant_comparison_request_id?: unknown;
   type?: unknown;
   table?: unknown;
   schema?: unknown;
@@ -80,6 +81,28 @@ Deno.serve(async (request: Request): Promise<Response> => {
     return jsonResponse(405, { ok: false, error: "method_not_allowed" });
   }
 
+  let payload: DatabaseWebhookPayload;
+  try { payload = await request.json(); }
+  catch { return jsonResponse(400, { ok: false, error: "invalid_json" }); }
+  if (payload.tenant_comparison_request_id !== undefined) {
+    const serviceKey = env("SUPABASE_SERVICE_ROLE_KEY");
+    if (!serviceKey || !timingSafeEqual(request.headers.get("x-scoutcapture-service-key") || "", serviceKey)) {
+      return reject(401, "unauthorized");
+    }
+    const id = lowerString(payload.tenant_comparison_request_id);
+    if (!isUuid(id)) return reject(400, "invalid_request_id");
+    const check = await fetch(`${env('SUPABASE_URL')}/rest/v1/on_demand_report_requests?id=eq.${id}&kind=eq.tenant_comparison&status=eq.queued&select=id`, {
+      headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
+    });
+    if (!check.ok || !(await check.json()).length) return reject(404, "request_not_found");
+    const token = env("GITHUB_REPORT_WORKER_TOKEN");
+    if (!token) return reject(500, "missing_github_token");
+    const response = await fetch(`https://api.github.com/repos/${env('GITHUB_REPOSITORY', DEFAULT_REPOSITORY)}/actions/workflows/${env('GITHUB_REPORT_WORKER_WORKFLOW', DEFAULT_WORKFLOW)}/dispatches`, {
+      method: 'POST', headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-github-api-version': '2022-11-28' },
+      body: JSON.stringify({ ref: env('GITHUB_REPORT_WORKER_REF', DEFAULT_REF), inputs: { tenant_comparison_request_id: id, trigger_source: 'on_demand_tenant_comparison' } }),
+    });
+    return jsonResponse(response.ok ? 202 : 502, { ok: response.ok, dispatched: response.ok });
+  }
   const expectedSecret = env("REPORT_PACKAGE_DISPATCH_SECRET");
   if (!expectedSecret) {
     console.error(JSON.stringify({ event: "report_package_dispatch_failed", reason: "missing_dispatch_secret" }));
@@ -88,13 +111,6 @@ Deno.serve(async (request: Request): Promise<Response> => {
   if (!timingSafeEqual(requestSecret(request), expectedSecret)) {
     console.warn(JSON.stringify({ event: "report_package_dispatch_rejected", reason: "unauthorized" }));
     return jsonResponse(401, { ok: false, error: "unauthorized" });
-  }
-
-  let payload: DatabaseWebhookPayload;
-  try {
-    payload = await request.json();
-  } catch {
-    return jsonResponse(400, { ok: false, error: "invalid_json" });
   }
 
   const record = payload.record ?? {};
