@@ -20095,6 +20095,22 @@ private struct FastLanePanelThumbnail: View {
     }
 }
 
+private struct FastLaneCaptureCellBackground: View {
+    let isCaptured: Bool
+    let idleBlackOpacity: Double
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color.black.opacity(isCaptured ? 0.65 : idleBlackOpacity))
+            .overlay {
+                if isCaptured {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.green.opacity(0.40))
+                }
+            }
+    }
+}
+
 private struct FastLaneIssueListRow: View {
     let observation: Observation
     let mode: FastLaneIssueListSheet.Mode
@@ -20151,6 +20167,7 @@ private struct FastLaneIssueListRow: View {
     }
 
     private var statusColor: Color {
+        if isHandledInCurrentSession { return .white }
         switch observation.status {
         case .resolutionRequired, .resolved:
             return .green
@@ -20193,7 +20210,7 @@ private struct FastLaneIssueListRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(observation.status == .resolved ? .secondary : .primary)
+                    .foregroundColor(isHandledInCurrentSession ? .white : (observation.status == .resolved ? .secondary : .primary))
                     .lineLimit(1)
 
                 if !statusLabel.isEmpty {
@@ -20227,13 +20244,13 @@ private struct FastLaneIssueListRow: View {
                 }
 
                 Text("\(Text("Reason: ").font(.system(size: 12, weight: .semibold)))\(Text(reasonText).font(.system(size: 12, weight: .regular)))")
-                    .foregroundColor(.white.opacity(0.86))
+                    .foregroundColor(.white.opacity(isHandledInCurrentSession ? 1.0 : 0.86))
                     .lineLimit(2)
 
                 if let supportingReasonText {
                     Text(supportingReasonText)
                         .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.white.opacity(0.66))
+                        .foregroundColor(.white.opacity(isHandledInCurrentSession ? 0.86 : 0.66))
                         .lineLimit(1)
                 }
             }
@@ -20242,13 +20259,16 @@ private struct FastLaneIssueListRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.35))
+        .background(FastLaneCaptureCellBackground(
+            isCaptured: isHandledInCurrentSession,
+            idleBlackOpacity: 0.35
+        ))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(isHandledInCurrentSession ? Color.green.opacity(0.75) : Color.white.opacity(0.12), lineWidth: 1)
         )
-        .opacity(observation.status == .resolved ? 0.70 : 1.0)
+        .opacity(observation.status == .resolved && !isHandledInCurrentSession ? 0.70 : 1.0)
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
@@ -20482,10 +20502,14 @@ private struct FastLaneGuidedChecklistRow: View {
         return "Pending"
     }
 
+    private var isCaptured: Bool {
+        statusLabel == "Captured"
+    }
+
     private var statusColor: Color {
         switch statusLabel {
         case "Captured":
-            return .green
+            return .white
         case "Skipped", "Retired":
             return .gray
         default:
@@ -20515,7 +20539,7 @@ private struct FastLaneGuidedChecklistRow: View {
             }
             .buttonStyle(.borderless)
             .overlay(alignment: .topTrailing) {
-                if statusLabel == "Captured" {
+                if isCaptured {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.white)
@@ -20527,7 +20551,7 @@ private struct FastLaneGuidedChecklistRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.primary)
+                    .foregroundColor(isCaptured ? .white : .primary)
                     .lineLimit(1)
 
                 Text(statusLabel)
@@ -20537,7 +20561,7 @@ private struct FastLaneGuidedChecklistRow: View {
                 if let detailLine {
                     Text(detailLine)
                         .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.white.opacity(0.66))
+                        .foregroundColor(.white.opacity(isCaptured ? 0.86 : 0.66))
                         .lineLimit(1)
                 }
             }
@@ -20547,11 +20571,14 @@ private struct FastLaneGuidedChecklistRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.55))
+        .background(FastLaneCaptureCellBackground(
+            isCaptured: isCaptured,
+            idleBlackOpacity: 0.55
+        ))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(isCaptured ? Color.green.opacity(0.75) : Color.white.opacity(0.12), lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
