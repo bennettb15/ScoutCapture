@@ -72,6 +72,17 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.visit2 = source('visit2', 3, 'punchlist_visit',
                              [shot(1, 'visit2', 3, kind='follow_up_capture')], [issue(1)])
 
+    def test_original_and_updated_reasons_survive_selective_composition(self):
+        self.visit1['metadata']['issues'][0]['currentReason']='Updated observation'
+        result=report_input.compose_punchlist_history([self.baseline,self.visit1],Storage())
+        current=next(s for s in result['punchlist_shots'] if s['issue_id']=='issue-0')
+        previous=next(i for i in result['comparisons'] if i['issue_id']=='issue-0')['previous_shot']
+        self.assertEqual(current['original_flagged_reason'],'Observation 0')
+        self.assertEqual(current['flagged_reason'],'Updated observation')
+        self.assertEqual(previous['flagged_reason'],'Observation 0')
+        displayed=next(s for s in result['shots'] if s['shot_id']=='photo-0-visit1')
+        self.assertEqual(displayed['original_flagged_reason'],'Observation 0')
+
     def test_one_of_eight_replaces_only_updated_property_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         self.assertEqual(len(result['punchlist_shots']), 8)
