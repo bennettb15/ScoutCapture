@@ -48,7 +48,7 @@ from scout_report_visuals import (
 
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "phase2c-photo-notes-3"
+GENERATOR_VERSION = "phase2c-photo-notes-4"
 PAGE_WIDTH = 612.0
 PAGE_HEIGHT = 792.0
 PAGE_SIZE = (PAGE_WIDTH, PAGE_HEIGHT)
@@ -976,6 +976,20 @@ def body_slots(count: int, include_header: bool = False) -> list[dict[str, dict[
     return slots
 
 
+def comparison_side_by_side_slots() -> list[dict[str, dict[str, float]]]:
+    """Keep the flagged comparison's original and latest photos on one row."""
+    return [
+        {
+            "photo_available_rect": {"x": 315.0, "y": 272.0, "width": 255.0, "height": 340.0},
+            "caption_rect": {"x": 315.0, "y": 100.0, "width": 255.0, "height": 164.0},
+        },
+        {
+            "photo_available_rect": {"x": 42.0, "y": 272.0, "width": 255.0, "height": 340.0},
+            "caption_rect": {"x": 42.0, "y": 100.0, "width": 255.0, "height": 164.0},
+        },
+    ]
+
+
 def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> list[list[dict[str, Any]]]:
     if not lines:
         return []
@@ -1537,7 +1551,7 @@ def build_comparison_plan(
         number += 1
     for entry in entries:
         slots = []
-        two_up_slots = body_slots(2)
+        two_up_slots = comparison_side_by_side_slots()
         current_media = entry["current"].get("media")
         current_image_size = image_size_from_media(current_media)
         current_frame = aspect_fit_rect(current_image_size, two_up_slots[0]["photo_available_rect"]) if current_image_size else None
@@ -2281,28 +2295,124 @@ def draw_priority_section(c: canvas.Canvas, plan: dict[str, Any], page: dict[str
     draw_footer(c, page["number"], plan["session"]["property_address"], PRIORITY_FOOTER)
 
 
+def comparison_location_code(entry: dict[str, Any]) -> str:
+    building = trim(entry.get("building")) or "B1"
+    building_number = numeric_suffix("B", building)
+    if building_number is None:
+        match = re.fullmatch(r"Building\s+(\d+)", building, flags=re.IGNORECASE)
+        building_number = match.group(1) if match else None
+    building_label = f"B{building_number}" if building_number is not None else building.upper()
+    return " | ".join(
+        [
+            building_label,
+            (trim(entry.get("elevation")) or "North").upper(),
+            (trim(entry.get("detail_type")) or "General Elevation").upper(),
+            detail_identifier(entry.get("shot_key"), entry.get("angle_index")).upper(),
+        ]
+    )
+
+
+def comparison_fitted_font_size(text: str, width: float, preferred: float, minimum: float = 8.0) -> float:
+    size = preferred
+    while size > minimum and text_width(text, "Helvetica", size) > width:
+        size -= 0.25
+    return size
+
+
+def draw_comparison_caption(c: canvas.Canvas, slot: dict[str, Any]) -> None:
+    entry = slot["entry"]
+    state = visual_state(entry)
+    rect = slot["caption_rect"]
+    reason = trim(entry.get("flagged_reason"))
+    note = f"Resolved - {reason}" if state == "resolved" and reason else ("Resolved" if state == "resolved" else (reason or "Flagged"))
+    top_y = rect["y"] + rect["height"] - 18.0
+    line_count = 0
+    if state != "none":
+        font_size = 10.0
+        lines = wrap_lines(note, "Helvetica", font_size, rect["width"] - 22.0)
+        while len(lines) > 9 and font_size > 8.0:
+            font_size -= 0.5
+            lines = wrap_lines(note, "Helvetica", font_size, rect["width"] - 22.0)
+        for index, line in enumerate(lines):
+            line_rect = {"x": rect["x"], "y": top_y - index * 13.0, "width": rect["width"], "height": 13.0}
+            if index == 0:
+                draw_note(c, line, line_rect, state, size=font_size)
+            else:
+                draw_text(c, line, line_rect, size=font_size, align="center")
+        line_count = len(lines)
+    if bool(entry.get("suppress_session_label")):
+        return
+    label = "Current Session" if slot["role"] == "current" else "Previous Session"
+    session_text = f"{label}: {entry.get('captured_at_display') or 'Unknown'}"
+    session_size = comparison_fitted_font_size(session_text, rect["width"], 9.0)
+    session_y = top_y - line_count * 13.0 - 6.0
+    draw_text(c, session_text, {"x": rect["x"], "y": session_y, "width": rect["width"], "height": 13.0}, size=session_size, align="center")
+
+
+def draw_comparison_placeholder(c: canvas.Canvas, rect: dict[str, float], label: str) -> None:
+    c.saveState()
+    c.setFillColor(Color(0.97, 0.98, 0.99, 1))
+    c.roundRect(rect["x"], rect["y"], rect["width"], rect["height"], 12, stroke=0, fill=1)
+    c.setStrokeColor(Color(0.66, 0.72, 0.78, 1))
+    c.setLineWidth(1.5)
+    c.setDash(5, 4)
+    c.roundRect(rect["x"], rect["y"], rect["width"], rect["height"], 12, stroke=1, fill=0)
+    c.restoreState()
+    draw_multiline_center(c, label, rect, "Helvetica", 11)
+
+
 def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], work_dir: pathlib.Path, warnings: list[str], logo_png: str | None) -> None:
+    draw_text(c, "Flagged Comparison Report", {"x": 18, "y": PAGE_HEIGHT - 31, "width": 180, "height": 16}, size=11)
     draw_logo(c, logo_png)
+    session = plan["session"]
+    property_name = trim(session.get("property_name"))
+    address = trim(session.get("property_address")) or "Unknown address"
+    property_line = f"{property_name} | {address}" if property_name else address
+    property_size = comparison_fitted_font_size(property_line, 528.0, 9.0)
+    draw_text(c, property_line, {"x": 42, "y": 704, "width": 528, "height": 16}, size=property_size, fill=Color(0.32, 0.38, 0.48, 1), align="center")
+    current = next(slot["entry"] for slot in page["slots"] if slot["role"] == "current")
+    code = comparison_location_code(current)
+    code_size = comparison_fitted_font_size(code, 528.0, 11.0)
+    draw_text(c, code, {"x": 42, "y": 679, "width": 528, "height": 18}, "Helvetica-Bold", code_size, align="center")
+    current_state = visual_state(current)
+    if current_state in {"flagged", "resolved"}:
+        c.saveState()
+        background = Color(0.91, 0.97, 0.93, 1) if current_state == "resolved" else Color(1.0, 0.94, 0.94, 1)
+        c.setFillColor(background)
+        c.roundRect(42, 648, 136, 26, 7, stroke=0, fill=1)
+        draw_state_marker(c, 52, 653, 14, current_state)
+        c.setFillColor(color_tuple(RESOLVED_COLOR if current_state == "resolved" else FLAG_COLOR))
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(73, 657, current_state.upper())
+        c.restoreState()
+    priority = trim(current.get("normalized_priority") or current.get("priority"))
+    if priority:
+        level = priority_level(priority)
+        draw_text(c, "PRIORITY", {"x": 462, "y": 662, "width": 108, "height": 12}, size=8, fill=Color(0.4, 0.47, 0.57, 1))
+        c.saveState()
+        c.setFillColor(color_tuple(PRIORITY_COLORS[level]))
+        c.circle(470, 651, 3.5, stroke=0, fill=1)
+        c.restoreState()
+        draw_text(c, PRIORITY_LABELS[level], {"x": 480, "y": 643, "width": 90, "height": 15}, size=10)
+    for role, label in (("previous", "Original flagged photo"), ("current", "Latest submitted photo")):
+        x = 42 if role == "previous" else 315
+        draw_text(c, label, {"x": x, "y": 621, "width": 255, "height": 17}, "Helvetica-Bold", 11, align="center")
     for index, slot in enumerate(page["slots"]):
         entry = slot["entry"]
         state = visual_state(entry)
-        entry["visual_state"] = state
-        border = FLAG_COLOR if state == "flagged" else RESOLVED_COLOR if state == "resolved" else None
+        media_path = trim(entry.get("media_path"))
+        has_image = bool(media_path and pathlib.Path(media_path).exists())
+        border = FLAG_COLOR if has_image and state == "flagged" else RESOLVED_COLOR if has_image and state == "resolved" else None
         image_rect = slot.get("image_rect") or (slot.get("photo_available_rect") if slot.get("placeholder_reason") else None)
-        draw_image_slot(c, entry.get("media_path"), image_rect, slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
-        top_y = slot["caption_rect"]["y"] + slot["caption_rect"]["height"] - 14
-        draw_text(c, entry.get("caption") or "", {"x": slot["caption_rect"]["x"], "y": top_y, "width": slot["caption_rect"]["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
-        if state != "none":
-            reason = trim(entry.get("flagged_reason"))
-            note = f"Resolved - {reason}" if state == "resolved" and reason else ("Resolved" if state == "resolved" else (reason or "Flagged"))
-            draw_note(c, note, {"x": slot["caption_rect"]["x"], "y": top_y - 14, "width": slot["caption_rect"]["width"], "height": 14}, state)
-            session_y = top_y - 28
+        if has_image:
+            draw_image_slot(c, media_path, image_rect, slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
         else:
-            session_y = top_y - 14
-        label = "Current Session" if slot["role"] == "current" else "Previous Session"
-        if not bool(entry.get("suppress_session_label")):
-            draw_text(c, f"{label}: {entry.get('captured_at_display') or 'Unknown'}", {"x": slot["caption_rect"]["x"], "y": session_y, "width": slot["caption_rect"]["width"], "height": 14}, size=10, align="center")
-    draw_footer(c, page["number"], plan["session"]["property_address"])
+            if media_path:
+                warnings.append(f"prepared_media_missing_on_disk:{media_path}")
+            missing_label = "No latest submitted photo available" if slot["role"] == "current" else (slot.get("placeholder_reason") or "No original flagged photo available")
+            draw_comparison_placeholder(c, image_rect or slot["photo_available_rect"], missing_label)
+        draw_comparison_caption(c, slot)
+    draw_footer(c, page["number"], session["property_address"])
 
 
 def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], work_dir: pathlib.Path, warnings: list[str], logo_asset: Any) -> None:

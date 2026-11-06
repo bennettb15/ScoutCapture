@@ -33,6 +33,7 @@ class FakeSupabaseClient:
     def __init__(self) -> None:
         self.environment = "local-test"
         self.tables: dict[str, list[dict[str, Any]]] = {
+            "orgs": [{"id": ORG_ID, "name": "Test Organization", "deleted_at": None}],
             "org_memberships": [],
             "users_profile": [],
             "property_access_grants": [],

@@ -172,13 +172,15 @@ placeholder_frame = no_previous_page["slots"][1]["image_rect"]
 assert placeholder_frame is not None
 assert math.isclose(placeholder_frame["width"], current_frame["width"])
 assert math.isclose(placeholder_frame["height"], current_frame["height"])
-assert math.isclose(placeholder_frame["x"], current_frame["x"])
 assert "comparison_note" not in no_previous_page
 previous_rect = no_previous_page["slots"][1]["photo_available_rect"]
-assert placeholder_frame["width"] < previous_rect["width"]
+assert placeholder_frame["width"] <= previous_rect["width"]
+assert placeholder_frame["height"] < previous_rect["height"]
+assert math.isclose(placeholder_frame["x"], previous_rect["x"] + (previous_rect["width"] - placeholder_frame["width"]) / 2.0)
 assert math.isclose(placeholder_frame["y"], previous_rect["y"] + (previous_rect["height"] - placeholder_frame["height"]) / 2.0)
-current_caption_rect = no_previous_page["slots"][0]["caption_rect"]
-assert placeholder_frame["y"] + placeholder_frame["height"] <= current_caption_rect["y"]
+assert current_frame["x"] > placeholder_frame["x"]
+previous_caption_rect = no_previous_page["slots"][1]["caption_rect"]
+assert placeholder_frame["y"] >= previous_caption_rect["y"] + previous_caption_rect["height"]
 
 pdf = next((root / "with_date" / "comparison").glob("*.pdf"))
 pdf_pages = PdfReader(str(pdf)).pages
