@@ -8,6 +8,7 @@ import pathlib
 import sys
 import types
 import unittest
+from unittest.mock import MagicMock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -46,6 +47,7 @@ def install_optional_dependency_stubs() -> None:
         colors.black = Color(0, 0, 0, 1)
         colors.white = Color(1, 1, 1, 1)
         utils.ImageReader = object
+        pdfmetrics.stringWidth = lambda value, _font, size: len(value) * size * 0.5
         canvas.Canvas = object
         sys.modules.update(
             {
@@ -389,7 +391,7 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             renderer.draw_text = lambda *_args, **_kwargs: None
             base_slot = {
                 "image_rect": {"x": 1, "y": 2, "width": 3, "height": 4},
-                "caption_rect": {"x": 1, "y": 2, "width": 120, "height": 40},
+                "caption_rect": {"x": 1, "y": 2, "width": 255, "height": 80},
             }
             page = {
                 "number": 10,
@@ -405,6 +407,7 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                             "captureKind": "resolvedCapture",
                             "isFlagged": True,
                             "flagged_reason": "Paint touched up",
+                            "media_path": str(RENDERER_PATH),
                         },
                     },
                     {
@@ -414,13 +417,14 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                             "caption": "Previous",
                             "visual_state": "flagged",
                             "flagged_reason": "Paint touched up",
+                            "media_path": str(RENDERER_PATH),
                         },
                     },
                 ],
             }
 
             renderer.draw_comparison_page(
-                None,
+                MagicMock(),
                 {"session": {"property_address": "123 Green Check Way"}},
                 page,
                 pathlib.Path("."),
