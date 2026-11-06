@@ -3678,135 +3678,151 @@ struct SessionHubView: View {
             Color.black.opacity(colorScheme == .light ? 0.52 : 0.68)
                 .ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                VStack(spacing: 5) {
-                    Text(showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(headerPrimaryLabel)
-
-                    Text(property.name)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(headerPrimaryLabel)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
-
-                    if let addressLine = propertyAddressLine(property) ?? property.address,
-                       !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(addressLine)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                    }
+            ViewThatFits(in: .vertical) {
+                initialSessionTypePickerCard(for: property)
+                ScrollView {
+                    initialSessionTypePickerCard(for: property)
                 }
-
-                VStack(spacing: 10) {
-                    if showInitialPunchlistConfirmation {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .foregroundColor(.red)
-                            Text("Are you sure? Punchlist photos document issues only. Property reports will not have a front Overview cover photo until you take one in Full Documentation and complete and export that session.")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(headerPrimaryLabel)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.red.opacity(colorScheme == .light ? 0.12 : 0.22))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.red.opacity(0.45), lineWidth: 1)
-                        )
-
-                        initialSessionChoiceButton(
-                            title: "Start Full Documentation",
-                            subtitle: "Take a front Overview photo first",
-                            systemImage: "camera.metering.matrix",
-                            isEnabled: true,
-                            disabledCaption: nil
-                        ) {
-                            beginInitialFullDocumentationEntry(for: property)
-                        }
-                        initialSessionChoiceButton(
-                            title: "Continue Punchlist",
-                            subtitle: "Proceed without a front Overview cover photo",
-                            systemImage: "checklist",
-                            isEnabled: true,
-                            disabledCaption: nil
-                        ) {
-                            beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
-                        }
-                    } else {
-                        if shouldRecommendInitialOverview {
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: "photo.on.rectangle.angled")
-                                    .foregroundColor(.blue)
-                                Text("For property reports, we recommend starting with a clear front Overview photo in Full Documentation, then completing and exporting that session. Punchlist captures issue photos only, but you can still choose it now.")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundColor(headerPrimaryLabel)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.blue.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-
-                        initialSessionChoiceButton(
-                            title: "Full Documentation",
-                            subtitle: "Complete property walkthrough with guided photos and flags",
-                            systemImage: "camera.metering.matrix",
-                            isEnabled: true,
-                            disabledCaption: nil
-                        ) {
-                            beginInitialFullDocumentationEntry(for: property)
-                        }
-                        initialSessionChoiceButton(
-                            title: "Punchlist Visit",
-                            subtitle: "Issue photos only; no guided Overview photo",
-                            systemImage: "checklist",
-                            isEnabled: true,
-                            disabledCaption: nil
-                        ) {
-                            beginInitialPunchlistEntry(for: property)
-                        }
-                    }
-                }
-
-                Button {
-                    if showInitialPunchlistConfirmation {
-                        showInitialPunchlistConfirmation = false
-                    } else {
-                        dismissInitialSessionTypePicker(for: property)
-                    }
-                } label: {
-                    Text("Back")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.blue)
-                        .padding(.horizontal, 18)
-                        .frame(height: 38)
-                }
-                .buttonStyle(.plain)
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxWidth: 430)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 20)
-            .frame(maxWidth: 430)
-            .background(colorScheme == .light ? Color(.systemBackground) : Color(.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(colorScheme == .light ? Color.black.opacity(0.12) : Color.white.opacity(0.18), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
             .padding(.horizontal, 20)
+            .padding(.vertical, 20)
         }
         .allowsHitTesting(true)
     }
 
+    private func initialSessionTypePickerCard(for property: Property) -> some View {
+        VStack(spacing: 16) {
+            VStack(spacing: 5) {
+                Text(showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(headerPrimaryLabel)
+
+                Text(property.name)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(headerPrimaryLabel)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+
+                if let addressLine = propertyAddressLine(property) ?? property.address,
+                   !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(addressLine)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
+            }
+
+            if shouldRecommendInitialOverview || showInitialPunchlistConfirmation {
+                SessionCoverPhotoIllustration()
+                    .frame(width: 126, height: 84)
+            }
+
+            VStack(spacing: 10) {
+                if showInitialPunchlistConfirmation {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.red)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Your reports won’t have a cover photo.")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("To add one, take a front overview in Full Documentation, then complete and export that session.")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .foregroundColor(headerPrimaryLabel)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(colorScheme == .light ? 0.12 : 0.22))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.red.opacity(0.45), lineWidth: 1)
+                    )
+
+                    initialSessionChoiceButton(
+                        title: "Start Full Documentation",
+                        subtitle: nil,
+                        systemImage: "camera.metering.matrix",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialFullDocumentationEntry(for: property)
+                    }
+                    initialSessionChoiceButton(
+                        title: "Continue Punchlist",
+                        subtitle: nil,
+                        systemImage: "checklist",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+                    }
+                } else {
+                    if shouldRecommendInitialOverview {
+                        Text("Start with Full Documentation to add a property report cover photo.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(headerPrimaryLabel)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 4)
+                    }
+
+                    initialSessionChoiceButton(
+                        title: "Full Documentation",
+                        subtitle: "Guided photos and flags",
+                        systemImage: "camera.metering.matrix",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialFullDocumentationEntry(for: property)
+                    }
+                    initialSessionChoiceButton(
+                        title: "Punchlist Visit",
+                        subtitle: "Issue photos only",
+                        systemImage: "checklist",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialPunchlistEntry(for: property)
+                    }
+                }
+            }
+
+            Button {
+                if showInitialPunchlistConfirmation {
+                    showInitialPunchlistConfirmation = false
+                } else {
+                    dismissInitialSessionTypePicker(for: property)
+                }
+            } label: {
+                Text("Back")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.blue)
+                    .padding(.horizontal, 18)
+                    .frame(height: 38)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 20)
+        .frame(maxWidth: 430)
+        .background(colorScheme == .light ? Color(.systemBackground) : Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(colorScheme == .light ? Color.black.opacity(0.12) : Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func initialSessionChoiceButton(
         title: String,
-        subtitle: String,
+        subtitle: String?,
         systemImage: String,
         isEnabled: Bool,
         disabledCaption: String?,
@@ -3820,10 +3836,12 @@ struct SessionHubView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.system(size: 17, weight: .semibold))
-                    Text(subtitle)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
                     if let disabledCaption {
                         Text(disabledCaption)
                             .font(.system(size: 12, weight: .semibold))
@@ -3843,7 +3861,7 @@ struct SessionHubView: View {
             }
             .foregroundColor(isEnabled ? headerPrimaryLabel : .secondary)
             .padding(.horizontal, 14)
-            .frame(minHeight: 82)
+            .frame(minHeight: subtitle == nil ? 64 : 82)
             .background(isEnabled ? Color.blue.opacity(colorScheme == .light ? 0.10 : 0.18) : Color(.tertiarySystemFill))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
