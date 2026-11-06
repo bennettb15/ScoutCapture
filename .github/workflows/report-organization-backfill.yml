@@ -1,0 +1,52 @@
+name: Backfill Report Organization
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Overwrite report PDFs after saving backups. Leave unchecked for a dry run."
+        required: true
+        type: boolean
+        default: false
+      limit:
+        description: "Maximum report files to check (0 checks all)."
+        required: true
+        type: number
+        default: 0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: report-organization-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${SUPABASE_URL:-}" && -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]
+      - name: Build report worker image
+        run: docker build -f web-contract/report-production/Dockerfile -t scoutcapture-report-worker:organization-backfill .
+      - name: Update report covers
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--limit "${{ inputs.limit }}")
+          if [[ '${{ inputs.apply }}' == 'true' ]]; then args+=(--apply); fi
+          docker run --rm \
+            -e SUPABASE_URL \
+            -e SUPABASE_SERVICE_ROLE_KEY \
+            --entrypoint python \
+            scoutcapture-report-worker:organization-backfill \
+            web-contract/report-production/backfill_report_organization.py "${args[@]}"

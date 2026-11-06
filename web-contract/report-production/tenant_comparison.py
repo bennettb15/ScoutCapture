@@ -180,6 +180,10 @@ def process_request(args, client, repo, request_id, worker):
             results = [future.result() for future in futures]
         validations = [result[0] for result in results]
         prepared = [result[1] for result in results]
+        after_session = validations[1]["inputs"]["session"]
+        after_session["org_name"] = worker.generating_organization_name(
+            client, row["org_id"], after_session.get("org_name")
+        )
         client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'progress_step':'rendering'})
         renderer = load_renderer(repo)
         plan = build_plan(renderer, *validations, *prepared, renderer.logo_info(None, str(repo/worker.PACKAGED_LOGO_SVG)))

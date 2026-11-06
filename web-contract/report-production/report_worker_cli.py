@@ -2513,6 +2513,19 @@ def latest_snapshots_per_session(
     return latest, superseded
 
 
+def generating_organization_name(client: SupabaseServiceClient, org_id: str, fallback: str | None = None) -> str:
+    captured_name = trim(fallback)
+    try:
+        rows = client.select('orgs', {'select': 'name', 'id': f'eq.{org_id}', 'deleted_at': 'is.null', 'limit': '1'})
+    except Exception:
+        if not captured_name:
+            raise
+        rows = []
+    name = trim(rows[0].get('name')) if rows else None
+    if name or captured_name:
+        return name or captured_name
+    raise WorkerError('Generating organization name is unavailable.')
+
 def process_session(
     args: argparse.Namespace,
     client: SupabaseServiceClient,
@@ -2560,6 +2573,10 @@ def process_session(
             return {"ok": True, "package_id": package["id"], "package_action": package_action,
                     "source_provenance": validation.get("source_provenance")}
 
+        generated_by_org_name = generating_organization_name(
+            client, package["org_id"], validation.get("inputs", {}).get("session", {}).get("org_name")
+        )
+
         run_step(
             [
                 sys.executable,
@@ -2592,6 +2609,8 @@ def process_session(
             "all",
             "--report-date",
             report_date(validation),
+            "--generated-by-org-name",
+            generated_by_org_name,
             "--logo-pdf",
             str(repo / DISABLED_LOGO_PDF),
             "--logo-svg",

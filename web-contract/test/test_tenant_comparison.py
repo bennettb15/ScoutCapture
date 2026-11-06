@@ -118,14 +118,15 @@ class TenantComparisonTests(unittest.TestCase):
                 sid = command[command.index('--session-id')+1]
                 value = dict(session_id=sid, source_snapshot_id=f'snapshot-{sid}', session_type='full_documentation' if sid == 'b' else 'punchlist_visit',
                     media={'missing_count':0}, reports={'property_report':{'applicable':True}},
-                    inputs={'ordered_shots':[{'shot_id':sid, 'session_id':sid, 'media':{'bucket':'scoutcapture-originals','path':f'sessions/{sid}/shots/{sid}/sample.jpg'}}], 'property_report_entries':[{'kind':'photo','shot_id':sid}]})
+                    inputs={'session':{}, 'ordered_shots':[{'shot_id':sid, 'session_id':sid, 'media':{'bucket':'scoutcapture-originals','path':f'sessions/{sid}/shots/{sid}/sample.jpg'}}], 'property_report_entries':[{'kind':'photo','shot_id':sid}]})
                 write_json(Path(command[command.index('--output')+1]),value,False)
             else:
                 media = Path(command[command.index('--output-dir')+1]);media.mkdir()
                 write_json(media/'prepared_report_media.json', {'items':[]},False)
         worker = SimpleNamespace(safe_iso_now=lambda:'2026-10-03', select_ready_package=lambda client,id:packages[id],
             snapshot_metadata=lambda client,id:dict(org_id='org',property_id='prop'), run_step=run_step,
-            read_json=lambda path:json.loads(path.read_text()), write_json=write_json, PACKAGED_LOGO_SVG='logo.svg')
+            read_json=lambda path:json.loads(path.read_text()), write_json=write_json, PACKAGED_LOGO_SVG='logo.svg',
+            generating_organization_name=lambda client,org_id,fallback: 'Current Example Group')
         renderer = SimpleNamespace(logo_info=lambda *args:{}, render_pdf=lambda plan,path:path.write_bytes(b'%PDF-test'))
         with tempfile.TemporaryDirectory() as folder, patch.object(tenant,'load_renderer',return_value=renderer), patch.object(tenant,'build_plan',return_value={}):
             started = dt.datetime.now(dt.timezone.utc)
