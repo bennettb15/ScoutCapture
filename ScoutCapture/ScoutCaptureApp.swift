@@ -3728,7 +3728,7 @@ struct SessionHubView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Your reports won’t have a cover photo.")
                                 .font(.system(size: 15, weight: .semibold))
-                            Text("To add one, take a front overview in Full Documentation, then complete and export that session.")
+                            Text("To add one, take one front overview photo in Full Documentation, then complete and export that session before taking any more photos.")
                                 .font(.system(size: 13, weight: .medium))
                         }
                         .foregroundColor(headerPrimaryLabel)
@@ -3763,8 +3763,12 @@ struct SessionHubView: View {
                     }
                 } else {
                     if shouldRecommendInitialOverview {
-                        Text("Start with Full Documentation to add a property report cover photo.")
-                            .font(.system(size: 14, weight: .medium))
+                        VStack(spacing: 6) {
+                            Text("Set your report cover first")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("Choose Full Documentation, take **one front overview photo**, then **complete and export that session before taking any more photos**.")
+                                .font(.system(size: 14, weight: .medium))
+                        }
                             .foregroundColor(headerPrimaryLabel)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
