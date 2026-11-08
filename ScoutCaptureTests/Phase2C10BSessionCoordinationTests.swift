@@ -452,6 +452,23 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         XCTAssertNotNil(sessionLock.lockedAt)
     }
 
+    func testCurrentDeviceClaimReleaseProtectsLocalPhotos() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let result = await fixture.appState.releaseFastRuntimePrototypeCurrentUserClaim(
+            propertyID: fixture.property.id,
+            requireCurrentDeviceMatch: true
+        )
+
+        XCTAssertFalse(result.didRelease)
+        XCTAssertEqual(result.reason, "protected_local_work")
+        let original = fixture.localStore
+            .sessionFolderURL(propertyID: fixture.property.id, sessionID: fixture.session.id)
+            .appendingPathComponent("Originals/one.jpg")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+    }
+
     func testFailedUntouchedOccupancyWriteDoesNotReturnAllowedClaimedState() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

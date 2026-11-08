@@ -902,6 +902,7 @@ struct SessionHubView: View {
     @State private var pendingExportErrorMessage: String? = nil
     @State private var showPendingExportError: Bool = false
     @State private var propertyUploadRetryAlert: PropertyUploadRetryAlert? = nil
+    @State private var pendingUploadRetryProperty: Property? = nil
     @State private var retryingPropertyUploadIDs: Set<UUID> = []
     @State private var mapLookupPropertyID: UUID? = nil
     @State private var showMapsErrorToast: Bool = false
@@ -1390,6 +1391,16 @@ struct SessionHubView: View {
                     title: Text(alert.title),
                     message: Text(alert.message),
                     dismissButton: .default(Text("OK"))
+                )
+            }
+            .alert(item: $pendingUploadRetryProperty) { property in
+                Alert(
+                    title: Text("Saved Photos Need Upload"),
+                    message: Text("This property has photos saved on this iPhone that are waiting to finish uploading."),
+                    primaryButton: .default(Text("Retry Upload")) {
+                        retryUploadOrExport(for: property)
+                    },
+                    secondaryButton: .cancel()
                 )
             }
             .overlay {
@@ -4075,6 +4086,15 @@ struct SessionHubView: View {
         tapToken: Int,
         didFreshEntryPreflight: Bool = false
     ) {
+        if appState.hasOwnedFastRuntimeCaptureReadyForRetry(propertyID: property.id) {
+            isOpeningProperty = false
+            fastLaneOpeningProperty = nil
+            if pressedPropertyID == property.id {
+                pressedPropertyID = nil
+            }
+            pendingUploadRetryProperty = property
+            return
+        }
         if !didFreshEntryPreflight {
             Task { @MainActor in
                 let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
@@ -14324,12 +14344,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if showFastLaneSessionActionsSheet {
                 FastLaneSessionActionsSheet(
                     summary: fastLaneSessionActionsSummary,
-                    isEndingSession: isFastLaneExiting,
+                    isEndingSession: isFastLaneExiting || productionCompleteState.isRunning || isSavingFastCapture || camera.isCapturing,
                     endingTitle: fastLaneEndingProgressTitle,
                     onResume: {
                         showFastLaneSessionActionsSheet = false
                     },
                     onSaveDraftAndExit: {
+                        guard !productionCompleteState.isRunning,
+                              !isSavingFastCapture,
+                              !camera.isCapturing else { return }
                         fastLaneExitIntentActive = true
                         showFastLaneSessionActionsSheet = false
                         closePreview()
@@ -15548,7 +15571,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .frame(height: 34)
                 .background(Color.black.opacity(0.58))
                 .clipShape(Capsule())
-                .disabled(isClosing || isSavingFastCapture || camera.isCapturing)
+                .disabled(isClosing || productionCompleteState.isRunning || isSavingFastCapture || camera.isCapturing)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(propertyName)
@@ -19053,15 +19076,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private static let exteriorElevationOptions = ["North", "South", "East", "West"]
 
     private func closePreview() {
-        guard !isClosing else { return }
+        guard !isClosing,
+              !productionCompleteState.isRunning,
+              !isSavingFastCapture,
+              !camera.isCapturing else { return }
         fastLaneExitIntentActive = true
         isClosing = true
         fastLanePendingFlaggedDecision = nil
         fastLaneRetakeGuidedID = nil
         fastLaneRetakeIssueID = nil
         releaseStartedAt = Date()
-        camera.stopPreviewAsync()
         if didCompleteUpload {
+            camera.stopPreviewAsync()
             releaseFinishedAt = Date()
             onDismiss(AppState.FastRuntimePrototypeCloseResult(
                 propertyID: context.propertyID,
@@ -19095,6 +19121,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
             await MainActor.run {
                 releaseFinishedAt = Date()
+                if let error = closeResult.errorMessage {
+                    isClosing = false
+                    fastLaneExitIntentActive = false
+                    print("[FastLane] draft_close_failed propertyID=\(context.propertyID.uuidString) error=\(error)")
+                    captureErrorMessage = "Could not save this session. Your photos remain on this device. Please try Exit as Draft again."
+                    return
+                }
+                camera.stopPreviewAsync()
                 onDismiss(closeResult)
             }
         }
