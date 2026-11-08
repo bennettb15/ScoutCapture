@@ -37575,13 +37575,14 @@ final class AppState: ObservableObject {
                 orgID: orgID,
                 propertyID: propertyID
             )
-            _ = await performPropertyStatusShadowWrite(
+            let didReleasePropertyStatus = await performPropertyStatusShadowWrite(
                 transition: .release,
                 propertyID: propertyID,
                 sessionID: sessionID,
                 deviceID: currentDeviceIdentifier(),
                 reason: "zero_photo_or_occupancy_release"
             )
+            guard didReleasePropertyStatus else { return false }
             if emitReleasedEvent, let sessionID {
                 occupancyOnlyClaimedSessionIDs.remove(sessionID)
                 await emitAuditEvent(
@@ -43896,13 +43897,15 @@ final class AppState: ObservableObject {
                 occupiedByDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
                 occupiedAt: status.lockedAt ?? status.serverTimestamp ?? Date()
             )
-            await releasePropertySessionOccupancyIfOwned(
+            didReleasePrototypeClaim = await releasePropertySessionOccupancyIfOwned(
                 propertyID: propertyID,
                 sessionID: targetSessionID,
                 emitReleasedEvent: false,
                 ownershipState: ownershipState
             )
-            didReleasePrototypeClaim = true
+            if !didReleasePrototypeClaim {
+                releaseErrorMessage = "Could not confirm that the property claim was released."
+            }
             releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
         } else if releaseClaim, status?.entryState == .unlockedAndClaimed {
             releaseErrorMessage = "Skipped release because the RPC result required fallback."
@@ -43947,6 +43950,25 @@ final class AppState: ObservableObject {
         let property = properties.first(where: { $0.id == propertyID }) ??
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
+
+        if (fastRuntimeDraftsByPropertyID[propertyID]?.photoCount ?? 0) > 0 ||
+            !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).isEmpty ||
+            canonicalDraftSession(for: propertyID, requireCaptures: true) != nil ||
+            propertyRowPendingDeliverySession(for: propertyID) != nil {
+            return FastRuntimePrototypeReleaseResult(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                probeSessionID: probeSessionID,
+                lockSessionID: nil,
+                entryState: nil,
+                reason: "protected_local_work",
+                didRelease: false,
+                message: "Saved photos or a pending upload are on this device. Retry the upload before releasing the claim.",
+                rpcMilliseconds: 0,
+                releaseMilliseconds: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
 
         let rpcStartedAt = Date()
         let status = await evaluateLightweightPropertyEntryStatus(
@@ -44000,7 +44022,7 @@ final class AppState: ObservableObject {
             occupiedByDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
             occupiedAt: status.lockedAt ?? status.serverTimestamp ?? Date()
         )
-        await releasePropertySessionOccupancyIfOwned(
+        let didRelease = await releasePropertySessionOccupancyIfOwned(
             propertyID: propertyID,
             sessionID: releaseSessionID,
             emitReleasedEvent: false,
@@ -44015,8 +44037,10 @@ final class AppState: ObservableObject {
             lockSessionID: status.lockSessionID,
             entryState: status.entryState,
             reason: status.reason,
-            didRelease: true,
-            message: "Released current-user occupied claim. Rerun prototype to test clean unlocked_and_claimed.",
+            didRelease: didRelease,
+            message: didRelease
+                ? "Released current-user occupied claim. Rerun prototype to test clean unlocked_and_claimed."
+                : "Could not confirm that the current-user claim was released.",
             rpcMilliseconds: rpcMilliseconds,
             releaseMilliseconds: releaseMilliseconds,
             totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
@@ -44036,7 +44060,7 @@ final class AppState: ObservableObject {
             occupiedByDeviceID: normalizedSupabaseText(context.ownerDeviceID) ?? currentDeviceIdentifier(),
             occupiedAt: context.createdAt
         )
-        await releasePropertySessionOccupancyIfOwned(
+        let didRelease = await releasePropertySessionOccupancyIfOwned(
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             emitReleasedEvent: false,
@@ -44051,8 +44075,10 @@ final class AppState: ObservableObject {
             lockSessionID: context.sessionID,
             entryState: .unlockedAndClaimed,
             reason: context.statusReason,
-            didRelease: true,
-            message: "Released prototype camera preview claim.",
+            didRelease: didRelease,
+            message: didRelease
+                ? "Released prototype camera preview claim."
+                : "Could not confirm that the prototype camera preview claim was released.",
             rpcMilliseconds: 0,
             releaseMilliseconds: releaseMilliseconds,
             totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
@@ -59485,7 +59511,8 @@ final class AppState: ObservableObject {
         let currentDeviceID = currentDeviceIdentifier()
         return properties.reduce(0) { count, property in
             // Count each property once while its originals upload or reports process.
-            if hasPendingFastRuntimeOriginalUpload(propertyID: property.id) {
+            if hasPendingFastRuntimeOriginalUpload(propertyID: property.id) ||
+                hasOwnedFastRuntimeCaptureReadyForRetry(propertyID: property.id) {
                 return count + 1
             }
             guard let record = propertyStatusByPropertyID[property.id] else {
