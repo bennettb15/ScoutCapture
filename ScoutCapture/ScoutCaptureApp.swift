@@ -22355,6 +22355,7 @@ private struct FastLaneDetailNoteModal: View {
     let onSave: (String) -> Void
 
     @State private var draft: String
+    @State private var isTradePickerPresented = false
     @FocusState private var isFocused: Bool
 
     init(
@@ -22493,15 +22494,9 @@ private struct FastLaneDetailNoteModal: View {
                         .foregroundColor(.white.opacity(0.90))
                         .frame(width: 62, alignment: .leading)
 
-                    Menu {
-                        Button("None") {
-                            selectedTrade = ""
-                        }
-                        ForEach(tradeOptions, id: \.self) { option in
-                            Button(option) {
-                                selectedTrade = option
-                            }
-                        }
+                    Button {
+                        isFocused = false
+                        isTradePickerPresented = true
                     } label: {
                         HStack(spacing: 8) {
                             Text(selectedTrade.isEmpty ? "Optional" : selectedTrade)
@@ -22587,6 +22582,37 @@ private struct FastLaneDetailNoteModal: View {
             isFocused = isNoteEditable
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        .sheet(isPresented: $isTradePickerPresented) {
+            NavigationStack {
+                List {
+                    ForEach([""] + tradeOptions, id: \.self) { option in
+                        Button {
+                            selectedTrade = option
+                            isTradePickerPresented = false
+                        } label: {
+                            HStack {
+                                Text(option.isEmpty ? "None" : option)
+                                Spacer()
+                                if selectedTrade == option {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .navigationTitle("Trade")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { isTradePickerPresented = false }
+                    }
+                }
+            }
+            .presentationDetents([.large])
+        }
     }
 }
 
