@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -32,6 +33,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 
 DELIVERABLES_BUCKET = "scoutcapture-deliverables"
+BRANDING_BUCKET = "scoutcapture-org-branding"
 RENDERER_VERSION = "phase2c-photo-notes-4"
 MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
@@ -1635,6 +1637,33 @@ def snapshot_metadata(client: SupabaseServiceClient, snapshot_id: str) -> dict[s
     return rows[0]
 
 
+
+def load_org_report_logo(client: SupabaseServiceClient, org_id: str, output_dir: pathlib.Path) -> pathlib.Path | None:
+    """Fetch the optional private logo for this org; never block report generation."""
+    try:
+        rows = client.select("org_report_branding", {
+            "select": "logo_path", "org_id": f"eq.{org_id}", "limit": "1",
+        })
+        if not rows:
+            return None
+        path = str(rows[0].get("logo_path") or "")
+        parts = path.split("/")
+        if (len(parts) != 4 or parts[:3] != ["orgs", org_id, "logos"] or
+                not parts[3].endswith(".png")):
+            raise WorkerError("Organization report logo path is invalid.")
+        uuid.UUID(parts[3][:-4])
+        image = client.download_object(BRANDING_BUCKET, path)
+        if len(image) > 2_000_000 or not image.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise WorkerError("Organization report logo file is invalid.")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        local = output_dir / "org_report_logo.png"
+        local.write_bytes(image)
+        return local
+    except Exception as error:
+        print(f"Report branding unavailable for organization {org_id}; using SCOUT logo ({type(error).__name__}).", file=sys.stderr)
+        return None
+
+
 def upsert_file_row(
     client: SupabaseServiceClient,
     package: dict[str, Any],
@@ -2596,6 +2625,7 @@ def process_session(
         if prepared.get("errors"):
             raise WorkerError(f"Media preparation errors: {prepared.get('errors')}")
 
+        brand_logo = load_org_report_logo(client, snapshot_row["org_id"], output_root)
         render_cmd = [
             sys.executable,
             str(repo / "web-contract" / "report-renderer" / "report_renderer_phase2b.py"),
@@ -2618,6 +2648,8 @@ def process_session(
             "--pretty",
         ]
         render_cmd[render_cmd.index("--report") + 1] = renderer_report_arg(validation)
+        if brand_logo:
+            render_cmd.extend(["--brand-logo-png", str(brand_logo)])
         if args.allow_weather_fetch:
             render_cmd.append("--allow-weather-fetch")
         run_step(render_cmd, repo, env)

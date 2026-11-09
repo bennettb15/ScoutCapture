@@ -141,6 +141,10 @@ def parse_args() -> argparse.Namespace:
         help="Official SCOUT SVG logo asset used for vector logo rendering.",
     )
     parser.add_argument(
+        "--brand-logo-png",
+        help="Optional organization logo PNG for the report header and cover.",
+    )
+    parser.add_argument(
         "--weather-cache",
         help="Deterministic weather cache JSON. Defaults to output-dir/weather_cache.json.",
     )
@@ -509,7 +513,7 @@ def cover_photo_entry(validation: dict[str, Any], lookup: MediaLookup) -> dict[s
     return next((shot for shot in sorted(candidates, key=cover_candidate_score) if shot.get("media_path")), None)
 
 
-def logo_info(logo_pdf: str | None, logo_svg: str | None) -> dict[str, Any]:
+def logo_info(logo_pdf: str | None, logo_svg: str | None, brand_png: str | None = None) -> dict[str, Any]:
     pdf_path = pathlib.Path(logo_pdf) if logo_pdf else None
     svg_path = pathlib.Path(logo_svg) if logo_svg else None
     info = {
@@ -519,6 +523,8 @@ def logo_info(logo_pdf: str | None, logo_svg: str | None) -> dict[str, Any]:
         "source_svg_path": str(svg_path) if svg_path else None,
         "source_svg_exists": bool(svg_path and svg_path.exists()),
         "source_svg_sha256": sha256_file(svg_path) if svg_path and svg_path.exists() else None,
+        "brand_png_path": brand_png,
+        "brand_png_sha256": sha256_file(pathlib.Path(brand_png)) if brand_png and pathlib.Path(brand_png).exists() else None,
         "embedding": "official_svg_drawn_as_reportlab_vector_paths",
         "conversion_tool": None,
         "fallback_embedding": "high_resolution_transparent_png_from_pdf",
@@ -678,6 +684,15 @@ def resolve_logo_png(plan: dict[str, Any], work_dir: pathlib.Path, warnings: lis
 
 def resolve_logo_asset(plan: dict[str, Any], work_dir: pathlib.Path, warnings: list[str]) -> dict[str, Any] | None:
     logo = plan.get("logo") or {}
+    brand_path = pathlib.Path(logo.get("brand_png_path")) if logo.get("brand_png_path") else None
+    if brand_path and brand_path.exists():
+        try:
+            with Image.open(brand_path) as image:
+                image.verify()
+                if image.format == "PNG":
+                    return {"kind": "png", "path": str(brand_path)}
+        except Exception:
+            warnings.append("organization_logo_invalid_scout_fallback_used")
     try:
         vector = load_logo_vector(logo.get("source_svg_path"))
     except Exception as error:
@@ -1932,6 +1947,16 @@ def draw_logo(c: canvas.Canvas, logo_asset: dict[str, Any] | None, cover: bool =
     c.restoreState()
 
 
+def draw_scout_branding_footer(c: canvas.Canvas, scout_logo: dict[str, Any] | None) -> None:
+    """Show Scout attribution only when an organization supplies its own logo."""
+    draw_text(c, "Generated with", {"x": 64, "y": 83, "width": 68, "height": 11}, size=8)
+    box = {"x": 135, "y": 82, "width": 50, "height": 12}
+    if scout_logo and scout_logo.get("kind") == "vector":
+        draw_vector_logo(c, scout_logo, box)
+    else:
+        draw_text(c, "SCOUT", box, "Helvetica-Bold", 8)
+
+
 def draw_footer(c: canvas.Canvas, page_number: int, address: str | None = None, extra: str | None = None) -> None:
     margin = 64.0
     if address is not None:
@@ -2181,6 +2206,9 @@ def draw_cover(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], wor
         (None, "Generated with SCOUT software"),
         ("Report Date:", session.get("report_date") or ""),
     ]
+    if (logo_asset and logo_asset.get("kind") == "png" and
+            logo_asset.get("path") == (plan.get("logo") or {}).get("brand_png_path")):
+        details = [entry for entry in details if entry != (None, "Generated with SCOUT software")]
     if plan.get("report_type") == "tenant_comparison":
         versions = plan.get("comparison_versions") or {}
         details[2:4] = [("Before version:", display_datetime(versions.get("before_date")) or "Unknown"),
@@ -2477,6 +2505,17 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
     work_dir = output_path.parent / "_pdf_image_cache" / output_path.stem
     work_dir.mkdir(parents=True, exist_ok=True)
     logo_asset = resolve_logo_asset(plan, work_dir, warnings)
+    brand_path = (plan.get("logo") or {}).get("brand_png_path")
+    has_org_logo = bool(brand_path and logo_asset and logo_asset.get("kind") == "png" and
+                        logo_asset.get("path") == brand_path)
+    scout_logo = None
+    if has_org_logo:
+        try:
+            scout_logo = load_logo_vector((plan.get("logo") or {}).get("source_svg_path"))
+            if scout_logo:
+                scout_logo = {"kind": "vector", **scout_logo}
+        except Exception:
+            warnings.append("scout_footer_vector_unavailable_text_fallback_used")
     c = canvas.Canvas(str(output_path), pagesize=PAGE_SIZE, pageCompression=1, invariant=1)
     c.setTitle(output_path.stem)
     c.setAuthor(plan["session"].get("org_name") or "Organization not provided")
@@ -2500,6 +2539,8 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
             draw_tenant_comparison_page(c, plan, page, work_dir, warnings, logo_asset)
         else:
             raise Phase2BError(f"Unsupported page kind: {kind}")
+        if has_org_logo:
+            draw_scout_branding_footer(c, scout_logo)
         c.showPage()
     c.save()
     return {"warnings": sorted(set(warnings))}
@@ -2670,7 +2711,7 @@ def main() -> int:
         validation.setdefault("inputs", {}).setdefault("session", {})["org_name"] = trim(args.generated_by_org_name)
     prepared = read_json(media_path)
     lookup = media_lookup(prepared)
-    logo = logo_info(args.logo_pdf, args.logo_svg)
+    logo = logo_info(args.logo_pdf, args.logo_svg, args.brand_logo_png)
     weather_warnings: list[str] = []
     weather_cache_path = pathlib.Path(args.weather_cache) if args.weather_cache else output_dir / "weather_cache.json"
     weather = resolve_weather_summary(validation, weather_cache_path, args.allow_weather_fetch, weather_warnings, args.pretty)

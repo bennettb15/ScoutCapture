@@ -186,7 +186,9 @@ def process_request(args, client, repo, request_id, worker):
         )
         client.patch(TABLE, {'id':f'eq.{row["id"]}', 'status':'eq.generating'}, {'progress_step':'rendering'})
         renderer = load_renderer(repo)
-        plan = build_plan(renderer, *validations, *prepared, renderer.logo_info(None, str(repo/worker.PACKAGED_LOGO_SVG)))
+        brand_logo = worker.load_org_report_logo(client, row['org_id'], root)
+        plan = build_plan(renderer, *validations, *prepared,
+            renderer.logo_info(None, str(repo/worker.PACKAGED_LOGO_SVG), str(brand_logo) if brand_logo else None))
         filename = 'Tenant Comparison Report.pdf'
         pdf = root/filename
         renderer.render_pdf(plan, pdf)
