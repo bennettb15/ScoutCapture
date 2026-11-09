@@ -1949,8 +1949,9 @@ def draw_logo(c: canvas.Canvas, logo_asset: dict[str, Any] | None, cover: bool =
 
 def draw_scout_branding_footer(c: canvas.Canvas, scout_logo: dict[str, Any] | None) -> None:
     """Show Scout attribution only when an organization supplies its own logo."""
-    draw_text(c, "Generated with", {"x": 64, "y": 83, "width": 68, "height": 11}, size=8)
-    box = {"x": 135, "y": 82, "width": 50, "height": 12}
+    label = "Generated with"
+    draw_text(c, label, {"x": 64, "y": 10, "width": 70, "height": 12}, size=8)
+    box = {"x": 64 + text_width(label, "Helvetica", 8) + 4, "y": 10, "width": 50, "height": 12}
     if scout_logo and scout_logo.get("kind") == "vector":
         draw_vector_logo(c, scout_logo, box)
     else:
@@ -1959,11 +1960,18 @@ def draw_scout_branding_footer(c: canvas.Canvas, scout_logo: dict[str, Any] | No
 
 def draw_footer(c: canvas.Canvas, page_number: int, address: str | None = None, extra: str | None = None) -> None:
     margin = 64.0
+    branding = getattr(c, "_scout_branding_footer", None)
     if address is not None:
         disclaimer = BASE_FOOTER + (f" {extra}" if extra else "")
-        draw_wrapped(c, disclaimer, {"x": margin, "y": 24, "width": PAGE_WIDTH - margin * 2, "height": 56}, size=8)
-        draw_text(c, address, {"x": margin, "y": 10, "width": PAGE_WIDTH - margin * 2, "height": 12}, size=9)
-    draw_text(c, f"Page {page_number}", {"x": 0, "y": 10, "width": PAGE_WIDTH - margin, "height": 12}, size=10, align="right")
+        disclaimer_rect = {"x": margin, "y": 45 if branding else 24,
+                           "width": PAGE_WIDTH - margin * 2, "height": 35 if branding else 56}
+        draw_wrapped(c, disclaimer, disclaimer_rect, size=8)
+        draw_text(c, address, {"x": margin, "y": 28 if branding else 10,
+                               "width": PAGE_WIDTH - margin * 2, "height": 12}, size=9)
+    if branding:
+        draw_scout_branding_footer(c, branding["logo"])
+    draw_text(c, f"Page {page_number}", {"x": 0, "y": 28 if branding else 10,
+                                         "width": PAGE_WIDTH - margin, "height": 12}, size=10, align="right")
 
 
 def prepare_pdf_image(source: str | None, work_dir: pathlib.Path, key: str, warnings: list[str]) -> str | None:
@@ -2517,6 +2525,7 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
         except Exception:
             warnings.append("scout_footer_vector_unavailable_text_fallback_used")
     c = canvas.Canvas(str(output_path), pagesize=PAGE_SIZE, pageCompression=1, invariant=1)
+    c._scout_branding_footer = {"logo": scout_logo} if has_org_logo else None
     c.setTitle(output_path.stem)
     c.setAuthor(plan["session"].get("org_name") or "Organization not provided")
     for page in plan["pages"]:
@@ -2539,8 +2548,6 @@ def render_pdf(plan: dict[str, Any], output_path: pathlib.Path) -> dict[str, Any
             draw_tenant_comparison_page(c, plan, page, work_dir, warnings, logo_asset)
         else:
             raise Phase2BError(f"Unsupported page kind: {kind}")
-        if has_org_logo:
-            draw_scout_branding_footer(c, scout_logo)
         c.showPage()
     c.save()
     return {"warnings": sorted(set(warnings))}
