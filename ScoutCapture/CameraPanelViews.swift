@@ -1938,7 +1938,7 @@ struct ActiveIssuesSheet: View {
                     building: observation.building ?? "",
                     elevation: CanonicalElevation.normalize(observation.targetElevation) ?? "",
                     detail: observation.detailType ?? "",
-                    angle: max(1, angleIndexByIssueID[observation.id] ?? 1),
+                    angle: max(1, observation.targetAngleIndex ?? angleIndexByIssueID[observation.id] ?? 1),
                     originalIndex: index
                 )
             )
@@ -2009,7 +2009,7 @@ struct ActiveIssuesSheet: View {
                                 observation: observation,
                                 currentSessionID: currentSessionID,
                                 resolvedThumbnailPath: resolvedThumbnailPathByID[observation.id],
-                                angleIndex: angleIndexByIssueID[observation.id],
+                                angleIndex: observation.targetAngleIndex ?? angleIndexByIssueID[observation.id],
                                 tradeOptions: tradeOptions,
                                 mode: mode,
                                 cache: cache,

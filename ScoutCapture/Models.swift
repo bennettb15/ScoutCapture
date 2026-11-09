@@ -2319,6 +2319,7 @@ struct Observation: Codable, Identifiable, Equatable {
     var building: String?
     var targetElevation: String?
     var detailType: String?
+    var targetAngleIndex: Int?
     var priority: String?
     var trade: String?
     var currentReason: String?
@@ -2371,6 +2372,7 @@ struct Observation: Codable, Identifiable, Equatable {
         building: String? = nil,
         targetElevation: String? = nil,
         detailType: String? = nil,
+        targetAngleIndex: Int? = nil,
         priority: String? = nil,
         trade: String? = nil,
         currentReason: String? = nil,
@@ -2396,6 +2398,7 @@ struct Observation: Codable, Identifiable, Equatable {
         self.building = building
         self.targetElevation = targetElevation
         self.detailType = detailType
+        self.targetAngleIndex = targetAngleIndex.map { max(1, $0) }
         self.priority = Observation.normalizedPriority(priority)
         self.trade = Observation.trimmedNonEmpty(trade)
         self.currentReason = Observation.trimmedNonEmpty(currentReason)
@@ -2423,6 +2426,7 @@ struct Observation: Codable, Identifiable, Equatable {
         case building
         case targetElevation
         case detailType
+        case targetAngleIndex
         case priority
         case trade
         case currentReason
@@ -2451,6 +2455,7 @@ struct Observation: Codable, Identifiable, Equatable {
         building = try c.decodeIfPresent(String.self, forKey: .building)
         targetElevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .targetElevation))
         detailType = try c.decodeIfPresent(String.self, forKey: .detailType)
+        targetAngleIndex = try c.decodeIfPresent(Int.self, forKey: .targetAngleIndex).map { max(1, $0) }
         priority = Observation.normalizedPriority(try c.decodeIfPresent(String.self, forKey: .priority))
         trade = Observation.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .trade))
         let decodedNote = try c.decodeIfPresent(String.self, forKey: .note)
@@ -2488,6 +2493,7 @@ struct Observation: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(building, forKey: .building)
         try c.encodeIfPresent(CanonicalElevation.normalize(targetElevation), forKey: .targetElevation)
         try c.encodeIfPresent(detailType, forKey: .detailType)
+        try c.encodeIfPresent(targetAngleIndex, forKey: .targetAngleIndex)
         try c.encodeIfPresent(Observation.normalizedPriority(priority), forKey: .priority)
         try c.encodeIfPresent(Observation.trimmedNonEmpty(trade), forKey: .trade)
         try c.encodeIfPresent(Observation.trimmedNonEmpty(currentReason), forKey: .currentReason)

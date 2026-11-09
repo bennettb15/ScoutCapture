@@ -3390,6 +3390,10 @@ final class LocalStore {
         guard !sessions.isEmpty else { return guidedRows }
 
         var recovered = guidedRows
+        let persistedRowIDs = Set(guidedRows.map(\.id))
+        var historicalShotIDs = Set<UUID>()
+        var explicitlyGuidedShotIDs = Set<UUID>()
+        var postPromotionShotIDs = Set<UUID>()
         var indexByShotID = recovered.indices.reduce(into: [UUID: Array<GuidedShot>.Index]()) { partial, index in
             if let shotID = recovered[index].shot?.id {
                 partial[shotID] = index
@@ -3404,6 +3408,11 @@ final class LocalStore {
         for session in sessions {
             guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
                 continue
+            }
+            if !metadata.guidedShots.isEmpty {
+                historicalShotIDs.formUnion(metadata.shots.map(\.shotID))
+                explicitlyGuidedShotIDs.formUnion(metadata.guidedShots.map(\.id))
+                explicitlyGuidedShotIDs.formUnion(metadata.guidedShots.compactMap { $0.shot?.id })
             }
             // Earlier Fast Lane snapshots contain the ordinary guided photos but
             // serialize no guided panel rows. Their original path is the remote
@@ -3433,6 +3442,7 @@ final class LocalStore {
                 }
                 let isPostPromotion = promotionEvidence.guidedBaseKeyCutoffs[baseKey]
                     .map { shot.createdAt > $0 } ?? false
+                if isPostPromotion { postPromotionShotIDs.insert(shot.shotID) }
                 let isMissingServerGuidedRow = hasMissingServerGuidedRows &&
                     trimmedNonEmpty(shot.storagePath) == shot.originalRelativePath
                 guard isMissingServerGuidedRow || isPostPromotion else { continue }
@@ -3502,7 +3512,24 @@ final class LocalStore {
             }
         }
 
-        return LocalConflictRules.normalizeGuidedCompletionStates(recovered)
+        // A completed session's Guided rows are authoritative for its older
+        // captures. A remote shot reference can otherwise revive an ordinary
+        // photo as a new checklist row after the original row was reclassified.
+        let reconciled = recovered.filter { guided in
+            guard persistedRowIDs.contains(guided.id),
+                  guided.id == guided.shot?.id,
+                  historicalShotIDs.contains(guided.id),
+                  !explicitlyGuidedShotIDs.contains(guided.id),
+                  !postPromotionShotIDs.contains(guided.id),
+                  guided.labelEditedAt == nil,
+                  guided.reassignedAt == nil,
+                  guided.skipReason == nil,
+                  !guided.isRetired else {
+                return true
+            }
+            return false
+        }
+        return LocalConflictRules.normalizeGuidedCompletionStates(reconciled)
     }
 
     private func recoveredGuidedShot(

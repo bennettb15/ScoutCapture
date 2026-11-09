@@ -678,6 +678,114 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertTrue(afterRetirement[0].isRetired)
     }
 
+    func testCompletedSessionDoesNotReviveHistoricalPhotoOutsideItsGuidedChecklist() throws {
+        let fixture = try makeFixture()
+        try seedDeviceBMetadata(
+            fixture: fixture,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "historical overview",
+            guidedTitle: "A North Overview"
+        )
+        let orphanID = UUID()
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: fixture.session.id
+        )
+        let historicalShot = ShotMetadata(
+            shotID: orphanID, propertyID: fixture.property.id, sessionID: fixture.session.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 110),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "A", elevation: "North", detailType: "Overview", angleIndex: 3,
+            shotKey: ShotMetadata.makeShotKey(
+                building: "A", elevation: "North", detailType: "Overview", angleIndex: 3
+            ),
+            isGuided: true, isFlagged: false, issueID: nil, issueStatus: nil,
+            noteText: nil, noteCategory: nil, originalFilename: "orphan.jpg",
+            originalRelativePath: "Originals/orphan.jpg", originalByteSize: 123,
+            storageBucket: "media", storagePath: "orgs/test/orphan.jpg",
+            stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
+            lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
+            accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+        )
+        metadata.shots.append(historicalShot)
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: fixture.session.id, metadata: metadata
+        )
+
+        let authoritative = try XCTUnwrap(metadata.guidedShots.first)
+        let orphan = GuidedShot(
+            id: orphanID, title: "A North Overview", building: "A",
+            targetElevation: "North", detailType: "Overview", angleIndex: 3,
+            shot: Shot(id: orphanID, capturedAt: historicalShot.createdAt), isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots(
+            [authoritative, orphan], propertyID: fixture.property.id
+        )
+        XCTAssertEqual(
+            try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).map(\.id),
+            [authoritative.id]
+        )
+
+        let remoteData = Data("""
+            [{"id":"\(orphanID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+              "property_id":"\(fixture.property.id.uuidString)",
+              "session_id":"\(fixture.session.id.uuidString)",
+              "created_at":"2026-09-25T12:00:00Z",
+              "building":"A","elevation":"North","detail_type":"Overview",
+              "angle_index":3,"is_guided":true,"is_flagged":false,
+              "storage_bucket":"media","storage_path":"orgs/test/orphan.jpg"}]
+            """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: remoteData)
+        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 0)
+        XCTAssertEqual(
+            try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).map(\.id),
+            [authoritative.id]
+        )
+    }
+
+    func testHistoricalRemoteGuidedPhotoDoesNotFillRetiredChecklistSlot() throws {
+        let fixture = try makeFixture()
+        let active = GuidedShot(
+            title: "A North Roofline", building: "A", targetElevation: "North",
+            detailType: "Roofline", angleIndex: 1
+        )
+        let retired = GuidedShot(
+            status: .retired, title: "A North Sidewalk", building: "A",
+            targetElevation: "North", detailType: "Sidewalk", angleIndex: 1,
+            isRetired: true
+        )
+        try fixture.deviceBStore.saveGuidedShots(
+            [active, retired], propertyID: fixture.property.id
+        )
+        let historicalID = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: Data(
+            """
+            [{"id":"\(historicalID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+              "property_id":"\(fixture.property.id.uuidString)",
+              "session_id":"\(fixture.session.id.uuidString)",
+              "created_at":"2026-09-29T14:36:03Z",
+              "building":"A","elevation":"North","detail_type":"Overview",
+              "angle_index":3,"is_guided":true,"is_flagged":false,
+              "storage_bucket":"media","storage_path":"orgs/test/old-overview.jpg"}]
+            """.utf8
+        ))
+
+        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 0)
+        XCTAssertEqual(
+            try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).map(\.id),
+            [active.id, retired.id]
+        )
+    }
+
     func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
         let fixture = try makeFixture()
         let guidedShotID = UUID()

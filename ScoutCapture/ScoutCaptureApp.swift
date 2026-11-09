@@ -14253,6 +14253,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneSessionActionsSheet: Bool = false
     @State private var fastLaneSideControlCounts: AppState.FastRuntimePreviewSideControlCounts = .empty
     @State private var fastLaneSideControlPayload: AppState.FastRuntimePreviewSideControlPayload = .empty
+    @State private var fastLaneMissingIssueAngleByID: [UUID: Int] = [:]
     @State private var isLoadingFastLaneSideControlSheet: Bool = false
     @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
     @State private var fastLaneCaptureIntent: FastLaneCaptureIntent = .free
@@ -14693,10 +14694,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func fastLaneIssueAngleIndexByID(for observations: [Observation]) -> [UUID: Int] {
         observations.reduce(into: [UUID: Int]()) { partial, observation in
-            if let angle = fastLaneObservationDisplayAngleIndex(observation) {
-                partial[observation.id] = angle
-            }
+            partial[observation.id] = fastLaneObservationDisplayAngleIndex(observation)
+                ?? fastLaneMissingIssueAngleByID[observation.id]
         }
+    }
+
+    private func refreshFastLaneMissingIssueAngles(for observations: [Observation]) {
+        let missing = observations.filter { fastLaneObservationDisplayAngleIndex($0) == nil }
+        fastLaneMissingIssueAngleByID = missing.isEmpty ? [:] : appState.fastRuntimeNextReclassifiedAngles(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            observations: missing
+        )
     }
 
     private func reloadFastLaneSideControlPayloadFromLocalStore() {
@@ -14707,6 +14716,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         fastLaneSideControlPayload = scopedPayload
+        if fastLaneSideControlSheetMode == nil {
+            refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
+        }
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
         refreshFastLaneSideControlMediaMaps(for: scopedPayload)
     }
@@ -14796,16 +14808,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             building: building,
             elevation: elevation,
             detailType: detailType,
-            angleIndex: fastLaneAngleIndexForContext(
-                building: building,
-                elevation: elevation,
-                detailType: detailType,
-                excludingGuidedShotID: guidedShot.id
-            ),
             storageRoot: fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         ) {
             fastLaneAngleReservationIndex = nil
             reloadFastLaneSideControlPayloadFromLocalStore()
+            if fastLaneCaptureIntent.guidedID == guidedShot.id,
+               let updated = fastLaneSideControlPayload.guidedShots.first(where: { $0.id == guidedShot.id }) {
+                applyFastLaneMetadataContext(fastMetadataContext.reclassified(
+                    building: updated.building ?? building,
+                    elevation: updated.targetElevation ?? elevation,
+                    detailType: updated.detailType ?? detailType,
+                    angleIndex: max(1, updated.angleIndex ?? 1)
+                ))
+            }
             reloadFastLaneGalleryAssets()
         } else {
             showFastLaneSideControlToast("Unable to reclassify guided photo")
@@ -14829,6 +14844,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         ) {
             fastLaneAngleReservationIndex = nil
             reloadFastLaneSideControlPayloadFromLocalStore()
+            refreshFastLaneMissingIssueAngles(for: fastLaneSideControlPayload.activeObservations)
+            if fastLaneCaptureIntent.issueID == observation.id,
+               let updated = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == observation.id }) {
+                applyFastLaneMetadataContext(fastMetadataContext.reclassified(
+                    building: updated.building ?? building,
+                    elevation: updated.targetElevation ?? elevation,
+                    detailType: updated.detailType ?? detailType,
+                    angleIndex: fastLaneObservationTargetAngleIndex(updated)
+                ))
+            }
             reloadFastLaneGalleryAssets()
         } else {
             showFastLaneSideControlToast("Unable to reclassify issue")
@@ -16180,6 +16205,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         fastLaneSideControlPayload = scopedPayload
+        refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
         refreshFastLaneSideControlMediaMaps(for: scopedPayload)
         prewarmFastLaneGuidedThumbnails(for: scopedPayload.guidedShots)
@@ -16230,6 +16256,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 )
                 let scopedPayload = fastLanePayloadScopedToCurrentFastSession(rawPayload)
                 fastLaneSideControlPayload = scopedPayload
+                refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
                 fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
                 didRefreshFastLaneSideControlCounts = true
@@ -16264,6 +16291,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
             await MainActor.run {
                 fastLaneSideControlPayload = scopedPayload
+                refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
                 fastLaneSideControlCounts = counts
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
                 finishFastLaneSideControlRefresh()
@@ -17026,6 +17054,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let knownCount = fastLaneSideControlCounts.activeIssueCount
         let cachedRows = fastLaneSideControlPayload.activeObservations
 
+        if cachedRows.contains(where: {
+            fastLaneObservationDisplayAngleIndex($0) == nil && fastLaneMissingIssueAngleByID[$0.id] == nil
+        }) {
+            refreshFastLaneMissingIssueAngles(for: cachedRows)
+        }
+
         if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneIssuePayload {
             fastLaneSideControlSheetMode = mode
             isLoadingFastLaneSideControlSheet = false
@@ -17153,7 +17187,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             trade: observation.trade,
             detailNote: note,
             priority: observation.priority,
-            angleIndex: fastLaneObservationTargetAngleIndex(observation) ?? max(1, fastMetadataContext.angleIndex),
+            angleIndex: fastLaneObservationTargetAngleIndex(observation),
             isGuided: false,
             isFlagged: true,
             issueID: observation.id,
@@ -17166,8 +17200,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         fastLaneSideControlSheetMode = nil
     }
 
-    private func fastLaneObservationTargetAngleIndex(_ observation: Observation) -> Int? {
-        fastLaneObservationDisplayAngleIndex(observation)
+    private func fastLaneObservationTargetAngleIndex(_ observation: Observation) -> Int {
+        if let angle = fastLaneObservationDisplayAngleIndex(observation) {
+            return angle
+        }
+        if let angle = fastLaneMissingIssueAngleByID[observation.id] {
+            return angle
+        }
+        return appState.fastRuntimeNextReclassifiedAngle(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            building: observation.building ?? "",
+            elevation: observation.targetElevation ?? "",
+            detailType: observation.detailType ?? "",
+            excludingShotID: observation.linkedShotID ?? observation.shots.last?.id,
+            excludingObservationID: observation.id
+        )
     }
 
     private func fastLaneMetadataContextForNextCapture(
@@ -17426,6 +17474,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             await MainActor.run {
                 let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
                 fastLaneSideControlPayload = scopedPayload
+                if fastLaneSideControlSheetMode == nil {
+                    refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
+                }
                 fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
             }
@@ -18227,7 +18278,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 guard generation == fastLaneGalleryLoadGeneration else { return }
                 fastLaneGalleryAssets = gallery.assets
                 fastLaneGalleryMetadataByAssetID = gallery.metadata
-                fastLaneGalleryDisplayCount = gallery.assets.count
+                fastLaneGalleryDisplayCount = Set(gallery.shots.map(\.id)).count
                 refreshFastLaneGalleryThumbnail(from: gallery.assets)
                 scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
             }
@@ -22652,6 +22703,9 @@ private func fastLaneConciseContextLabel(building: String?, elevation: String?, 
 }
 
 private func fastLaneObservationDisplayAngleIndex(_ observation: Observation) -> Int? {
+    if let targetAngle = observation.targetAngleIndex {
+        return max(1, targetAngle)
+    }
     let building = normalizedFastLaneComparable(observation.building)
     let elevation = normalizedFastLaneComparable(
         CanonicalElevation.normalize(observation.targetElevation ?? "") ?? observation.targetElevation
