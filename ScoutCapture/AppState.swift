@@ -44521,6 +44521,7 @@ final class AppState: ObservableObject {
                 existing.building = fastRuntimeTrimmedNonEmpty(metadata.building) ?? existing.building
                 existing.targetElevation = fastRuntimeTrimmedNonEmpty(metadata.elevation) ?? existing.targetElevation
                 existing.detailType = fastRuntimeTrimmedNonEmpty(metadata.detailType) ?? existing.detailType
+                existing.targetAngleIndex = max(1, metadata.angleIndex)
                 existing.priority = fastRuntimeTrimmedNonEmpty(metadata.priority) ?? existing.priority
                 existing.trade = fastRuntimeTrimmedNonEmpty(metadata.trade) ?? existing.trade
                 existing.currentReason = reason ?? existing.currentReason
@@ -44558,6 +44559,7 @@ final class AppState: ObservableObject {
                     building: metadata.building,
                     targetElevation: metadata.elevation,
                     detailType: metadata.detailType,
+                    targetAngleIndex: metadata.angleIndex,
                     priority: metadata.priority,
                     trade: metadata.trade,
                     currentReason: reason,
@@ -44808,7 +44810,6 @@ final class AppState: ObservableObject {
         building: String,
         elevation: String,
         detailType: String,
-        angleIndex: Int? = nil,
         storageRoot: URL? = nil
     ) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
@@ -44821,12 +44822,19 @@ final class AppState: ObservableObject {
             let previousGuidedRows = try localStore.fetchGuidedShots(propertyID: propertyID)
             var guidedRows = previousGuidedRows
             guard let index = guidedRows.firstIndex(where: { $0.id == guidedShotID }) else { return false }
+            let linkedShotID = guidedRows[index].shot?.id
             guidedRows[index].building = nextBuilding ?? guidedRows[index].building
             guidedRows[index].targetElevation = nextElevation ?? guidedRows[index].targetElevation
             guidedRows[index].detailType = nextDetail ?? guidedRows[index].detailType
-            if let angleIndex {
-                guidedRows[index].angleIndex = max(1, angleIndex)
-            }
+            guidedRows[index].angleIndex = fastRuntimeNextReclassifiedAngle(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                building: guidedRows[index].building ?? "",
+                elevation: guidedRows[index].targetElevation ?? "",
+                detailType: guidedRows[index].detailType ?? "",
+                excludingShotID: linkedShotID,
+                excludingGuidedShotID: guidedShotID
+            )
             let title = fastRuntimeConciseContextLabel(
                 building: guidedRows[index].building,
                 elevation: guidedRows[index].targetElevation,
@@ -44838,7 +44846,6 @@ final class AppState: ObservableObject {
             guidedRows[index].labelEditedAt = Date()
             guidedRows[index].labelEditedInSessionID = sessionID
 
-            let linkedShotID = guidedRows[index].shot?.id
             let building = guidedRows[index].building ?? ""
             let elevation = guidedRows[index].targetElevation ?? ""
             let detailType = guidedRows[index].detailType ?? ""
@@ -44986,6 +44993,15 @@ final class AppState: ObservableObject {
             guard !revisedBuilding.isEmpty, !revisedElevation.isEmpty, !revisedDetail.isEmpty else { return false }
 
             let linkedShotID = observation.linkedShotID ?? observation.shots.last?.id
+            let assignedAngle = fastRuntimeNextReclassifiedAngle(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                building: revisedBuilding,
+                elevation: revisedElevation,
+                detailType: revisedDetail,
+                excludingShotID: linkedShotID,
+                excludingObservationID: observationID
+            )
             let previousLabel = fastRuntimeConciseContextLabel(
                 building: observation.building ?? "",
                 elevation: observation.targetElevation ?? "",
@@ -44998,6 +45014,7 @@ final class AppState: ObservableObject {
             observation.building = revisedBuilding
             observation.targetElevation = revisedElevation
             observation.detailType = revisedDetail
+            observation.targetAngleIndex = assignedAngle
             observation.updatedAt = revisedAt
             observation.updatedInSessionID = sessionID
             observation.historyEvents.append(ObservationHistoryEvent(
@@ -45039,7 +45056,7 @@ final class AppState: ObservableObject {
                         building: revisedBuilding,
                         elevation: revisedElevation,
                         detailType: revisedDetail,
-                        angleIndex: previousContext.angleIndex
+                        angleIndex: assignedAngle
                     )
                     records[recordIndex].metadataContext = revisedContext
                     records[recordIndex].captureLocationMode = revisedContext.locationMode
@@ -45147,6 +45164,122 @@ final class AppState: ObservableObject {
             print("[FastLanePanel] observation_reclassify_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
             return false
         }
+    }
+
+    private struct FastRuntimeReclassificationAngleSources {
+        let guided: [GuidedShot]
+        let observations: [Observation]
+        let shots: [ShotMetadata]
+    }
+
+    private func fastRuntimeReclassificationAngleSources(
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> FastRuntimeReclassificationAngleSources {
+        let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let sessionIDs = Set([sessionID] + (((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)))
+        let shots = sessionIDs.flatMap { id in
+            (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: id))?.shots ?? []
+        }
+        return FastRuntimeReclassificationAngleSources(
+            guided: guided, observations: observations, shots: shots
+        )
+    }
+
+    func fastRuntimeNextReclassifiedAngles(
+        propertyID: UUID,
+        sessionID: UUID,
+        observations: [Observation]
+    ) -> [UUID: Int] {
+        let sources = fastRuntimeReclassificationAngleSources(propertyID: propertyID, sessionID: sessionID)
+        return observations.reduce(into: [UUID: Int]()) { result, observation in
+            result[observation.id] = fastRuntimeNextReclassifiedAngle(
+                building: observation.building ?? "",
+                elevation: observation.targetElevation ?? "",
+                detailType: observation.detailType ?? "",
+                excludingShotID: observation.linkedShotID ?? observation.shots.last?.id,
+                excludingGuidedShotID: nil,
+                excludingObservationID: observation.id,
+                sources: sources
+            )
+        }
+    }
+
+    func fastRuntimeNextReclassifiedAngle(
+        propertyID: UUID,
+        sessionID: UUID,
+        building: String,
+        elevation: String,
+        detailType: String,
+        excludingShotID: UUID?,
+        excludingGuidedShotID: UUID? = nil,
+        excludingObservationID: UUID? = nil
+    ) -> Int {
+        let sources = fastRuntimeReclassificationAngleSources(propertyID: propertyID, sessionID: sessionID)
+        return fastRuntimeNextReclassifiedAngle(
+            building: building, elevation: elevation, detailType: detailType,
+            excludingShotID: excludingShotID,
+            excludingGuidedShotID: excludingGuidedShotID,
+            excludingObservationID: excludingObservationID,
+            sources: sources
+        )
+    }
+
+    private func fastRuntimeNextReclassifiedAngle(
+        building: String,
+        elevation: String,
+        detailType: String,
+        excludingShotID: UUID?,
+        excludingGuidedShotID: UUID?,
+        excludingObservationID: UUID?,
+        sources: FastRuntimeReclassificationAngleSources
+    ) -> Int {
+        let buildingKey = fastRuntimeComparable(building)
+        let elevationKey = fastRuntimeComparable(CanonicalElevation.normalize(elevation) ?? elevation)
+        let detailKey = fastRuntimeComparable(detailType)
+        var usedAngles = Set<Int>()
+
+        func reserve(building: String?, elevation: String?, detailType: String?, angle: Int?) {
+            guard fastRuntimeComparable(building) == buildingKey,
+                  fastRuntimeComparable(CanonicalElevation.normalize(elevation ?? "") ?? elevation) == elevationKey,
+                  fastRuntimeComparable(detailType) == detailKey else { return }
+            usedAngles.insert(max(1, angle ?? 1))
+        }
+
+        for guided in sources.guided {
+            guard guided.id != excludingGuidedShotID,
+                  (excludingShotID == nil || guided.shot?.id != excludingShotID),
+                  guided.status != .retired, !guided.isRetired else { continue }
+            reserve(building: guided.building, elevation: guided.targetElevation,
+                    detailType: guided.detailType, angle: guided.angleIndex)
+        }
+
+        for observation in sources.observations {
+            guard observation.id != excludingObservationID else { continue }
+            if let targetAngle = observation.targetAngleIndex {
+                reserve(building: observation.building,
+                        elevation: observation.targetElevation,
+                        detailType: observation.detailType,
+                        angle: targetAngle)
+            }
+            for guided in observation.guidedShots where
+                (excludingShotID == nil || guided.shot?.id != excludingShotID) && guided.id != excludingShotID {
+                reserve(building: guided.building ?? observation.building,
+                        elevation: guided.targetElevation ?? observation.targetElevation,
+                        detailType: guided.detailType ?? observation.detailType,
+                        angle: guided.angleIndex)
+            }
+        }
+
+        for shot in sources.shots where shot.shotID != excludingShotID && shot.isActiveForDefaultWorkflows {
+            reserve(building: shot.building, elevation: shot.elevation,
+                    detailType: shot.detailType, angle: shot.angleIndex)
+        }
+
+        var nextAngle = 1
+        while usedAngles.contains(nextAngle) { nextAngle += 1 }
+        return nextAngle
     }
 
     @discardableResult
@@ -54310,9 +54443,15 @@ final class AppState: ObservableObject {
         }
 
         var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        // This is a fallback for a missing local checklist. Once any Guided
+        // rows exist, including retired rows, the checklist owns membership;
+        // historical remote shots must not fill a newly retired slot.
+        guard guidedRows.isEmpty else { return 0 }
         var representedShotIDs = Set(guidedRows.compactMap { $0.shot?.id })
         representedShotIDs.formUnion(guidedRows.map(\.id))
         var representedKeys = Set(guidedRows.compactMap(LocalConflictRules.guidedShotIdentityKey))
+        var localMetadataBySessionID: [UUID: SessionMetadata] = [:]
+        var checkedLocalSessionIDs = Set<UUID>()
         var added = 0
 
         for row in remoteShots.sorted(by: { lhs, rhs in
@@ -54336,6 +54475,22 @@ final class AppState: ObservableObject {
             )
             guard LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shotMetadata),
                   !representedShotIDs.contains(row.id) else {
+                continue
+            }
+            // A local completed snapshot with Guided rows is authoritative for
+            // its captured photos. Do not resurrect a shot omitted from that
+            // checklist when remote shot metadata is refreshed.
+            if checkedLocalSessionIDs.insert(sessionID).inserted {
+                localMetadataBySessionID[sessionID] = try? localStore.loadSessionMetadata(
+                    propertyID: propertyID, sessionID: sessionID
+                )
+            }
+            if let metadata = localMetadataBySessionID[sessionID],
+               !metadata.guidedShots.isEmpty,
+               metadata.shots.contains(where: { $0.shotID == row.id }),
+               !metadata.guidedShots.contains(where: {
+                   $0.id == row.id || $0.shot?.id == row.id
+               }) {
                 continue
             }
             let identityKey = LocalConflictRules.guidedShotIdentityKey(
@@ -57609,6 +57764,14 @@ final class AppState: ObservableObject {
 
         if let observations = try? localStore.fetchObservations(propertyID: propertyID) {
             for observation in observations {
+                if let targetAngle = observation.targetAngleIndex {
+                    appendReservation(
+                        building: observation.building,
+                        elevation: observation.targetElevation,
+                        detailType: observation.detailType,
+                        angleIndex: targetAngle
+                    )
+                }
                 for guidedShot in observation.guidedShots {
                     appendReservation(
                         building: guidedShot.building ?? observation.building,

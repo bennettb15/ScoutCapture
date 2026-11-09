@@ -219,8 +219,8 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         )
         let guidedID = UUID()
         try store.saveGuidedShots([
-            GuidedShot(id: guidedID, title: "B1 East Downspout", building: "B1",
-                       targetElevation: "East", detailType: "Downspout", angleIndex: 1)
+            GuidedShot(id: guidedID, title: "B1 East Overview", building: "B1",
+                       targetElevation: "East", detailType: "Overview", angleIndex: 8)
         ], propertyID: property.id)
         let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { renderer in
             UIColor.blue.setFill()
@@ -231,7 +231,7 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
             data: jpeg, context: context, capturedAt: Date(),
             metadataContext: AppState.FastRuntimeCaptureMetadataContext(
                 locationMode: "Exterior", building: "B1", elevation: "East",
-                detailType: "Downspout", angleIndex: 1, isGuided: true
+                detailType: "Overview", angleIndex: 8, isGuided: true
             )
         )
         XCTAssertTrue(save.success, save.errorMessage ?? "")
@@ -240,7 +240,7 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         appState.projectFastRuntimeCaptureToLocalCameraState(context: context, shot: shot, guidedID: guidedID)
         XCTAssertTrue(appState.fastRuntimeReclassifyGuidedShot(
             propertyID: property.id, sessionID: context.sessionID, guidedShotID: guidedID,
-            building: "B1", elevation: "East", detailType: "Elevation", angleIndex: 1,
+            building: "B1", elevation: "East", detailType: "Roofline",
             storageRoot: storageRoot
         ))
         let recordsData = try Data(contentsOf: storageRoot.appendingPathComponent("Metadata/fast-lane-shots.json"))
@@ -249,18 +249,21 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         let records = try decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: recordsData)
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records[0].id, shot.id)
-        XCTAssertEqual(records[0].metadataContext?.detailType, "Elevation")
+        XCTAssertEqual(records[0].metadataContext?.detailType, "Roofline")
+        XCTAssertEqual(records[0].metadataContext?.angleIndex, 1)
         XCTAssertEqual(records[0].metadataContext?.shotKey,
-                       ShotMetadata.makeShotKey(building: "B1", elevation: "East", detailType: "Elevation", angleIndex: 1))
+                       ShotMetadata.makeShotKey(building: "B1", elevation: "East", detailType: "Roofline", angleIndex: 1))
         let rows = try store.fetchGuidedShots(propertyID: property.id)
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].shot?.id, shot.id)
         XCTAssertTrue(rows[0].isCompleted)
-        XCTAssertEqual(rows[0].detailType, "Elevation")
+        XCTAssertEqual(rows[0].detailType, "Roofline")
+        XCTAssertEqual(rows[0].angleIndex, 1)
         let session = try store.loadSessionMetadata(propertyID: property.id, sessionID: context.sessionID)
         XCTAssertEqual(session.shots.count, 1)
         XCTAssertEqual(session.shots[0].shotID, shot.id)
-        XCTAssertEqual(session.shots[0].detailType, "Elevation")
+        XCTAssertEqual(session.shots[0].detailType, "Roofline")
+        XCTAssertEqual(session.shots[0].angleIndex, 1)
         XCTAssertEqual(session.guidedShots.count, 1)
         XCTAssertEqual(session.guidedShots[0].shot?.id, shot.id)
     }
@@ -296,7 +299,7 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
             data: jpeg, context: context, capturedAt: Date(),
             metadataContext: AppState.FastRuntimeCaptureMetadataContext(
                 locationMode: "Exterior", building: "B1", elevation: "East",
-                detailType: "Downspout", angleIndex: 1, isFlagged: true,
+                detailType: "Overview", angleIndex: 8, isFlagged: true,
                 issueID: issueID, issueStatus: "active"
             )
         )
@@ -304,9 +307,13 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         let shot = try XCTUnwrap(save.shot)
         let storageRoot = try XCTUnwrap(save.storageRoot)
         appState.projectFastRuntimeCaptureToLocalCameraState(context: context, shot: shot)
+        try store.saveGuidedShots([
+            GuidedShot(title: "B1 East Roofline", building: "B1",
+                       targetElevation: "East", detailType: "Roofline", angleIndex: 1)
+        ], propertyID: property.id)
         XCTAssertTrue(appState.fastRuntimeReclassifyObservation(
             propertyID: property.id, sessionID: context.sessionID, observationID: issueID,
-            building: "B1", elevation: "East", detailType: "Elevation", storageRoot: storageRoot
+            building: "B1", elevation: "East", detailType: "Roofline", storageRoot: storageRoot
         ))
 
         let recordsData = try Data(contentsOf: storageRoot.appendingPathComponent("Metadata/fast-lane-shots.json"))
@@ -316,22 +323,31 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records[0].id, shot.id)
         XCTAssertEqual(records[0].metadataContext?.issueID, issueID)
-        XCTAssertEqual(records[0].metadataContext?.detailType, "Elevation")
+        XCTAssertEqual(records[0].metadataContext?.detailType, "Roofline")
+        XCTAssertEqual(records[0].metadataContext?.angleIndex, 2)
         XCTAssertEqual(records[0].metadataContext?.shotKey,
-                       ShotMetadata.makeShotKey(building: "B1", elevation: "East", detailType: "Elevation", angleIndex: 1))
+                       ShotMetadata.makeShotKey(building: "B1", elevation: "East", detailType: "Roofline", angleIndex: 2))
         let observations = try store.fetchObservations(propertyID: property.id)
         XCTAssertEqual(observations.count, 1)
         XCTAssertEqual(observations[0].id, issueID)
         XCTAssertEqual(observations[0].linkedShotID, shot.id)
         XCTAssertEqual(observations[0].shots.map(\.id), [shot.id])
-        XCTAssertEqual(observations[0].detailType, "Elevation")
-        XCTAssertEqual(observations[0].guidedShots.first?.detailType, "Elevation")
+        XCTAssertEqual(observations[0].detailType, "Roofline")
+        XCTAssertEqual(observations[0].guidedShots.first?.detailType, "Roofline")
+        XCTAssertEqual(observations[0].guidedShots.first?.angleIndex, 2)
+        var legacyIssueWithoutTargetAngle = observations[0]
+        legacyIssueWithoutTargetAngle.targetAngleIndex = nil
+        XCTAssertEqual(appState.fastRuntimeNextReclassifiedAngles(
+            propertyID: property.id, sessionID: context.sessionID,
+            observations: [legacyIssueWithoutTargetAngle]
+        )[issueID], 2)
         XCTAssertTrue(observations[0].historyEvents.contains { $0.kind == .reclassified && $0.shotID == shot.id })
         let session = try store.loadSessionMetadata(propertyID: property.id, sessionID: context.sessionID)
         XCTAssertEqual(session.shots.count, 1)
         XCTAssertEqual(session.shots[0].shotID, shot.id)
         XCTAssertEqual(session.shots[0].issueID, issueID)
-        XCTAssertEqual(session.shots[0].detailType, "Elevation")
+        XCTAssertEqual(session.shots[0].detailType, "Roofline")
+        XCTAssertEqual(session.shots[0].angleIndex, 2)
         let originals = try FileManager.default.contentsOfDirectory(
             at: store.originalsFolderURL(propertyID: property.id, sessionID: context.sessionID),
             includingPropertiesForKeys: nil
@@ -346,8 +362,71 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
         let exif = try XCTUnwrap(properties[kCGImagePropertyExifDictionary] as? [CFString: Any])
         let comment = try XCTUnwrap(exif[kCGImagePropertyExifUserComment] as? String)
         XCTAssertTrue(comment.contains("shotID=\(shot.id.uuidString)"))
-        XCTAssertTrue(comment.contains("detailType=Elevation"))
+        XCTAssertTrue(comment.contains("detailType=Roofline"))
+        XCTAssertTrue(comment.contains("angleIndex=2"))
         XCTAssertTrue(comment.contains("shotKey=\(try XCTUnwrap(records[0].metadataContext).shotKey)"))
+    }
+
+    func testReclassifyingPriorSessionActiveIssueStoresTargetAngleWithoutRelabelingOriginal() async throws {
+        let externalRoot = URL(fileURLWithPath: "/Volumes/Samsung 4TB/Codex/tmp/ScoutCapture", isDirectory: true)
+        let root = externalRoot.appendingPathComponent("HistoricalIssueReclassification-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let org = try store.createOrganization(Organization(name: "Test Organization"))
+        let property = try store.createProperty(Property(orgId: org.id, name: "Test Property", address: "100 Test Way"))
+        let suiteName = "HistoricalIssueReclassification-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        let appState = AppState(localStore: store, userDefaults: defaults)
+        appState._debugRefreshPropertiesLocallyForTests()
+        let deviceID = try XCTUnwrap(defaults.string(forKey: "scoutcapture.deviceIdentifier.v1"))
+        let previousSessionID = UUID()
+        let context = ActiveCaptureContext(
+            sessionID: previousSessionID, propertyID: property.id, orgID: org.id,
+            sessionType: .fullDocumentation, ownerUserID: nil, ownerEmail: nil,
+            ownerDeviceID: deviceID, createdAt: Date(), status: .draft, statusReason: "test"
+        )
+        let issueID = UUID()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { renderer in
+            UIColor.blue.setFill()
+            renderer.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let jpeg = try XCTUnwrap(image.jpegData(compressionQuality: 0.8))
+        let save = await appState.saveFastRuntimePrototypeCapture(
+            data: jpeg, context: context, capturedAt: Date(),
+            metadataContext: AppState.FastRuntimeCaptureMetadataContext(
+                locationMode: "Exterior", building: "B1", elevation: "North",
+                detailType: "Overview", angleIndex: 8, isFlagged: true,
+                issueID: issueID, issueStatus: "active"
+            )
+        )
+        XCTAssertTrue(save.success, save.errorMessage ?? "")
+        let shot = try XCTUnwrap(save.shot)
+        appState.projectFastRuntimeCaptureToLocalCameraState(context: context, shot: shot)
+
+        let currentSessionID = UUID()
+        XCTAssertTrue(appState.fastRuntimeReclassifyObservation(
+            propertyID: property.id, sessionID: currentSessionID, observationID: issueID,
+            building: "B1", elevation: "North", detailType: "Window"
+        ))
+
+        let observation = try XCTUnwrap(store.fetchObservations(propertyID: property.id).first)
+        XCTAssertEqual(observation.detailType, "Window")
+        XCTAssertEqual(observation.targetAngleIndex, 1)
+        XCTAssertEqual(observation.guidedShots.first?.detailType, "Overview")
+        XCTAssertEqual(observation.guidedShots.first?.angleIndex, 8)
+        var legacyIssueWithoutTargetAngle = observation
+        legacyIssueWithoutTargetAngle.targetAngleIndex = nil
+        XCTAssertEqual(appState.fastRuntimeNextReclassifiedAngles(
+            propertyID: property.id, sessionID: currentSessionID,
+            observations: [legacyIssueWithoutTargetAngle]
+        )[issueID], 1)
+        let original = try store.loadSessionMetadata(propertyID: property.id, sessionID: previousSessionID)
+        XCTAssertEqual(original.shots.first?.detailType, "Overview")
+        XCTAssertEqual(original.shots.first?.angleIndex, 8)
     }
 
     func testMissingSessionJSONRecoversOnlyOriginalsInCurrentContainerAndIsIdempotent() throws {

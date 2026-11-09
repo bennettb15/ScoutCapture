@@ -12265,6 +12265,7 @@ extension ContentView {
             updated.building = normalizedBuilding
             updated.targetElevation = normalizedElevation
             updated.detailType = normalizedDetailType
+            updated.targetAngleIndex = assignedAngle
             updated.updatedAt = Date()
             updated.updatedInSessionID = sessionID
             appendObservationHistoryEvent(
