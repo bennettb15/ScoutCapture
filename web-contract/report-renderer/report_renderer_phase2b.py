@@ -687,7 +687,7 @@ def resolve_logo_asset(plan: dict[str, Any], work_dir: pathlib.Path, warnings: l
             with Image.open(brand_path) as image:
                 image.verify()
                 if image.format == "PNG":
-                    return {"kind": "png", "path": str(brand_path)}
+                    return {"kind": "png", "path": str(brand_path), "is_org_logo": True}
         except Exception:
             warnings.append("organization_logo_invalid_scout_fallback_used")
     try:
@@ -1914,7 +1914,9 @@ def draw_logo(c: canvas.Canvas, logo_asset: dict[str, Any] | None, cover: bool =
     container = (
         {"x": 72, "y": PAGE_HEIGHT - 160, "width": PAGE_WIDTH - 144, "height": 80}
         if cover
-        else {"x": (PAGE_WIDTH - 170) / 2, "y": PAGE_HEIGHT - 56, "width": 170, "height": 34}
+        else {"x": (PAGE_WIDTH - 170) / 2,
+              "y": PAGE_HEIGHT - (68 if logo_asset and logo_asset.get("is_org_logo") else 56),
+              "width": 170, "height": 48 if logo_asset and logo_asset.get("is_org_logo") else 34}
     )
     if logo_asset and logo_asset.get("kind") == "vector":
         draw_vector_logo(c, logo_asset, container)
@@ -1947,8 +1949,8 @@ def draw_logo(c: canvas.Canvas, logo_asset: dict[str, Any] | None, cover: bool =
 def draw_scout_branding_footer(c: canvas.Canvas, scout_logo: dict[str, Any] | None) -> None:
     """Show Scout attribution only when an organization supplies its own logo."""
     label = "Generated with"
-    draw_text(c, label, {"x": 64, "y": 10, "width": 70, "height": 12}, size=8)
-    box = {"x": 64 + text_width(label, "Helvetica", 8) + 4, "y": 10, "width": 50, "height": 12}
+    draw_text(c, label, {"x": 64, "y": 28, "width": 70, "height": 12}, size=8)
+    box = {"x": 64 + text_width(label, "Helvetica", 8) + 4, "y": 28, "width": 50, "height": 12}
     if scout_logo and scout_logo.get("kind") == "vector":
         draw_vector_logo(c, scout_logo, box)
     else:
@@ -1959,11 +1961,11 @@ def draw_footer(c: canvas.Canvas, page_number: int, address: str | None = None) 
     margin = 64.0
     branding = getattr(c, "_scout_branding_footer", None)
     if address is not None:
-        draw_text(c, address, {"x": margin, "y": 28 if branding else 10,
+        draw_text(c, address, {"x": margin, "y": 46 if branding else 10,
                                "width": PAGE_WIDTH - margin * 2, "height": 12}, size=9)
     if branding:
         draw_scout_branding_footer(c, branding["logo"])
-    draw_text(c, f"Page {page_number}", {"x": 0, "y": 28 if branding else 10,
+    draw_text(c, f"Page {page_number}", {"x": 0, "y": 46 if branding and address is not None else 28 if branding else 10,
                                          "width": PAGE_WIDTH - margin, "height": 12}, size=10, align="right")
 
 
