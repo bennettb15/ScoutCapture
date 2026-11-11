@@ -60,3 +60,27 @@ test('registered current secret keys work when legacy keys are disabled, and oth
     assert.equal((await handler(request('test-service'))).status, 401);
   } finally { delete values.SUPABASE_SECRET_KEYS; }
 });
+
+test('reviewed dispatch requires a service key and sends only the queued request id', async () => {
+  const calls = [];
+  const reviewedRequest = (key, payload = { reviewed_report_request_id: id }) => new Request('https://example.test', {
+    method: 'POST', headers: { 'x-scoutcapture-service-key': key }, body: JSON.stringify(payload),
+  });
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return calls.length === 1 ? new Response(JSON.stringify([{ id }])) : new Response(null, { status: 204 });
+  };
+  assert.equal((await handler(reviewedRequest('wrong'))).status, 401);
+  assert.equal((await handler(reviewedRequest('test-service', {
+    reviewed_report_request_id: id, tenant_comparison_request_id: id,
+  }))).status, 400);
+  assert.equal(calls.length, 0);
+
+  const response = await handler(reviewedRequest('test-service'));
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { ok: true, dispatched: true });
+  assert.match(calls[0].url, /reviewed_report_requests\?id=eq\.[^&]+&status=eq\.queued/);
+  assert.deepEqual(JSON.parse(calls[1].options.body).inputs, {
+    reviewed_report_request_id: id, trigger_source: 'on_demand_reviewed_report',
+  });
+});

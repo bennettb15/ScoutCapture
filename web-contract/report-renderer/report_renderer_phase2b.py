@@ -281,6 +281,8 @@ def output_filename(session: dict[str, Any], report_type: str) -> str:
         suffix = "Punchlist Update"
     else:
         raise Phase2BError(f"Unknown report type: {report_type}")
+    if session.get("report_variant") == "reviewed":
+        suffix += " (Reviewed)"
     return f"{descriptor} - {suffix} - {date}.pdf"
 
 
@@ -430,6 +432,9 @@ def resolved_signal(item: dict[str, Any]) -> bool:
 
 
 def visual_state(item: dict[str, Any]) -> str:
+    reviewed_status = item.get("reviewed_resolution_status")
+    if reviewed_status in {"active", "resolved"}:
+        return "flagged" if reviewed_status == "active" else "resolved"
     if resolved_signal(item):
         return "resolved"
     declared = normalized_token(item.get("visual_state") or item.get("visualState"))
@@ -440,6 +445,20 @@ def visual_state(item: dict[str, Any]) -> str:
     if declared == "flagged":
         return "flagged"
     return "none"
+
+
+def resolution_label(item: dict[str, Any]) -> str | None:
+    if visual_state(item) != "resolved":
+        return None
+    status = normalized_token(first_trimmed(item, [
+        "issue_status", "issueStatus", "snapshot_issue_status", "snapshotIssueStatus", "status",
+    ]))
+    return "Resolved in field · Pending Review" if status == "pending_review" else "Resolved"
+
+
+def resolution_suffix(item: dict[str, Any]) -> str:
+    label = resolution_label(item)
+    return f" | {label}" if label else ""
 
 
 def is_overview_material_shot(item: dict[str, Any]) -> bool:
@@ -1169,6 +1188,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "original_flagged_reason",
         "priority",
         "normalized_priority",
+        "reviewed_resolution_status",
         "issue_status",
         "issueStatus",
         "snapshot_issue_status",
@@ -1220,7 +1240,7 @@ def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             lines.append({"kind": "sectionHeader", "text": header, "page_number": None, "is_flagged": False, "visual_state": "none"})
             for index, entry in enumerate(section["entries"]):
                 page_number = section_start + index // 2
-                text = entry["caption"] + (" | Resolved" if entry["visual_state"] == "resolved" else "")
+                text = entry["caption"] + resolution_suffix(entry)
                 lines.append(
                     {
                         "kind": "photoItem",
@@ -1318,7 +1338,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             for index, entry in enumerate(section["entries"]):
                 page_num = chunk_pages[index // 2] if chunk_pages else section_page
                 state = entry.get("visual_state") or "none"
-                state_suffix = " | Resolved" if state == "resolved" else ""
+                state_suffix = resolution_suffix(entry)
                 lines.append(
                     {
                         "kind": "photoItem",
@@ -1542,7 +1562,7 @@ def build_comparison_plan(
         for index, entry in enumerate(entries):
             current = entry["current"]
             previous = entry["previous"]
-            resolved_suffix = " | Resolved" if current["visual_state"] == "resolved" else ""
+            resolved_suffix = resolution_suffix(current)
             text = f"{current['caption']} | {current['month_year']} vs {previous['month_year']}{resolved_suffix}"
             lines.append({"kind": "photoItem", "text": text, "page_number": first_photo_page + index, "is_flagged": True, "visual_state": current["visual_state"]})
         index_pages = index_page_plans(lines)
@@ -2147,13 +2167,14 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     top_y = rect["y"] + rect["height"] - 14
     draw_text(c, entry.get("caption") or "", {"x": rect["x"], "y": top_y, "width": rect["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
     state = entry.get("visual_state") or "none"
+    label = resolution_label(entry)
     original = trim(entry.get("original_flagged_reason"))
     current = trim(entry.get("flagged_reason"))
     if state != "none" and original and current and original != current:
         draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, size=10, align="center")
         note = f"Updated note: {current}"
-        if state == "resolved":
-            note = f"Resolved - {note}"
+        if label:
+            note = f"{label} - {note}"
         note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
         if priority and state != "resolved":
             draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
@@ -2164,7 +2185,7 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     if priority:
         if state == "resolved":
             reason = trim(entry.get("flagged_reason"))
-            note = f"Resolved - {reason}" if reason else "Resolved"
+            note = f"{label} - {reason}" if reason else label
             draw_note(c, note, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
         else:
             draw_priority_note(c, priority, entry.get("flagged_reason"), {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14})
@@ -2172,7 +2193,7 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
         return
     if state != "none":
         reason = trim(entry.get("flagged_reason"))
-        note = f"Resolved - {reason}" if state == "resolved" and reason else ("Resolved" if state == "resolved" else (reason or "Flagged"))
+        note = f"{label} - {reason}" if label and reason else (label or reason or "Flagged")
         draw_note(c, note, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
         draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, size=10, align="center")
     else:
@@ -2354,8 +2375,9 @@ def draw_comparison_caption(c: canvas.Canvas, slot: dict[str, Any]) -> None:
     entry = slot["entry"]
     state = visual_state(entry)
     rect = slot["caption_rect"]
+    label = resolution_label(entry)
     reason = trim(entry.get("flagged_reason"))
-    note = f"Resolved - {reason}" if state == "resolved" and reason else ("Resolved" if state == "resolved" else (reason or "Flagged"))
+    note = f"{label} - {reason}" if label and reason else (label or reason or "Flagged")
     top_y = rect["y"] + rect["height"] - 18.0
     line_count = 0
     if state != "none":
@@ -2407,14 +2429,16 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
     draw_text(c, code, {"x": 42, "y": 679, "width": 528, "height": 18}, "Helvetica-Bold", code_size, align="center")
     current_state = visual_state(current)
     if current_state in {"flagged", "resolved"}:
+        badge_label = (resolution_label(current) or current_state).upper()
+        badge_width = max(136.0, text_width(badge_label, "Helvetica-Bold", 9) + 43.0)
         c.saveState()
         background = Color(0.91, 0.97, 0.93, 1) if current_state == "resolved" else Color(1.0, 0.94, 0.94, 1)
         c.setFillColor(background)
-        c.roundRect(42, 648, 136, 26, 7, stroke=0, fill=1)
+        c.roundRect(42, 648, badge_width, 26, 7, stroke=0, fill=1)
         draw_state_marker(c, 52, 653, 14, current_state)
         c.setFillColor(color_tuple(RESOLVED_COLOR if current_state == "resolved" else FLAG_COLOR))
         c.setFont("Helvetica-Bold", 9)
-        c.drawString(73, 657, current_state.upper())
+        c.drawString(73, 657, badge_label)
         c.restoreState()
     priority = trim(current.get("normalized_priority") or current.get("priority"))
     if priority:

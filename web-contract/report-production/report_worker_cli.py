@@ -42,6 +42,7 @@ REPORT_CONTRACT_VERSION = "phase1-report-input-1"
 PDF_UPLOAD_RETRY_ATTEMPTS = 4
 PDF_UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.0
 PDF_UPLOAD_RETRY_MAX_DELAY_SECONDS = 8.0
+REVIEWED_REPORT_LOCK_TIMEOUT = dt.timedelta(minutes=30)
 REPORT_READY_NOTIFICATION_TYPE = "report_package_ready"
 REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
 REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
@@ -75,6 +76,7 @@ class WorkerError(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-id", help="Completed ScoutCapture session UUID to process.")
+    parser.add_argument("--reviewed-report-request-id", help="Process an authorized on-demand reviewed report request.")
     parser.add_argument("--tenant-comparison-request-id", help="Process an authorized on-demand tenant comparison request.")
     parser.add_argument(
         "--snapshot-id",
@@ -1547,6 +1549,7 @@ def get_or_create_package(
     validation: dict[str, Any],
     snapshot_row: dict[str, Any],
     attempt_started_at: str,
+    reviewed_package_manifest: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     session = validation["inputs"]["session"]
     package_session_type = session_type(validation)
@@ -1563,7 +1566,10 @@ def get_or_create_package(
            for key in ("session_id", "org_id", "property_id")):
         raise WorkerError("ReportInput identity does not match the sealed source snapshot.")
     actor = validation_actor(validation)
-    idempotency_key = f"pdf-package:{snapshot_id}:{RENDERER_VERSION}"
+    idempotency_key = (
+        f"reviewed-pdf-package:{reviewed_package_manifest['reviewed_report_request_id']}"
+        if reviewed_package_manifest else f"pdf-package:{snapshot_id}:{RENDERER_VERSION}"
+    )
     existing = client.select(
         "report_packages",
         {
@@ -1597,7 +1603,7 @@ def get_or_create_package(
         "session_id": session_id,
         "snapshot_id": snapshot_id,
         "status": "generating",
-        "generation_trigger": "session_completed",
+        "generation_trigger": "regenerated" if reviewed_package_manifest else "session_completed",
         "idempotency_key": idempotency_key,
         "session_completed_at": session.get("ended_at_utc") or session.get("started_at_utc"),
         "started_at": attempt_started_at,
@@ -1609,6 +1615,7 @@ def get_or_create_package(
         "media_preparer_version": MEDIA_PREPARER_VERSION,
         "manifest": {
             "worker": "web-contract/report-production/report_worker_cli.py",
+            **(reviewed_package_manifest or {}),
             "sessionType": package_session_type,
             "session_type": package_session_type,
             "actor": actor,
@@ -2286,6 +2293,7 @@ def ready_package_exists(client: SupabaseServiceClient, snapshot_id: str) -> boo
         {
             "select": "id",
             "snapshot_id": f"eq.{snapshot_id}",
+            "idempotency_key": "not.like.reviewed-pdf-package:*",
             "status": "eq.ready",
             "deleted_at": "is.null",
             "order": "completed_at.desc",
@@ -2561,8 +2569,17 @@ def process_session(
     repo: pathlib.Path,
     session_id: str,
     snapshot_id: str | None = None,
+    reviewed_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_root = pathlib.Path(args.output_dir).resolve() / session_id.lower()
+    reviewed_package_manifest = None
+    if reviewed_request:
+        output_root /= f"reviewed-{reviewed_request['id']}"
+        reviewed_package_manifest = {
+            "report_variant": "reviewed",
+            "source_package_id": reviewed_request["source_package_id"],
+            "reviewed_report_request_id": reviewed_request["id"],
+        }
     output_root.mkdir(parents=True, exist_ok=True)
     validation_path = output_root / "report_input_validation.json"
     media_dir = output_root / "prepared_media"
@@ -2592,12 +2609,18 @@ def process_session(
     if validation.get("media", {}).get("missing_count") != 0:
         raise WorkerError("ReportInput has missing remote media; refusing to continue.")
 
+    if reviewed_request:
+        apply_reviewed_resolutions(validation, reviewed_request["review_outcomes"])
+        write_json(validation_path, validation, args.pretty)
+
     attempt_started_at = safe_iso_now()
     package = None
     package_action = None
     try:
         snapshot_row = snapshot_metadata(client, validation["source_snapshot_id"])
-        package, package_action = get_or_create_package(client, validation, snapshot_row, attempt_started_at)
+        package, package_action = get_or_create_package(
+            client, validation, snapshot_row, attempt_started_at, reviewed_package_manifest
+        )
         if package_action == "already_ready":
             return {"ok": True, "package_id": package["id"], "package_action": package_action,
                     "source_provenance": validation.get("source_provenance")}
@@ -2606,6 +2629,8 @@ def process_session(
             client, package["org_id"], validation.get("inputs", {}).get("session", {}).get("org_name")
         )
 
+        if reviewed_request:
+            update_reviewed_report_request(client, reviewed_request, {"progress_step": "preparing_photos"})
         run_step(
             [
                 sys.executable,
@@ -2652,6 +2677,8 @@ def process_session(
             render_cmd.extend(["--brand-logo-png", str(brand_logo)])
         if args.allow_weather_fetch:
             render_cmd.append("--allow-weather-fetch")
+        if reviewed_request:
+            update_reviewed_report_request(client, reviewed_request, {"progress_step": "rendering"})
         run_step(render_cmd, repo, env)
 
         render_summary = read_json(render_dir / "phase2c_summary.json")
@@ -2659,7 +2686,7 @@ def process_session(
         if failed:
             raise WorkerError(f"PDF validation failures: {failed}")
         if not render_summary.get("reports"):
-            if session_type(validation) != "punchlist_visit":
+            if reviewed_request or session_type(validation) != "punchlist_visit":
                 raise WorkerError(f"No applicable PDF reports were generated: {render_summary.get('skipped_reports')}")
     except Exception as error:
         if package is not None:
@@ -2676,6 +2703,8 @@ def process_session(
         raise
 
     try:
+        if reviewed_request:
+            update_reviewed_report_request(client, reviewed_request, {"progress_step": "uploading"})
         uploaded_files = []
         report_plan_hashes = []
         for report in render_summary.get("reports", []):
@@ -2749,6 +2778,7 @@ def process_session(
                 },
                 "manifest": {
                     "worker": "web-contract/report-production/report_worker_cli.py",
+                    **(reviewed_package_manifest or {}),
                     "sessionType": package_session_type,
                     "session_type": package_session_type,
                     "environment": client.environment,
@@ -2768,10 +2798,15 @@ def process_session(
         if package_rows:
             package = package_rows[0]
 
-        candidates = retention_candidates(client, package["property_id"])
-        retention = apply_retention(client, candidates, args.retention_mode)
-        email_notifications = send_report_ready_notifications(client, package, validation)
-        delivery_status = mark_fast_lane_report_delivered(client, package, email_notifications)
+        candidates = []
+        retention = []
+        email_notifications = None
+        delivery_status = None
+        if not reviewed_request:
+            candidates = retention_candidates(client, package["property_id"])
+            retention = apply_retention(client, candidates, args.retention_mode)
+            email_notifications = send_report_ready_notifications(client, package, validation)
+            delivery_status = mark_fast_lane_report_delivered(client, package, email_notifications)
     except Exception as error:
         client.patch(
             "report_packages",
@@ -2814,6 +2849,107 @@ def process_session(
     return summary
 
 
+def apply_reviewed_resolutions(validation: dict[str, Any], outcomes: list[dict[str, Any]]) -> None:
+    if not outcomes or any(outcome.get("status") not in {"resolved", "active"} for outcome in outcomes):
+        raise WorkerError("Reviewed reports require completed review decisions.")
+    by_shot = {str(outcome["shot_id"]).lower(): outcome for outcome in outcomes if outcome.get("shot_id")}
+    inputs = validation["inputs"]
+    matched = set()
+    for shot in (inputs.get("ordered_shots") or []) + (inputs.get("punchlist_shots") or []):
+        shot_id = str(shot.get("shot_id") or "").lower()
+        outcome = by_shot.get(shot_id)
+        if not outcome:
+            continue
+        if str(shot.get("issue_id") or "").lower() != str(outcome["observation_id"]).lower():
+            raise WorkerError("Reviewed resolution does not match its source photo.")
+        status = outcome["status"]
+        shot.update(issue_status=status, reviewed_resolution_status=status,
+                    is_resolved_in_session=status == "resolved", is_flagged=True)
+        matched.add(shot_id)
+    if matched != set(by_shot):
+        raise WorkerError("A reviewed resolution photo is missing from the source report input.")
+    inputs["session"]["report_variant"] = "reviewed"
+    validation.setdefault("source_provenance", {})["reviewed_resolution_outcomes"] = outcomes
+
+
+def update_reviewed_report_request(
+    client: SupabaseServiceClient, request: dict[str, Any], changes: dict[str, Any],
+) -> None:
+    updated = client.patch(
+        "reviewed_report_requests",
+        {"id": f"eq.{request['id']}", "status": "eq.generating", "locked_at": f"eq.{request['locked_at']}"},
+        changes,
+    )
+    if not updated:
+        raise WorkerError("Reviewed report request claim was lost.")
+
+
+def process_reviewed_report_request(
+    args: argparse.Namespace, client: SupabaseServiceClient, repo: pathlib.Path, request_id: str,
+) -> dict[str, Any] | None:
+    rows = client.select("reviewed_report_requests", {"id": f"eq.{request_id}", "limit": "1"})
+    if not rows:
+        raise WorkerError("Reviewed report request was not found.")
+    request = rows[0]
+    if request["status"] in {"ready", "failed"}:
+        return request
+
+    cutoff = (dt.datetime.now(dt.timezone.utc) - REVIEWED_REPORT_LOCK_TIMEOUT).isoformat()
+    query = {"id": f"eq.{request_id}", "status": f"eq.{request['status']}"}
+    if request["status"] == "generating":
+        query["locked_at"] = f"lt.{cutoff}"
+    claimed = client.patch(
+        "reviewed_report_requests", query,
+        {"status": "generating", "locked_at": safe_iso_now(), "progress_step": "validating", "last_error": None},
+    )
+    if not claimed:
+        return None
+
+    request = claimed[0]
+    try:
+        source = select_ready_package(client, request["source_package_id"])
+        snapshot = snapshot_metadata(client, source["snapshot_id"])
+        if (
+            any(source[key] != request[key] for key in ("org_id", "property_id"))
+            or any(snapshot[key] != source[key] for key in ("org_id", "property_id", "session_id"))
+            or json_object(source.get("manifest")).get("report_variant") == "reviewed"
+        ):
+            raise WorkerError("Reviewed report source package is outside the request scope.")
+        ready = client.select("report_packages", {
+            "select": "id", "idempotency_key": f"eq.reviewed-pdf-package:{request_id}",
+            "org_id": f"eq.{request['org_id']}", "property_id": f"eq.{request['property_id']}",
+            "snapshot_id": f"eq.{source['snapshot_id']}", "status": "eq.ready", "deleted_at": "is.null",
+            "limit": "1",
+        })
+        result = {"package_id": ready[0]["id"], "package_action": "already_ready"} if ready else process_session(
+            args, client, repo, source["session_id"], source["snapshot_id"], request
+        )
+    except Exception as error:
+        update_reviewed_report_request(client, request, {
+            "status": "failed", "progress_step": "failed", "last_error": str(error)[:2000],
+            "completed_at": safe_iso_now(), "locked_at": None,
+        })
+        raise
+
+    update_reviewed_report_request(client, request, {
+        "status": "ready", "progress_step": "ready", "result_package_id": result["package_id"],
+        "completed_at": safe_iso_now(), "locked_at": None,
+    })
+    return result
+
+
+def drain_reviewed_report_requests(args: argparse.Namespace, client: SupabaseServiceClient, repo: pathlib.Path) -> None:
+    cutoff = (dt.datetime.now(dt.timezone.utc) - REVIEWED_REPORT_LOCK_TIMEOUT).isoformat()
+    rows = client.select("reviewed_report_requests", {
+        "select": "id",
+        "or": f"(status.eq.queued,and(status.eq.generating,locked_at.lt.{cutoff}))",
+        "order": "requested_at.asc,id.asc",
+        "limit": "1",
+    })
+    for row in rows:
+        process_reviewed_report_request(args, client, repo, row["id"])
+
+
 def run_poll_once(
     args: argparse.Namespace,
     client: SupabaseServiceClient,
@@ -2824,6 +2960,7 @@ def run_poll_once(
     allowed_pairs = allowed_org_properties(args)
 
     on_demand_error = None
+    reviewed_report_error = None
     if not args.poll_dry_run and not (allowed_sessions or allowed_orgs or allowed_pairs):
         from tenant_comparison import drain
         try:
@@ -2831,6 +2968,10 @@ def run_poll_once(
         except WorkerError as error:
             # Temporary downloads must not block ordinary package processing.
             on_demand_error = str(error)[:1000]
+        try:
+            drain_reviewed_report_requests(args, client, repo)
+        except Exception as error:
+            reviewed_report_error = str(error)[:1000]
 
     discovered = discover_poll_snapshots(client)
     latest_snapshots, superseded_snapshots = latest_snapshots_per_session(discovered)
@@ -2852,6 +2993,7 @@ def run_poll_once(
         "skipped": [],
         "would_process": [],
         "on_demand_error": on_demand_error,
+        "reviewed_report_error": reviewed_report_error,
     }
 
     for snapshot in superseded_snapshots:
@@ -2918,6 +3060,14 @@ def main() -> int:
 
     repo = pathlib.Path(__file__).resolve().parents[2]
     client = SupabaseServiceClient.from_env(args)
+
+    if args.reviewed_report_request_id:
+        try:
+            request_id = str(uuid.UUID(args.reviewed_report_request_id))
+        except ValueError as error:
+            raise WorkerError("Invalid reviewed report request ID.") from error
+        process_reviewed_report_request(args, client, repo, request_id)
+        return 0
 
     if args.tenant_comparison_request_id:
         import uuid
