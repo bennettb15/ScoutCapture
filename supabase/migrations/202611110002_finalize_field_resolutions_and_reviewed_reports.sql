@@ -1,6 +1,20 @@
 -- Depends on Scout Website's 202611110001_org_field_resolution_review.sql.
 begin;
 
+alter table public.punchlist_activity
+    add column field_resolution_submission_id uuid references public.punchlist_activity(id) on delete set null,
+    add constraint field_resolution_decision_type_check check (
+        field_resolution_submission_id is null or activity_type in ('completion_approved', 'completion_rejected')
+    );
+
+create unique index field_resolution_decision_submission_key
+    on public.punchlist_activity (field_resolution_submission_id)
+    where field_resolution_submission_id is not null and deleted_at is null;
+
+create policy punchlist_activity_linked_field_review_service_only
+    on public.punchlist_activity as restrictive for insert to authenticated
+    with check (field_resolution_submission_id is null);
+
 create unique index field_resolution_finalized_submission_key
     on public.punchlist_activity (org_id, property_id, observation_id, from_value, shot_id)
     nulls not distinct
@@ -43,6 +57,7 @@ declare
     v_requires_review boolean;
     v_issue record;
     v_outcome text;
+    v_submission_id uuid;
     v_event_at timestamptz;
     v_now timestamptz;
 begin
@@ -91,22 +106,26 @@ begin
         order by o.id
         for update of o
     loop
-        select a.to_value, a.created_at into v_outcome, v_event_at
+        select a.id, a.to_value, a.created_at into v_submission_id, v_outcome, v_event_at
         from public.punchlist_activity a
         where a.org_id = p_org_id and a.property_id = p_property_id
           and a.observation_id = v_issue.id and a.shot_id is not distinct from v_issue.shot_id
           and a.activity_type = 'field_resolution_finalized' and a.from_value = p_session_id::text
           and a.deleted_at is null;
 
-        -- The website may publish its review event just before it syncs the
-        -- observation. Do not overwrite that decision if an upload is retried.
+        -- A linked decision is specific to this upload, even when neither
+        -- the current nor a previous submission has a photo.
         if exists (
             select 1 from public.punchlist_activity a
             where a.org_id = p_org_id and a.property_id = p_property_id
-              and a.observation_id = v_issue.id and a.shot_id is not distinct from v_issue.shot_id
+              and a.observation_id = v_issue.id
               and a.activity_type in ('completion_approved', 'completion_rejected')
               and a.deleted_at is null
-              and a.created_at >= coalesce(v_event_at, v_issue.updated_at)
+              and (
+                  a.field_resolution_submission_id = v_submission_id
+                  or (a.field_resolution_submission_id is null and a.shot_id = v_issue.shot_id
+                      and a.created_at >= coalesce(v_event_at, v_issue.updated_at))
+              )
         ) then
             continue;
         end if;
@@ -140,7 +159,8 @@ begin
 
     return coalesce((
         select jsonb_agg(jsonb_build_object(
-            'observation_id', a.observation_id, 'shot_id', a.shot_id, 'status', a.to_value
+            'activity_id', a.id, 'observation_id', a.observation_id,
+            'shot_id', a.shot_id, 'status', a.to_value
         ) order by a.observation_id, a.shot_id)
         from public.punchlist_activity a
         where a.org_id = p_org_id and a.property_id = p_property_id and a.from_value = p_session_id::text
@@ -151,6 +171,135 @@ $$;
 
 revoke all on function public.finalize_field_resolution_upload(uuid, uuid, uuid) from public, anon, authenticated;
 grant execute on function public.finalize_field_resolution_upload(uuid, uuid, uuid) to service_role;
+
+create function public.review_field_resolution_submission(
+    p_submission_activity_id uuid,
+    p_reviewer_id uuid,
+    p_action text,
+    p_note text default null
+) returns jsonb
+language plpgsql
+set search_path = ''
+as $$
+declare
+    v_submission public.punchlist_activity%rowtype;
+    v_decision public.punchlist_activity%rowtype;
+    v_observation public.observations%rowtype;
+    v_shot public.shots%rowtype;
+    v_session_id uuid;
+    v_latest_activity_id uuid;
+    v_decision_type text;
+    v_status text;
+    v_storage_prefix text;
+    v_now timestamptz;
+begin
+    if p_reviewer_id is null or p_action is null or p_action not in ('approve', 'reject')
+       or char_length(btrim(p_note)) > 1000 then
+        raise exception 'Invalid field resolution review' using errcode = '23514';
+    end if;
+    v_decision_type := case p_action when 'approve' then 'completion_approved' else 'completion_rejected' end;
+    v_status := case p_action when 'approve' then 'resolved' else 'active' end;
+
+    select a.* into v_submission
+    from public.punchlist_activity a
+    where a.id = p_submission_activity_id and a.activity_type = 'field_resolution_finalized'
+      and a.deleted_at is null;
+    if not found then
+        raise exception 'Field resolution submission not found' using errcode = 'P0002';
+    end if;
+    if v_submission.to_value is distinct from 'pending_review' then
+        raise exception 'Field resolution submission did not require review' using errcode = '23514';
+    end if;
+
+    v_session_id := v_submission.from_value::uuid;
+    -- Use the same session lock as upload finalization before locking the issue
+    -- or its photo. Repeated reviews and upload retries share that ordering.
+    perform 1 from public.sessions s
+    join public.properties p on p.id = s.property_id and p.org_id = s.org_id
+    where s.id = v_session_id and s.org_id = v_submission.org_id and s.property_id = v_submission.property_id
+      and s.status = 'completed' and s.is_sealed and s.deleted_at is null and p.deleted_at is null
+    for update of s;
+    if not found then
+        raise exception 'Field resolution submission session is unavailable' using errcode = '23514';
+    end if;
+
+    select o.* into v_observation
+    from public.observations o
+    where o.id = v_submission.observation_id and o.org_id = v_submission.org_id
+      and o.property_id = v_submission.property_id and o.deleted_at is null
+    for update;
+    if not found then
+        raise exception 'Field resolution observation is unavailable' using errcode = '23514';
+    end if;
+
+    select a.* into v_decision
+    from public.punchlist_activity a
+    where a.field_resolution_submission_id = v_submission.id
+      and a.org_id = v_submission.org_id and a.property_id = v_submission.property_id
+      and a.observation_id = v_submission.observation_id
+      and a.shot_id is not distinct from v_submission.shot_id and a.deleted_at is null;
+    if found then
+        if v_decision.activity_type <> v_decision_type then
+            raise exception 'Field resolution submission already has a different decision' using errcode = '23514';
+        end if;
+        return jsonb_build_object('status', v_decision.to_value, 'activity', to_jsonb(v_decision));
+    end if;
+
+    select a.id into v_latest_activity_id
+    from public.punchlist_activity a
+    where a.org_id = v_submission.org_id and a.property_id = v_submission.property_id
+      and a.observation_id = v_submission.observation_id and a.deleted_at is null
+      and a.activity_type in ('field_resolution_finalized', 'status_changed', 'completion_submitted',
+                              'completion_approved', 'completion_rejected')
+    order by a.created_at desc, a.id desc
+    limit 1;
+    if v_latest_activity_id is distinct from v_submission.id
+       or v_observation.status is distinct from 'pending_review'
+       or coalesce(v_observation.last_update_session_id, v_observation.session_id) is distinct from v_session_id then
+        raise exception 'Field resolution submission is no longer pending review' using errcode = '23514';
+    end if;
+
+    if v_submission.shot_id is not null then
+        select sh.* into v_shot from public.shots sh
+        where sh.id = v_submission.shot_id and sh.org_id = v_submission.org_id
+          and sh.property_id = v_submission.property_id and sh.issue_id = v_submission.observation_id
+          and sh.session_id = v_session_id and sh.capture_kind = 'resolved_capture'
+          and sh.deleted_at is null and coalesce(sh.lifecycle_state, 'active') = 'active'
+        for update;
+        if not found then
+            raise exception 'Field resolution photo is unavailable' using errcode = '23514';
+        end if;
+        v_storage_prefix := format('sessions/%s/shots/%s/', v_session_id, v_shot.id);
+    end if;
+    if p_action = 'approve' and (v_shot.id is null or v_shot.upload_state is distinct from 'uploaded'
+        or not coalesce(starts_with(v_shot.storage_path, v_storage_prefix)
+                        and length(v_shot.storage_path) > length(v_storage_prefix), false)) then
+        raise exception 'Approval requires an uploaded completion photo' using errcode = '23514';
+    end if;
+
+    v_now := clock_timestamp();
+    insert into public.punchlist_activity (
+        org_id, property_id, observation_id, shot_id, activity_type, from_value, to_value,
+        note, created_by, created_at, field_resolution_submission_id
+    ) values (
+        v_submission.org_id, v_submission.property_id, v_submission.observation_id, v_submission.shot_id,
+        v_decision_type, v_submission.id::text, v_status, nullif(btrim(p_note), ''), p_reviewer_id, v_now, v_submission.id
+    ) returning * into v_decision;
+
+    update public.observations
+    set status = v_status,
+        resolved_session_id = case when v_status = 'resolved' then v_session_id end,
+        resolved_at = case when v_status = 'resolved' then v_now end,
+        updated_by = p_reviewer_id
+    where id = v_observation.id;
+    update public.shots set issue_status = v_status where id = v_shot.id;
+
+    return jsonb_build_object('status', v_status, 'activity', to_jsonb(v_decision));
+end;
+$$;
+
+revoke all on function public.review_field_resolution_submission(uuid, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.review_field_resolution_submission(uuid, uuid, text, text) to service_role;
 
 create table public.reviewed_report_requests (
     id uuid primary key default gen_random_uuid(),
@@ -209,35 +358,25 @@ begin
         'shot_id', submitted.shot_id,
         'submission_activity_id', submitted.id,
         'decision_activity_id', decision.id,
-        'status', decision.status
+        'status', case decision.activity_type
+            when 'completion_approved' then 'resolved'
+            when 'completion_rejected' then 'active'
+        end
     ) order by submitted.observation_id, submitted.shot_id), '[]'::jsonb)
     into new.review_outcomes
     from public.punchlist_activity submitted
-    left join lateral (
-        select reviewed.id,
-            case reviewed.activity_type when 'completion_approved' then 'resolved' else 'active' end as status
-        from public.punchlist_activity reviewed
-        where reviewed.org_id = submitted.org_id and reviewed.property_id = submitted.property_id
-          and reviewed.observation_id = submitted.observation_id
-          and reviewed.shot_id is not distinct from submitted.shot_id
-          and reviewed.activity_type in ('completion_approved', 'completion_rejected')
-          and reviewed.deleted_at is null and reviewed.created_at >= submitted.created_at
-          and not exists (
-              select 1 from public.punchlist_activity newer
-              where newer.org_id = submitted.org_id and newer.property_id = submitted.property_id
-                and newer.observation_id = submitted.observation_id
-                and newer.shot_id is not distinct from submitted.shot_id
-                and newer.activity_type = 'field_resolution_finalized' and newer.deleted_at is null
-                and newer.created_at > submitted.created_at and newer.created_at <= reviewed.created_at
-          )
-        order by reviewed.created_at desc, reviewed.id desc
-        limit 1
-    ) decision on true
+    left join public.punchlist_activity decision
+        on decision.field_resolution_submission_id = submitted.id
+        and decision.org_id = submitted.org_id and decision.property_id = submitted.property_id
+        and decision.observation_id = submitted.observation_id
+        and decision.shot_id is not distinct from submitted.shot_id
+        and decision.from_value = submitted.id::text and decision.deleted_at is null
     where submitted.org_id = new.org_id and submitted.property_id = new.property_id
       and submitted.activity_type = 'field_resolution_finalized' and submitted.deleted_at is null
       and submitted.from_value = v_session_id::text and submitted.to_value = 'pending_review'
       and v_submissions @> jsonb_build_array(jsonb_build_object(
-          'observation_id', submitted.observation_id, 'shot_id', submitted.shot_id, 'status', 'pending_review'
+          'activity_id', submitted.id, 'observation_id', submitted.observation_id,
+          'shot_id', submitted.shot_id, 'status', 'pending_review'
       ));
 
     if jsonb_array_length(new.review_outcomes) = 0

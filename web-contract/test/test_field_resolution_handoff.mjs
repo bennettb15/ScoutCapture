@@ -8,6 +8,7 @@ const sessionID = '33333333-3333-4333-8333-333333333333';
 const issueID = '44444444-4444-4444-8444-444444444444';
 const shotID = '55555555-5555-4555-8555-555555555555';
 const userID = '66666666-6666-4666-8666-666666666666';
+const activityId = '77777777-7777-4777-8777-777777777777';
 const timestamp = '2026-11-11T20:00:00Z';
 const scope = { org_id: orgID, property_id: propertyID, session_id: sessionID };
 const env = {
@@ -27,7 +28,7 @@ for (const status of ['resolved', 'pending_review', 'failure']) {
         });
         return status === 'failure'
           ? new Response(null, { status: 500 })
-          : Response.json([{ observation_id: issueID, shot_id: shotID, status }]);
+          : Response.json([{ activity_id: activityId, observation_id: issueID, shot_id: shotID, status }]);
       }
       if (key.startsWith('POST /storage/v1/object/scoutcapture-session-snapshots/')) {
         const snapshot = JSON.parse(new TextDecoder().decode(options.body));
@@ -36,7 +37,7 @@ for (const status of ['resolved', 'pending_review', 'failure']) {
       }
       if (key === 'POST /rest/v1/session_snapshots') {
         assert.deepEqual(JSON.parse(options.body).manifest.fieldResolutionSubmissions, [
-          { observation_id: issueID, shot_id: shotID, status },
+          { activity_id: activityId, observation_id: issueID, shot_id: shotID, status },
         ]);
         return new Response(null, { status: 201 });
       }

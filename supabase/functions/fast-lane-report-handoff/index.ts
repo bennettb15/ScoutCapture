@@ -839,7 +839,12 @@ export async function handleHandoff(request: Request): Promise<Response> {
       }),
     });
     if (!finalization.ok) throw new Error(`field_resolution_finalization_failed:${finalization.status}`);
-    const submissions = await finalization.json() as { observation_id: string; shot_id: string | null; status: string }[];
+    const submissions = await finalization.json() as {
+      activity_id: string;
+      observation_id: string;
+      shot_id: string | null;
+      status: string;
+    }[];
     const outcomesByShot = new Map(submissions.map((submission) => [submission.shot_id, submission]));
     const snapshotShots = shots.map((shot) => {
       const outcome = outcomesByShot.get(shot.id);
