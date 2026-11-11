@@ -2815,6 +2815,9 @@ struct ActiveIssuesSheet: View {
                 if observation.status == .pendingReview {
                     return "Pending Review"
                 }
+                if observation.status == .resolved && observation.hasFieldResolutionHistory {
+                    return "Resolved"
+                }
                 if observation.resolvedInSessionID == currentSessionID || canRetake || isSelectionDisabled {
                     return "Captured"
                 }
