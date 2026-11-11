@@ -1188,13 +1188,16 @@ def operational_issue_overlays(
     return result
 
 
-def apply_operational_overlays(composition: dict[str, Any], overlays: dict[str, dict[str, Any]]) -> None:
+def apply_operational_overlays(
+    composition: dict[str, Any], overlays: dict[str, dict[str, Any]], finalized_shot_ids: set[str] | None = None,
+) -> None:
+    frozen_shot_ids = finalized_shot_ids or set()
     for shot in composition["punchlist_shots"]:
         overlay = overlays.get(str(shot.get("issue_id") or "").lower())
         if not overlay:
             continue
         status = (overlay.get("activity_status") or (overlay.get("status") if not shot.get("issue_status") else None) or "").lower()
-        if status:
+        if status and str(shot.get("shot_id") or "").lower() not in frozen_shot_ids:
             shot["issue_status"] = status
             shot["is_resolved_in_session"] = status in {"resolved", "pending_review"}
         priority = overlay.get("activity_priority") or (overlay.get("priority") if not shot.get("priority") else None)
@@ -1222,7 +1225,12 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         composition = compose_punchlist_history(sources, storage)
         operational_overlays = {} if getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
             client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
-        apply_operational_overlays(composition, operational_overlays)
+        finalized_shot_ids = {
+            str(submission["shot_id"]).lower()
+            for submission in (row.get("manifest") or {}).get("fieldResolutionSubmissions", [])
+            if submission.get("shot_id")
+        }
+        apply_operational_overlays(composition, operational_overlays, finalized_shot_ids)
         shots = composition["shots"]
     punchlist_shots = composition["punchlist_shots"] if composition else shots
     media = media_validations(shots, storage)

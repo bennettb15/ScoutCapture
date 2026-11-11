@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -176,6 +177,9 @@ class FakeSupabaseClient:
             elif value.startswith("in.(") and value.endswith(")"):
                 expected_values = set(value[4:-1].split(","))
                 if str(row.get(key)) not in expected_values:
+                    return False
+            elif value.startswith("not.like.") and value.endswith("*"):
+                if str(row.get(key) or "").startswith(value[len("not.like."):-1]):
                     return False
             elif value == "is.null":
                 if row.get(key) is not None:
@@ -414,6 +418,53 @@ def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
 
 
 class ReportWorkerEmailNotificationTests(unittest.TestCase):
+    def test_reviewed_request_creates_separate_ready_package_and_is_idempotent(self) -> None:
+        client = FakeSupabaseClient()
+        original = package()
+        original["id"] = "40000000-0000-0000-0000-000000000002"
+        original["idempotency_key"] = "original"
+        client.tables["report_packages"].append(dict(original))
+        request = {
+            "id": "50000000-0000-0000-0000-000000000001",
+            "org_id": ORG_ID, "property_id": PROPERTY_ID, "source_package_id": original["id"],
+            "status": "queued", "review_outcomes": [
+                {"observation_id": "issue-1", "shot_id": "shot-1", "status": "active"}
+            ],
+        }
+        client.tables["reviewed_report_requests"] = [request]
+        fake_step = fake_worker_run_step("full_documentation", ["property", "priority", "comparison"])
+
+        def run_step(cmd, cwd, env):
+            fake_step(cmd, cwd, env)
+            if any("report_input_phase1.py" in part for part in cmd):
+                path = pathlib.Path(cmd[cmd.index("--output") + 1])
+                payload = worker.read_json(path)
+                payload["inputs"]["ordered_shots"][0].update(issue_id="issue-1", issue_status="pending_review")
+                worker.write_json(path, payload)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "run_step", side_effect=run_step), \
+                patch.object(worker, "send_report_ready_notifications") as email, \
+                patch.object(worker, "mark_fast_lane_report_delivered") as delivery:
+            args = worker_args(pathlib.Path(tmp))
+            result = worker.process_reviewed_report_request(args, client, ROOT, request["id"])
+            replay = worker.process_reviewed_report_request(args, client, ROOT, request["id"])
+            email.assert_not_called()
+            delivery.assert_not_called()
+            rendered = worker.read_json(pathlib.Path(result["validation_json"]))
+            self.assertEqual("active", rendered["inputs"]["ordered_shots"][0]["reviewed_resolution_status"])
+
+        self.assertEqual(original, client.tables["report_packages"][0])
+        self.assertEqual(2, len(client.tables["report_packages"]))
+        self.assertEqual(3, len(client.uploads))
+        self.assertTrue(all(f"/packages/{PACKAGE_ID}/" in row["path"] for row in client.uploads))
+        self.assertEqual("ready", replay["status"])
+        self.assertEqual(PACKAGE_ID, replay["result_package_id"])
+        reviewed = client.tables["report_packages"][1]
+        self.assertEqual("regenerated", reviewed["generation_trigger"])
+        self.assertEqual("reviewed", reviewed["manifest"]["report_variant"])
+        self.assertEqual(original["id"], reviewed["manifest"]["source_package_id"])
+        self.assertEqual(request["id"], reviewed["manifest"]["reviewed_report_request_id"])
+
     def test_worker_uses_punchlist_renderer_for_punchlist_visits(self) -> None:
         payload = validation()
         payload["session_type"] = "punchlist_visit"

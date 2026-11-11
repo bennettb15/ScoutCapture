@@ -831,6 +831,21 @@ export async function handleHandoff(request: Request): Promise<Response> {
       }
     }
 
+    const finalization = await supabaseFetch(config, "/rest/v1/rpc/finalize_field_resolution_upload", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        p_org_id: handoff.orgID, p_property_id: handoff.propertyID, p_session_id: handoff.sessionID,
+      }),
+    });
+    if (!finalization.ok) throw new Error(`field_resolution_finalization_failed:${finalization.status}`);
+    const submissions = await finalization.json() as { observation_id: string; shot_id: string | null; status: string }[];
+    const outcomesByShot = new Map(submissions.map((submission) => [submission.shot_id, submission]));
+    const snapshotShots = shots.map((shot) => {
+      const outcome = outcomesByShot.get(shot.id);
+      return outcome && outcome.observation_id === shot.issue_id ? { ...shot, issue_status: outcome.status } : shot;
+    });
+
     const snapshotID = crypto.randomUUID();
     const generatedAt = new Date().toISOString();
     const snapshot = await buildSnapshotPayload({
@@ -838,7 +853,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
       user,
       property: property!,
       session: session!,
-      shots,
+      shots: snapshotShots,
       snapshotID,
       generatedAt,
     });
@@ -873,6 +888,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
         sessionType: handoff.sessionType,
         session_type: handoff.sessionType,
         reportMode: handoff.reportMode,
+        fieldResolutionSubmissions: submissions,
       },
       shot_count: shots.length,
       issue_count: 0,

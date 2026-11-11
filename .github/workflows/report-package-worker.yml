@@ -7,6 +7,10 @@ on:
         description: "Optional authorized on-demand tenant comparison request UUID."
         required: false
         type: string
+      reviewed_report_request_id:
+        description: "Optional authorized on-demand reviewed report request UUID."
+        required: false
+        type: string
       session_id:
         description: "Optional ScoutCapture session UUID to process. Empty runs the poll worker."
         required: false
@@ -32,7 +36,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: report-package-worker-${{ inputs.tenant_comparison_request_id || inputs.session_id || 'poll' }}
+  group: report-package-worker-${{ inputs.reviewed_report_request_id || inputs.tenant_comparison_request_id || inputs.session_id || 'poll' }}
   cancel-in-progress: false
 
 jobs:
@@ -51,6 +55,7 @@ jobs:
       REPORT_EMAIL_NOTIFICATIONS_ENABLED: ${{ inputs.suppress_report_email == true && 'false' || vars.REPORT_EMAIL_NOTIFICATIONS_ENABLED || 'true' }}
       REPORT_EMAIL_ALLOWLIST: ${{ vars.REPORT_EMAIL_ALLOWLIST || '' }}
       REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
+      REVIEWED_REPORT_REQUEST_ID: ${{ inputs.reviewed_report_request_id || '' }}
       TENANT_COMPARISON_REQUEST_ID: ${{ inputs.tenant_comparison_request_id || '' }}
       REPORT_WORKER_SNAPSHOT_ID: ${{ inputs.snapshot_id || '' }}
       REPORT_WORKER_TRIGGER_SOURCE: ${{ inputs.trigger_source || github.event_name }}
@@ -68,7 +73,7 @@ jobs:
           fi
 
       - name: Finish background uploads in Test Org
-        if: inputs.tenant_comparison_request_id == '' && (github.event_name == 'schedule' || inputs.session_id == '')
+        if: inputs.reviewed_report_request_id == '' && inputs.tenant_comparison_request_id == '' && (github.event_name == 'schedule' || inputs.session_id == '')
         continue-on-error: true
         shell: bash
         run: |
@@ -95,7 +100,9 @@ jobs:
             --retention-mode dry-run
             --pretty
           )
-          if [[ -n "${TENANT_COMPARISON_REQUEST_ID}" ]]; then
+          if [[ -n "${REVIEWED_REPORT_REQUEST_ID}" ]]; then
+            worker_args+=(--reviewed-report-request-id "${REVIEWED_REPORT_REQUEST_ID}")
+          elif [[ -n "${TENANT_COMPARISON_REQUEST_ID}" ]]; then
             worker_args+=(--tenant-comparison-request-id "${TENANT_COMPARISON_REQUEST_ID}")
           elif [[ -n "${REPORT_WORKER_SESSION_ID}" ]]; then
             echo "Report worker trigger source: ${REPORT_WORKER_TRIGGER_SOURCE}"

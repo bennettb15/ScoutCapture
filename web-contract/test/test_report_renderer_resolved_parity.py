@@ -132,6 +132,31 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
+    def test_all_three_indexes_use_the_field_resolution_outcome(self) -> None:
+        for status, label in (("pending_review", "Resolved in field · Pending Review"), ("resolved", "Resolved")):
+            payload = validation()
+            payload["inputs"]["ordered_shots"][0]["issueStatus"] = status
+            for builder in (renderer.build_property_plan, renderer.build_priority_plan, renderer.build_comparison_plan):
+                with self.subTest(report=builder.__name__, status=status):
+                    plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
+                    lines = [line for page in plan["pages"] if page["kind"] == "index" for line in page["lines"]
+                             if line["kind"] == "photoItem"]
+                    self.assertEqual(1, len(lines))
+                    self.assertTrue(lines[0]["text"].endswith(f" | {label}"), lines[0]["text"])
+
+    def test_reviewed_rejection_overrides_the_historical_resolution_capture(self) -> None:
+        payload = validation()
+        shot = payload["inputs"]["ordered_shots"][0]
+        shot.update(reviewed_resolution_status="active", issue_status="active", is_resolved_in_session=False)
+        for builder in (renderer.build_property_plan, renderer.build_priority_plan, renderer.build_comparison_plan):
+            with self.subTest(report=builder.__name__):
+                plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
+                entries = [slot["entry"] for page in plan["pages"] for slot in page.get("slots", [])
+                           if slot["entry"]["shot_id"] == CURRENT_SHOT_ID]
+                self.assertTrue(entries)
+                self.assertTrue(all(renderer.visual_state(entry) == "flagged" for entry in entries))
+                self.assertTrue(all(renderer.resolution_label(entry) is None for entry in entries))
+
     def test_customer_report_plans_omit_scope_and_keep_index_page_numbers(self) -> None:
         payload = validation()
         payload["inputs"]["session"]["org_name"] = "Example Property Group"
@@ -403,7 +428,7 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                         "entry": {
                             "caption": "Current",
                             "visual_state": "flagged",
-                            "issueStatus": "pending_review",
+                            "issueStatus": "resolved",
                             "captureKind": "resolvedCapture",
                             "isFlagged": True,
                             "flagged_reason": "Paint touched up",

@@ -15,6 +15,7 @@ type SnapshotRecord = {
 
 type DatabaseWebhookPayload = {
   tenant_comparison_request_id?: unknown;
+  reviewed_report_request_id?: unknown;
   type?: unknown;
   table?: unknown;
   schema?: unknown;
@@ -97,24 +98,38 @@ Deno.serve(async (request: Request): Promise<Response> => {
   let payload: DatabaseWebhookPayload;
   try { payload = await request.json(); }
   catch { return jsonResponse(400, { ok: false, error: "invalid_json" }); }
-  if (payload.tenant_comparison_request_id !== undefined) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return reject(400, "invalid_json");
+  if (payload.tenant_comparison_request_id !== undefined && payload.reviewed_report_request_id !== undefined) {
+    return reject(400, "multiple_report_requests");
+  }
+  if (payload.tenant_comparison_request_id !== undefined || payload.reviewed_report_request_id !== undefined) {
+    const reviewed = payload.reviewed_report_request_id !== undefined;
     const serviceKey = authenticatedServiceKey(request);
     if (!serviceKey) {
       return reject(401, "unauthorized");
     }
-    const id = lowerString(payload.tenant_comparison_request_id);
+    const id = lowerString(reviewed ? payload.reviewed_report_request_id : payload.tenant_comparison_request_id);
     if (!isUuid(id)) return reject(400, "invalid_request_id");
-    const check = await fetch(`${env('SUPABASE_URL')}/rest/v1/on_demand_report_requests?id=eq.${id}&kind=eq.tenant_comparison&status=eq.queued&select=id`, {
+    const source = reviewed ? 'reviewed_report_requests' : 'on_demand_report_requests';
+    const kindFilter = reviewed ? '' : '&kind=eq.tenant_comparison';
+    const check = await fetch(`${env('SUPABASE_URL')}/rest/v1/${source}?id=eq.${id}${kindFilter}&status=eq.queued&select=id`, {
       headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
     });
-    if (!check.ok || !(await check.json()).length) return reject(404, "request_not_found");
+    if (!check.ok) return reviewed ? reject(502, "request_lookup_failed") : reject(404, "request_not_found");
+    if (!(await check.json()).length) return reject(404, "request_not_found");
     const token = env("GITHUB_REPORT_WORKER_TOKEN");
     if (!token) return reject(500, "missing_github_token");
+    const inputs = reviewed
+      ? { reviewed_report_request_id: id, trigger_source: 'on_demand_reviewed_report' }
+      : { tenant_comparison_request_id: id, trigger_source: 'on_demand_tenant_comparison' };
     const response = await fetch(`https://api.github.com/repos/${env('GITHUB_REPOSITORY', DEFAULT_REPOSITORY)}/actions/workflows/${env('GITHUB_REPORT_WORKER_WORKFLOW', DEFAULT_WORKFLOW)}/dispatches`, {
       method: 'POST', headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-github-api-version': '2022-11-28', 'user-agent': 'scoutcapture-report-package-dispatch' },
-      body: JSON.stringify({ ref: env('GITHUB_REPORT_WORKER_REF', DEFAULT_REF), inputs: { tenant_comparison_request_id: id, trigger_source: 'on_demand_tenant_comparison' } }),
+      body: JSON.stringify({ ref: env('GITHUB_REPORT_WORKER_REF', DEFAULT_REF), inputs }),
     });
-    if (!response.ok) console.warn(JSON.stringify({ event: 'tenant_dispatch_failed', request_id: id, github_status: response.status }));
+    if (!response.ok) console.warn(JSON.stringify({
+      event: reviewed ? 'reviewed_report_dispatch_failed' : 'tenant_dispatch_failed',
+      request_id: id, github_status: response.status,
+    }));
     return jsonResponse(response.ok ? 202 : 502, { ok: response.ok, dispatched: response.ok });
   }
   const expectedSecret = env("REPORT_PACKAGE_DISPATCH_SECRET");
