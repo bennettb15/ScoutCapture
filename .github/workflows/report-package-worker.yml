@@ -48,7 +48,14 @@ jobs:
     name: Process completed ScoutCapture snapshots
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && vars.PDF_REPORT_PACKAGE_WORKER_ENABLED == 'true')
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.session_id == '89a8ec2a-246c-43f0-8db8-e871948e9aa7' &&
+      inputs.snapshot_id == '523d1114-df8d-49c8-a469-8306253bcede' &&
+      inputs.suppress_report_email == true &&
+      inputs.reviewed_report_request_id == '' &&
+      inputs.reviewed_content_package_id == '' &&
+      inputs.tenant_comparison_request_id == ''
     env:
       SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}

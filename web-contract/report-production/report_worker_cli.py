@@ -34,7 +34,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 DELIVERABLES_BUCKET = "scoutcapture-deliverables"
 BRANDING_BUCKET = "scoutcapture-org-branding"
-RENDERER_VERSION = "phase2c-photo-notes-4"
+RENDERER_VERSION = "phase2c-photo-notes-4-qa-1014-parity"
 MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
 ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
