@@ -10008,6 +10008,11 @@ final class AppState: ObservableObject {
                 ready: true,
                 expectedAuthenticatedUserID: userID
             )
+            if let resolvedActiveID {
+                Task { [weak self] in
+                    await self?.refreshFieldResolutionReviewPolicy(organizationID: resolvedActiveID)
+                }
+            }
         }
     }
 
@@ -27865,7 +27870,11 @@ final class AppState: ObservableObject {
             return status == "active" || status == "pending_review" || status == "resolved"
         }.compactMap { issue -> NormalizedObservationReplayRow? in
             guard seen.insert(issue.issueID).inserted else { return nil }
-            let linkedShot = shotsByIssueID[issue.issueID] ??
+            let submittedShotID = issue.fieldResolutionSubmission(sessionID: sessionID)?
+                .details["shotId"].flatMap(UUID.init(uuidString:))
+            let linkedShot = submittedShotID.flatMap { shotID in
+                metadata.shots.first { $0.shotID == shotID && $0.issueID == issue.issueID }
+            } ?? shotsByIssueID[issue.issueID] ??
                 normalizedReplayText(issue.shotKey).flatMap { shotsByKey[$0.lowercased()] }
             let title = normalizedReplayText(issue.currentReason) ??
                 normalizedReplayText(issue.detailNote) ??
@@ -27886,7 +27895,7 @@ final class AppState: ObservableObject {
                 sessionID: sessionID,
                 shotID: linkedShot?.shotID,
                 category: "flagged_issue",
-                status: normalizedObservationStatus(issue.issueStatus),
+                status: issue.statusForUpload(sessionID: sessionID),
                 title: title,
                 detail: detail,
                 createdAt: createdAt,
@@ -27919,9 +27928,13 @@ final class AppState: ObservableObject {
 
         for issue in metadata.issues {
             guard seen.insert(issue.issueID).inserted else { continue }
-            let linkedShot = shotsByIssueID[issue.issueID] ??
+            let submittedShotID = issue.fieldResolutionSubmission(sessionID: sessionID)?
+                .details["shotId"].flatMap(UUID.init(uuidString:))
+            let linkedShot = submittedShotID.flatMap { shotID in
+                metadata.shots.first { $0.shotID == shotID && $0.issueID == issue.issueID }
+            } ?? shotsByIssueID[issue.issueID] ??
                 normalizedReplayText(issue.shotKey).flatMap { shotsByKey[$0.lowercased()] }
-            let status = normalizedObservationStatus(issue.issueStatus)
+            let status = issue.statusForUpload(sessionID: sessionID)
             let title = normalizedReplayText(issue.currentReason) ??
                 normalizedReplayText(issue.detailNote) ??
                 "Flagged observation"
@@ -35388,6 +35401,7 @@ final class AppState: ObservableObject {
         allowInsert: Bool,
         prerequisitesEnsured: Bool = false
     ) async throws {
+        let shot = metadata.shotForFieldResolutionUpload(shot)
 #if DEBUG
         if let shotMetadataWriteOverride {
             let payload = makeSupabaseShotRichMetadataPayload(
@@ -45308,45 +45322,36 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         observationID: UUID,
         shotID: UUID
-    ) -> Bool {
-        guard canAccessProperty(propertyID) else { return false }
+    ) -> Observation? {
+        guard canAccessProperty(propertyID) else { return nil }
         do {
             var observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return false }
+            guard let index = observations.firstIndex(where: { $0.id == observationID }) else { return nil }
             var observation = observations[index]
-            guard observation.status != .resolutionRequired else { return false }
+            guard observation.status != .resolutionRequired else { return nil }
             let shot = observation.shots.first(where: { $0.id == shotID })
-            observation.status = .pendingReview
             observation.linkedShotID = shotID
             observation.resolutionPhotoRef = shot?.imageLocalIdentifier ?? observation.resolutionPhotoRef
             observation.resolutionStatement = "Condition no longer visibly present at time of documentation."
-            observation.updatedAt = Date()
-            observation.updatedInSessionID = sessionID
-            observation.resolvedInSessionID = sessionID
-            observation.historyEvents.append(ObservationHistoryEvent(
-                timestamp: Date(),
+            observation.recordFieldResolution(
+                requiresReview: requiresReviewForFieldResolution(propertyID: propertyID),
                 sessionID: sessionID,
-                kind: .pendingReview,
-                beforeValue: Observation.Status.active.issueStatusValue,
-                afterValue: Observation.Status.pendingReview.issueStatusValue,
-                field: "status",
                 shotID: shotID
-            ))
-            observation.historyEvents.sort { $0.timestamp < $1.timestamp }
-            _ = try localStore.updateObservation(observation)
+            )
+            let persisted = try localStore.updateObservation(observation)
             _ = try? localStore.syncFlaggedObservationUpdateToSessionMetadata(
                 propertyID: propertyID,
                 sessionID: sessionID,
-                observation: observation,
+                observation: persisted,
                 shotID: shotID,
-                trade: observation.trade,
+                trade: persisted.trade,
                 activeCaptureKind: "resolved_capture",
-                updatedAt: observation.updatedAt
+                updatedAt: persisted.updatedAt
             )
-            return true
+            return persisted
         } catch {
             print("[FastLanePanel] observation_resolve_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
-            return false
+            return nil
         }
     }
 
@@ -47090,6 +47095,14 @@ final class AppState: ObservableObject {
                 payload: payload
             )
         }
+        if let orgID = context.orgID {
+            Task { [weak self] in
+                await self?.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+                    propertyID: context.propertyID,
+                    activeOrganizationID: orgID
+                )
+            }
+        }
         return true
     }
 
@@ -48709,7 +48722,16 @@ final class AppState: ObservableObject {
                 localObservation: localObservation,
                 fallbackCaptureKind: shot.captureKind
             )
-            let expectedIssueStatus = localObservation?.status.issueStatusValue
+            let expectedIssueStatus: String?
+            if let localObservation,
+               localObservation.preservesFieldResolutionStatus,
+               localObservation.latestFieldResolutionSubmission?.sessionID == session.id {
+                // Preserve the accepted server status if this repair runs on a retry.
+                let remoteStatus = normalizedSupabaseText(shot.issueStatus)?.lowercased()
+                expectedIssueStatus = remoteStatus == "resolved" ? "resolved" : "pending_review"
+            } else {
+                expectedIssueStatus = localObservation?.status.issueStatusValue
+            }
             let expectedReason = localObservation.flatMap {
                 Observation.inferredCurrentReason(note: $0.currentReason ?? $0.note, statement: $0.statement)
             }
@@ -49074,7 +49096,9 @@ final class AppState: ObservableObject {
                 lastCaptureSessionId: observation.resolvedInSessionID ?? observation.updatedInSessionID ?? shot.sessionID,
                 detailNote: reason,
                 shotKey: shot.shotKey,
-                historyEvents: []
+                historyEvents: observation.latestFieldResolutionSubmission.map {
+                    [localStore.exportHistoryEvent($0, observation: observation)]
+                } ?? []
             ))
         }
 
@@ -54210,7 +54234,7 @@ final class AppState: ObservableObject {
             do {
                 activityRows = try await client
                     .from("punchlist_activity")
-                    .select("id, property_id, observation_id, shot_id, activity_type, to_value, created_at, deleted_at")
+                    .select("id, property_id, observation_id, shot_id, activity_type, from_value, to_value, created_at, deleted_at")
                     .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
                     .eq("property_id", value: propertyID.uuidString.lowercased())
                     .is("deleted_at", value: nil)
@@ -54220,7 +54244,8 @@ final class AppState: ObservableObject {
                         "status_changed",
                         "completion_submitted",
                         "completion_approved",
-                        "completion_rejected"
+                        "completion_rejected",
+                        FieldResolutionOutcome.activityType
                     ])
                     .order("created_at", ascending: false)
                     .limit(5_000)
@@ -54286,6 +54311,41 @@ final class AppState: ObservableObject {
         return counts.keys.sorted().map { "\($0):\(counts[$0, default: 0])" }.joined(separator: ",")
     }
 
+    func requiresReviewForFieldResolution(propertyID: UUID) -> Bool {
+        let organizationID = properties.first { $0.id == propertyID }?.orgId
+        return FieldResolutionReviewPolicy.requiresReview(organizationID: organizationID, defaults: userDefaults)
+    }
+
+    private var fieldResolutionPolicyRefreshInFlight: Set<UUID> = []
+
+    private func refreshFieldResolutionReviewPolicy(organizationID: UUID) async {
+        guard isNetworkAvailable, canAccessOrganization(organizationID),
+              let userID = authenticatedSupabaseUser?.id, let client = supabaseClient,
+              fieldResolutionPolicyRefreshInFlight.insert(organizationID).inserted else { return }
+        defer { fieldResolutionPolicyRefreshInFlight.remove(organizationID) }
+
+        let requiresReview: Bool?
+        do {
+            let rows: [FieldResolutionReviewPolicy.RemoteRow] = try await client.from("orgs")
+                .select("require_review_for_field_resolutions")
+                .eq("id", value: organizationID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .limit(1)
+                .execute()
+                .value
+            requiresReview = rows.first?.requiresReview
+        } catch let error as PostgrestError where error.code == "42703" || error.code == "PGRST204" {
+            // A server without this setting retains the existing review workflow.
+            requiresReview = nil
+        } catch {
+            // An unreachable server leaves the last known policy available offline.
+            return
+        }
+
+        guard authenticatedSupabaseUser?.id == userID, canAccessOrganization(organizationID) else { return }
+        FieldResolutionReviewPolicy.cache(requiresReview, organizationID: organizationID, defaults: userDefaults)
+    }
+
     @discardableResult
     func syncPortalPunchlistOperationalOverlaysForPropertyOpen(
         propertyID: UUID,
@@ -54306,6 +54366,7 @@ final class AppState: ObservableObject {
             "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
             "orgID=\(activeOrganizationID.uuidString) trigger=property_open fetch=starting"
         )
+        async let policyRefresh: Void = refreshFieldResolutionReviewPolicy(organizationID: activeOrganizationID)
         let remoteShots: [RemoteShotMetadataRecord]
         do {
             remoteShots = try await fetchRemotePortalPunchlistShotMetadataRows(
@@ -54352,6 +54413,7 @@ final class AppState: ObservableObject {
             "resolvedSkipped=\(result?.skippedResolvedCount ?? 0) " +
             "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
+        await policyRefresh
         return result
     }
 
@@ -54932,6 +54994,9 @@ final class AppState: ObservableObject {
             row.deletedAt == nil
         }
         let candidateObservationIDs = Set(candidateObservationRows.map(\.id))
+        let observationSources = candidateObservationRows.reduce(into: [UUID: RemotePortalPunchlistObservationRecord]()) {
+            $0[$1.id] = $1
+        }
         let remoteShotsByID = Dictionary(uniqueKeysWithValues: remoteShots.map { ($0.id, $0) })
 
         var overlaysByIssueID: [UUID: PortalPunchlistOperationalOverlay] = [:]
@@ -55062,15 +55127,19 @@ final class AppState: ObservableObject {
             let nextStatus: Observation.Status?
             let activityType = normalizedReplayText(activity.activityType)?.lowercased()
             var reopensResolved = activityType == "completion_rejected"
+            var fieldResolutionOutcome: FieldResolutionOutcome?
+            var matchesCurrentFieldSubmission = false
             switch activityType {
             case "priority_changed":
                 nextPriority = normalizedReplayText(activity.toValue) ?? current?.priority
                 nextTrade = current?.trade
                 nextStatus = current?.status
+                fieldResolutionOutcome = current?.fieldResolutionOutcome
             case "trade_changed":
                 nextPriority = current?.priority
                 nextTrade = normalizedReplayText(activity.toValue) ?? current?.trade
                 nextStatus = current?.status
+                fieldResolutionOutcome = current?.fieldResolutionOutcome
             case "status_changed":
                 nextPriority = current?.priority
                 nextTrade = current?.trade
@@ -55079,6 +55148,24 @@ final class AppState: ObservableObject {
                     ? .resolved
                     : statusChange
                 reopensResolved = false
+                if nextStatus == current?.status {
+                    fieldResolutionOutcome = current?.fieldResolutionOutcome
+                }
+            case FieldResolutionOutcome.activityType:
+                guard activity.observationID != nil,
+                      let outcome = FieldResolutionOutcome(
+                          id: activity.id,
+                          sessionValue: activity.fromValue,
+                          shotID: activity.shotID,
+                          statusValue: activity.toValue,
+                          createdAt: activity.createdAt
+                      ) else { continue }
+                nextPriority = current?.priority
+                nextTrade = current?.trade
+                nextStatus = outcome.status
+                fieldResolutionOutcome = outcome
+                matchesCurrentFieldSubmission = observationSources[observationID]?.sessionID == outcome.sessionID &&
+                    observationSources[observationID]?.shotID == outcome.shotID
             case "completion_rejected":
                 nextPriority = current?.priority
                 nextTrade = current?.trade
@@ -55097,7 +55184,8 @@ final class AppState: ObservableObject {
             let activityUpdatedAt = activity.createdAt
             let resolvedStatus = nextStatus ?? current?.status ?? .active
             let suppressesStaleActivityStatus: Bool
-            if let currentUpdatedAt = current?.updatedAt,
+            if !matchesCurrentFieldSubmission,
+               let currentUpdatedAt = current?.updatedAt,
                let activityUpdatedAt,
                currentUpdatedAt > activityUpdatedAt,
                resolvedStatus != current?.status {
@@ -55111,6 +55199,7 @@ final class AppState: ObservableObject {
                 statusFromActivity = current?.status ?? resolvedStatus
                 updatedAtFromActivity = current?.updatedAt ?? activityUpdatedAt
                 reopensResolved = false
+                fieldResolutionOutcome = current?.fieldResolutionOutcome
             } else {
                 statusFromActivity = resolvedStatus
                 updatedAtFromActivity = activityUpdatedAt ?? current?.updatedAt
@@ -55128,7 +55217,8 @@ final class AppState: ObservableObject {
                 detailType: resolvedShot?.detailType ?? current?.detailType,
                 angleIndex: resolvedShot?.angleIndex ?? current?.angleIndex,
                 shotKey: resolvedShot?.shotKey ?? current?.shotKey,
-                reopensResolved: reopensResolved
+                reopensResolved: reopensResolved,
+                fieldResolutionOutcome: fieldResolutionOutcome
             )
         }
 
@@ -55456,7 +55546,8 @@ final class AppState: ObservableObject {
         observationStatus: String? = "active",
         observationPriority: String? = nil,
         observationTrade: String? = nil,
-        activityRows: [(activityType: String, toValue: String?, createdAt: Date)]
+        activityRows: [(activityType: String, toValue: String?, createdAt: Date)],
+        fieldSubmission: (sessionID: UUID, shotID: UUID?, updatedAt: Date)? = nil
     ) -> [PortalPunchlistOperationalOverlay] {
         portalPunchlistOperationalOverlays(
             propertyID: propertyID,
@@ -55464,12 +55555,12 @@ final class AppState: ObservableObject {
                 RemotePortalPunchlistObservationRecord(
                     id: observationID,
                     propertyID: propertyID,
-                    sessionID: nil,
-                    shotID: nil,
+                    sessionID: fieldSubmission?.sessionID,
+                    shotID: fieldSubmission?.shotID,
                     status: observationStatus,
                     priority: observationPriority,
                     trade: observationTrade,
-                    updatedAt: nil,
+                    updatedAt: fieldSubmission?.updatedAt,
                     deletedAt: nil
                 )
             ],
@@ -55480,9 +55571,10 @@ final class AppState: ObservableObject {
                     orgID: nil,
                     propertyID: propertyID,
                     observationID: observationID,
-                    shotID: nil,
+                    shotID: row.activityType == FieldResolutionOutcome.activityType ? fieldSubmission?.shotID : nil,
                     activityType: row.activityType,
-                    fromValue: nil,
+                    fromValue: row.activityType == FieldResolutionOutcome.activityType
+                        ? fieldSubmission?.sessionID.uuidString : nil,
                     toValue: row.toValue,
                     note: nil,
                     createdBy: nil,
@@ -57151,7 +57243,7 @@ final class AppState: ObservableObject {
         )
     }
 
-    func fastRuntimePreviewIssueSideControlPayload(propertyID: UUID) -> FastRuntimePreviewSideControlPayload {
+    func fastRuntimePreviewIssueSideControlPayload(propertyID: UUID, currentSessionID: UUID? = nil) -> FastRuntimePreviewSideControlPayload {
         guard canAccessProperty(propertyID) else {
             return .empty
         }
@@ -57168,7 +57260,7 @@ final class AppState: ObservableObject {
         }
         return FastRuntimePreviewSideControlPayload(
             resolutionRequiredObservations: [],
-            activeObservations: sortedObservations.filter { $0.status == .active || $0.status == .pendingReview || $0.status == .resolutionRequired },
+            activeObservations: sortedObservations.filter { $0.appearsInFieldIssueList(currentSessionID: currentSessionID) },
             guidedShots: [],
             retiredGuidedShots: []
         )
@@ -57193,7 +57285,7 @@ final class AppState: ObservableObject {
             }
             return lhs.id.uuidString < rhs.id.uuidString
         }
-        let active = sortedObservations.filter { $0.status == .active || $0.status == .pendingReview || $0.status == .resolutionRequired }
+        let active = sortedObservations.filter { $0.appearsInFieldIssueList(currentSessionID: currentSessionID) }
 
         guard sessionType != .punchlistVisit else {
             return FastRuntimePreviewSideControlPayload(

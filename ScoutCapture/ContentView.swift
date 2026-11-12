@@ -11016,12 +11016,8 @@ extension ContentView {
                 priorityValue = Self.normalizedPriority(observationPriority)
             }
             let isNewFlaggedIssueCapture = createdFlaggedObservationID == observation.id
-            if observation.status == .resolved || observation.resolvedInSessionID == sessionID {
-                issueStatus = Observation.Status.resolved.issueStatusValue
-                captureKind = "resolved_capture"
-                firstCaptureKind = "captured"
-            } else if observation.status == .pendingReview {
-                issueStatus = Observation.Status.pendingReview.issueStatusValue
+            if observation.status == .pendingReview || observation.status == .resolved {
+                issueStatus = observation.status.issueStatusValue
                 captureKind = "resolved_capture"
                 firstCaptureKind = "captured"
             } else if isNewFlaggedIssueCapture {
@@ -14780,7 +14776,6 @@ extension ContentView {
             }
 
             var updated = existing
-            updated.status = .pendingReview
             if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
                 updated.priority = Self.flaggedPriorityOrDefault(selectedPriority)
             }
@@ -14788,8 +14783,6 @@ extension ContentView {
             upsertShot(shot, in: &updated)
             updated.resolutionPhotoRef = pendingFlaggedDecisionPhotoRef ?? shot.imageLocalIdentifier
             updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
-            updated.updatedInSessionID = sessionID
-            updated.resolvedInSessionID = sessionID
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
@@ -14799,17 +14792,10 @@ extension ContentView {
                 ),
                 to: &updated
             )
-            appendObservationHistoryEvent(
-                ObservationHistoryEvent(
-                    timestamp: Date(),
-                    sessionID: sessionID,
-                    kind: .pendingReview,
-                    beforeValue: "active",
-                    afterValue: Observation.Status.pendingReview.issueStatusValue,
-                    field: "status",
-                    shotID: shot.id
-                ),
-                to: &updated
+            updated.recordFieldResolution(
+                requiresReview: appState.requiresReviewForFieldResolution(propertyID: propertyID),
+                sessionID: sessionID,
+                shotID: shot.id
             )
 
             let persisted = try localStore.updateObservation(updated)
@@ -14826,12 +14812,12 @@ extension ContentView {
                     propertyID: propertyID,
                     sessionID: sessionID,
                     shotID: shot.id,
-                    reason: "flagged_issue_pending_review"
+                    reason: "flagged_issue_field_resolution"
                 )
             } catch {
                 // Keep the capture decision flow resilient; the observation itself has already been saved.
             }
-            showFlaggedActionToastNow("Issue submitted for review")
+            showFlaggedActionToastNow(persisted.fieldResolutionToast)
             finalizeArmedIssueCaptureAfterDecision()
             refreshActiveIssues()
         } catch {
@@ -14963,50 +14949,41 @@ extension ContentView {
 
         do {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let existing = observations.first(where: { $0.id == observation.id }) else { return }
+            guard let existing = observations.first(where: { $0.id == observation.id }),
+                  existing.status != .resolutionRequired else { return }
 
             var updated = existing
-            updated.status = .pendingReview
-            updated.updatedInSessionID = sessionID
-            updated.resolvedInSessionID = sessionID
             if updated.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
                 updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
             }
-            appendObservationHistoryEvent(
-                ObservationHistoryEvent(
-                    timestamp: Date(),
-                    sessionID: sessionID,
-                    kind: .pendingReview,
-                    beforeValue: "active",
-                    afterValue: Observation.Status.pendingReview.issueStatusValue,
-                    field: "status",
-                    shotID: updated.linkedShotID
-                ),
-                to: &updated
+            updated.recordFieldResolution(
+                requiresReview: appState.requiresReviewForFieldResolution(propertyID: propertyID),
+                sessionID: sessionID,
+                shotID: updated.linkedShotID
             )
 
             let persisted = try localStore.updateObservation(updated)
-            if let shotID = persisted.linkedShotID {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shotID,
-                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        activeCaptureKind: "follow_up_capture"
-                    )
+            do {
+                _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    observation: persisted,
+                    shotID: persisted.linkedShotID,
+                    trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
+                    activeCaptureKind: "follow_up_capture"
+                )
+                if let shotID = persisted.linkedShotID {
                     appState.scheduleShotMetadataSupabaseWriteIfNeeded(
                         propertyID: propertyID,
                         sessionID: sessionID,
                         shotID: shotID,
-                        reason: "flagged_issue_pending_review"
+                        reason: "flagged_issue_field_resolution"
                     )
-                } catch {
-                    // Keep checklist resolution resilient; the observation itself has already been saved.
                 }
+            } catch {
+                // Keep checklist resolution resilient; the observation itself has already been saved.
             }
-            showFlaggedActionToastNow("Issue submitted for review")
+            showFlaggedActionToastNow(persisted.fieldResolutionToast)
             refreshActiveIssues()
         } catch {
             // Keep UI responsive if persistence fails.

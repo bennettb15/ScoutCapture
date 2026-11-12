@@ -26,11 +26,6 @@ struct CameraPreviewView: UIViewRepresentable {
         v.videoPreviewLayer.session = session
         v.videoPreviewLayer.videoGravity = .resizeAspectFill
 
-        v.onTap = { devicePoint, normalizedPoint in
-            onTapDevicePoint?(devicePoint)
-            onTapNormalizedPoint?(normalizedPoint)
-        }
-
         // Apply orientation and mirroring immediately to reduce visible settling.
         v.applyImmediately()
 
@@ -40,6 +35,10 @@ struct CameraPreviewView: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewUIView, context: Context) {
         uiView.videoPreviewLayer.session = session
         uiView.videoPreviewLayer.videoGravity = .resizeAspectFill
+        uiView.onTap = { devicePoint, normalizedPoint in
+            onTapDevicePoint?(devicePoint)
+            onTapNormalizedPoint?(normalizedPoint)
+        }
 
         // Do not force orientation or mirroring changes on every SwiftUI update.
         // SwiftUI can call updateUIView on many UI events (capture, zoom, toggles).

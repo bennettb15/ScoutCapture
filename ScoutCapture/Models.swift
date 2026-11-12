@@ -2590,6 +2590,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
     let angleIndex: Int?
     let shotKey: String?
     let reopensResolved: Bool
+    let fieldResolutionOutcome: FieldResolutionOutcome?
 
     nonisolated init(
         issueID: UUID?,
@@ -2604,7 +2605,8 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         detailType: String? = nil,
         angleIndex: Int? = nil,
         shotKey: String? = nil,
-        reopensResolved: Bool = false
+        reopensResolved: Bool = false,
+        fieldResolutionOutcome: FieldResolutionOutcome? = nil
     ) {
         self.issueID = issueID
         self.propertyID = propertyID
@@ -2619,6 +2621,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         self.angleIndex = angleIndex.map { max(1, $0) }
         self.shotKey = Observation.trimmedNonEmpty(shotKey)
         self.reopensResolved = reopensResolved
+        self.fieldResolutionOutcome = fieldResolutionOutcome
     }
 }
 

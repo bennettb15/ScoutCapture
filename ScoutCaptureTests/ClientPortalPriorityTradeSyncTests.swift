@@ -1461,6 +1461,14 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updateRow.shotID, shotID)
     }
 
+    func testPendingReviewUsesReviewAppearanceEvenAfterCapture() {
+        XCTAssertEqual(IssueRowCaptureStyle(status: .pendingReview, isCaptured: true), .pendingReview)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .pendingReview, isCaptured: false), .pendingReview)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .resolved, isCaptured: true), .captured)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .active, isCaptured: true), .captured)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .active, isCaptured: false), .idle)
+    }
+
     func testCompletionApprovalFullyResolvesPendingReviewAndRemovesCarryForwardState() throws {
         let fixture = try makeStore()
         let issueID = UUID()
@@ -2184,5 +2192,243 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
 
         XCTAssertEqual(notes[localIssueID]?.map(\.note), ["Historical shot note."])
+    }
+}
+
+extension ClientPortalPriorityTradeSyncTests {
+    func testFieldResolutionPolicyDefaultsOnAndRetainsLastKnownValuePerOrganization() throws {
+        let suite = "FieldResolutionPolicyTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let organizationID = UUID()
+        let otherOrganizationID = UUID()
+
+        XCTAssertTrue(FieldResolutionReviewPolicy.requiresReview(organizationID: nil, defaults: defaults))
+        XCTAssertTrue(FieldResolutionReviewPolicy.requiresReview(organizationID: organizationID, defaults: defaults))
+
+        let decoded = try JSONDecoder().decode(
+            FieldResolutionReviewPolicy.RemoteRow.self,
+            from: Data(#"{"require_review_for_field_resolutions":false}"#.utf8)
+        )
+        FieldResolutionReviewPolicy.cache(decoded.requiresReview, organizationID: organizationID, defaults: defaults)
+
+        // A new app instance can still read its last policy without a network response.
+        let offlineDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertFalse(FieldResolutionReviewPolicy.requiresReview(organizationID: organizationID, defaults: offlineDefaults))
+        XCTAssertTrue(FieldResolutionReviewPolicy.requiresReview(organizationID: otherOrganizationID, defaults: offlineDefaults))
+
+        FieldResolutionReviewPolicy.cache(true, organizationID: organizationID, defaults: defaults)
+        XCTAssertTrue(FieldResolutionReviewPolicy.requiresReview(organizationID: organizationID, defaults: offlineDefaults))
+        FieldResolutionReviewPolicy.cache(false, organizationID: organizationID, defaults: defaults)
+        let missing = try JSONDecoder().decode(FieldResolutionReviewPolicy.RemoteRow.self, from: Data("{}".utf8))
+        FieldResolutionReviewPolicy.cache(missing.requiresReview, organizationID: organizationID, defaults: defaults)
+        XCTAssertTrue(FieldResolutionReviewPolicy.requiresReview(organizationID: organizationID, defaults: offlineDefaults))
+    }
+
+    func testFieldResolutionStoresConsistentStatusAndUploadsAsSubmissionWithEitherPolicy() throws {
+        for requiresReview in [true, false] {
+            let (store, property, observation, sessionID, shotID) = try makeFieldResolution(requiresReview: requiresReview)
+            let expected: Observation.Status = requiresReview ? .pendingReview : .resolved
+            XCTAssertEqual(observation.status, expected)
+            XCTAssertEqual(observation.resolvedInSessionID, sessionID)
+            let event = try XCTUnwrap(observation.latestFieldResolutionSubmission)
+            XCTAssertEqual(event.kind, requiresReview ? .pendingReview : .resolved)
+            XCTAssertEqual(event.afterValue, expected.issueStatusValue)
+            XCTAssertEqual(event.shotID, shotID)
+            XCTAssertTrue(observation.appearsInFieldIssueList(currentSessionID: sessionID))
+            XCTAssertEqual(observation.appearsInFieldIssueList(currentSessionID: UUID()), requiresReview)
+
+            let metadata = try store.loadSessionMetadata(propertyID: property.id, sessionID: sessionID)
+            let shot = try XCTUnwrap(metadata.shots.first { $0.shotID == shotID })
+            let issue = try XCTUnwrap(metadata.issues.first { $0.issueID == observation.id })
+            XCTAssertEqual(issue.issueStatus, expected.issueStatusValue)
+            XCTAssertEqual(shot.issueStatus, expected.issueStatusValue)
+            XCTAssertEqual(shot.captureKind, "resolved_capture")
+            XCTAssertEqual(issue.historyEvents.first { $0.id == event.id }?.details["afterValue"], expected.issueStatusValue)
+            XCTAssertEqual(metadata.shotForFieldResolutionUpload(shot).issueStatus, "pending_review")
+            let rows = AppState.normalizedObservationLineageReplayRows(
+                orgID: try XCTUnwrap(property.orgId),
+                propertyID: property.id,
+                sessionID: sessionID,
+                metadata: metadata
+            )
+            XCTAssertEqual(rows.observations.first?.status, "pending_review")
+            XCTAssertEqual(rows.observations.first?.shotID, shotID)
+            XCTAssertTrue(rows.updates.isEmpty)
+        }
+    }
+
+    func testOfflineResolveStaysResolvedUntilServerRequiresReviewAndThenRepairsMetadata() throws {
+        let (store, property, observation, sessionID, shotID) = try makeFieldResolution(requiresReview: false)
+        let staleSnapshot = makeCompletedFlaggedSessionMetadata(
+            propertyID: property.id, sessionID: sessionID, issueID: observation.id, shotID: shotID,
+            priority: "High", trade: "Paint", issueStatus: "pending_review"
+        )
+        try store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: property.id, sessionID: sessionID, metadata: staleSnapshot
+        )
+        XCTAssertEqual(try store.fetchObservations(propertyID: property.id).first?.status, .resolved)
+
+        // A result for this exact submission can arrive with an older clock than the device.
+        let serverAt = newest.addingTimeInterval(-1)
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id,
+            observationID: observation.id,
+            observationStatus: "pending_review",
+            activityRows: [(FieldResolutionOutcome.activityType, "pending_review", serverAt)],
+            fieldSubmission: (sessionID, shotID, serverAt)
+        )
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        let reconciled = try XCTUnwrap(try store.fetchObservations(propertyID: property.id).first)
+        XCTAssertEqual(reconciled.status, .pendingReview)
+        XCTAssertTrue(reconciled.appearsInFieldIssueList(currentSessionID: UUID()))
+        XCTAssertEqual(reconciled.historyEvents.last { $0.field == FieldResolutionOutcome.historyField }?.afterValue, "pending_review")
+
+        let metadata = try store.loadSessionMetadata(propertyID: property.id, sessionID: sessionID)
+        XCTAssertEqual(metadata.issues.first?.issueStatus, "pending_review")
+        XCTAssertEqual(metadata.shots.first?.issueStatus, "pending_review")
+        XCTAssertEqual(metadata.shots.first?.captureKind, "resolved_capture")
+        let repeatResult = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        XCTAssertEqual(repeatResult.appliedCount, 0)
+    }
+
+    func testServerAutoResolutionRemovesIssueFromNextSessionDespiteStaleSnapshot() throws {
+        let (store, property, observation, sessionID, shotID) = try makeFieldResolution(requiresReview: true)
+        let serverAt = newest.addingTimeInterval(10)
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id,
+            observationID: observation.id,
+            observationStatus: "resolved",
+            activityRows: [(FieldResolutionOutcome.activityType, "resolved", serverAt)],
+            fieldSubmission: (sessionID, shotID, serverAt.addingTimeInterval(1))
+        )
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        let staleSnapshot = makeCompletedFlaggedSessionMetadata(
+            propertyID: property.id, sessionID: sessionID, issueID: observation.id, shotID: shotID,
+            priority: "High", trade: "Paint", issueStatus: "pending_review"
+        )
+        try store.saveSessionMetadataAtomically(propertyID: property.id, sessionID: sessionID, metadata: staleSnapshot)
+        try store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: property.id, sessionID: sessionID, metadata: staleSnapshot
+        )
+        let reconciled = try XCTUnwrap(try store.fetchObservations(propertyID: property.id).first)
+        XCTAssertEqual(reconciled.status, .resolved)
+        XCTAssertFalse(reconciled.appearsInFieldIssueList(currentSessionID: UUID()))
+        let metadata = try store.loadSessionMetadata(propertyID: property.id, sessionID: sessionID)
+        XCTAssertEqual(metadata.issues.first?.issueStatus, "resolved")
+        XCTAssertEqual(metadata.shots.first?.issueStatus, "resolved")
+    }
+
+    func testServerOutcomeReconcilesRestoredSubmissionWithoutLocalHistory() throws {
+        let (store, property) = try makeStore()
+        let sessionID = UUID()
+        let shotID = UUID()
+        var observation = makeObservation(id: UUID(), propertyID: property.id, status: .pendingReview)
+        observation.linkedShotID = shotID
+        observation.resolvedInSessionID = sessionID
+        observation.updatedAt = newest.addingTimeInterval(20)
+        _ = try store.createObservation(observation)
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id,
+            observationID: observation.id,
+            observationStatus: "resolved",
+            activityRows: [(FieldResolutionOutcome.activityType, "resolved", newest)],
+            fieldSubmission: (sessionID, shotID, observation.updatedAt)
+        )
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        let restored = try XCTUnwrap(try store.fetchObservations(propertyID: property.id).first)
+        XCTAssertEqual(restored.status, .resolved)
+        XCTAssertFalse(restored.appearsInFieldIssueList(currentSessionID: UUID()))
+    }
+
+    func testServerOutcomeForAnOlderPhotoCannotReplaceNewerSubmissionInSameSession() throws {
+        let (store, property, observation, sessionID, _) = try makeFieldResolution(requiresReview: false)
+        let serverAt = newest.addingTimeInterval(10)
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id,
+            observationID: observation.id,
+            observationStatus: "pending_review",
+            activityRows: [(FieldResolutionOutcome.activityType, "pending_review", serverAt)],
+            fieldSubmission: (sessionID, UUID(), serverAt)
+        )
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        let reloaded = try XCTUnwrap(try store.fetchObservations(propertyID: property.id).first)
+        XCTAssertEqual(reloaded.status, .resolved)
+        XCTAssertEqual(reloaded.linkedShotID, observation.linkedShotID)
+    }
+
+    func testHumanRejectionAfterPolicyOutcomeStillReopensIssue() throws {
+        let (store, property, observation, sessionID, shotID) = try makeFieldResolution(requiresReview: false)
+        let serverAt = newest.addingTimeInterval(10)
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id,
+            observationID: observation.id,
+            observationStatus: "active",
+            activityRows: [
+                (FieldResolutionOutcome.activityType, "pending_review", serverAt),
+                ("completion_rejected", nil, serverAt.addingTimeInterval(1))
+            ],
+            fieldSubmission: (sessionID, shotID, serverAt)
+        )
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        let staleSnapshot = makeCompletedFlaggedSessionMetadata(
+            propertyID: property.id, sessionID: sessionID, issueID: observation.id, shotID: shotID,
+            priority: "High", trade: "Paint", issueStatus: "resolved"
+        )
+        try store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: property.id, sessionID: sessionID, metadata: staleSnapshot
+        )
+        let reloaded = try XCTUnwrap(try store.fetchObservations(propertyID: property.id).first)
+        XCTAssertEqual(reloaded.status, .active)
+        XCTAssertNil(reloaded.resolvedInSessionID)
+    }
+
+    func testChecklistResolutionCanReconcileWithoutAnEvidenceShot() throws {
+        let (store, property) = try makeStore()
+        let sessionID = UUID()
+        _ = try store.upsertSession(Session(id: sessionID, propertyID: property.id))
+        var observation = makeObservation(id: UUID(), propertyID: property.id)
+        observation.recordFieldResolution(requiresReview: false, sessionID: sessionID, shotID: nil, at: newest)
+        observation = try store.createObservation(observation)
+        _ = try store.syncFlaggedObservationUpdateToSessionMetadata(
+            propertyID: property.id, sessionID: sessionID, observation: observation, shotID: nil,
+            trade: observation.trade, activeCaptureKind: "resolved_capture", updatedAt: newest
+        )
+        let metadata = try store.loadSessionMetadata(propertyID: property.id, sessionID: sessionID)
+        XCTAssertTrue(metadata.shots.isEmpty)
+        XCTAssertEqual(metadata.issues.first?.issueStatus, "resolved")
+        XCTAssertEqual(metadata.issues.first?.statusForUpload(sessionID: sessionID), "pending_review")
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id, observationID: observation.id, observationStatus: "pending_review",
+            activityRows: [(FieldResolutionOutcome.activityType, "pending_review", newest)],
+            fieldSubmission: (sessionID, nil, newest)
+        )
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        XCTAssertEqual(try store.fetchObservations(propertyID: property.id).first?.status, .pendingReview)
+        XCTAssertEqual(try store.loadSessionMetadata(propertyID: property.id, sessionID: sessionID).issues.first?.issueStatus, "pending_review")
+    }
+
+    private func makeFieldResolution(requiresReview: Bool) throws -> (LocalStore, Property, Observation, UUID, UUID) {
+        let (store, property) = try makeStore()
+        let issueID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        _ = try store.upsertSession(Session(id: sessionID, propertyID: property.id))
+        let metadata = makeCompletedFlaggedSessionMetadata(
+            propertyID: property.id, sessionID: sessionID, issueID: issueID, shotID: shotID,
+            priority: "High", trade: "Paint"
+        )
+        try store.saveSessionMetadataAtomically(propertyID: property.id, sessionID: sessionID, metadata: metadata)
+        var observation = makeObservation(id: issueID, propertyID: property.id)
+        observation.linkedShotID = shotID
+        observation.recordFieldResolution(requiresReview: requiresReview, sessionID: sessionID, shotID: shotID, at: newest)
+        observation = try store.createObservation(observation)
+        _ = try store.syncFlaggedObservationUpdateToSessionMetadata(
+            propertyID: property.id, sessionID: sessionID, observation: observation, shotID: shotID,
+            trade: observation.trade, activeCaptureKind: "resolved_capture", updatedAt: newest
+        )
+        return (store, property, observation, sessionID, shotID)
     }
 }

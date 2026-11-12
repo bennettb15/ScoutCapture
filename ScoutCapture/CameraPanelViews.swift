@@ -16,6 +16,61 @@ private func verboseLog(_ message: @autoclosure () -> String) {
     print(message())
 }
 
+enum IssueRowCaptureStyle: Equatable {
+    case idle
+    case captured
+    case pendingReview
+
+    static let pendingReviewInk = Color(red: 0.77, green: 0.71, blue: 0.99)
+
+    init(status: Observation.Status, isCaptured: Bool) {
+        if status == .pendingReview {
+            self = .pendingReview
+        } else {
+            self = isCaptured ? .captured : .idle
+        }
+    }
+
+    func background(idleOpacity: Double) -> Color {
+        switch self {
+        case .idle: return .black.opacity(idleOpacity)
+        case .captured: return Color(red: 0.04, green: 0.42, blue: 0.14).opacity(0.88)
+        case .pendingReview: return Color(red: 0.18, green: 0.10, blue: 0.33)
+        }
+    }
+
+    var border: Color {
+        switch self {
+        case .idle: return .white.opacity(0.12)
+        case .captured: return .green.opacity(0.90)
+        case .pendingReview: return Color(red: 0.55, green: 0.36, blue: 0.96)
+        }
+    }
+
+    @ViewBuilder
+    var thumbnailBadge: some View {
+        switch self {
+        case .idle:
+            EmptyView()
+        case .captured:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                .padding(4)
+                .accessibilityHidden(true)
+        case .pendingReview:
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Self.pendingReviewInk)
+                .frame(width: 22, height: 22)
+                .background(background(idleOpacity: 0), in: Circle())
+                .padding(4)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
 private struct ChecklistDisplayOrder {
     let state: Int
     let building: String
@@ -2815,6 +2870,9 @@ struct ActiveIssuesSheet: View {
                 if observation.status == .pendingReview {
                     return "Pending Review"
                 }
+                if observation.status == .resolved && observation.hasFieldResolutionHistory {
+                    return "Resolved"
+                }
                 if observation.resolvedInSessionID == currentSessionID || canRetake || isSelectionDisabled {
                     return "Captured"
                 }
@@ -2856,15 +2914,19 @@ struct ActiveIssuesSheet: View {
             return "Active\(angleSuffix)"
         }
 
+        private var captureStyle: IssueRowCaptureStyle {
+            IssueRowCaptureStyle(status: observation.status, isCaptured: isCapturedInCurrentSession)
+        }
+
         private var statusColor: Color {
+            if captureStyle == .pendingReview {
+                return IssueRowCaptureStyle.pendingReviewInk
+            }
             if isCapturedInCurrentSession {
                 return .white
             }
             if observation.status == .resolutionRequired {
                 return .green
-            }
-            if observation.status == .pendingReview {
-                return .blue
             }
             if observation.resolvedInSessionID == currentSessionID {
                 return .green
@@ -2908,7 +2970,7 @@ struct ActiveIssuesSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(contextLabel)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(isCapturedInCurrentSession ? .white :
+                        .foregroundColor(captureStyle != .idle ? .white :
                             (observation.status == .resolved ? .secondary : .primary))
                         .lineLimit(1)
 
@@ -2960,14 +3022,11 @@ struct ActiveIssuesSheet: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(isCapturedInCurrentSession
-                ? Color(red: 0.04, green: 0.42, blue: 0.14).opacity(0.88)
-                : Color.black.opacity(0.35))
+            .background(captureStyle.background(idleOpacity: 0.35))
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .overlay(
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(isCapturedInCurrentSession ? Color.green.opacity(0.90) : Color.white.opacity(0.12),
-                            lineWidth: isCapturedInCurrentSession ? 1.5 : 1)
+                    .stroke(captureStyle.border, lineWidth: captureStyle == .idle ? 1 : 1.5)
             )
             .opacity(observation.status == .resolved && !isCapturedInCurrentSession ? 0.70 : 1.0)
             .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
@@ -3140,13 +3199,7 @@ struct ActiveIssuesSheet: View {
                     .stroke(Color.white.opacity(0.12), lineWidth: 1)
             )
             .overlay(alignment: .topTrailing) {
-                if hasCapturedImage {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
-                        .padding(4)
-                }
+                IssueRowCaptureStyle(status: observation.status, isCaptured: hasCapturedImage).thumbnailBadge
             }
         }
 

@@ -14178,6 +14178,11 @@ private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
 }
 
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
+    private struct FocusTap: Identifiable {
+        let id = UUID()
+        let point: CGPoint
+    }
+
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
@@ -14205,6 +14210,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneExitIntentActive: Bool = false
     @State private var isSavingFastCapture: Bool = false
     @State private var captureFlashVisible: Bool = false
+    @State private var focusTap: FocusTap?
     @State private var capturedCount: Int = 0
     @State private var fastLaneCaptureProfileHistoryLocked: Bool = false
     @State private var captureErrorMessage: String?
@@ -14320,7 +14326,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 selectedZoomID: camera.selectedZoomId,
                 actions: cameraChromeActions,
                 previewContent: {
-                    CameraPreviewView(session: camera.session)
+                    CameraPreviewView(
+                        session: camera.session,
+                        onTapDevicePoint: { point in
+                            guard camera.isPreviewRunning, !isClosing else { return }
+                            camera.focus(atDevicePoint: point)
+                        },
+                        onTapNormalizedPoint: { point in
+                            guard camera.isPreviewRunning, !isClosing else { return }
+                            focusTap = FocusTap(point: point)
+                        }
+                    )
                 },
                 overlayContent: {
                     fastLanePreviewOverlays
@@ -14410,6 +14426,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .zIndex(600)
             }
         }
+        .onChange(of: appState.isNetworkAvailable) { _, isAvailable in
+            if isAvailable, !isFastLaneExiting {
+                refreshFastLaneSideControlCounts(force: true)
+            }
+        }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             refreshCameraChromeGlyphRotation()
@@ -14456,6 +14477,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
         }
         .onDisappear {
+            focusTap = nil
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
             locationManager.stop()
             fastLaneLevelModel.stop()
@@ -15269,6 +15291,31 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         .rotationEffect(.degrees(glyphAngleDegrees))
                         .allowsHitTesting(false)
                         .zIndex(11)
+                }
+            }
+        }
+
+        if let focusTap {
+            GeometryReader { geometry in
+                Circle()
+                    .stroke(Color.white, lineWidth: 3)
+                    .frame(width: 74, height: 74)
+                    .position(
+                        x: focusTap.point.x * geometry.size.width,
+                        y: focusTap.point.y * geometry.size.height
+                    )
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .zIndex(30)
+            .task(id: focusTap.id) {
+                do {
+                    try await Task.sleep(for: .milliseconds(750))
+                } catch {
+                    return
+                }
+                if self.focusTap?.id == focusTap.id {
+                    self.focusTap = nil
                 }
             }
         }
@@ -16246,7 +16293,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 return
             }
-            let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+            let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID, currentSessionID: context.sessionID)
             await MainActor.run {
                 let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
                     resolutionRequiredObservations: [],
@@ -16667,7 +16714,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
         }
         let localActive = localIssues.filter {
-            !existingActiveIDs.contains($0.id)
+            !existingActiveIDs.contains($0.id) && $0.status != .resolved
         }
         return AppState.FastRuntimePreviewSideControlPayload(
             resolutionRequiredObservations: [],
@@ -16830,12 +16877,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     ) -> Observation {
         guard let localObservation else { return observation }
         var scoped = observation
-        if localObservation.status != .active || scoped.status == .active {
-            scoped.status = localObservation.status
+        if !observation.hasFieldResolutionHistory {
+            if localObservation.status != .active || scoped.status == .active {
+                scoped.status = localObservation.status
+            }
+            scoped.linkedShotID = localObservation.linkedShotID ?? scoped.linkedShotID
+            scoped.updatedInSessionID = localObservation.updatedInSessionID ?? scoped.updatedInSessionID
+            scoped.resolvedInSessionID = localObservation.resolvedInSessionID ?? scoped.resolvedInSessionID
         }
-        scoped.linkedShotID = localObservation.linkedShotID ?? scoped.linkedShotID
-        scoped.updatedInSessionID = localObservation.updatedInSessionID ?? scoped.updatedInSessionID
-        scoped.resolvedInSessionID = localObservation.resolvedInSessionID ?? scoped.resolvedInSessionID
         if fastLaneTrimmedNonEmpty(scoped.resolutionPhotoRef) == nil {
             scoped.resolutionPhotoRef = localObservation.resolutionPhotoRef
         }
@@ -17636,11 +17685,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         switch fastLaneCaptureIntent {
         case .resolution:
             return fastLaneSideControlPayload.resolutionRequiredObservations.first(where: { $0.id == issueID }) ??
-                appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+                appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID, currentSessionID: context.sessionID)
                     .resolutionRequiredObservations.first(where: { $0.id == issueID })
         case .flagged:
             return fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
-                appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+                appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID, currentSessionID: context.sessionID)
                     .activeObservations.first(where: { $0.id == issueID })
         default:
             return nil
@@ -17856,7 +17905,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func presentFastLaneFlaggedDecision(issueID: UUID, shotID: UUID) {
         let observation = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
-            appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+            appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID, currentSessionID: context.sessionID)
                 .activeObservations
                 .first(where: { $0.id == issueID })
         let reason = observation.map(fastLaneObservationReasonText) ?? "Flagged issue"
@@ -17941,27 +17990,27 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func applyFastLaneFlaggedResolveDecision(_ pending: FastLanePendingFlaggedDecision) {
         guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
-        let didResolve = appState.fastRuntimeResolveFlaggedObservationAfterCapture(
+        let observation = appState.fastRuntimeResolveFlaggedObservationAfterCapture(
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             observationID: pending.issueID,
             shotID: pending.shotID
         )
         fastLanePendingFlaggedDecision = nil
-        let observation = didResolve ? updatedFastLaneObservation(issueID: pending.issueID) : nil
+        guard let observation else {
+            showFastLaneSideControlToast("Could not resolve issue")
+            return
+        }
         refreshFastLaneIssueShotRecordFromLocalObservation(
             issueID: pending.issueID,
             shotID: pending.shotID,
             captureKind: "resolved_capture",
-            issueStatusOverride: Observation.Status.pendingReview.issueStatusValue,
             reasonOverride: pending.reason,
             priorityOverride: pending.priority,
             observation: observation
         )
-        if let observation {
-            showUpdatedFastLaneObservation(observation)
-        }
-        showFastLaneSideControlToast(didResolve ? "Issue submitted for review" : "Could not resolve issue")
+        showUpdatedFastLaneObservation(observation)
+        showFastLaneSideControlToast(observation.fieldResolutionToast)
     }
 
     private func showFastLaneSideControlToast(_ text: String, duration: TimeInterval = 1.8) {
@@ -17978,7 +18027,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         issueID: UUID,
         shotID: UUID,
         captureKind: String,
-        issueStatusOverride: String? = nil,
         reasonOverride: String? = nil,
         priorityOverride: String? = nil,
         observation: Observation? = nil
@@ -17993,8 +18041,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let reason = fastLaneTrimmedNonEmpty(reasonOverride) ??
             observation.map(fastLaneObservationReasonText)
         let priority = normalizedFastLaneDetailPriority(priorityOverride ?? observation?.priority)
-        let issueStatus = fastLaneTrimmedNonEmpty(issueStatusOverride) ??
-            observation?.status.issueStatusValue
+        let issueStatus = observation?.status.issueStatusValue
 
         guard let data = try? Data(contentsOf: metadataURL) else { return }
         let decoder = JSONDecoder()
@@ -20166,15 +20213,15 @@ private struct FastLaneIssueListRow: View {
         }
     }
 
+    private var captureStyle: IssueRowCaptureStyle {
+        IssueRowCaptureStyle(status: observation.status, isCaptured: isHandledInCurrentSession)
+    }
+
     private var statusColor: Color {
-        if isHandledInCurrentSession { return .white }
-        switch observation.status {
-        case .resolutionRequired, .resolved:
-            return .green
-        case .pendingReview:
-            return .blue
-        case .active:
-            return isHandledInCurrentSession ? .green : .orange
+        switch captureStyle {
+        case .pendingReview: return IssueRowCaptureStyle.pendingReviewInk
+        case .captured: return .white
+        case .idle: return observation.status == .active ? .orange : .green
         }
     }
 
@@ -20198,19 +20245,13 @@ private struct FastLaneIssueListRow: View {
             }
             .buttonStyle(.borderless)
             .overlay(alignment: .topTrailing) {
-                if isHandledInCurrentSession {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
-                        .padding(4)
-                }
+                captureStyle.thumbnailBadge
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(isHandledInCurrentSession ? .white : (observation.status == .resolved ? .secondary : .primary))
+                    .foregroundColor(captureStyle != .idle ? .white : (observation.status == .resolved ? .secondary : .primary))
                     .lineLimit(1)
 
                 if !statusLabel.isEmpty {
@@ -20259,14 +20300,11 @@ private struct FastLaneIssueListRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(FastLaneCaptureCellBackground(
-            isCaptured: isHandledInCurrentSession,
-            idleBlackOpacity: 0.35
-        ))
+        .background(captureStyle.background(idleOpacity: 0.35))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(isHandledInCurrentSession ? Color.green.opacity(0.90) : Color.white.opacity(0.12), lineWidth: isHandledInCurrentSession ? 1.5 : 1)
+                .stroke(captureStyle.border, lineWidth: captureStyle == .idle ? 1 : 1.5)
         )
         .opacity(observation.status == .resolved && !isHandledInCurrentSession ? 0.70 : 1.0)
         .contentShape(Rectangle())
