@@ -418,6 +418,32 @@ def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
 
 
 class ReportWorkerEmailNotificationTests(unittest.TestCase):
+    def test_legacy_review_decisions_must_cover_the_exact_sealed_photos(self) -> None:
+        first = {"observation_id": "issue-1", "shot_id": "photo-1"}
+        second = {"observation_id": "issue-2", "shot_id": "photo-2"}
+        validation = {
+            "source_provenance": {"legacy_pending_resolution_photos": [first, second]},
+            "inputs": {"session": {}, "ordered_shots": [{"issue_id": "issue-1", "shot_id": "photo-1"},
+                                                         {"issue_id": "issue-2", "shot_id": "photo-2"}]},
+        }
+        first_decision = {**first, "legacy": True, "decision_activity_id": "approval", "status": "resolved"}
+        second_decision = {**second, "legacy": True, "decision_activity_id": "rejection", "status": "active"}
+
+        for invalid in (
+            [first_decision],
+            [first_decision, {**second_decision, "observation_id": "other-issue"}],
+            [first_decision, {**second_decision, "decision_activity_id": None}],
+            [first_decision, first_decision],
+        ):
+            with self.assertRaisesRegex(worker.WorkerError, "sealed source snapshot"):
+                worker.apply_reviewed_resolutions(validation, invalid)
+
+        worker.apply_reviewed_resolutions(validation, [first_decision, second_decision])
+        self.assertEqual(
+            ["resolved", "active"],
+            [shot["reviewed_resolution_status"] for shot in validation["inputs"]["ordered_shots"]],
+        )
+
     def test_reviewed_request_creates_separate_ready_package_and_is_idempotent(self) -> None:
         client = FakeSupabaseClient()
         original = package()

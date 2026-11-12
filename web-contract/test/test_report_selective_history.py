@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import tempfile
@@ -236,6 +237,43 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(validation['reports']['flagged_comparison']['comparison_count'], 8)
         self.assertEqual(validation['source_provenance']['guided_baseline']['snapshot_id'], 'snapshot-full')
         self.assertEqual(validation['inputs']['ordered_shots'][0]['shot_id'], 'photo-0-full')
+
+    def test_legacy_validation_uses_pending_photos_from_exact_sealed_visit(self):
+        earlier = source('earlier', 2, 'punchlist_visit', [
+            shot(0, 'earlier', 2, status='pending_review', kind='resolved_capture')
+        ])
+        visit = source('legacy', 3, 'punchlist_visit', [
+            shot(1, 'legacy', 3, status='pending_review', kind='resolved_capture'),
+            shot(2, 'legacy', 3, status='resolved', kind='resolved_capture'),
+        ])
+        row = visit['row']
+        raw = visit['payload']['rawSessionJSON']
+        row['raw_session_json_sha256'] = hashlib.sha256(raw.encode()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'row.json').write_text(json.dumps(row))
+            (root / 'payload.json').write_text(json.dumps(visit['payload']))
+            (root / 'history.json').write_text(json.dumps([
+                {'row': item['row'], 'payload': item['payload']} for item in (self.baseline, earlier, visit)
+            ]))
+            (root / 'storage.json').write_text(json.dumps({'objects': [
+                {'bucket': 'scoutcapture-originals', 'path': photo['storagePath']}
+                for item in (self.baseline, earlier, visit) for photo in item['metadata']['shots']
+            ]}))
+            args = SimpleNamespace(snapshot_row_fixture=str(root / 'row.json'),
+                snapshot_payload_fixture=str(root / 'payload.json'),
+                history_fixture=str(root / 'history.json'), storage_fixture=str(root / 'storage.json'),
+                canonical_fixture=None, include_runtime=False, session_id=None, snapshot_id=row['id'],
+                legacy_review_source=True, snapshot_history_only=True)
+            validation = report_input.build_validation(args)
+            self.assertEqual(
+                validation['source_provenance']['legacy_pending_resolution_photos'],
+                [{'shot_id': 'photo-1-legacy', 'observation_id': 'issue-1'}],
+            )
+            (root / 'row.json').write_text(json.dumps({**row, 'raw_session_json_sha256': '0' * 64}))
+            with self.assertRaisesRegex(report_input.Phase1Error, 'sealed snapshot hash'):
+                report_input.build_validation(args)
 
     def test_validation_without_full_baseline_skips_property_report(self):
         with tempfile.TemporaryDirectory() as folder:
