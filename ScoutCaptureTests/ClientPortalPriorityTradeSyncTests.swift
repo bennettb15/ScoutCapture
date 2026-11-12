@@ -1089,6 +1089,55 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertNil(updated.resolvedInSessionID)
     }
 
+    func testPortalStatusChangedActiveRestoresTwoPreviouslyResolvedItemsToNextSession() throws {
+        let (store, property, firstResolved, firstSessionID, firstShotID) = try makeFieldResolution(requiresReview: false)
+        var secondResolved = makeObservation(propertyID: property.id, status: .resolved)
+        secondResolved.currentReason = "Renamed flag"
+        secondResolved = try store.createObservation(secondResolved)
+        let alreadyOpen = try store.createObservation(makeObservation(propertyID: property.id))
+        let reopenedAt = newest.addingTimeInterval(10)
+        let overlays = [firstResolved.id, secondResolved.id].flatMap { issueID in
+            AppState.portalPunchlistOperationalOverlaysTestOnly(
+                propertyID: property.id,
+                observationID: issueID,
+                observationStatus: "resolved",
+                activityRows: [("status_changed", "active", reopenedAt)],
+                statusChangeFromValue: "resolved"
+            )
+        }
+        XCTAssertEqual(overlays.count, 2)
+        XCTAssertTrue(overlays.allSatisfy { $0.reopensResolved && $0.status == .active })
+
+        _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        let observations = try store.fetchObservations(propertyID: property.id)
+        let nextSessionID = UUID()
+        XCTAssertEqual(observations.filter { $0.appearsInFieldIssueList(currentSessionID: nextSessionID) }.count, 3)
+        XCTAssertEqual(observations.first { $0.id == firstResolved.id }?.status, .active)
+        XCTAssertEqual(observations.first { $0.id == secondResolved.id }?.status, .active)
+        XCTAssertEqual(observations.first { $0.id == alreadyOpen.id }?.status, .active)
+        XCTAssertTrue(observations.first { $0.id == firstResolved.id }?.historyEvents.contains {
+            $0.kind == .reopened && $0.beforeValue == "resolved" && $0.afterValue == "active"
+        } == true)
+
+        let staleSnapshot = makeCompletedFlaggedSessionMetadata(
+            propertyID: property.id,
+            sessionID: firstSessionID,
+            issueID: firstResolved.id,
+            shotID: firstShotID,
+            priority: "High",
+            trade: "Paint",
+            issueStatus: "resolved"
+        )
+        try store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: property.id,
+            sessionID: firstSessionID,
+            metadata: staleSnapshot
+        )
+        let afterSnapshot = try store.fetchObservations(propertyID: property.id)
+        XCTAssertEqual(afterSnapshot.first { $0.id == firstResolved.id }?.status, .active)
+        XCTAssertEqual(afterSnapshot.filter { $0.appearsInFieldIssueList(currentSessionID: nextSessionID) }.count, 3)
+    }
+
     func testResolutionRequiredAndActiveCountsAreSeparate() throws {
         let fixture = try makeStore()
         _ = try fixture.store.createObservation(
@@ -2372,6 +2421,7 @@ extension ClientPortalPriorityTradeSyncTests {
             fieldSubmission: (sessionID, shotID, serverAt)
         )
         _ = try store.applyPortalPunchlistOperationalOverlays(propertyID: property.id, overlays: overlays)
+        XCTAssertEqual(try store.fetchObservations(propertyID: property.id).first?.status, .active)
         let staleSnapshot = makeCompletedFlaggedSessionMetadata(
             propertyID: property.id, sessionID: sessionID, issueID: observation.id, shotID: shotID,
             priority: "High", trade: "Paint", issueStatus: "resolved"
