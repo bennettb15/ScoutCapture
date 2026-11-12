@@ -4,6 +4,16 @@ from __future__ import annotations
 
 FLAGGED_RGB = (211, 47, 47)
 RESOLVED_RGB = (38, 173, 86)
+PENDING_REVIEW_RGB = (109, 40, 217)
+ISSUE_STATUS_KEYS = (
+    "issue_status", "issueStatus", "snapshot_issue_status", "snapshotIssueStatus",
+    "status", "operational_status", "operationalStatus",
+)
+PENDING_REVIEW_STATUSES = {"pending_review", "pending"}
+MAGNIFIER_CENTER = (10.5, 10.5)
+MAGNIFIER_RADIUS = 5.5
+MAGNIFIER_HANDLE = ((14.5, 14.5), (19.5, 19.5))
+MAGNIFIER_BOUNDS = (4.0, 4.0, 21.0, 21.0)
 
 # Google Material Icons "flag" filled icon.
 # Source: https://fonts.google.com/icons?selected=Material+Icons:flag
@@ -36,7 +46,7 @@ CHECK_MARK_PATH = (
 
 
 def visual_state_rgb(state: str) -> tuple[int, int, int]:
-    return RESOLVED_RGB if state == "resolved" else FLAGGED_RGB
+    return {"resolved": RESOLVED_RGB, "pending_review": PENDING_REVIEW_RGB}.get(state, FLAGGED_RGB)
 
 
 def filled_flag_polygon() -> tuple[tuple[float, float], ...]:

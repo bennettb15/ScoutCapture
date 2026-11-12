@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "shared"))
@@ -45,6 +45,11 @@ except Exception:
 
 from scout_report_visuals import (
     CHECK_MARK_PATH,
+    MAGNIFIER_CENTER,
+    MAGNIFIER_HANDLE,
+    MAGNIFIER_RADIUS,
+    ISSUE_STATUS_KEYS,
+    PENDING_REVIEW_STATUSES,
     filled_flag_polygon,
     visual_state_rgb,
 )
@@ -139,6 +144,7 @@ class MediaItem:
     session_completed_at_utc: str | None = None
     session_exported_at_utc: str | None = None
     session_ended_at_utc: str | None = None
+    is_pending_review: bool = False
 
 
 def stable_json(data: Any, pretty: bool) -> str:
@@ -169,7 +175,7 @@ def normalized_token(value: Any) -> str:
     return text.replace("-", "_").strip().lower()
 
 
-def first_trimmed(item: dict[str, Any], keys: list[str]) -> str | None:
+def first_trimmed(item: dict[str, Any], keys: Sequence[str]) -> str | None:
     for key in keys:
         value = trim(item.get(key))
         if value:
@@ -178,6 +184,9 @@ def first_trimmed(item: dict[str, Any], keys: list[str]) -> str | None:
 
 
 def is_current_resolved_for_media(shot: dict[str, Any]) -> bool:
+    reviewed_status = shot.get("reviewed_resolution_status")
+    if reviewed_status in {"active", "resolved"}:
+        return reviewed_status == "resolved"
     if any(
         boolish(shot.get(key))
         for key in [
@@ -188,19 +197,8 @@ def is_current_resolved_for_media(shot: dict[str, Any]) -> bool:
         ]
     ):
         return True
-    issue_status = normalized_token(
-        first_trimmed(
-            shot,
-            [
-                "issue_status",
-                "issueStatus",
-                "snapshot_issue_status",
-                "snapshotIssueStatus",
-                "status",
-            ],
-        )
-    )
-    if issue_status in {"resolved", "pending_review", "pending"}:
+    issue_status = normalized_token(first_trimmed(shot, ISSUE_STATUS_KEYS))
+    if issue_status == "resolved" or issue_status in PENDING_REVIEW_STATUSES:
         return True
     capture_kind = normalized_token(
         first_trimmed(
@@ -384,6 +382,17 @@ def draw_flag(draw: ImageDraw.ImageDraw, x: float, y: float, size: float, state:
     def transform(point: tuple[float, float]) -> tuple[float, float]:
         return x + (point[0] / 24.0) * size, y + (point[1] / 24.0) * size
 
+    if state == "pending_review":
+        # Use a lighter violet against the dark photo stamp.
+        ink = (167, 139, 250, 255)
+        cx, cy = MAGNIFIER_CENTER
+        bounds = (*transform((cx - MAGNIFIER_RADIUS, cy - MAGNIFIER_RADIUS)),
+                  *transform((cx + MAGNIFIER_RADIUS, cy + MAGNIFIER_RADIUS)))
+        width = max(2, round(size * 0.11))
+        draw.ellipse(bounds, outline=ink, width=width)
+        draw.line([transform(point) for point in MAGNIFIER_HANDLE], fill=ink, width=width)
+        return
+
     if state == "resolved":
         points = [transform(point) for command, point in CHECK_MARK_PATH if command in {"M", "L"}]
         width = max(3, round(size * 0.16))
@@ -416,7 +425,10 @@ def prepare_image(item: MediaItem, source_path: pathlib.Path, output_path: pathl
     corner_radius = max((19 if is_portrait else 17) * overlay_scale, 13)
     max_overlay_width = out_width - (side_margin * 2)
 
-    visual_state = "resolved" if item.is_resolved_in_session else "flagged" if item.is_flagged else "none"
+    if item.is_pending_review:
+        visual_state = "pending_review"
+    else:
+        visual_state = "resolved" if item.is_resolved_in_session else "flagged" if item.is_flagged else "none"
     shows_flag = visual_state != "none"
     glyph_size = font_size * 0.82 if shows_flag else 0
     glyph_gap = max(11 * overlay_scale, 8) if shows_flag else 0
@@ -496,6 +508,10 @@ def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
                 session_ended_at_utc=shot.get("source_session_completed_at_utc") or session.get("ended_at_utc"),
                 is_flagged=bool(shot.get("is_flagged")),
                 is_resolved_in_session=is_current_resolved_for_media(shot),
+                is_pending_review=(
+                    shot.get("reviewed_resolution_status") not in {"active", "resolved"}
+                    and normalized_token(first_trimmed(shot, ISSUE_STATUS_KEYS)) in PENDING_REVIEW_STATUSES
+                ),
             )
         )
     return result
