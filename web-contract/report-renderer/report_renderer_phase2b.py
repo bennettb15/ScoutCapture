@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "shared"))
@@ -42,13 +42,20 @@ from scout_report_visuals import (
     CHECK_MARK_PATH,
     FILLED_FLAG_BOUNDS,
     FILLED_FLAG_PATH,
+    MAGNIFIER_BOUNDS,
+    MAGNIFIER_CENTER,
+    MAGNIFIER_HANDLE,
+    MAGNIFIER_RADIUS,
+    PENDING_REVIEW_RGB,
+    ISSUE_STATUS_KEYS,
+    PENDING_REVIEW_STATUSES,
     filled_flag_metadata,
     visual_state_rgb,
 )
 
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "phase2c-photo-notes-4"
+GENERATOR_VERSION = "phase2c-pending-review-5"
 PAGE_WIDTH = 612.0
 PAGE_HEIGHT = 792.0
 PAGE_SIZE = (PAGE_WIDTH, PAGE_HEIGHT)
@@ -58,6 +65,22 @@ PDF_IMAGE_JPEG_QUALITY = 80
 
 FLAG_COLOR = (0.827, 0.184, 0.184)
 RESOLVED_COLOR = (0.149, 0.678, 0.337)
+PENDING_REVIEW_COLOR = tuple(channel / 255 for channel in PENDING_REVIEW_RGB)
+STATE_BORDER_COLORS = {
+    "flagged": FLAG_COLOR,
+    "resolved": RESOLVED_COLOR,
+    "pending_review": (139 / 255, 92 / 255, 246 / 255),
+}
+STATE_BADGE_FILLS = {
+    "flagged": (1.0, 0.94, 0.94),
+    "resolved": (0.91, 0.97, 0.93),
+    "pending_review": (245 / 255, 243 / 255, 1.0),
+}
+INDEX_ROW_HEIGHT = 15.0
+INDEX_CONTINUATION_HEIGHT = 12.0
+INDEX_PAGE_NUMBER_WIDTH = 34.0
+INDEX_COLUMN_GAP = 10.0
+INDEX_FONT_SIZE = 9.0
 PRIORITY_COLORS = {
     "critical": (0.827, 0.184, 0.184),
     "high": (0.925, 0.486, 0.156),
@@ -370,7 +393,7 @@ def normalized_token(value: Any) -> str:
     return text.replace("-", "_").strip().lower()
 
 
-def first_trimmed(item: dict[str, Any], keys: list[str]) -> str | None:
+def first_trimmed(item: dict[str, Any], keys: Sequence[str]) -> str | None:
     for key in keys:
         value = trim(item.get(key))
         if value:
@@ -378,7 +401,7 @@ def first_trimmed(item: dict[str, Any], keys: list[str]) -> str | None:
     return None
 
 
-def resolved_signal(item: dict[str, Any]) -> bool:
+def resolved_signal(item: dict[str, Any], issue_status: str) -> bool:
     if any(
         boolish(item.get(key))
         for key in [
@@ -389,21 +412,7 @@ def resolved_signal(item: dict[str, Any]) -> bool:
         ]
     ):
         return True
-    issue_status = normalized_token(
-        first_trimmed(
-            item,
-            [
-                "issue_status",
-                "issueStatus",
-                "snapshot_issue_status",
-                "snapshotIssueStatus",
-                "status",
-                "operational_status",
-                "operationalStatus",
-            ],
-        )
-    )
-    if issue_status in {"resolved", "pending_review", "pending"}:
+    if issue_status == "resolved":
         return True
     capture_kind = normalized_token(
         first_trimmed(
@@ -435,9 +444,12 @@ def visual_state(item: dict[str, Any]) -> str:
     reviewed_status = item.get("reviewed_resolution_status")
     if reviewed_status in {"active", "resolved"}:
         return "flagged" if reviewed_status == "active" else "resolved"
-    if resolved_signal(item):
-        return "resolved"
+    status = normalized_token(first_trimmed(item, ISSUE_STATUS_KEYS))
     declared = normalized_token(item.get("visual_state") or item.get("visualState"))
+    if status in PENDING_REVIEW_STATUSES or (not status and declared == "pending_review"):
+        return "pending_review"
+    if resolved_signal(item, status):
+        return "resolved"
     if declared == "resolved":
         return "resolved"
     if any(boolish(item.get(key)) for key in ["is_flagged", "isFlagged", "flagged"]):
@@ -448,12 +460,10 @@ def visual_state(item: dict[str, Any]) -> str:
 
 
 def resolution_label(item: dict[str, Any]) -> str | None:
-    if visual_state(item) != "resolved":
-        return None
-    status = normalized_token(first_trimmed(item, [
-        "issue_status", "issueStatus", "snapshot_issue_status", "snapshotIssueStatus", "status",
-    ]))
-    return "Resolved in field · Pending Review" if status == "pending_review" else "Resolved"
+    return {
+        "pending_review": "Resolved in field · Pending Review",
+        "resolved": "Resolved",
+    }.get(visual_state(item))
 
 
 def resolution_suffix(item: dict[str, Any]) -> str:
@@ -1021,6 +1031,21 @@ def comparison_side_by_side_slots() -> list[dict[str, dict[str, float]]]:
     ]
 
 
+def index_display_lines(text: str, max_width: float) -> list[str]:
+    def fits(line: str) -> bool:
+        return text_width(line, "Helvetica", INDEX_FONT_SIZE) <= max_width
+
+    lines = [
+        ellipsize_text(line, "Helvetica", INDEX_FONT_SIZE, max_width)
+        for line in wrap_lines(text, "Helvetica", INDEX_FONT_SIZE, max_width)
+    ]
+    if len(lines) > 4:
+        tail = text.rsplit(" | ", 1)[-1]
+        # Keep the status wording together when an unusually long caption is shortened.
+        lines = [*lines[:2], "…", tail if fits(tail) else lines[-1]]
+    return lines or [""]
+
+
 def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> list[list[dict[str, Any]]]:
     if not lines:
         return []
@@ -1034,6 +1059,7 @@ def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> l
     cursor_y = top_y
     for line in lines:
         kind = line["kind"]
+        display_lines = []
         if kind == "sectionHeader":
             line_height = 18.0
             padding_before = 14.0 if not placed else 12.0
@@ -1047,10 +1073,14 @@ def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> l
             padding_before = 0.0
             line_spacing = 2.0
         else:
-            line_height = 15.0
+            text_width_limit = usable_width - INDEX_PAGE_NUMBER_WIDTH - INDEX_COLUMN_GAP
+            if line.get("is_flagged"):
+                text_width_limit -= marker_text_offset(line.get("visual_state") or "flagged", INDEX_FONT_SIZE)
+            display_lines = index_display_lines(line["text"], text_width_limit)
+            line_height = INDEX_ROW_HEIGHT + (len(display_lines) - 1) * INDEX_CONTINUATION_HEIGHT
             padding_before = 0.0
             line_spacing = 3.0
-        if cursor_y - padding_before - line_height < bottom_y:
+        if cursor_y - padding_before - line_height - line_offset < bottom_y:
             if placed:
                 pages.append(placed)
                 placed = []
@@ -1061,7 +1091,7 @@ def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> l
             "width": usable_width,
             "height": line_height,
         }
-        placed.append({**line, "rect": rect})
+        placed.append({**line, "rect": rect, **({"display_lines": display_lines} if display_lines else {})})
         cursor_y -= padding_before + line_height + line_spacing
     if placed:
         pages.append(placed)
@@ -1194,6 +1224,8 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "snapshot_issue_status",
         "snapshotIssueStatus",
         "status",
+        "operational_status",
+        "operationalStatus",
         "capture_kind",
         "captureKind",
         "first_capture_kind",
@@ -1780,6 +1812,7 @@ def make_plan(
             "colors": {
                 "flagged": FLAG_COLOR,
                 "resolved": RESOLVED_COLOR,
+                "pending_review": PENDING_REVIEW_COLOR,
                 "priority": PRIORITY_COLORS,
             },
             "flag_visual_language": {
@@ -1788,6 +1821,7 @@ def make_plan(
                 "metadata": filled_flag_metadata(),
                 "flagged_rgb": visual_state_rgb("flagged"),
                 "resolved_rgb": visual_state_rgb("resolved"),
+                "pending_review_rgb": PENDING_REVIEW_RGB,
                 "used_by": ["Phase 2A stamped image overlay", "Phase 2C PDF page markers"],
             },
         },
@@ -1825,6 +1859,19 @@ def color_tuple(rgb: tuple[float, float, float]) -> Color:
 
 def text_width(text: str, font: str, size: float) -> float:
     return pdfmetrics.stringWidth(text, font, size)
+
+
+def ellipsize_text(text: str, font: str, size: float, width: float) -> str:
+    if text_width(text, font, size) <= width:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if text_width(text[:middle] + "…", font, size) <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip() + "…"
 
 
 def draw_text(
@@ -2080,6 +2127,14 @@ def draw_state_marker(c: canvas.Canvas, x: float, y: float, size: float, state: 
         return x + (point[0] / 24.0) * size, y + ((24.0 - point[1]) / 24.0) * size
 
     c.saveState()
+    if state == "pending_review":
+        c.setStrokeColor(color_tuple(color))
+        c.setLineWidth(max(1.0, size * 0.11))
+        c.setLineCap(1)
+        c.circle(*transform(MAGNIFIER_CENTER), MAGNIFIER_RADIUS * size / 24, stroke=1, fill=0)
+        c.line(*transform(MAGNIFIER_HANDLE[0]), *transform(MAGNIFIER_HANDLE[1]))
+        c.restoreState()
+        return
     if state == "resolved":
         c.setStrokeColor(color_tuple(color))
         c.setLineWidth(max(1.8, size * 0.16))
@@ -2109,16 +2164,28 @@ def draw_state_marker(c: canvas.Canvas, x: float, y: float, size: float, state: 
     c.restoreState()
 
 
+def marker_bounds(state: str) -> tuple[float, float, float, float]:
+    return MAGNIFIER_BOUNDS if state == "pending_review" else FILLED_FLAG_BOUNDS
+
+
+def marker_text_offset(state: str, size: float) -> float:
+    min_x, _, max_x, _ = marker_bounds(state)
+    return size * 0.96 * (max_x - min_x) / 24 + 3.0
+
+
+def status_text_color(state: str) -> Color:
+    return color_tuple(PENDING_REVIEW_COLOR) if state == "pending_review" else black
+
+
 def draw_note(c: canvas.Canvas, text: str, rect: dict[str, float], state: str, align: str = "center", size: float = 10.0) -> None:
     c.saveState()
     c.setFont("Helvetica", size)
     font_size = size
     glyph_size = size * 0.96
-    icon_min_x, icon_min_y, icon_max_x, icon_max_y = FILLED_FLAG_BOUNDS
-    glyph_visible_width = glyph_size * ((icon_max_x - icon_min_x) / 24.0)
+    icon_min_x, icon_min_y, _, icon_max_y = marker_bounds(state)
     glyph_visible_height = glyph_size * ((icon_max_y - icon_min_y) / 24.0)
-    gap = 3.0
-    total = text_width(text, "Helvetica", font_size) + glyph_visible_width + gap
+    text_offset = marker_text_offset(state, size)
+    total = text_width(text, "Helvetica", font_size) + text_offset
     if align == "center":
         start_x = rect["x"] + max(0, (rect["width"] - total) / 2.0)
     else:
@@ -2128,8 +2195,8 @@ def draw_note(c: canvas.Canvas, text: str, rect: dict[str, float], state: str, a
     icon_box_y = cap_center - glyph_visible_height / 2.0 - (icon_min_y / 24.0) * glyph_size
     icon_box_x = start_x - (icon_min_x / 24.0) * glyph_size
     draw_state_marker(c, icon_box_x, icon_box_y, glyph_size, state)
-    c.setFillColor(black)
-    c.drawString(start_x + glyph_visible_width + gap, y, text)
+    c.setFillColor(status_text_color(state))
+    c.drawString(start_x + text_offset, y, text)
     c.restoreState()
 
 
@@ -2165,7 +2232,8 @@ def draw_priority_note(c: canvas.Canvas, priority: str, reason: str | None, rect
 
 def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float], priority: str | None = None) -> None:
     top_y = rect["y"] + rect["height"] - 14
-    draw_text(c, entry.get("caption") or "", {"x": rect["x"], "y": top_y, "width": rect["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
+    caption = ellipsize_text(entry.get("caption") or "", "Helvetica-Bold", 11, rect["width"])
+    draw_text(c, caption, {"x": rect["x"], "y": top_y, "width": rect["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
     state = entry.get("visual_state") or "none"
     label = resolution_label(entry)
     original = trim(entry.get("original_flagged_reason"))
@@ -2176,14 +2244,14 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
         if label:
             note = f"{label} - {note}"
         note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
-        if priority and state != "resolved":
+        if priority and not label:
             draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
         else:
             draw_note(c, note, note_rect, state)
         draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if priority:
-        if state == "resolved":
+        if label:
             reason = trim(entry.get("flagged_reason"))
             note = f"{label} - {reason}" if reason else label
             draw_note(c, note, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
@@ -2286,12 +2354,26 @@ def draw_index(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], log
         if line["kind"] == "sectionHeader":
             draw_text(c, line["text"], rect, "Helvetica-Bold", 11)
         elif line["kind"] == "photoItem":
-            page_rect = {"x": rect["x"] + rect["width"] - 34, "y": rect["y"], "width": 34, "height": rect["height"]}
-            text_rect = {"x": rect["x"], "y": rect["y"], "width": rect["width"] - 44, "height": rect["height"]}
-            if line.get("is_flagged"):
-                draw_note(c, line["text"], text_rect, line.get("visual_state") or "flagged", align="left", size=9)
-            else:
-                draw_text(c, line["text"], text_rect, size=9)
+            first_y = rect["y"] + rect["height"] - INDEX_ROW_HEIGHT
+            text_width_limit = rect["width"] - INDEX_PAGE_NUMBER_WIDTH - INDEX_COLUMN_GAP
+            text_rect = {"x": rect["x"], "y": first_y, "width": text_width_limit, "height": INDEX_ROW_HEIGHT}
+            page_rect = {
+                "x": rect["x"] + rect["width"] - INDEX_PAGE_NUMBER_WIDTH,
+                "y": first_y,
+                "width": INDEX_PAGE_NUMBER_WIDTH,
+                "height": INDEX_ROW_HEIGHT,
+            }
+            state = (line.get("visual_state") or "flagged") if line.get("is_flagged") else "none"
+            indent = marker_text_offset(state, INDEX_FONT_SIZE) if state != "none" else 0.0
+            display_lines = line.get("display_lines") or index_display_lines(line["text"], text_width_limit - indent)
+            for index, text in enumerate(display_lines):
+                line_rect = {**text_rect, "y": first_y - index * INDEX_CONTINUATION_HEIGHT}
+                if index == 0 and state != "none":
+                    draw_note(c, text, line_rect, state, align="left", size=INDEX_FONT_SIZE)
+                else:
+                    line_rect["x"] += indent
+                    line_rect["width"] -= indent
+                    draw_text(c, text, line_rect, size=INDEX_FONT_SIZE, fill=status_text_color(state))
             if line.get("page_number") is not None:
                 c.saveState()
                 c.setStrokeColor(Color(0, 0, 0, 0.35))
@@ -2300,7 +2382,7 @@ def draw_index(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], log
                 y = text_rect["y"] + text_rect["height"] / 2.0
                 c.line(text_rect["x"] + text_rect["width"] + 2, y, page_rect["x"] - 4, y)
                 c.restoreState()
-                draw_text(c, str(line["page_number"]), page_rect, size=9, align="right")
+                draw_text(c, str(line["page_number"]), page_rect, size=INDEX_FONT_SIZE, align="right")
         elif line["kind"] == "retiredNote":
             draw_text(c, line["text"], rect, "Helvetica-Bold", 9)
     draw_footer(c, page["number"], plan["session"]["property_address"])
@@ -2314,13 +2396,9 @@ def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any]
         entry = slot["entry"]
         state = visual_state(entry)
         entry["visual_state"] = state
-        border = None
-        if state == "resolved":
-            border = RESOLVED_COLOR
-        elif priority:
+        border = STATE_BORDER_COLORS.get(state)
+        if priority and state not in {"resolved", "pending_review"}:
             border = PRIORITY_COLORS[priority]
-        elif state == "flagged":
-            border = FLAG_COLOR
         draw_image_slot(c, entry.get("media_path"), slot.get("image_rect"), slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
         draw_metadata(c, entry, slot["caption_rect"], priority=priority)
     draw_footer(c, page["number"], plan["session"]["property_address"])
@@ -2391,7 +2469,7 @@ def draw_comparison_caption(c: canvas.Canvas, slot: dict[str, Any]) -> None:
             if index == 0:
                 draw_note(c, line, line_rect, state, size=font_size)
             else:
-                draw_text(c, line, line_rect, size=font_size, align="center")
+                draw_text(c, line, line_rect, size=font_size, fill=status_text_color(state), align="center")
         line_count = len(lines)
     if bool(entry.get("suppress_session_label")):
         return
@@ -2428,15 +2506,15 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
     code_size = comparison_fitted_font_size(code, 528.0, 11.0)
     draw_text(c, code, {"x": 42, "y": 679, "width": 528, "height": 18}, "Helvetica-Bold", code_size, align="center")
     current_state = visual_state(current)
-    if current_state in {"flagged", "resolved"}:
+    if current_state in STATE_BADGE_FILLS:
         badge_label = (resolution_label(current) or current_state).upper()
         badge_width = max(136.0, text_width(badge_label, "Helvetica-Bold", 9) + 43.0)
         c.saveState()
-        background = Color(0.91, 0.97, 0.93, 1) if current_state == "resolved" else Color(1.0, 0.94, 0.94, 1)
-        c.setFillColor(background)
+        c.setFillColor(color_tuple(STATE_BADGE_FILLS[current_state]))
         c.roundRect(42, 648, badge_width, 26, 7, stroke=0, fill=1)
         draw_state_marker(c, 52, 653, 14, current_state)
-        c.setFillColor(color_tuple(RESOLVED_COLOR if current_state == "resolved" else FLAG_COLOR))
+        ink = PENDING_REVIEW_COLOR if current_state == "pending_review" else STATE_BORDER_COLORS[current_state]
+        c.setFillColor(color_tuple(ink))
         c.setFont("Helvetica-Bold", 9)
         c.drawString(73, 657, badge_label)
         c.restoreState()
@@ -2457,7 +2535,7 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
         state = visual_state(entry)
         media_path = trim(entry.get("media_path"))
         has_image = bool(media_path and pathlib.Path(media_path).exists())
-        border = FLAG_COLOR if has_image and state == "flagged" else RESOLVED_COLOR if has_image and state == "resolved" else None
+        border = STATE_BORDER_COLORS.get(state)
         image_rect = slot.get("image_rect") or (slot.get("photo_available_rect") if slot.get("placeholder_reason") else None)
         if has_image:
             draw_image_slot(c, media_path, image_rect, slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)

@@ -8,7 +8,7 @@ import pathlib
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -143,6 +143,59 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                              if line["kind"] == "photoItem"]
                     self.assertEqual(1, len(lines))
                     self.assertTrue(lines[0]["text"].endswith(f" | {label}"), lines[0]["text"])
+                    self.assertEqual(status, lines[0]["visual_state"])
+                    self.assertTrue(" ".join(lines[0]["display_lines"]).endswith(label))
+
+    def test_approval_overrides_a_stale_pending_snapshot(self) -> None:
+        entry = {"issue_status": "pending_review", "reviewed_resolution_status": "resolved"}
+        self.assertEqual("resolved", renderer.visual_state(entry))
+        self.assertEqual("Resolved", renderer.resolution_label(entry))
+
+    def test_comparison_index_wraps_and_reserves_the_page_number_column(self) -> None:
+        payload = validation()
+        shot = payload["inputs"]["ordered_shots"][0]
+        shot["detail_type"] = "Exterior wall trim beside the rear covered pedestrian entrance " * 3
+        plan = renderer.build_comparison_plan(payload, media_lookup(), "09/22/2026", {}, {})
+        page = plan["pages"][1]
+        row = next(line for line in page["lines"] if line["kind"] == "photoItem")
+        self.assertGreater(len(row["display_lines"]), 1)
+        self.assertTrue(" ".join(row["display_lines"]).endswith("Resolved in field · Pending Review"))
+        self.assertEqual("comparison_photo", plan["pages"][row["page_number"] - 1]["kind"])
+
+        canvas = MagicMock()
+        with patch.object(renderer, "draw_logo"), patch.object(renderer, "draw_footer"):
+            renderer.draw_index(canvas, plan, page, None)
+
+        number_x, number_y, number_text = canvas.drawRightString.call_args.args
+        self.assertEqual(str(row["page_number"]), number_text)
+        self.assertEqual(row["rect"]["x"] + row["rect"]["width"], number_x)
+        text_right = number_x - renderer.INDEX_PAGE_NUMBER_WIDTH - renderer.INDEX_COLUMN_GAP
+        for index, text in enumerate(row["display_lines"]):
+            x, y, _ = next(call.args for call in canvas.drawString.call_args_list if call.args[-1] == text)
+            self.assertAlmostEqual(number_y - index * renderer.INDEX_CONTINUATION_HEIGHT, y)
+            self.assertLessEqual(x + renderer.text_width(text, "Helvetica", renderer.INDEX_FONT_SIZE), text_right)
+
+    def test_index_uses_wrapped_row_height_when_paginating(self) -> None:
+        text = "An intentionally wide exterior detail " * 11 + "| Resolved in field · Pending Review"
+        rows = [
+            {"kind": "photoItem", "text": text, "page_number": index + 8, "is_flagged": True, "visual_state": "pending_review"}
+            for index in range(36)
+        ]
+        pages = renderer.index_page_plans(rows, line_offset=28)
+        self.assertGreater(len(pages), 1)
+        self.assertEqual([row["page_number"] for row in rows], [row["page_number"] for page in pages for row in page])
+        for page in pages:
+            self.assertTrue(all(row["rect"]["y"] >= 96 for row in page))
+            for upper, lower in zip(page, page[1:]):
+                self.assertGreater(upper["rect"]["y"], lower["rect"]["y"] + lower["rect"]["height"])
+
+    def test_pending_marker_uses_a_stroked_lens_and_handle(self) -> None:
+        canvas = MagicMock()
+        renderer.draw_state_marker(canvas, 0, 0, 12, "pending_review")
+        canvas.circle.assert_called_once()
+        self.assertEqual({"stroke": 1, "fill": 0}, canvas.circle.call_args.kwargs)
+        canvas.line.assert_called_once()
+        canvas.drawPath.assert_not_called()
 
     def test_reviewed_rejection_overrides_the_historical_resolution_capture(self) -> None:
         payload = validation()
@@ -287,9 +340,9 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
             self.assertNotIn("former@example.com", json.dumps(plan))
 
-    def test_pending_review_item_gets_resolved_visual_state(self) -> None:
+    def test_pending_review_status_takes_precedence_over_capture_kind(self) -> None:
         self.assertEqual(
-            "resolved",
+            "pending_review",
             renderer.visual_state(
                 {
                     "issueStatus": "pending_review",
@@ -310,7 +363,7 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             ),
         )
 
-    def test_property_priority_and_comparison_plans_keep_resolved_current_photo(self) -> None:
+    def test_property_priority_and_comparison_plans_keep_pending_current_photo(self) -> None:
         payload = validation()
         lookup = media_lookup()
         logo = {}
@@ -323,7 +376,7 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             if page.get("kind") == "photo"
             for slot in page.get("slots", [])
         ]
-        self.assertEqual("resolved", property_slots[0]["entry"]["visual_state"])
+        self.assertEqual("pending_review", property_slots[0]["entry"]["visual_state"])
 
         priority_plan = renderer.build_priority_plan(payload, lookup, "09/22/2026", logo, weather)
         priority_slots = [
@@ -332,15 +385,15 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             if page.get("kind") == "priority_photo"
             for slot in page.get("slots", [])
         ]
-        self.assertEqual("resolved", priority_slots[0]["entry"]["visual_state"])
+        self.assertEqual("pending_review", priority_slots[0]["entry"]["visual_state"])
 
         comparison_plan = renderer.build_comparison_plan(payload, lookup, "09/22/2026", logo, weather)
         comparison_page = next(page for page in comparison_plan["pages"] if page.get("kind") == "comparison_photo")
         slots_by_role = {slot["role"]: slot for slot in comparison_page["slots"]}
-        self.assertEqual("resolved", slots_by_role["current"]["entry"]["visual_state"])
+        self.assertEqual("pending_review", slots_by_role["current"]["entry"]["visual_state"])
         self.assertEqual("flagged", slots_by_role["previous"]["entry"]["visual_state"])
 
-    def test_photo_page_draw_recomputes_resolved_border_from_pending_review(self) -> None:
+    def test_photo_page_draw_recomputes_pending_border_and_caption_state(self) -> None:
         calls = []
         metadata_states = []
         original_draw_image_slot = renderer.draw_image_slot
@@ -393,8 +446,8 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             renderer.draw_footer = original_draw_footer
             renderer.draw_text = original_draw_text
 
-        self.assertEqual([{"state": "resolved", "border": renderer.RESOLVED_COLOR}], calls)
-        self.assertEqual([{"state": "resolved", "priority": "high"}], metadata_states)
+        self.assertEqual([{"state": "pending_review", "border": renderer.STATE_BORDER_COLORS["pending_review"]}], calls)
+        self.assertEqual([{"state": "pending_review", "priority": "high"}], metadata_states)
 
     def test_comparison_draw_keeps_previous_red_and_current_resolved_green(self) -> None:
         image_calls = []
