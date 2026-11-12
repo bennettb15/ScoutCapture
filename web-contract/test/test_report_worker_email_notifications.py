@@ -531,7 +531,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
             "id": "current-request", "org_id": ORG_ID, "property_id": PROPERTY_ID, "status": "queued",
             "source_package_id": original["id"], "report_scope": "current_property", "current_state_hash": "initial",
             "current_issue_states": [
-                {"observation_id": "angle-2", "status": "resolved"},
+                {"observation_id": "angle-2", "status": "pending_review"},
                 {"observation_id": "angle-3", "status": "resolved"},
             ],
             "review_outcomes": [
@@ -562,7 +562,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
                 client = FakeSupabaseClient()
                 client.tables["report_packages"] = [dict(original)]
                 client.tables["reviewed_report_requests"] = [dict(request)]
-                state = {"package_id": original["id"], "state_hash": "initial", "unresolved_count": 0}
+                state = {"package_id": original["id"], "state_hash": "initial", "unresolved_count": 1}
                 final = {**state, "state_hash": "changed"} if changed else state
                 with patch.object(worker, "run_step", side_effect=run_step), \
                      patch.object(client, "rpc", create=True, side_effect=[state, state, final]), \
@@ -575,7 +575,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
                     else:
                         result = worker.process_reviewed_report_request(args, client, ROOT, request["id"])
                         validated = worker.read_json(pathlib.Path(result["validation_json"]))
-                        self.assertEqual([("later-completion", "resolved"), ("approved-photo", "resolved")], [
+                        self.assertEqual([("later-completion", "pending_review"), ("approved-photo", "resolved")], [
                             (shot["shot_id"], shot["issue_status"]) for shot in validated["inputs"]["punchlist_shots"]
                         ])
                         self.assertEqual(request["review_outcomes"], validated["source_provenance"]["reviewed_resolution_outcomes"])
@@ -592,7 +592,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         decision = {"shot_id": "different-photo", "observation_id": "issue", "status": "resolved",
                     "snapshot_id": "sealed", "session_id": "visit", "decision_activity_id": "approval"}
         for status, photo, message in (
-            ("pending_review", shot, "issues do not match"),
+            ("unknown", shot, "issues do not match"),
         ):
             with self.subTest(status=status, photo=photo):
                 validation = {"inputs": {"punchlist_shots": [photo], "session": {}},
@@ -603,7 +603,8 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
                     worker.apply_current_property_review(validation, request)
 
     def test_current_property_report_uses_live_status_after_review_setting_changed(self) -> None:
-        for status, kind in (("resolved", "resolved_capture"), ("active", "resolved_capture"),
+        for status, kind in (("resolved", "resolved_capture"), ("pending_review", "resolved_capture"),
+                             ("active", "resolved_capture"),
                              ("resolved", "flagged_capture")):
             with self.subTest(status=status, kind=kind):
                 photo = {"shot_id": "completion", "issue_id": "issue", "issue_status": "pending_review",
