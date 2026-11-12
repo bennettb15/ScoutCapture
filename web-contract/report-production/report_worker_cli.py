@@ -498,6 +498,11 @@ class SupabaseServiceClient:
             raise WorkerError(f"Expected list response from {table}.")
         return value
 
+    def rpc(self, function: str, args: dict[str, Any]) -> Any:
+        data = self.request("POST", f"{self.url}/rest/v1/rpc/{function}",
+                            body=json.dumps(args).encode("utf-8"), headers={"Content-Type": "application/json"})
+        return json.loads(data)
+
     def insert(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8")
         value = self.request(
@@ -2594,6 +2599,67 @@ def validate_report_input(
     return validation
 
 
+def verify_current_review_state(client: SupabaseServiceClient, request: dict[str, Any]) -> None:
+    state = client.rpc("current_reviewed_report_state", {
+        "p_org_id": request["org_id"], "p_property_id": request["property_id"],
+    })
+    if (
+        not isinstance(state, dict)
+        or state.get("package_id") != request["source_package_id"]
+        or state.get("state_hash") != request["current_state_hash"]
+        or state.get("unresolved_count") != 0
+    ):
+        raise WorkerError("The current property report changed. Refresh the property and request a new copy.")
+
+
+def apply_current_property_review(validation: dict[str, Any], request: dict[str, Any]) -> None:
+    expected = {row["observation_id"].lower(): row["status"] for row in request["current_issue_states"]}
+    inputs = validation["inputs"]
+    current = {str(shot["issue_id"]).lower(): shot for shot in inputs.get("punchlist_shots") or [] if shot.get("issue_id")}
+    if not expected or expected.keys() != current.keys() or set(expected.values()) - {"active", "resolved"}:
+        raise WorkerError("Current property issues do not match the latest sealed report photos.")
+
+    provenance = validation.setdefault("source_provenance", {})
+    source_sessions = {row["snapshot_id"]: row["session_id"] for row in provenance["source_snapshots"]}
+    decisions = {
+        (row["observation_id"].lower(), row["shot_id"].lower()): row
+        for row in request["review_outcomes"] if row.get("shot_id")
+    }
+    applied = []
+    # Apply decisions only to the exact latest photo for each issue.
+    for issue_id, shot in current.items():
+        status = expected[issue_id]
+        decision = decisions.get((issue_id, shot["shot_id"].lower()))
+        photo_status = str(shot.get("issue_status") or "").lower()
+        resolution_photo = shot.get("capture_kind") == "resolved_capture"
+        if decision:
+            if (
+                decision["status"] != status or not decision.get("decision_activity_id")
+                or source_sessions.get(decision["snapshot_id"]) != decision["session_id"]
+                or str(shot.get("source_shot_session_id") or "").lower() != decision["session_id"].lower()
+                or not resolution_photo
+            ):
+                raise WorkerError("A pinned decision does not match the current sealed completion photo.")
+            applied.append(decision)
+        elif (
+            (status == "resolved" and (photo_status != "resolved" or not resolution_photo))
+            or (status == "active" and (photo_status not in {"", "active"} or resolution_photo
+                                         or shot.get("is_resolved_in_session")))
+        ):
+            raise WorkerError("A current issue status has no matching sealed photo or review decision.")
+
+    current_ids = {shot["shot_id"].lower(): issue_id for issue_id, shot in current.items()}
+    for shot in (inputs.get("ordered_shots") or []) + inputs["punchlist_shots"]:
+        issue_id = current_ids.get(shot["shot_id"].lower())
+        if issue_id:
+            status = expected[issue_id]
+            shot.update(issue_status=status, reviewed_resolution_status=status,
+                        is_resolved_in_session=status == "resolved", is_flagged=True)
+    inputs["session"]["report_variant"] = "reviewed"
+    provenance["current_review_state_hash"] = request["current_state_hash"]
+    provenance["reviewed_resolution_outcomes"] = applied
+
+
 def apply_review_to_current_content(
     approval_source: dict[str, Any], content: dict[str, Any], outcomes: list[dict[str, Any]],
 ) -> None:
@@ -2636,6 +2702,7 @@ def process_session(
 ) -> dict[str, Any]:
     output_root = pathlib.Path(args.output_dir).resolve() / session_id.lower()
     reviewed_package_manifest = None
+    current_property_review = bool(reviewed_request and reviewed_request.get("report_scope") == "current_property")
     if reviewed_request:
         output_root /= f"reviewed-{reviewed_request['id']}"
         reviewed_package_manifest = {
@@ -2643,6 +2710,10 @@ def process_session(
             "source_package_id": reviewed_request["source_package_id"],
             "reviewed_report_request_id": reviewed_request["id"],
         }
+        if current_property_review:
+            reviewed_package_manifest["report_scope"] = "current_property"
+            reviewed_package_manifest["current_state_hash"] = reviewed_request["current_state_hash"]
+            verify_current_review_state(client, reviewed_request)
         if reviewed_content:
             output_root /= f"content-{reviewed_content['id']}"
             reviewed_package_manifest["content_package_id"] = reviewed_content["id"]
@@ -2658,14 +2729,19 @@ def process_session(
         raise WorkerError(f"Packaged vector logo asset is missing: {logo_svg}")
 
     flags = []
-    if reviewed_request and any(outcome.get("legacy") for outcome in reviewed_request["review_outcomes"]):
+    if current_property_review:
+        flags.append("--current-property-review")
+    elif reviewed_request and any(outcome.get("legacy") for outcome in reviewed_request["review_outcomes"]):
         flags.append("--legacy-review-source")
     if flags or reviewed_content:
         flags.append("--snapshot-history-only")
     validation = validate_report_input(repo, env, session_id, snapshot_id, validation_path, flags)
     if reviewed_request:
         outcomes = reviewed_request["review_outcomes"]
-        apply_reviewed_resolutions(validation, outcomes)
+        if current_property_review:
+            apply_current_property_review(validation, reviewed_request)
+        else:
+            apply_reviewed_resolutions(validation, outcomes)
         if reviewed_content:
             session_id = reviewed_content["session_id"]
             current = validate_report_input(
@@ -2773,10 +2849,12 @@ def process_session(
         uploaded_files = []
         report_plan_hashes = []
         reports = render_summary.get("reports", [])
-        if reviewed_content and {REPORT_TYPE_MAP[report["report_type"]] for report in reports} != {
+        if (reviewed_content or current_property_review) and {REPORT_TYPE_MAP[report["report_type"]] for report in reports} != {
             "property_report", "flagged_observations", "flagged_comparison",
         }:
             raise WorkerError("The current reviewed copy did not produce all three reports.")
+        if current_property_review:
+            verify_current_review_state(client, reviewed_request)
         for report in reports:
             report_type = REPORT_TYPE_MAP[report["report_type"]]
             pdf_path = pathlib.Path(report["pdf_path"])
@@ -2811,6 +2889,8 @@ def process_session(
             )
             report_plan_hashes.append(report["report_plan_sha256"])
 
+        if current_property_review:
+            verify_current_review_state(client, reviewed_request)
         completed_at = safe_iso_now()
         package_actor = validation_actor(validation)
         original_photo_actors = original_photo_actor_manifest(validation, prepared)
@@ -3031,6 +3111,8 @@ def process_reviewed_current_copy(
     if not rows or not rows[0].get("result_package_id"):
         raise WorkerError("A completed reviewed report request is required for a current copy.")
     request = rows[0]
+    if request.get("report_scope") == "current_property":
+        raise WorkerError("Request a new current property copy from the portal.")
     source = select_ready_package(client, request["source_package_id"])
     content = select_ready_package(client, content_package_id)
     for package in (source, content):

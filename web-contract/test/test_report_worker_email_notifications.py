@@ -525,6 +525,85 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual(original["id"], reviewed["manifest"]["source_package_id"])
         self.assertEqual(request["id"], reviewed["manifest"]["reviewed_report_request_id"])
 
+    def test_current_property_report_uses_exact_decisions_and_rechecks_before_publication(self) -> None:
+        original = {**package(), "id": "latest-automatic"}
+        request = {
+            "id": "current-request", "org_id": ORG_ID, "property_id": PROPERTY_ID, "status": "queued",
+            "source_package_id": original["id"], "report_scope": "current_property", "current_state_hash": "initial",
+            "current_issue_states": [
+                {"observation_id": "angle-2", "status": "resolved"},
+                {"observation_id": "angle-3", "status": "resolved"},
+            ],
+            "review_outcomes": [
+                {"observation_id": "angle-3", "shot_id": "approved-photo", "status": "resolved",
+                 "decision_activity_id": "older-approval", "snapshot_id": "old-snapshot", "session_id": "old-session"},
+            ],
+        }
+        fake_step = fake_worker_run_step("punchlist_visit", ["property", "priority", "comparison"])
+
+        def run_step(cmd, cwd, env):
+            fake_step(cmd, cwd, env)
+            if not any("report_input_phase1.py" in part for part in cmd):
+                return
+            self.assertIn("--current-property-review", cmd)
+            output = pathlib.Path(cmd[cmd.index("--output") + 1])
+            payload = worker.read_json(output)
+            latest_photo = {"shot_id": "later-completion", "issue_id": "angle-2", "issue_status": "resolved",
+                            "capture_kind": "resolved_capture", "source_shot_session_id": SESSION_ID}
+            approved_photo = {"shot_id": "approved-photo", "issue_id": "angle-3", "issue_status": "pending_review",
+                              "capture_kind": "resolved_capture", "source_shot_session_id": "old-session"}
+            payload["source_provenance"]["source_snapshots"].append({"snapshot_id": "old-snapshot", "session_id": "old-session"})
+            payload["inputs"]["ordered_shots"] = [latest_photo, approved_photo]
+            payload["inputs"]["punchlist_shots"] = [latest_photo, approved_photo]
+            worker.write_json(output, payload)
+
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as tmp:
+                client = FakeSupabaseClient()
+                client.tables["report_packages"] = [dict(original)]
+                client.tables["reviewed_report_requests"] = [dict(request)]
+                state = {"package_id": original["id"], "state_hash": "initial", "unresolved_count": 0}
+                final = {**state, "state_hash": "changed"} if changed else state
+                with patch.object(worker, "run_step", side_effect=run_step), \
+                     patch.object(client, "rpc", create=True, side_effect=[state, state, final]), \
+                     patch.object(worker, "send_report_ready_notifications") as email, \
+                     patch.object(worker, "mark_fast_lane_report_delivered") as delivery:
+                    args = worker_args(pathlib.Path(tmp))
+                    if changed:
+                        with self.assertRaisesRegex(worker.WorkerError, "current property report changed"):
+                            worker.process_reviewed_report_request(args, client, ROOT, request["id"])
+                    else:
+                        result = worker.process_reviewed_report_request(args, client, ROOT, request["id"])
+                        validated = worker.read_json(pathlib.Path(result["validation_json"]))
+                        self.assertEqual([("later-completion", "resolved"), ("approved-photo", "resolved")], [
+                            (shot["shot_id"], shot["issue_status"]) for shot in validated["inputs"]["punchlist_shots"]
+                        ])
+                        self.assertEqual(request["review_outcomes"], validated["source_provenance"]["reviewed_resolution_outcomes"])
+                    email.assert_not_called()
+                    delivery.assert_not_called()
+                self.assertEqual(original, client.tables["report_packages"][0])
+                status = "failed" if changed else "ready"
+                self.assertEqual(status, client.tables["reviewed_report_requests"][0]["status"])
+                self.assertEqual(status, client.tables["report_packages"][1]["status"])
+
+    def test_current_property_report_rejects_a_status_or_photo_mismatch(self) -> None:
+        shot = {"shot_id": "sealed-photo", "issue_id": "issue", "issue_status": "active",
+                "capture_kind": "follow_up_capture", "source_shot_session_id": "visit"}
+        decision = {"shot_id": "different-photo", "observation_id": "issue", "status": "resolved",
+                    "snapshot_id": "sealed", "session_id": "visit", "decision_activity_id": "approval"}
+        for status, photo, message in (
+            ("pending_review", shot, "issues do not match"),
+            ("resolved", shot, "no matching sealed photo"),
+            ("active", {**shot, "capture_kind": "resolved_capture"}, "no matching sealed photo"),
+        ):
+            with self.subTest(status=status, photo=photo):
+                validation = {"inputs": {"punchlist_shots": [photo], "session": {}},
+                              "source_provenance": {"source_snapshots": [{"snapshot_id": "sealed", "session_id": "visit"}]}}
+                request = {"current_issue_states": [{"observation_id": "issue", "status": status}],
+                           "review_outcomes": [decision], "current_state_hash": "hash"}
+                with self.assertRaisesRegex(worker.WorkerError, message):
+                    worker.apply_current_property_review(validation, request)
+
     def test_current_reviewed_copy_uses_later_photo_and_reuses_exact_approval(self) -> None:
         client = FakeSupabaseClient()
         old_session = "20000000-0000-0000-0000-000000000002"
