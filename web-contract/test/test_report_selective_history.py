@@ -306,13 +306,14 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(by_issue['issue-0']['captured_at_utc'], '2026-10-02T10:30:00Z')
 
     def test_retained_baseline_photo_uses_same_review_status_in_all_reports(self):
-        baseline = source('full', 1, 'full_documentation',
-                          [shot(1, 'full', 1, guided=True, status='pending_review', kind='resolved_capture')],
-                          [issue(1, 'pending_review')])
-        current = source('visit', 2, 'punchlist_visit',
-                         [shot(12, 'visit', 2, status='pending_review', kind='resolved_capture')],
+        prior = source('prior', 1, 'punchlist_visit', [shot(1, 'prior', 1)], [issue(1)])
+        baseline = source('full', 2, 'full_documentation',
+                          [shot(1, 'full', 2, guided=True, status='pending_review', kind='resolved_capture')],
+                          [{**issue(1, 'pending_review'), 'currentReason': 'Updated observation'}])
+        current = source('visit', 3, 'punchlist_visit',
+                         [shot(12, 'visit', 3, status='pending_review', kind='resolved_capture')],
                          [issue(12, 'pending_review')])
-        composition = report_input.compose_punchlist_history([baseline, current], Storage())
+        composition = report_input.compose_punchlist_history([prior, baseline, current], Storage())
         report_input.apply_operational_overlays(composition, {
             'issue-1': {'activity_status': 'resolved', 'activity_priority': 'low'},
             'issue-12': {'activity_status': 'resolved'},
@@ -329,13 +330,17 @@ class SelectiveHistoryTests(unittest.TestCase):
                            report_renderer.build_comparison_plan,
                            report_renderer.build_priority_plan):
             with self.subTest(report=build_plan.__name__):
-                plan = build_plan(validation, lookup, '10/02/2026', {}, {})
+                plan = build_plan(validation, lookup, '10/03/2026', {}, {})
                 statuses = [line['visual_state'] for page in plan['pages']
                             for line in page.get('lines', []) if line['kind'] == 'photoItem']
                 self.assertCountEqual(statuses, ['resolved', 'pending_review'])
-        approved = next(shot for shot in composition['shots'] if shot['shot_id'] == 'photo-1-full')
+        property_plan = report_renderer.build_property_plan(validation, lookup, '10/03/2026', {}, {})
+        approved = next(slot['entry'] for page in property_plan['pages'] for slot in page.get('slots', [])
+                        if slot['entry']['shot_id'] == 'photo-1-full')
         self.assertEqual(approved['normalized_priority'], 'low')
-        self.assertEqual(approved['captured_at_utc'], '2026-10-01T10:30:00Z')
+        self.assertEqual(approved['captured_at_utc'], '2026-10-02T10:30:00Z')
+        self.assertEqual(approved['original_flagged_reason'], 'Observation 1')
+        self.assertEqual(approved['flagged_reason'], 'Updated observation')
 
     def test_portal_activity_scope_cannot_mix_organizations(self):
         class Client:
