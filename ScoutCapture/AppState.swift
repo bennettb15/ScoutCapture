@@ -55147,7 +55147,8 @@ final class AppState: ObservableObject {
                 nextStatus = (current?.status == .resolved && statusChange == .resolutionRequired)
                     ? .resolved
                     : statusChange
-                reopensResolved = false
+                reopensResolved = normalizedReplayText(activity.fromValue)?.lowercased() == "resolved" &&
+                    statusChange == .active
                 if nextStatus == current?.status {
                     fieldResolutionOutcome = current?.fieldResolutionOutcome
                 }
@@ -55547,6 +55548,7 @@ final class AppState: ObservableObject {
         observationPriority: String? = nil,
         observationTrade: String? = nil,
         activityRows: [(activityType: String, toValue: String?, createdAt: Date)],
+        statusChangeFromValue: String? = nil,
         fieldSubmission: (sessionID: UUID, shotID: UUID?, updatedAt: Date)? = nil
     ) -> [PortalPunchlistOperationalOverlay] {
         portalPunchlistOperationalOverlays(
@@ -55574,7 +55576,8 @@ final class AppState: ObservableObject {
                     shotID: row.activityType == FieldResolutionOutcome.activityType ? fieldSubmission?.shotID : nil,
                     activityType: row.activityType,
                     fromValue: row.activityType == FieldResolutionOutcome.activityType
-                        ? fieldSubmission?.sessionID.uuidString : nil,
+                        ? fieldSubmission?.sessionID.uuidString :
+                        (row.activityType == "status_changed" ? (statusChangeFromValue ?? observationStatus) : nil),
                     toValue: row.toValue,
                     note: nil,
                     createdBy: nil,

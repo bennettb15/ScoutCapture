@@ -2699,7 +2699,7 @@ final class LocalStore {
                                     timestamp: overlay.updatedAt ?? Date(),
                                     sessionID: nil,
                                     kind: .reopened,
-                                    beforeValue: Observation.Status.pendingReview.issueStatusValue,
+                                    beforeValue: before.status.issueStatusValue,
                                     afterValue: Observation.Status.active.issueStatusValue,
                                     field: "status",
                                     shotID: overlay.shotID ?? before.linkedShotID
@@ -2822,7 +2822,8 @@ final class LocalStore {
               incoming == .pendingReview || (incoming == .resolved && existing.hasFieldResolutionHistory),
               let reopen = existing.historyEvents.filter({
                   $0.kind == .reopened &&
-                      $0.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
+                      ($0.beforeValue == Observation.Status.pendingReview.issueStatusValue ||
+                          $0.beforeValue == Observation.Status.resolved.issueStatusValue) &&
                       $0.afterValue == Observation.Status.active.issueStatusValue
               }).max(by: { $0.timestamp < $1.timestamp }) else {
             return false
