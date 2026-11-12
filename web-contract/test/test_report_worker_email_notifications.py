@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -443,6 +444,39 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
             ["resolved", "active"],
             [shot["reviewed_resolution_status"] for shot in validation["inputs"]["ordered_shots"]],
         )
+
+    def test_reviewed_request_cli_accepts_a_scoped_remote_request_without_allowlist(self) -> None:
+        request_id = "50000000-0000-0000-0000-000000000001"
+        argv = ["report_worker_cli.py", "--allow-remote-validation", "--expected-project-ref", "review-test",
+                "--reviewed-report-request-id", request_id]
+        env = {"SUPABASE_URL": "https://review-test.supabase.co", "SUPABASE_SERVICE_ROLE_KEY": "fake"}
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), \
+             patch.object(worker, "process_reviewed_report_request") as process:
+            self.assertEqual(0, worker.main())
+        process.assert_called_once()
+        args, client, _, dispatched_id = process.call_args.args
+        self.assertEqual("remote-validation", client.environment)
+        self.assertEqual(request_id, dispatched_id)
+        self.assertEqual([], args.allow_session_id)
+
+    def test_reviewed_request_cli_preserves_remote_project_and_id_guards(self) -> None:
+        request_id = "50000000-0000-0000-0000-000000000001"
+        env = {"SUPABASE_URL": "https://review-test.supabase.co", "SUPABASE_SERVICE_ROLE_KEY": "fake"}
+        for flags, message in (
+            (["--reviewed-report-request-id", request_id], "without --allow-remote-validation"),
+            (["--allow-remote-validation", "--expected-project-ref", "other",
+              "--reviewed-report-request-id", request_id], "does not match"),
+            (["--allow-remote-validation", "--expected-project-ref", "review-test",
+              "--reviewed-report-request-id", "invalid"], "Invalid reviewed report request ID"),
+            (["--allow-remote-validation", "--expected-project-ref", "review-test",
+              "--session-id", SESSION_ID], "Remote validation requires at least one"),
+        ):
+            with self.subTest(flags=flags), patch.dict(os.environ, env, clear=True), \
+                 patch.object(sys, "argv", ["report_worker_cli.py", *flags]), \
+                 patch.object(worker, "process_reviewed_report_request") as process:
+                with self.assertRaisesRegex(worker.WorkerError, message):
+                    worker.main()
+                process.assert_not_called()
 
     def test_reviewed_request_creates_separate_ready_package_and_is_idempotent(self) -> None:
         client = FakeSupabaseClient()
