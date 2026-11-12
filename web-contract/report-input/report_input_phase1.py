@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snapshot-history-only", action="store_true", help="Use sealed documentation without current portal workflow overlays.")
     parser.add_argument("--legacy-review-source", action="store_true", help="Validate pending captures in the exact legacy snapshot.")
     parser.add_argument("--verify-sealed-source", action="store_true", help="Verify the exact sealed source and metadata hash.")
+    parser.add_argument("--current-property-review", action="store_true", help="Compose and verify sealed visit history for a current reviewed report.")
     parser.add_argument("--output", help="Write validation JSON to this path.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print deterministic JSON.")
     parser.add_argument(
@@ -981,7 +982,7 @@ def scoped_snapshot_history(
         offset = 0
         while True:
             page = client.select_rows("session_snapshots", {
-                "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,payload_storage_bucket,payload_storage_path,created_at,deleted_at",
+                "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,payload_storage_bucket,payload_storage_path,raw_session_json_sha256,created_at,deleted_at",
                 "org_id": f"eq.{org_id}", "property_id": f"eq.{property_id}",
                 "snapshot_kind": "eq.completed", "session_status": "eq.completed",
                 "is_sealed": "eq.true", "deleted_at": "is.null",
@@ -1020,6 +1021,9 @@ def scoped_snapshot_history(
         started = parse_date(metadata.get("startedAt"))
         if current_started and started and started > current_started:
             continue
+        if getattr(args, "current_property_review", False):
+            if hashlib.sha256(payload["rawSessionJSON"].encode("utf-8")).hexdigest() != row.get("raw_session_json_sha256"):
+                raise Phase1Error("Current reviewed report history does not match a sealed snapshot hash.")
         seen_sessions.add(sid)
         result.append({"row": row, "payload": payload, "metadata": metadata,
                        "session_type": normalized_session_type(metadata, payload),
@@ -1028,7 +1032,9 @@ def scoped_snapshot_history(
     return sorted(result, key=lambda item: (item["started"], str(item["row"].get("created_at") or "")))
 
 
-def compose_punchlist_history(sources: list[dict[str, Any]], storage: StorageProbe) -> dict[str, Any]:
+def compose_punchlist_history(
+    sources: list[dict[str, Any]], storage: StorageProbe, *, include_prior_issues: bool = False,
+) -> dict[str, Any]:
     """Use the newest full visit's layout and the latest real photo per issue."""
     baseline = next((source for source in reversed(sources)
                      if source["session_type"] == "full_documentation" and
@@ -1110,7 +1116,7 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
     since_baseline = {str(source["row"].get("session_id") or "").lower()
                       for source in sources[sources.index(baseline):]} if baseline else set()
     replacements = {shot["issue_id"].lower(): shot for shot in latest_shots
-                    if (baseline and shot["session_id"].lower() in since_baseline and
+                    if (baseline and (include_prior_issues or shot["session_id"].lower() in since_baseline) and
                         shot["shot_id"].lower() not in baseline_ids)}
     baseline_by_id = {shot["shot_id"].lower(): shot for shot in baseline_shots}
     entries = []
@@ -1231,7 +1237,8 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     shots.sort(key=lambda item: (item.get("captured_at_utc") or "", item.get("original_filename") or ""))
     legacy_pending_photos = None
     legacy_review = getattr(args, "legacy_review_source", False)
-    if legacy_review or getattr(args, "verify_sealed_source", False):
+    current_review = getattr(args, "current_property_review", False)
+    if legacy_review or current_review or getattr(args, "verify_sealed_source", False):
         if (
             str(row.get("id") or "").lower() != str(args.snapshot_id or "").lower()
             or not args.snapshot_id
@@ -1258,10 +1265,10 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         ]
     composition = None
     operational_overlays = {}
-    if session_type == "punchlist_visit":
+    if session_type == "punchlist_visit" or current_review:
         sources = scoped_snapshot_history(args, client, row, payload, metadata)
-        composition = compose_punchlist_history(sources, storage)
-        operational_overlays = {} if getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
+        composition = compose_punchlist_history(sources, storage, include_prior_issues=current_review)
+        operational_overlays = {} if current_review or getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
             client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
         finalized_shot_ids = {
             str(submission["shot_id"]).lower()
