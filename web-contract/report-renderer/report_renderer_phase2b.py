@@ -2200,19 +2200,21 @@ def draw_note(c: canvas.Canvas, text: str, rect: dict[str, float], state: str, a
     c.restoreState()
 
 
-def draw_priority_note(c: canvas.Canvas, priority: str, reason: str | None, rect: dict[str, float]) -> None:
+def draw_priority_note(c: canvas.Canvas, priority: str, reason: str | None, rect: dict[str, float], state: str = "flagged") -> None:
     label = PRIORITY_LABELS[priority]
-    reason_text = trim(reason) or "No reason provided"
+    reason_text = trim(reason)
     prefix = f"{label} (Priority) - "
-    suffix = f" - {reason_text}"
+    suffix = (f" - {reason_text}" if state == "flagged" else f" {reason_text}") if reason_text else ""
     c.saveState()
     c.setFont("Helvetica", 10)
     font_size = 10.0
     glyph_size = 9.6
-    icon_min_x, icon_min_y, icon_max_x, icon_max_y = FILLED_FLAG_BOUNDS
+    icon_min_x, icon_min_y, icon_max_x, icon_max_y = marker_bounds(state)
     glyph_visible_width = glyph_size * ((icon_max_x - icon_min_x) / 24.0)
     glyph_visible_height = glyph_size * ((icon_max_y - icon_min_y) / 24.0)
     gap = 3.0
+    suffix_width = max(1.0, rect["width"] - text_width(prefix, "Helvetica", font_size) - 11 - glyph_visible_width - gap)
+    suffix = ellipsize_text(suffix, "Helvetica", font_size, suffix_width)
     total = text_width(prefix + suffix, "Helvetica", font_size) + 11 + glyph_visible_width + gap
     start_x = rect["x"] + max(0, (rect["width"] - total) / 2.0)
     y = rect["y"] + max(0, (rect["height"] - font_size) / 2.0)
@@ -2221,11 +2223,11 @@ def draw_priority_note(c: canvas.Canvas, priority: str, reason: str | None, rect
     c.setFillColor(black)
     text_x = start_x + 11
     c.drawString(text_x, y, prefix)
-    flag_x = text_x + text_width(prefix, "Helvetica", 10)
+    flag_x = text_x + text_width(prefix, "Helvetica", font_size)
     cap_center = y + font_size * 0.47
     icon_box_y = cap_center - glyph_visible_height / 2.0 - (icon_min_y / 24.0) * glyph_size
     icon_box_x = flag_x - (icon_min_x / 24.0) * glyph_size
-    draw_state_marker(c, icon_box_x, icon_box_y, glyph_size, "flagged")
+    draw_state_marker(c, icon_box_x, icon_box_y, glyph_size, state)
     c.drawString(flag_x + glyph_visible_width + gap, y, suffix)
     c.restoreState()
 
@@ -2241,26 +2243,27 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     if state != "none" and original and current and original != current:
         draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, size=10, align="center")
         note = f"Updated note: {current}"
-        if label:
-            note = f"{label} - {note}"
         note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
-        if priority and not label:
-            draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
+        if priority:
+            draw_priority_note(c, priority, "Pending Review" if state == "pending_review" else label, note_rect, state)
+            detail = f"Resolved in field · {note}" if state == "pending_review" else note
+            draw_text(c, ellipsize_text(detail, "Helvetica", 10, rect["width"]), {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
         else:
+            if label:
+                note = f"{label} - {note}"
             draw_note(c, note, note_rect, state)
-        if priority and label:
-            draw_text(c, f"Priority: {PRIORITY_LABELS[priority]}", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=9, fill=color_tuple(PRIORITY_COLORS[priority]), align="center")
-        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (56 if priority and label else 42), "width": rect["width"], "height": 14}, size=10, align="center")
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (56 if priority else 42), "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if priority:
         if label:
             reason = trim(entry.get("flagged_reason"))
-            note = f"{label} - {reason}" if reason else label
-            draw_note(c, note, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
-            draw_text(c, f"Priority: {PRIORITY_LABELS[priority]}", {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, size=9, fill=color_tuple(PRIORITY_COLORS[priority]), align="center")
+            draw_priority_note(c, priority, "Pending Review" if state == "pending_review" else label, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
+            detail = f"Resolved in field · {reason}" if state == "pending_review" and reason else ("Resolved in field" if state == "pending_review" else reason)
+            if detail:
+                draw_text(c, ellipsize_text(detail, "Helvetica", 10, rect["width"]), {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, size=10, align="center")
         else:
-            draw_priority_note(c, priority, entry.get("flagged_reason"), {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14})
-        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (42 if label else 28), "width": rect["width"], "height": 14}, size=10, align="center")
+            draw_priority_note(c, priority, entry.get("flagged_reason") or "No reason provided", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14})
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (42 if label and detail else 28), "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if state != "none":
         reason = trim(entry.get("flagged_reason"))
@@ -2570,7 +2573,16 @@ def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: di
         fitted = aspect_fit_rect(size, area) if size else area
         reason = "No photo documented in this version" if not entry or entry.get("kind") != "photo" else "Image unavailable"
         if source:
-            draw_image_slot(c, source, fitted, reason, "none", None, work_dir, f"tenant-{page['number']}-{role}", warnings)
+            state = visual_state(entry)
+            draw_image_slot(c, source, fitted, reason, state, STATE_BORDER_COLORS.get(state), work_dir, f"tenant-{page['number']}-{role}", warnings)
+            if pathlib.Path(source).exists() and state in STATE_BORDER_COLORS:
+                badge_x = fitted["x"] + fitted["width"] - 13
+                badge_y = fitted["y"] + fitted["height"] - 13
+                c.saveState()
+                c.setFillColor(white)
+                c.circle(badge_x, badge_y, 11, stroke=0, fill=1)
+                c.restoreState()
+                draw_state_marker(c, badge_x - 7, badge_y - 7, 14, state)
         else:
             c.saveState()
             c.setStrokeColor(Color(0.8, 0.82, 0.85))
