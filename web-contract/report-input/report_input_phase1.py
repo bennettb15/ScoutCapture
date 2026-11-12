@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history-fixture", help="Local JSON fixture containing scoped completed snapshot rows and payloads.")
     parser.add_argument("--snapshot-history-only", action="store_true", help="Use sealed documentation without current portal workflow overlays.")
     parser.add_argument("--legacy-review-source", action="store_true", help="Validate pending captures in the exact legacy snapshot.")
+    parser.add_argument("--verify-sealed-source", action="store_true", help="Verify the exact sealed source and metadata hash.")
     parser.add_argument("--output", help="Write validation JSON to this path.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print deterministic JSON.")
     parser.add_argument(
@@ -1220,7 +1221,8 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     shots = [report_shot(metadata, shot, issues, session_actor) for shot in exported_shots(metadata)]
     shots.sort(key=lambda item: (item.get("captured_at_utc") or "", item.get("original_filename") or ""))
     legacy_pending_photos = None
-    if getattr(args, "legacy_review_source", False):
+    legacy_review = getattr(args, "legacy_review_source", False)
+    if legacy_review or getattr(args, "verify_sealed_source", False):
         if (
             str(row.get("id") or "").lower() != str(args.snapshot_id or "").lower()
             or not args.snapshot_id
@@ -1228,12 +1230,15 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
             or row.get("session_status") != "completed"
             or row.get("is_sealed") is not True
             or row.get("deleted_at")
-            or "fieldResolutionSubmissions" in (row.get("manifest") or {})
+            or str(metadata.get("sessionID") or "").lower() != str(row.get("session_id") or "").lower()
         ):
-            raise Phase1Error("Legacy review requires the exact pre-submission snapshot.")
+            raise Phase1Error("Reviewed reports require the exact completed sealed snapshot.")
         raw_hash = hashlib.sha256(payload["rawSessionJSON"].encode("utf-8")).hexdigest()
         if raw_hash != row.get("raw_session_json_sha256"):
-            raise Phase1Error("Legacy review source metadata does not match the sealed snapshot hash.")
+            raise Phase1Error("Reviewed report source metadata does not match the sealed snapshot hash.")
+    if legacy_review:
+        if "fieldResolutionSubmissions" in (row.get("manifest") or {}):
+            raise Phase1Error("Legacy review requires the exact pre-submission snapshot.")
         session_id = str(row.get("session_id") or "").lower()
         legacy_pending_photos = [
             {"observation_id": shot.get("issue_id"), "shot_id": shot["shot_id"]}

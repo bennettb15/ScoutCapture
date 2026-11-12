@@ -77,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-id", help="Completed ScoutCapture session UUID to process.")
     parser.add_argument("--reviewed-report-request-id", help="Process an authorized on-demand reviewed report request.")
+    parser.add_argument("--reviewed-content-package-id", help="Use a later automatic package for a completed review.")
     parser.add_argument("--tenant-comparison-request-id", help="Process an authorized on-demand tenant comparison request.")
     parser.add_argument(
         "--snapshot-id",
@@ -1573,6 +1574,8 @@ def get_or_create_package(
         f"reviewed-pdf-package:{reviewed_package_manifest['reviewed_report_request_id']}"
         if reviewed_package_manifest else f"pdf-package:{snapshot_id}:{RENDERER_VERSION}"
     )
+    if reviewed_package_manifest and reviewed_package_manifest.get("content_package_id"):
+        idempotency_key += f":content:{reviewed_package_manifest['content_package_id']}"
     existing = client.select(
         "report_packages",
         {
@@ -1584,6 +1587,12 @@ def get_or_create_package(
     )
     if existing:
         package = existing[0]
+        if reviewed_package_manifest and (
+            package.get("snapshot_id") != snapshot_id
+            or package.get("org_id") != org_id
+            or package.get("property_id") != property_id
+        ):
+            raise WorkerError("Reviewed package identity does not match its source snapshot.")
         if package.get("status") == "ready":
             return package, "already_ready"
         rows = client.patch(
@@ -2566,6 +2575,56 @@ def generating_organization_name(client: SupabaseServiceClient, org_id: str, fal
         return name or captured_name
     raise WorkerError('Generating organization name is unavailable.')
 
+def validate_report_input(
+    repo: pathlib.Path, env: dict[str, str], session_id: str,
+    snapshot_id: str | None, output_path: pathlib.Path, flags: list[str],
+) -> dict[str, Any]:
+    command = [
+        sys.executable, str(repo / "web-contract" / "report-input" / "report_input_phase1.py"),
+        "--session-id", session_id, "--output", str(output_path), "--pretty",
+    ]
+    if snapshot_id:
+        command.extend(["--snapshot-id", snapshot_id])
+    run_step([*command, *flags], repo, env)
+    validation = read_json(output_path)
+    if not validation.get("renderable_remotely"):
+        raise WorkerError(f"ReportInput is not renderable remotely: {validation.get('gaps')}")
+    if validation.get("media", {}).get("missing_count") != 0:
+        raise WorkerError("ReportInput has missing remote media; refusing to continue.")
+    return validation
+
+
+def apply_review_to_current_content(
+    approval_source: dict[str, Any], content: dict[str, Any], outcomes: list[dict[str, Any]],
+) -> None:
+    if session_type(content) != "punchlist_visit" or any(not outcome.get("shot_id") for outcome in outcomes):
+        raise WorkerError("A current reviewed copy requires a punchlist visit and photo-backed decisions.")
+
+    source_issues = {
+        str(shot["issue_id"]).lower()
+        for shot in approval_source["inputs"].get("punchlist_shots", [])
+        if shot.get("issue_id")
+    }
+    current_shots = {
+        (str(shot.get("shot_id") or "").lower(), str(shot.get("issue_id") or "").lower())
+        for shot in content["inputs"].get("punchlist_shots", [])
+    }
+    reviewed_photos = {(str(outcome["shot_id"]).lower(), str(outcome["observation_id"]).lower())
+                       for outcome in outcomes}
+    if not reviewed_photos <= current_shots or not source_issues <= {issue for _, issue in current_shots}:
+        raise WorkerError("The later package is missing an exact reviewed photo or issue from the original report.")
+
+    provenance = content.setdefault("source_provenance", {})
+    proof = approval_source.get("source_provenance", {}).get("legacy_pending_resolution_photos")
+    if proof is not None:
+        provenance["legacy_pending_resolution_photos"] = proof
+    provenance["review_decision_snapshot_id"] = approval_source["source_snapshot_id"]
+    apply_reviewed_resolutions(content, outcomes)
+    if any(str(shot.get("issue_status") or "").lower() in {"pending_review", "pending"}
+           for shot in content["inputs"]["punchlist_shots"]):
+        raise WorkerError("The later package has pending photos without a review decision.")
+
+
 def process_session(
     args: argparse.Namespace,
     client: SupabaseServiceClient,
@@ -2573,6 +2632,7 @@ def process_session(
     session_id: str,
     snapshot_id: str | None = None,
     reviewed_request: dict[str, Any] | None = None,
+    reviewed_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_root = pathlib.Path(args.output_dir).resolve() / session_id.lower()
     reviewed_package_manifest = None
@@ -2583,6 +2643,9 @@ def process_session(
             "source_package_id": reviewed_request["source_package_id"],
             "reviewed_report_request_id": reviewed_request["id"],
         }
+        if reviewed_content:
+            output_root /= f"content-{reviewed_content['id']}"
+            reviewed_package_manifest["content_package_id"] = reviewed_content["id"]
     output_root.mkdir(parents=True, exist_ok=True)
     validation_path = output_root / "report_input_validation.json"
     media_dir = output_root / "prepared_media"
@@ -2594,28 +2657,25 @@ def process_session(
     if not logo_svg.exists():
         raise WorkerError(f"Packaged vector logo asset is missing: {logo_svg}")
 
-    report_input_cmd = [
-        sys.executable,
-        str(repo / "web-contract" / "report-input" / "report_input_phase1.py"),
-        "--session-id",
-        session_id,
-        "--output",
-        str(validation_path),
-        "--pretty",
-    ]
-    if snapshot_id:
-        report_input_cmd.extend(["--snapshot-id", snapshot_id])
+    flags = []
     if reviewed_request and any(outcome.get("legacy") for outcome in reviewed_request["review_outcomes"]):
-        report_input_cmd.extend(["--legacy-review-source", "--snapshot-history-only"])
-    run_step(report_input_cmd, repo, env)
-    validation = read_json(validation_path)
-    if not validation.get("renderable_remotely"):
-        raise WorkerError(f"ReportInput is not renderable remotely: {validation.get('gaps')}")
-    if validation.get("media", {}).get("missing_count") != 0:
-        raise WorkerError("ReportInput has missing remote media; refusing to continue.")
-
+        flags.append("--legacy-review-source")
+    if flags or reviewed_content:
+        flags.append("--snapshot-history-only")
+    validation = validate_report_input(repo, env, session_id, snapshot_id, validation_path, flags)
     if reviewed_request:
-        apply_reviewed_resolutions(validation, reviewed_request["review_outcomes"])
+        outcomes = reviewed_request["review_outcomes"]
+        apply_reviewed_resolutions(validation, outcomes)
+        if reviewed_content:
+            session_id = reviewed_content["session_id"]
+            current = validate_report_input(
+                repo, env, session_id, reviewed_content["snapshot_id"], validation_path,
+                ["--snapshot-history-only", "--verify-sealed-source"],
+            )
+            if current["source_snapshot_id"] != reviewed_content["snapshot_id"]:
+                raise WorkerError("Current reviewed copy does not match the selected content snapshot.")
+            apply_review_to_current_content(validation, current, outcomes)
+            validation = current
         write_json(validation_path, validation, args.pretty)
 
     attempt_started_at = safe_iso_now()
@@ -2634,7 +2694,7 @@ def process_session(
             client, package["org_id"], validation.get("inputs", {}).get("session", {}).get("org_name")
         )
 
-        if reviewed_request:
+        if reviewed_request and not reviewed_content:
             update_reviewed_report_request(client, reviewed_request, {"progress_step": "preparing_photos"})
         run_step(
             [
@@ -2682,7 +2742,7 @@ def process_session(
             render_cmd.extend(["--brand-logo-png", str(brand_logo)])
         if args.allow_weather_fetch:
             render_cmd.append("--allow-weather-fetch")
-        if reviewed_request:
+        if reviewed_request and not reviewed_content:
             update_reviewed_report_request(client, reviewed_request, {"progress_step": "rendering"})
         run_step(render_cmd, repo, env)
 
@@ -2708,11 +2768,16 @@ def process_session(
         raise
 
     try:
-        if reviewed_request:
+        if reviewed_request and not reviewed_content:
             update_reviewed_report_request(client, reviewed_request, {"progress_step": "uploading"})
         uploaded_files = []
         report_plan_hashes = []
-        for report in render_summary.get("reports", []):
+        reports = render_summary.get("reports", [])
+        if reviewed_content and {REPORT_TYPE_MAP[report["report_type"]] for report in reports} != {
+            "property_report", "flagged_observations", "flagged_comparison",
+        }:
+            raise WorkerError("The current reviewed copy did not produce all three reports.")
+        for report in reports:
             report_type = REPORT_TYPE_MAP[report["report_type"]]
             pdf_path = pathlib.Path(report["pdf_path"])
             output_filename = report.get("output_filename") or pdf_path.name
@@ -2956,6 +3021,46 @@ def process_reviewed_report_request(
     return result
 
 
+def process_reviewed_current_copy(
+    args: argparse.Namespace, client: SupabaseServiceClient, repo: pathlib.Path,
+    request_id: str, content_package_id: str,
+) -> dict[str, Any]:
+    rows = client.select("reviewed_report_requests", {
+        "id": f"eq.{request_id}", "status": "eq.ready", "limit": "1",
+    })
+    if not rows or not rows[0].get("result_package_id"):
+        raise WorkerError("A completed reviewed report request is required for a current copy.")
+    request = rows[0]
+    source = select_ready_package(client, request["source_package_id"])
+    content = select_ready_package(client, content_package_id)
+    for package in (source, content):
+        snapshot = snapshot_metadata(client, package["snapshot_id"])
+        if (
+            any(package[key] != request[key] for key in ("org_id", "property_id"))
+            or any(snapshot[key] != package[key] for key in ("org_id", "property_id", "session_id"))
+            or json_object(package.get("manifest")).get("report_variant") == "reviewed"
+        ):
+            raise WorkerError("The review source and later content must be automatic reports for the same property.")
+    try:
+        source_completed = dt.datetime.fromisoformat(source["session_completed_at"])
+        content_completed = dt.datetime.fromisoformat(content["session_completed_at"])
+        is_later = content_completed > source_completed
+    except (KeyError, TypeError, ValueError) as error:
+        raise WorkerError("The review source and later content need known completion dates.") from error
+    if not is_later:
+        raise WorkerError("The current reviewed copy requires a later automatic report.")
+
+    files = client.select("report_package_files", {
+        "select": "report_type", "package_id": f"eq.{content['id']}", "org_id": f"eq.{content['org_id']}",
+        "property_id": f"eq.{content['property_id']}", "deleted_at": "is.null", "storage_deleted_at": "is.null",
+    })
+    if not {"property_report", "flagged_observations", "flagged_comparison"} <= {
+        file["report_type"] for file in files
+    }:
+        raise WorkerError("The later automatic package must contain all three reports.")
+    return process_session(args, client, repo, source["session_id"], source["snapshot_id"], request, content)
+
+
 def drain_reviewed_report_requests(args: argparse.Namespace, client: SupabaseServiceClient, repo: pathlib.Path) -> None:
     cutoff = (dt.datetime.now(dt.timezone.utc) - REVIEWED_REPORT_LOCK_TIMEOUT).isoformat()
     rows = client.select("reviewed_report_requests", {
@@ -3079,12 +3184,22 @@ def main() -> int:
     repo = pathlib.Path(__file__).resolve().parents[2]
     client = SupabaseServiceClient.from_env(args)
 
+    if args.reviewed_content_package_id and not args.reviewed_report_request_id:
+        raise WorkerError("--reviewed-content-package-id requires --reviewed-report-request-id.")
+
     if args.reviewed_report_request_id:
         try:
             request_id = str(uuid.UUID(args.reviewed_report_request_id))
         except ValueError as error:
             raise WorkerError("Invalid reviewed report request ID.") from error
-        process_reviewed_report_request(args, client, repo, request_id)
+        if args.reviewed_content_package_id:
+            try:
+                content_id = str(uuid.UUID(args.reviewed_content_package_id))
+            except ValueError as error:
+                raise WorkerError("Invalid reviewed content package ID.") from error
+            process_reviewed_current_copy(args, client, repo, request_id, content_id)
+        else:
+            process_reviewed_report_request(args, client, repo, request_id)
         return 0
 
     if args.tenant_comparison_request_id:
