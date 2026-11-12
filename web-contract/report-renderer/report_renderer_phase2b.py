@@ -2248,16 +2248,19 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
             draw_priority_note(c, priority, f"Updated note: {current}", note_rect)
         else:
             draw_note(c, note, note_rect, state)
-        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
+        if priority and label:
+            draw_text(c, f"Priority: {PRIORITY_LABELS[priority]}", {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=9, fill=color_tuple(PRIORITY_COLORS[priority]), align="center")
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (56 if priority and label else 42), "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if priority:
         if label:
             reason = trim(entry.get("flagged_reason"))
             note = f"{label} - {reason}" if reason else label
             draw_note(c, note, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
+            draw_text(c, f"Priority: {PRIORITY_LABELS[priority]}", {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, size=9, fill=color_tuple(PRIORITY_COLORS[priority]), align="center")
         else:
             draw_priority_note(c, priority, entry.get("flagged_reason"), {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14})
-        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, size=10, align="center")
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (42 if label else 28), "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if state != "none":
         reason = trim(entry.get("flagged_reason"))
@@ -2299,8 +2302,8 @@ def draw_cover(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], wor
     ]
     if plan.get("report_type") == "tenant_comparison":
         versions = plan.get("comparison_versions") or {}
-        details[2:4] = [("Before version:", display_datetime(versions.get("before_date")) or "Unknown"),
-                        ("After version:", display_datetime(versions.get("after_date")) or "Unknown")]
+        details[2:4] = [("Earlier report:", display_datetime(versions.get("before_date")) or "Unknown"),
+                        ("Later report:", display_datetime(versions.get("after_date")) or "Unknown")]
     if session.get("weather_summary"):
         details.insert(4, ("Weather at service start:", session["weather_summary"]))
         details.insert(5, (None, "Weather data provided by Open-Meteo."))
@@ -2555,10 +2558,10 @@ def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: di
         entry = page.get(role) or {}
         x = 42 + index * 273
         width = 255
-        draw_text(c, role.title(), {"x": x, "y": 704, "width": width, "height": 18}, "Helvetica-Bold", 14, align="center")
+        draw_text(c, "Earlier report" if role == "before" else "Later report", {"x": x, "y": 704, "width": width, "height": 18}, "Helvetica-Bold", 14, align="center")
         version_date = display_datetime(versions.get(f"{role}_date")) or "Unknown"
-        draw_text(c, f"Report version: {version_date}", {"x": x, "y": 683, "width": width, "height": 16}, size=8, align="center")
-        area = {"x": x, "y": 258, "width": width, "height": 405}
+        draw_text(c, f"Report dated: {version_date}", {"x": x, "y": 683, "width": width, "height": 16}, size=8, align="center")
+        area = {"x": x, "y": 258, "width": width, "height": 380 if page.get("same_photo") else 405}
         source = entry.get("media_path")
         size = None
         if source and pathlib.Path(source).exists():
@@ -2593,7 +2596,13 @@ def draw_tenant_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: di
             draw_text(c, line, {'x': x + 8, 'y': line_y, 'width': width - 16, 'height': 12}, size=9)
             line_y -= 11
     if page.get("same_photo"):
-        note = "Same photo - no newer documentation."
+        c.saveState()
+        c.setFillColor(Color(0.92, 0.95, 0.99))
+        c.roundRect(132, 646, 348, 22, 6, stroke=0, fill=1)
+        c.restoreState()
+        draw_text(c, "Same photo in both reports - no newer photo for this view.",
+                  {"x": 140, "y": 650, "width": 332, "height": 14}, "Helvetica-Bold", 9, align="center")
+        note = None
     elif page.get("matching_basis") == "documented_view":
         note = "Views matched by location and angle."
     elif page.get("matching_basis") == "unmatched":
