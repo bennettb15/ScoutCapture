@@ -2607,7 +2607,6 @@ def verify_current_review_state(client: SupabaseServiceClient, request: dict[str
         not isinstance(state, dict)
         or state.get("package_id") != request["source_package_id"]
         or state.get("state_hash") != request["current_state_hash"]
-        or state.get("unresolved_count") != 0
     ):
         raise WorkerError("The current property report changed. Refresh the property and request a new copy.")
 
@@ -2616,7 +2615,7 @@ def apply_current_property_review(validation: dict[str, Any], request: dict[str,
     expected = {row["observation_id"].lower(): row["status"] for row in request["current_issue_states"]}
     inputs = validation["inputs"]
     current = {str(shot["issue_id"]).lower(): shot for shot in inputs.get("punchlist_shots") or [] if shot.get("issue_id")}
-    if not expected or expected.keys() != current.keys() or set(expected.values()) - {"active", "resolved"}:
+    if not expected or expected.keys() != current.keys() or set(expected.values()) - {"active", "pending_review", "resolved"}:
         raise WorkerError("Current property issues do not match the latest sealed report photos.")
 
     provenance = validation.setdefault("source_provenance", {})
