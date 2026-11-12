@@ -525,6 +525,96 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual(original["id"], reviewed["manifest"]["source_package_id"])
         self.assertEqual(request["id"], reviewed["manifest"]["reviewed_report_request_id"])
 
+    def test_current_reviewed_copy_uses_later_photo_and_reuses_exact_approval(self) -> None:
+        client = FakeSupabaseClient()
+        old_session = "20000000-0000-0000-0000-000000000002"
+        old_snapshot = "30000000-0000-0000-0000-000000000002"
+        original = {**package(), "id": "approval-source", "session_id": old_session,
+                    "snapshot_id": old_snapshot, "session_completed_at": "2026-09-05T14:30:00Z"}
+        historical_copy = {**original, "id": "historical-reviewed", "manifest": {"report_variant": "reviewed"}}
+        content = {**package(), "id": "newer-automatic"}
+        client.tables["report_packages"] = [dict(row) for row in (original, historical_copy, content)]
+        client.tables["session_snapshots"].append(
+            {**client.tables["session_snapshots"][0], "id": old_snapshot, "session_id": old_session}
+        )
+        client.tables["report_package_files"] = [
+            {"package_id": content["id"], "org_id": ORG_ID, "property_id": PROPERTY_ID, "report_type": report_type}
+            for report_type in ("property_report", "flagged_observations", "flagged_comparison")
+        ]
+        approval = {"shot_id": "angle-3-approved", "observation_id": "angle-3", "status": "resolved",
+                    "legacy": True, "decision_activity_id": "approval"}
+        request = {"id": "review-request", "org_id": ORG_ID, "property_id": PROPERTY_ID, "status": "ready",
+                   "source_package_id": original["id"], "result_package_id": historical_copy["id"],
+                   "review_outcomes": [approval]}
+        client.tables["reviewed_report_requests"] = [dict(request)]
+        fake_step = fake_worker_run_step("punchlist_visit", ["property", "priority", "comparison"])
+        inputs_read = []
+
+        def run_step(cmd, cwd, env):
+            fake_step(cmd, cwd, env)
+            if not any("report_input_phase1.py" in part for part in cmd):
+                return
+            source_id = cmd[cmd.index("--snapshot-id") + 1]
+            inputs_read.append(source_id)
+            output = pathlib.Path(cmd[cmd.index("--output") + 1])
+            payload = worker.read_json(output)
+            angle_3 = {"shot_id": "angle-3-approved", "issue_id": "angle-3", "issue_status": "pending_review"}
+            if source_id == old_snapshot:
+                self.assertIn("--legacy-review-source", cmd)
+                payload["source_snapshot_id"] = old_snapshot
+                payload["inputs"]["session"]["session_id"] = old_session
+                payload["source_provenance"]["legacy_pending_resolution_photos"] = [
+                    {"shot_id": angle_3["shot_id"], "observation_id": angle_3["issue_id"]}
+                ]
+                angle_2 = {"shot_id": "angle-2-old", "issue_id": "angle-2", "issue_status": "active"}
+            else:
+                self.assertIn("--verify-sealed-source", cmd)
+                self.assertIn("--snapshot-history-only", cmd)
+                angle_2 = {"shot_id": "angle-2-new", "issue_id": "angle-2", "issue_status": "resolved"}
+            payload["inputs"]["ordered_shots"] = [angle_2, angle_3]
+            payload["inputs"]["punchlist_shots"] = [angle_2, angle_3]
+            worker.write_json(output, payload)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "run_step", side_effect=run_step), \
+                patch.object(worker, "send_report_ready_notifications") as email, \
+                patch.object(worker, "mark_fast_lane_report_delivered") as delivery:
+            args = worker_args(pathlib.Path(tmp))
+            result = worker.process_reviewed_current_copy(args, client, ROOT, request["id"], content["id"])
+            replay = worker.process_reviewed_current_copy(args, client, ROOT, request["id"], content["id"])
+            rendered = worker.read_json(pathlib.Path(result["validation_json"]))
+            self.assertEqual([("angle-2-new", "resolved"), ("angle-3-approved", "resolved")], [
+                (shot["shot_id"], shot["issue_status"]) for shot in rendered["inputs"]["punchlist_shots"]
+            ])
+            email.assert_not_called()
+            delivery.assert_not_called()
+
+        self.assertEqual([old_snapshot, SNAPSHOT_ID] * 2, inputs_read)
+        self.assertEqual([request], client.tables["reviewed_report_requests"])
+        self.assertEqual([original, historical_copy, content], client.tables["report_packages"][:3])
+        reviewed = client.tables["report_packages"][3]
+        self.assertEqual(SNAPSHOT_ID, reviewed["snapshot_id"])
+        self.assertEqual(content["id"], reviewed["manifest"]["content_package_id"])
+        self.assertEqual(original["id"], reviewed["manifest"]["source_package_id"])
+        self.assertEqual(old_snapshot, reviewed["manifest"]["source_provenance"]["review_decision_snapshot_id"])
+        self.assertEqual("already_ready", replay["package_action"])
+        self.assertEqual(3, len(client.uploads))
+
+    def test_current_reviewed_copy_rejects_a_replaced_or_unreviewed_photo(self) -> None:
+        outcome = {"shot_id": "approved-photo", "observation_id": "approved-issue", "status": "resolved"}
+        source = {"source_snapshot_id": "old", "inputs": {"punchlist_shots": [
+            {"shot_id": "approved-photo", "issue_id": "approved-issue", "issue_status": "pending_review"}
+        ]}}
+        for shots, error in (
+            ([{"shot_id": "new-photo", "issue_id": "approved-issue"}], "missing an exact reviewed photo"),
+            ([{"shot_id": "approved-photo", "issue_id": "approved-issue"},
+              {"shot_id": "unreviewed", "issue_id": "another-issue", "issue_status": "pending_review"}],
+             "pending photos without a review decision"),
+        ):
+            with self.subTest(error=error):
+                candidate = {"session_type": "punchlist_visit", "inputs": {"session": {}, "punchlist_shots": shots}}
+                with self.assertRaisesRegex(worker.WorkerError, error):
+                    worker.apply_review_to_current_content(source, candidate, [outcome])
+
     def test_worker_uses_punchlist_renderer_for_punchlist_visits(self) -> None:
         payload = validation()
         payload["session_type"] = "punchlist_visit"

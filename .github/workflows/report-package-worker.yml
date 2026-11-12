@@ -11,6 +11,10 @@ on:
         description: "Optional authorized on-demand reviewed report request UUID."
         required: false
         type: string
+      reviewed_content_package_id:
+        description: "Optional later ready automatic package for a current copy of an already-reviewed visit."
+        required: false
+        type: string
       session_id:
         description: "Optional ScoutCapture session UUID to process. Empty runs the poll worker."
         required: false
@@ -56,6 +60,7 @@ jobs:
       REPORT_EMAIL_ALLOWLIST: ${{ vars.REPORT_EMAIL_ALLOWLIST || '' }}
       REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
       REVIEWED_REPORT_REQUEST_ID: ${{ inputs.reviewed_report_request_id || '' }}
+      REVIEWED_CONTENT_PACKAGE_ID: ${{ inputs.reviewed_content_package_id || '' }}
       TENANT_COMPARISON_REQUEST_ID: ${{ inputs.tenant_comparison_request_id || '' }}
       REPORT_WORKER_SNAPSHOT_ID: ${{ inputs.snapshot_id || '' }}
       REPORT_WORKER_TRIGGER_SOURCE: ${{ inputs.trigger_source || github.event_name }}
@@ -100,8 +105,15 @@ jobs:
             --retention-mode dry-run
             --pretty
           )
+          if [[ -n "${REVIEWED_CONTENT_PACKAGE_ID}" && -z "${REVIEWED_REPORT_REQUEST_ID}" ]]; then
+            echo "::error::A reviewed content package requires a reviewed report request."
+            exit 1
+          fi
           if [[ -n "${REVIEWED_REPORT_REQUEST_ID}" ]]; then
             worker_args+=(--reviewed-report-request-id "${REVIEWED_REPORT_REQUEST_ID}")
+            if [[ -n "${REVIEWED_CONTENT_PACKAGE_ID}" ]]; then
+              worker_args+=(--reviewed-content-package-id "${REVIEWED_CONTENT_PACKAGE_ID}")
+            fi
           elif [[ -n "${TENANT_COMPARISON_REQUEST_ID}" ]]; then
             worker_args+=(--tenant-comparison-request-id "${TENANT_COMPARISON_REQUEST_ID}")
           elif [[ -n "${REPORT_WORKER_SESSION_ID}" ]]; then
