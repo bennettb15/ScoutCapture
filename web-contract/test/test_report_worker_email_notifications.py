@@ -593,8 +593,6 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
                     "snapshot_id": "sealed", "session_id": "visit", "decision_activity_id": "approval"}
         for status, photo, message in (
             ("pending_review", shot, "issues do not match"),
-            ("resolved", shot, "no matching sealed photo"),
-            ("active", {**shot, "capture_kind": "resolved_capture"}, "no matching sealed photo"),
         ):
             with self.subTest(status=status, photo=photo):
                 validation = {"inputs": {"punchlist_shots": [photo], "session": {}},
@@ -603,6 +601,20 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
                            "review_outcomes": [decision], "current_state_hash": "hash"}
                 with self.assertRaisesRegex(worker.WorkerError, message):
                     worker.apply_current_property_review(validation, request)
+
+    def test_current_property_report_uses_live_status_after_review_setting_changed(self) -> None:
+        for status, kind in (("resolved", "resolved_capture"), ("active", "resolved_capture"),
+                             ("resolved", "flagged_capture")):
+            with self.subTest(status=status, kind=kind):
+                photo = {"shot_id": "completion", "issue_id": "issue", "issue_status": "pending_review",
+                         "capture_kind": kind, "source_shot_session_id": "visit"}
+                validation = {"inputs": {"punchlist_shots": [photo], "ordered_shots": [photo], "session": {}},
+                              "source_provenance": {"source_snapshots": [{"snapshot_id": "sealed", "session_id": "visit"}]}}
+                request = {"current_issue_states": [{"observation_id": "issue", "status": status}],
+                           "review_outcomes": [], "current_state_hash": "current"}
+                worker.apply_current_property_review(validation, request)
+                self.assertEqual(status, photo["issue_status"])
+                self.assertEqual(status, photo["reviewed_resolution_status"])
 
     def test_current_reviewed_copy_uses_later_photo_and_reuses_exact_approval(self) -> None:
         client = FakeSupabaseClient()
