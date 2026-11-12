@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--canonical-fixture", help="Local JSON fixture for remote historical sessions/shots.")
     parser.add_argument("--history-fixture", help="Local JSON fixture containing scoped completed snapshot rows and payloads.")
     parser.add_argument("--snapshot-history-only", action="store_true", help="Use sealed documentation without current portal workflow overlays.")
+    parser.add_argument("--legacy-review-source", action="store_true", help="Validate pending captures in the exact legacy snapshot.")
     parser.add_argument("--output", help="Write validation JSON to this path.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print deterministic JSON.")
     parser.add_argument(
@@ -1218,6 +1219,29 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     session_actor = merge_actor_identity(actor_identity(metadata), merge_actor_identity(actor_identity(payload), actor_identity(row)))
     shots = [report_shot(metadata, shot, issues, session_actor) for shot in exported_shots(metadata)]
     shots.sort(key=lambda item: (item.get("captured_at_utc") or "", item.get("original_filename") or ""))
+    legacy_pending_photos = None
+    if getattr(args, "legacy_review_source", False):
+        if (
+            str(row.get("id") or "").lower() != str(args.snapshot_id or "").lower()
+            or not args.snapshot_id
+            or row.get("snapshot_kind") != "completed"
+            or row.get("session_status") != "completed"
+            or row.get("is_sealed") is not True
+            or row.get("deleted_at")
+            or "fieldResolutionSubmissions" in (row.get("manifest") or {})
+        ):
+            raise Phase1Error("Legacy review requires the exact pre-submission snapshot.")
+        raw_hash = hashlib.sha256(payload["rawSessionJSON"].encode("utf-8")).hexdigest()
+        if raw_hash != row.get("raw_session_json_sha256"):
+            raise Phase1Error("Legacy review source metadata does not match the sealed snapshot hash.")
+        session_id = str(row.get("session_id") or "").lower()
+        legacy_pending_photos = [
+            {"observation_id": shot.get("issue_id"), "shot_id": shot["shot_id"]}
+            for shot in shots
+            if shot["source_shot_session_id"].lower() == session_id
+            and shot.get("capture_kind") == "resolved_capture"
+            and shot.get("issue_status") == "pending_review"
+        ]
     composition = None
     operational_overlays = {}
     if session_type == "punchlist_visit":
@@ -1375,6 +1399,8 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         "gaps": gaps,
         "warnings": warnings,
     }
+    if legacy_pending_photos is not None:
+        output["source_provenance"]["legacy_pending_resolution_photos"] = legacy_pending_photos
     if args.include_runtime:
         output["runtime"] = {
             "generated_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),

@@ -2602,6 +2602,8 @@ def process_session(
     ]
     if snapshot_id:
         report_input_cmd.extend(["--snapshot-id", snapshot_id])
+    if reviewed_request and any(outcome.get("legacy") for outcome in reviewed_request["review_outcomes"]):
+        report_input_cmd.extend(["--legacy-review-source", "--snapshot-history-only"])
     run_step(report_input_cmd, repo, env)
     validation = read_json(validation_path)
     if not validation.get("renderable_remotely"):
@@ -2852,6 +2854,19 @@ def process_session(
 def apply_reviewed_resolutions(validation: dict[str, Any], outcomes: list[dict[str, Any]]) -> None:
     if not outcomes or any(outcome.get("status") not in {"resolved", "active"} for outcome in outcomes):
         raise WorkerError("Reviewed reports require completed review decisions.")
+    if any(outcome.get("legacy") for outcome in outcomes):
+        sealed_photos = validation.get("source_provenance", {}).get("legacy_pending_resolution_photos") or []
+        reviewed_photos = sorted(
+            (str(outcome.get("shot_id") or "").lower(), str(outcome.get("observation_id") or "").lower())
+            for outcome in outcomes
+            if outcome.get("legacy") and outcome.get("decision_activity_id")
+        )
+        expected_photos = sorted(
+            (str(photo.get("shot_id") or "").lower(), str(photo.get("observation_id") or "").lower())
+            for photo in sealed_photos
+        )
+        if len(reviewed_photos) != len(outcomes) or reviewed_photos != expected_photos:
+            raise WorkerError("Legacy review decisions do not cover the pending photos in the sealed source snapshot.")
     by_shot = {str(outcome["shot_id"]).lower(): outcome for outcome in outcomes if outcome.get("shot_id")}
     inputs = validation["inputs"]
     matched = set()
