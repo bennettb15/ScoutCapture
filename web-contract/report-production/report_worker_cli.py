@@ -2630,23 +2630,19 @@ def apply_current_property_review(validation: dict[str, Any], request: dict[str,
     for issue_id, shot in current.items():
         status = expected[issue_id]
         decision = decisions.get((issue_id, shot["shot_id"].lower()))
-        photo_status = str(shot.get("issue_status") or "").lower()
-        resolution_photo = shot.get("capture_kind") == "resolved_capture"
         if decision:
             if (
-                decision["status"] != status or not decision.get("decision_activity_id")
+                not decision.get("decision_activity_id")
                 or source_sessions.get(decision["snapshot_id"]) != decision["session_id"]
                 or str(shot.get("source_shot_session_id") or "").lower() != decision["session_id"].lower()
-                or not resolution_photo
+                or shot.get("capture_kind") != "resolved_capture"
             ):
                 raise WorkerError("A pinned decision does not match the current sealed completion photo.")
-            applied.append(decision)
-        elif (
-            (status == "resolved" and (photo_status != "resolved" or not resolution_photo))
-            or (status == "active" and (photo_status not in {"", "active"} or resolution_photo
-                                         or shot.get("is_resolved_in_session")))
-        ):
-            raise WorkerError("A current issue status has no matching sealed photo or review decision.")
+            if decision["status"] == status:
+                applied.append(decision)
+        # A sealed photo records the field status at capture. A later review,
+        # direct resolution, or manual status change can make it differ from
+        # the pinned live observation state. That current state controls the PDFs.
 
     current_ids = {shot["shot_id"].lower(): issue_id for issue_id, shot in current.items()}
     for shot in (inputs.get("ordered_shots") or []) + inputs["punchlist_shots"]:
