@@ -321,7 +321,10 @@ def execution_environment(url: str, args: argparse.Namespace) -> str:
     if expected_ref != project_ref:
         raise WorkerError("--expected-project-ref does not match SUPABASE_URL project ref.")
     has_allowlist = bool(args.allow_session_id or args.allow_org_property or args.allow_org_id)
-    if not args.poll_once and not getattr(args, "tenant_comparison_request_id", None) and not has_allowlist:
+    has_scoped_request = bool(
+        getattr(args, "tenant_comparison_request_id", None) or getattr(args, "reviewed_report_request_id", None)
+    )
+    if not args.poll_once and not has_scoped_request and not has_allowlist:
         raise WorkerError("Remote validation requires at least one --allow-session-id, --allow-org-property, or --allow-org-id.")
     if args.session_id and args.session_id.lower() not in allowed_session_ids(args):
         raise WorkerError("Remote validation --session-id must be explicitly included in --allow-session-id.")
@@ -3085,7 +3088,6 @@ def main() -> int:
         return 0
 
     if args.tenant_comparison_request_id:
-        import uuid
         uuid.UUID(args.tenant_comparison_request_id)
         from tenant_comparison import process_request
         process_request(args, client, repo, args.tenant_comparison_request_id, sys.modules[__name__])
