@@ -305,6 +305,38 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(by_issue['issue-0']['normalized_priority'], 'critical')
         self.assertEqual(by_issue['issue-0']['captured_at_utc'], '2026-10-02T10:30:00Z')
 
+    def test_retained_baseline_photo_uses_same_review_status_in_all_reports(self):
+        baseline = source('full', 1, 'full_documentation',
+                          [shot(1, 'full', 1, guided=True, status='pending_review', kind='resolved_capture')],
+                          [issue(1, 'pending_review')])
+        current = source('visit', 2, 'punchlist_visit',
+                         [shot(12, 'visit', 2, status='pending_review', kind='resolved_capture')],
+                         [issue(12, 'pending_review')])
+        composition = report_input.compose_punchlist_history([baseline, current], Storage())
+        report_input.apply_operational_overlays(composition, {
+            'issue-1': {'activity_status': 'resolved', 'activity_priority': 'low'},
+            'issue-12': {'activity_status': 'resolved'},
+        }, {'photo-12-visit'})
+        validation = {
+            'inputs': {'session': {'session_id': 'session-visit'},
+                       'ordered_shots': composition['shots'],
+                       'punchlist_shots': composition['punchlist_shots'],
+                       'property_report_entries': composition['entries']},
+            'comparisons': {'items': composition['comparisons']},
+        }
+        lookup = report_renderer.media_lookup({})
+        for build_plan in (report_renderer.build_property_plan,
+                           report_renderer.build_comparison_plan,
+                           report_renderer.build_priority_plan):
+            with self.subTest(report=build_plan.__name__):
+                plan = build_plan(validation, lookup, '10/02/2026', {}, {})
+                statuses = [line['visual_state'] for page in plan['pages']
+                            for line in page.get('lines', []) if line['kind'] == 'photoItem']
+                self.assertCountEqual(statuses, ['resolved', 'pending_review'])
+        approved = next(shot for shot in composition['shots'] if shot['shot_id'] == 'photo-1-full')
+        self.assertEqual(approved['normalized_priority'], 'low')
+        self.assertEqual(approved['captured_at_utc'], '2026-10-01T10:30:00Z')
+
     def test_portal_activity_scope_cannot_mix_organizations(self):
         class Client:
             def select_rows(self, table, query):

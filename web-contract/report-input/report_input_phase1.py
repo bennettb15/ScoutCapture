@@ -1088,15 +1088,24 @@ def compose_punchlist_history(sources: list[dict[str, Any]], storage: StoragePro
                             "previous_shot": previous if previous else None,
                             "matching_rule": "same_issue_id"})
     latest_shots.sort(key=lambda shot: (shot.get("captured_at_utc") or "", shot["shot_id"]))
-    all_shots = list(baseline_shots)
+    # Reuse the selected issue photo in the Property Report when the baseline
+    # already contains it. Later status and priority overlays then reach every
+    # report that displays the same photo.
+    latest_by_id = {shot["shot_id"].lower(): shot for shot in latest_shots}
+    original_reasons = {iid: history[0].get("flagged_reason") for iid, history in issue_photos.items()}
+    all_shots = []
+    for shot in baseline_shots:
+        selected = latest_by_id.get(shot["shot_id"].lower())
+        if selected is None:
+            issue_id = (trim(shot.get("issue_id")) or "").lower()
+            selected = {**shot, "original_flagged_reason": original_reasons.get(issue_id)}
+        all_shots.append(selected)
     seen = {shot["shot_id"].lower() for shot in all_shots}
     for shot in latest_shots:
-        if shot["shot_id"].lower() not in seen:
+        shot_id = shot["shot_id"].lower()
+        if shot_id not in seen:
             all_shots.append(shot)
-            seen.add(shot["shot_id"].lower())
-    original_reasons = {iid: history[0].get("flagged_reason") for iid, history in issue_photos.items()}
-    all_shots = [{**shot, "original_flagged_reason": original_reasons.get((trim(shot.get("issue_id")) or "").lower())}
-                 for shot in all_shots]
+            seen.add(shot_id)
     baseline_ids = {shot["shot_id"].lower() for shot in baseline_shots}
     since_baseline = {str(source["row"].get("session_id") or "").lower()
                       for source in sources[sources.index(baseline):]} if baseline else set()
