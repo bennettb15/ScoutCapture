@@ -1461,6 +1461,14 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updateRow.shotID, shotID)
     }
 
+    func testPendingReviewUsesReviewAppearanceEvenAfterCapture() {
+        XCTAssertEqual(IssueRowCaptureStyle(status: .pendingReview, isCaptured: true), .pendingReview)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .pendingReview, isCaptured: false), .pendingReview)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .resolved, isCaptured: true), .captured)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .active, isCaptured: true), .captured)
+        XCTAssertEqual(IssueRowCaptureStyle(status: .active, isCaptured: false), .idle)
+    }
+
     func testCompletionApprovalFullyResolvesPendingReviewAndRemovesCarryForwardState() throws {
         let fixture = try makeStore()
         let issueID = UUID()

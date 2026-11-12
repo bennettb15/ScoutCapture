@@ -14178,6 +14178,11 @@ private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
 }
 
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
+    private struct FocusTap: Identifiable {
+        let id = UUID()
+        let point: CGPoint
+    }
+
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
@@ -14205,6 +14210,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneExitIntentActive: Bool = false
     @State private var isSavingFastCapture: Bool = false
     @State private var captureFlashVisible: Bool = false
+    @State private var focusTap: FocusTap?
     @State private var capturedCount: Int = 0
     @State private var fastLaneCaptureProfileHistoryLocked: Bool = false
     @State private var captureErrorMessage: String?
@@ -14320,7 +14326,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 selectedZoomID: camera.selectedZoomId,
                 actions: cameraChromeActions,
                 previewContent: {
-                    CameraPreviewView(session: camera.session)
+                    CameraPreviewView(
+                        session: camera.session,
+                        onTapDevicePoint: { point in
+                            guard camera.isPreviewRunning, !isClosing else { return }
+                            camera.focus(atDevicePoint: point)
+                        },
+                        onTapNormalizedPoint: { point in
+                            guard camera.isPreviewRunning, !isClosing else { return }
+                            focusTap = FocusTap(point: point)
+                        }
+                    )
                 },
                 overlayContent: {
                     fastLanePreviewOverlays
@@ -14461,6 +14477,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
         }
         .onDisappear {
+            focusTap = nil
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
             locationManager.stop()
             fastLaneLevelModel.stop()
@@ -15274,6 +15291,31 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         .rotationEffect(.degrees(glyphAngleDegrees))
                         .allowsHitTesting(false)
                         .zIndex(11)
+                }
+            }
+        }
+
+        if let focusTap {
+            GeometryReader { geometry in
+                Circle()
+                    .stroke(Color.white, lineWidth: 3)
+                    .frame(width: 74, height: 74)
+                    .position(
+                        x: focusTap.point.x * geometry.size.width,
+                        y: focusTap.point.y * geometry.size.height
+                    )
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .zIndex(30)
+            .task(id: focusTap.id) {
+                do {
+                    try await Task.sleep(for: .milliseconds(750))
+                } catch {
+                    return
+                }
+                if self.focusTap?.id == focusTap.id {
+                    self.focusTap = nil
                 }
             }
         }
@@ -20171,15 +20213,15 @@ private struct FastLaneIssueListRow: View {
         }
     }
 
+    private var captureStyle: IssueRowCaptureStyle {
+        IssueRowCaptureStyle(status: observation.status, isCaptured: isHandledInCurrentSession)
+    }
+
     private var statusColor: Color {
-        if isHandledInCurrentSession { return .white }
-        switch observation.status {
-        case .resolutionRequired, .resolved:
-            return .green
-        case .pendingReview:
-            return .blue
-        case .active:
-            return isHandledInCurrentSession ? .green : .orange
+        switch captureStyle {
+        case .pendingReview: return IssueRowCaptureStyle.pendingReviewInk
+        case .captured: return .white
+        case .idle: return observation.status == .active ? .orange : .green
         }
     }
 
@@ -20203,19 +20245,13 @@ private struct FastLaneIssueListRow: View {
             }
             .buttonStyle(.borderless)
             .overlay(alignment: .topTrailing) {
-                if isHandledInCurrentSession {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
-                        .padding(4)
-                }
+                captureStyle.thumbnailBadge
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(isHandledInCurrentSession ? .white : (observation.status == .resolved ? .secondary : .primary))
+                    .foregroundColor(captureStyle != .idle ? .white : (observation.status == .resolved ? .secondary : .primary))
                     .lineLimit(1)
 
                 if !statusLabel.isEmpty {
@@ -20264,14 +20300,11 @@ private struct FastLaneIssueListRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(FastLaneCaptureCellBackground(
-            isCaptured: isHandledInCurrentSession,
-            idleBlackOpacity: 0.35
-        ))
+        .background(captureStyle.background(idleOpacity: 0.35))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(isHandledInCurrentSession ? Color.green.opacity(0.90) : Color.white.opacity(0.12), lineWidth: isHandledInCurrentSession ? 1.5 : 1)
+                .stroke(captureStyle.border, lineWidth: captureStyle == .idle ? 1 : 1.5)
         )
         .opacity(observation.status == .resolved && !isHandledInCurrentSession ? 0.70 : 1.0)
         .contentShape(Rectangle())
