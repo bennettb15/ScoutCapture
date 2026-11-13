@@ -62,6 +62,7 @@ struct CameraChromeDisplayModel {
     var cloudStatus: CameraChromeStatusModel?
     var showsPunchlistBadge: Bool
     var showsFollowUpBadge: Bool
+    var showsFullBadge: Bool
     var metadata: CameraChromeMetadataModel
     var previewStatusTitle: String
     var previewStatusColor: Color
@@ -203,6 +204,9 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                 if display.showsFollowUpBadge {
                                     followUpHeaderBadge
                                 }
+                                if display.showsFullBadge {
+                                    fullHeaderBadge
+                                }
                             }
                             .frame(height: 14)
                         }
@@ -259,6 +263,10 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
 
     private var followUpHeaderBadge: some View {
         sessionModeHeaderBadge("Follow-Up", fill: .blue)
+    }
+
+    private var fullHeaderBadge: some View {
+        sessionModeHeaderBadge("Full", fill: .orange)
     }
 
     private func sessionModeHeaderBadge(_ title: String, fill: Color) -> some View {

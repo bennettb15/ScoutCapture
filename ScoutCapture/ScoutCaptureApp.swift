@@ -14947,6 +14947,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             cloudStatus: fastLaneChromeCloudStatus,
             showsPunchlistBadge: context.sessionType == .punchlistVisit,
             showsFollowUpBadge: context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp,
+            showsFullBadge: context.sessionType == .fullDocumentation && context.fullDocumentationMode != .followUp,
             metadata: CameraChromeMetadataModel(
                 building: fastMetadataContext.building,
                 orientation: fastMetadataOrientationLabel(for: fastMetadataContext.elevation),
