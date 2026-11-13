@@ -266,7 +266,7 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
     }
 
     private var fullHeaderBadge: some View {
-        sessionModeHeaderBadge("Full", fill: .orange)
+        sessionModeHeaderBadge("Full", fill: .blue)
     }
 
     private func sessionModeHeaderBadge(_ title: String, fill: Color) -> some View {
