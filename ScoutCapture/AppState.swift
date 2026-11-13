@@ -57039,7 +57039,15 @@ final class AppState: ObservableObject {
 
     func propertyHasBaseline(_ propertyID: UUID) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
-        return properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil
+        if properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil {
+            return true
+        }
+        return sessions(for: propertyID).contains { session in
+            session.status == .completed &&
+                session.isSealed &&
+                session.sessionType == .fullDocumentation &&
+                session.fullDocumentationMode == .completeCapture
+        }
     }
 
     @discardableResult

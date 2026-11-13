@@ -1037,4 +1037,24 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(payload["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
         XCTAssertEqual(rawSession["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
     }
+
+    func testFollowUpUnlocksForCompletedFullCaptureWithoutBaselinePointer() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        XCTAssertNil(fixture.property.baselineSessionID)
+        XCTAssertFalse(fixture.appState.propertyHasBaseline(fixture.property.id))
+
+        _ = try fixture.localStore.upsertSession(Session(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 200),
+            isSealed: true
+        ))
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        XCTAssertTrue(fixture.appState.propertyHasBaseline(fixture.property.id))
+    }
 }
