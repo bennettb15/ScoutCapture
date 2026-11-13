@@ -15681,8 +15681,8 @@ extension ContentView {
                             VStack(spacing: 8) {
                                 if summary.isFullDocumentationFollowUp {
                                     summaryRow(title: "New photos", value: summary.addedPhotoCount)
-                                    summaryRow(title: "Retaken photos", value: summary.retakenPhotoCount)
-                                    Text("Existing photos and flags carry forward without a retake.")
+                                    summaryRow(title: "Updated photos", value: summary.retakenPhotoCount)
+                                    Text("Other photos and flags carry forward unchanged.")
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundColor(.white.opacity(0.72))
                                         .frame(maxWidth: .infinity, alignment: .leading)

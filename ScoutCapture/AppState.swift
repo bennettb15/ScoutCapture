@@ -45955,12 +45955,17 @@ final class AppState: ObservableObject {
         do {
             await waitForUploadConnection()
             let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: context.propertyID)
+            let priorGuidedShotKeys = fastRuntimePriorGuidedShotKeys(
+                propertyID: context.propertyID,
+                currentSessionID: context.sessionID
+            )
             let metadata = makeFastRuntimeCompleteSessionMetadata(
                 context: context,
                 dryRun: dryRun,
                 property: property,
                 completedAt: completedAt,
-                localObservationByIssueID: localObservationByIssueID
+                localObservationByIssueID: localObservationByIssueID,
+                priorGuidedShotKeys: priorGuidedShotKeys
             )
             let session = Session(
                 id: context.sessionID,
@@ -46057,7 +46062,8 @@ final class AppState: ObservableObject {
                         byteSize: fingerprint.byteSize,
                         checksumSHA256: fingerprint.checksumSHA256,
                         storagePath: storagePath,
-                        localObservationByIssueID: localObservationByIssueID
+                        localObservationByIssueID: localObservationByIssueID,
+                        priorGuidedShotKeys: priorGuidedShotKeys
                     )
                     metadataWrites.append(shot)
                     newPreparedUploads.append(FastRuntimePreparedOriginalUpload(
@@ -48960,6 +48966,51 @@ final class AppState: ObservableObject {
         return mapped
     }
 
+    func fastRuntimePriorGuidedShotKeys(propertyID: UUID, currentSessionID: UUID) -> Set<String> {
+        let priorSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? sessions(for: propertyID))
+            .filter {
+                $0.id != currentSessionID &&
+                    $0.status == .completed &&
+                    $0.isSealed &&
+                    $0.sessionType == .fullDocumentation
+            }
+        var keys = Set<String>()
+        for session in priorSessions {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: session.id
+            ) else { continue }
+            for shot in metadata.shots where shot.isGuided && !shot.isFlagged && shot.issueID == nil {
+                keys.insert(shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                keys.insert(Self.makeFastRuntimeMetadataShotKey(
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    angleIndex: shot.angleIndex
+                ))
+            }
+        }
+        return keys
+    }
+
+    func fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+        _ capture: FastRuntimeCaptureMetadataContext,
+        priorGuidedShotKeys: Set<String>
+    ) -> Bool {
+        guard capture.isGuided == true,
+              capture.isFlagged != true,
+              capture.issueID == nil,
+              ["guided", "retake"].contains(capture.captureIntentSource?.lowercased() ?? "") else { return false }
+        let storedKey = capture.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let canonicalKey = Self.makeFastRuntimeMetadataShotKey(
+            building: capture.building,
+            elevation: capture.elevation,
+            detailType: capture.detailType,
+            angleIndex: capture.angleIndex
+        )
+        return priorGuidedShotKeys.contains(storedKey) || priorGuidedShotKeys.contains(canonicalKey)
+    }
+
     private func fastRuntimeProductionCaptureKind(
         sessionType: SessionType,
         metadataContext: FastRuntimeCaptureMetadataContext,
@@ -48998,7 +49049,8 @@ final class AppState: ObservableObject {
         dryRun: FastRuntimeCompleteDryRunResult,
         property: Property?,
         completedAt: Date,
-        localObservationByIssueID: [UUID: Observation]? = nil
+        localObservationByIssueID: [UUID: Observation]? = nil,
+        priorGuidedShotKeys: Set<String> = []
     ) -> SessionMetadata {
         let offsetSeconds = TimeZone.current.secondsFromGMT(for: context.createdAt)
         let offsetMinutes = offsetSeconds / 60
@@ -49018,7 +49070,8 @@ final class AppState: ObservableObject {
                 byteSize: $0.byteSize.flatMap { Int(exactly: $0) },
                 checksumSHA256: nil,
                 storagePath: nil,
-                localObservationByIssueID: localObservationByIssueID
+                localObservationByIssueID: localObservationByIssueID,
+                priorGuidedShotKeys: priorGuidedShotKeys
             )
         }
         let issues = fastRuntimeCompleteIssueMetadata(
@@ -49128,7 +49181,8 @@ final class AppState: ObservableObject {
         byteSize: Int?,
         checksumSHA256: String?,
         storagePath: String?,
-        localObservationByIssueID: [UUID: Observation]? = nil
+        localObservationByIssueID: [UUID: Observation]? = nil,
+        priorGuidedShotKeys: Set<String> = []
     ) -> ShotMetadata {
         let metadataContext = Self.normalizedFastRuntimeMetadataContext(
             dryRunShot.metadataContext,
@@ -49146,7 +49200,13 @@ final class AppState: ObservableObject {
         let issueReason = observationReason ?? metadataContext.detailNote
         let isFlagged = localObservation.map { _ in true }
             ?? (metadataContext.isFlagged ?? (metadataContext.detailNote != nil))
-        let captureKind = fastRuntimeProductionCaptureKind(
+        let inferredPriorGuidedUpdate = context.sessionType == .fullDocumentation &&
+            context.fullDocumentationMode == .followUp &&
+            fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+                metadataContext,
+                priorGuidedShotKeys: priorGuidedShotKeys
+            )
+        let captureKind = inferredPriorGuidedUpdate ? "retake" : fastRuntimeProductionCaptureKind(
             sessionType: context.sessionType,
             metadataContext: metadataContext,
             localObservation: localObservation,

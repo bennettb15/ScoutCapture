@@ -15136,8 +15136,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var fastLaneSessionActionsSummary: FastLaneSessionActionsSummary {
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         let followUpShots = isFollowUp ? fastLaneLocalShotRecords() : []
+        let priorGuidedShotKeys = isFollowUp
+            ? appState.fastRuntimePriorGuidedShotKeys(
+                propertyID: context.propertyID,
+                currentSessionID: context.sessionID
+            )
+            : []
         let retakenPhotoCount = followUpShots.filter {
-            $0.metadataContext?.captureIntentSource?.lowercased() == "retake"
+            guard let metadata = $0.metadataContext else { return false }
+            return metadata.captureIntentSource?.lowercased() == "retake" ||
+                appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+                    metadata,
+                    priorGuidedShotKeys: priorGuidedShotKeys
+                )
         }.count
         return FastLaneSessionActionsSummary(
             guidedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.guidedRemainingCount,
@@ -17200,6 +17211,28 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func armFastLaneGuidedShot(_ guidedShot: GuidedShot) {
+        if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
+            let priorGuidedShotKeys = appState.fastRuntimePriorGuidedShotKeys(
+                propertyID: context.propertyID,
+                currentSessionID: context.sessionID
+            )
+            let candidate = AppState.FastRuntimeCaptureMetadataContext(
+                building: guidedShot.building,
+                elevation: guidedShot.targetElevation,
+                detailType: guidedShot.detailType,
+                angleIndex: guidedShot.angleIndex,
+                isGuided: true,
+                isFlagged: false,
+                captureIntentSource: "guided"
+            )
+            if appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+                candidate,
+                priorGuidedShotKeys: priorGuidedShotKeys
+            ) {
+                retakeFastLaneGuidedShot(guidedShot)
+                return
+            }
+        }
         guard !guidedShot.isCompleted else {
             showFastLaneSideControlToast("Guided photo already captured")
             return
@@ -19834,8 +19867,8 @@ private struct FastLaneSessionActionsSheet: View {
                         VStack(spacing: 8) {
                             if summary.isFullDocumentationFollowUp {
                                 summaryRow(title: "New photos", value: summary.addedPhotoCount)
-                                summaryRow(title: "Retaken photos", value: summary.retakenPhotoCount)
-                                Text("Existing photos and flags carry forward without a retake.")
+                                summaryRow(title: "Updated photos", value: summary.retakenPhotoCount)
+                                Text("Other photos and flags carry forward unchanged.")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundColor(.white.opacity(0.72))
                                     .frame(maxWidth: .infinity, alignment: .leading)

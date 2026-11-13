@@ -1057,4 +1057,42 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
 
         XCTAssertTrue(fixture.appState.propertyHasBaseline(fixture.property.id))
     }
+
+    func testFollowUpRecognizesGuidedPhotoFromPriorCompletedSessionAsUpdate() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let prior = try fixture.localStore.upsertSession(Session(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            status: .completed,
+            isSealed: true
+        ))
+        try fixture.localStore.ensureSessionMetadata(for: prior)
+        try addMaterialShot(to: prior, in: fixture)
+
+        let keys = fixture.appState.fastRuntimePriorGuidedShotKeys(
+            propertyID: fixture.property.id,
+            currentSessionID: UUID()
+        )
+        let existing = AppState.FastRuntimeCaptureMetadataContext(
+            building: "B1", elevation: "North", detailType: "Overview", angleIndex: 1,
+            shotKey: "b1|north|overview|1", isGuided: true, isFlagged: false,
+            captureIntentSource: "guided"
+        )
+        let added = AppState.FastRuntimeCaptureMetadataContext(
+            building: "B1", elevation: "North", detailType: "Overview", angleIndex: 1,
+            shotKey: "b1|north|overview|1", isGuided: true, isFlagged: false,
+            captureIntentSource: "free"
+        )
+        let newGuidedSlot = AppState.FastRuntimeCaptureMetadataContext(
+            building: "B1", elevation: "North", detailType: "Overview", angleIndex: 2,
+            shotKey: "b1|north|overview|2", isGuided: true, isFlagged: false,
+            captureIntentSource: "guided"
+        )
+
+        XCTAssertTrue(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(existing, priorGuidedShotKeys: keys))
+        XCTAssertFalse(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(added, priorGuidedShotKeys: keys))
+        XCTAssertFalse(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(newGuidedSlot, priorGuidedShotKeys: keys))
+    }
 }
