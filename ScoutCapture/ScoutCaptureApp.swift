@@ -15266,14 +15266,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
         let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
-        let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
+        let guidedCount = isFollowUp
+            ? fastLaneSideControlPayload.guidedShots.count
+            : fastLaneSideControlCounts.guidedRemainingCount
         return [
             CameraChromeSideControl(
                 id: "active_issues",
                 systemImage: "flag.fill",
                 color: activeIssueCount > 0 ? .red : .white,
-                badgeText: activeIssueCount > 0 && !isFollowUp ? "\(activeIssueCount)" : nil,
+                badgeText: activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
                 accessibilityLabel: "Active issues",
                 isEnabled: true
             ),
@@ -15281,8 +15283,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 id: "guided",
                 systemImage: "safari",
                 color: guidedCount > 0 ? .blue : .white,
-                badgeText: guidedCount > 0 && !isFollowUp ? "\(guidedCount)" : nil,
-                accessibilityLabel: "Guided",
+                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
+                accessibilityLabel: isFollowUp ? "Guided photos available" : "Guided",
                 isVisible: context.sessionType != .punchlistVisit,
                 isEnabled: true
             ),
