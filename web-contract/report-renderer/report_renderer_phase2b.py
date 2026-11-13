@@ -1244,6 +1244,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "media_path",
         "original_filename",
         "suppress_session_label",
+        "recent_update",
     ]
     return {key: entry.get(key) for key in keys if key in entry}
 
@@ -1653,7 +1654,7 @@ def is_punchlist_update_shot(shot: dict[str, Any]) -> bool:
         trim(shot.get("detail_type")),
     ]
     normalized = {str(value or "").strip().lower().replace(" ", "_") for value in values if value}
-    return bool(normalized & {"follow_up_capture", "punchlist_capture", "punchlist_update"})
+    return bool(normalized & {"follow_up_capture", "punchlist_capture", "punchlist_update", "retake"})
 
 
 def build_punchlist_update_plan(
@@ -2394,6 +2395,23 @@ def draw_index(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], log
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
 
+def draw_recent_update_strip(c: canvas.Canvas, photo_rect: dict[str, float]) -> None:
+    """Mark a new or retaken photo beside its fitted frame at any aspect ratio."""
+    width = 14.0
+    x = max(1.0, photo_rect["x"] - width - 3.0)
+    y = photo_rect["y"]
+    height = photo_rect["height"]
+    c.saveState()
+    c.setFillColorRGB(0.04, 0.35, 0.74)
+    c.roundRect(x, y, width, height, 3, stroke=0, fill=1)
+    c.translate(x + width / 2, y + height / 2)
+    c.rotate(270)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawCentredString(0, -2.5, "RECENT UPDATE")
+    c.restoreState()
+
+
 def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], work_dir: pathlib.Path, warnings: list[str], logo_png: str | None, priority: str | None = None) -> None:
     draw_logo(c, logo_png)
     if page["kind"] == "priority_photo":
@@ -2406,6 +2424,8 @@ def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any]
         if priority and state not in {"resolved", "pending_review"}:
             border = PRIORITY_COLORS[priority]
         draw_image_slot(c, entry.get("media_path"), slot.get("image_rect"), slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
+        if boolish(entry.get("recent_update")):
+            draw_recent_update_strip(c, slot.get("image_rect") or slot["photo_available_rect"])
         draw_metadata(c, entry, slot["caption_rect"], priority=priority)
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
@@ -2550,6 +2570,8 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
                 warnings.append(f"prepared_media_missing_on_disk:{media_path}")
             missing_label = "No latest submitted photo available" if slot["role"] == "current" else (slot.get("placeholder_reason") or "No original flagged photo available")
             draw_comparison_placeholder(c, image_rect or slot["photo_available_rect"], missing_label)
+        if slot["role"] == "current" and boolish(entry.get("recent_update")):
+            draw_recent_update_strip(c, image_rect or slot["photo_available_rect"])
         draw_comparison_caption(c, slot)
     draw_footer(c, page["number"], session["property_address"])
 

@@ -130,11 +130,17 @@ enum SessionType: String, Codable, CaseIterable, Equatable {
     }
 }
 
+enum FullDocumentationMode: String, Codable, Equatable {
+    case completeCapture = "complete_capture"
+    case followUp = "follow_up"
+}
+
 struct SessionMetadata: Codable {
     var schemaVersion: Int
     var propertyID: UUID
     var sessionID: UUID
     var sessionType: SessionType
+    var fullDocumentationMode: FullDocumentationMode
     var orgID: UUID?
     var orgNameAtCapture: String?
     var folderIDAtCapture: String?
@@ -188,6 +194,7 @@ struct SessionMetadata: Codable {
         case sessionID
         case sessionType
         case session_type
+        case fullDocumentationMode
         case orgID
         case orgId
         case orgNameAtCapture
@@ -266,6 +273,7 @@ struct SessionMetadata: Codable {
         propertyID: UUID,
         sessionID: UUID,
         sessionType: SessionType = .fullDocumentation,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         orgID: UUID? = nil,
         orgNameAtCapture: String? = nil,
         folderIDAtCapture: String? = nil,
@@ -310,6 +318,7 @@ struct SessionMetadata: Codable {
         self.propertyID = propertyID
         self.sessionID = sessionID
         self.sessionType = sessionType
+        self.fullDocumentationMode = fullDocumentationMode
         self.orgID = orgID
         self.orgNameAtCapture = SessionMetadata.trimmedNonEmpty(orgNameAtCapture)
         self.folderIDAtCapture = SessionMetadata.trimmedNonEmpty(folderIDAtCapture)
@@ -360,6 +369,7 @@ struct SessionMetadata: Codable {
         sessionType = try c.decodeIfPresent(SessionType.self, forKey: .sessionType)
             ?? c.decodeIfPresent(SessionType.self, forKey: .session_type)
             ?? .fullDocumentation
+        fullDocumentationMode = try c.decodeIfPresent(FullDocumentationMode.self, forKey: .fullDocumentationMode) ?? .completeCapture
         orgID = try c.decodeIfPresent(UUID.self, forKey: .orgID)
             ?? c.decodeIfPresent(UUID.self, forKey: .orgId)
         orgNameAtCapture = SessionMetadata.trimmedNonEmpty(
@@ -478,6 +488,7 @@ struct SessionMetadata: Codable {
         try c.encode(sessionID, forKey: .sessionID)
         try c.encode(sessionType, forKey: .sessionType)
         try c.encode(sessionType, forKey: .session_type)
+        try c.encode(fullDocumentationMode, forKey: .fullDocumentationMode)
         try c.encodeIfPresent(orgID, forKey: .orgID)
         try c.encodeIfPresent(orgID, forKey: .orgId)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(orgNameAtCapture), forKey: .orgNameAtCapture)
@@ -1871,6 +1882,7 @@ struct Session: Codable, Identifiable, Equatable {
     let id: UUID
     let propertyID: UUID
     var sessionType: SessionType
+    var fullDocumentationMode: FullDocumentationMode
     var startedAt: Date
     var status: Status
     var endedAt: Date?
@@ -1886,6 +1898,7 @@ struct Session: Codable, Identifiable, Equatable {
         id: UUID = UUID(),
         propertyID: UUID,
         sessionType: SessionType = .fullDocumentation,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         startedAt: Date = Date(),
         status: Status = .draft,
         endedAt: Date? = nil,
@@ -1900,6 +1913,7 @@ struct Session: Codable, Identifiable, Equatable {
         self.id = id
         self.propertyID = propertyID
         self.sessionType = sessionType
+        self.fullDocumentationMode = fullDocumentationMode
         self.startedAt = startedAt
         self.status = status
         self.endedAt = endedAt
@@ -1917,6 +1931,7 @@ struct Session: Codable, Identifiable, Equatable {
         case propertyID
         case sessionType
         case session_type
+        case fullDocumentationMode
         case startedAt
         case status
         case endedAt
@@ -1936,6 +1951,7 @@ struct Session: Codable, Identifiable, Equatable {
         sessionType = try c.decodeIfPresent(SessionType.self, forKey: .sessionType)
             ?? c.decodeIfPresent(SessionType.self, forKey: .session_type)
             ?? .fullDocumentation
+        fullDocumentationMode = try c.decodeIfPresent(FullDocumentationMode.self, forKey: .fullDocumentationMode) ?? .completeCapture
         startedAt = try c.decode(Date.self, forKey: .startedAt)
         endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
@@ -1966,6 +1982,7 @@ struct Session: Codable, Identifiable, Equatable {
         try c.encode(propertyID, forKey: .propertyID)
         try c.encode(sessionType, forKey: .sessionType)
         try c.encode(sessionType, forKey: .session_type)
+        try c.encode(fullDocumentationMode, forKey: .fullDocumentationMode)
         try c.encode(startedAt, forKey: .startedAt)
         try c.encode(status, forKey: .status)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)
@@ -2012,6 +2029,7 @@ struct ActiveCaptureContext: Codable, Equatable, Identifiable {
     let propertyID: UUID
     let orgID: UUID?
     let sessionType: SessionType
+    var fullDocumentationMode: FullDocumentationMode? = nil
     let ownerUserID: UUID?
     let ownerEmail: String?
     let ownerDeviceID: String?

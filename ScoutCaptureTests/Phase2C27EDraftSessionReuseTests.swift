@@ -859,6 +859,43 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         )
     }
 
+    func testFullDocumentationFollowUpAllowsPhotoOnlyChangeWithoutChecklistDebt() throws {
+        XCTAssertFalse(AppState.sessionCompletionHasOutstandingChecklistItems(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            guidedRemainingCount: 70,
+            flaggedRemainingCount: 10
+        ))
+        XCTAssertFalse(AppState.sessionCanComplete(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            hasBaseline: true,
+            guidedRemainingCount: 70,
+            flaggedRemainingCount: 10,
+            currentSessionCaptureCount: 0
+        ))
+        XCTAssertTrue(AppState.sessionCanComplete(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            hasBaseline: true,
+            guidedRemainingCount: 70,
+            flaggedRemainingCount: 10,
+            currentSessionCaptureCount: 1
+        ))
+        XCTAssertFalse(AppState.sessionCanComplete(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            hasBaseline: false,
+            guidedRemainingCount: 0,
+            flaggedRemainingCount: 0,
+            currentSessionCaptureCount: 1
+        ))
+
+        let followUp = Session(propertyID: UUID(), fullDocumentationMode: .followUp)
+        let restored = try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(followUp))
+        XCTAssertEqual(restored.fullDocumentationMode, .followUp)
+    }
+
     func testEmptyPunchlistCannotBeSealedByAnyCompletionPath() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

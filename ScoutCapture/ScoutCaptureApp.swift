@@ -886,6 +886,7 @@ struct SessionHubView: View {
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
     @State private var initialSessionTypePickerProperty: Property? = nil
+    @State private var showFullDocumentationModeChoices = false
     @State private var shouldRecommendInitialOverview = false
     @State private var showInitialPunchlistConfirmation = false
     @State private var fastLaneOpeningProperty: Property? = nil
@@ -3706,7 +3707,7 @@ struct SessionHubView: View {
     private func initialSessionTypePickerCard(for property: Property) -> some View {
         VStack(spacing: 16) {
             VStack(spacing: 5) {
-                Text(showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type")
+                Text(showFullDocumentationModeChoices ? "Full Documentation" : (showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type"))
                     .font(.system(size: 24, weight: .bold))
                     .foregroundColor(headerPrimaryLabel)
 
@@ -3726,13 +3727,32 @@ struct SessionHubView: View {
                 }
             }
 
-            if shouldRecommendInitialOverview || showInitialPunchlistConfirmation {
+            if (shouldRecommendInitialOverview || showInitialPunchlistConfirmation) && !showFullDocumentationModeChoices {
                 SessionCoverPhotoIllustration()
                     .frame(width: 126, height: 84)
             }
 
             VStack(spacing: 10) {
-                if showInitialPunchlistConfirmation {
+                if showFullDocumentationModeChoices {
+                    initialSessionChoiceButton(
+                        title: "Complete Capture",
+                        subtitle: "Complete guided photos and flagged items",
+                        systemImage: "camera.metering.matrix",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialFullDocumentationEntry(for: property, mode: .completeCapture)
+                    }
+                    initialSessionChoiceButton(
+                        title: "Follow-Up",
+                        subtitle: "Add photos or retake selected photos",
+                        systemImage: "arrow.trianglehead.clockwise",
+                        isEnabled: appState.propertyHasBaseline(property.id),
+                        disabledCaption: "Available after a completed Full Documentation session"
+                    ) {
+                        beginInitialFullDocumentationEntry(for: property, mode: .followUp)
+                    }
+                } else if showInitialPunchlistConfirmation {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "exclamationmark.circle.fill")
                             .foregroundColor(.red)
@@ -3761,7 +3781,8 @@ struct SessionHubView: View {
                         isEnabled: true,
                         disabledCaption: nil
                     ) {
-                        beginInitialFullDocumentationEntry(for: property)
+                        showInitialPunchlistConfirmation = false
+                        showFullDocumentationModeChoices = true
                     }
                     initialSessionChoiceButton(
                         title: "Continue Punchlist",
@@ -3793,7 +3814,7 @@ struct SessionHubView: View {
                         isEnabled: true,
                         disabledCaption: nil
                     ) {
-                        beginInitialFullDocumentationEntry(for: property)
+                        showFullDocumentationModeChoices = true
                     }
                     initialSessionChoiceButton(
                         title: "Punchlist Visit",
@@ -3808,7 +3829,9 @@ struct SessionHubView: View {
             }
 
             Button {
-                if showInitialPunchlistConfirmation {
+                if showFullDocumentationModeChoices {
+                    showFullDocumentationModeChoices = false
+                } else if showInitialPunchlistConfirmation {
                     showInitialPunchlistConfirmation = false
                 } else {
                     dismissInitialSessionTypePicker(for: property)
@@ -4215,6 +4238,7 @@ struct SessionHubView: View {
             fastLaneOpeningProperty = nil
             shouldRecommendInitialOverview = appState.sessions(for: property.id).isEmpty
             showInitialPunchlistConfirmation = false
+            showFullDocumentationModeChoices = false
             initialSessionTypePickerProperty = property
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
@@ -4431,6 +4455,7 @@ struct SessionHubView: View {
     private func dismissInitialSessionTypePicker(for property: Property) {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
         initialSessionTypePickerProperty = nil
+        showFullDocumentationModeChoices = false
         shouldRecommendInitialOverview = false
         showInitialPunchlistConfirmation = false
         isOpeningProperty = false
@@ -4440,8 +4465,11 @@ struct SessionHubView: View {
         selectionHaptic.prepare()
     }
 
-    private func beginInitialFullDocumentationEntry(for property: Property) {
-        beginInitialSessionEntry(for: property, sessionType: .fullDocumentation)
+    private func beginInitialFullDocumentationEntry(
+        for property: Property,
+        mode: FullDocumentationMode
+    ) {
+        beginInitialSessionEntry(for: property, sessionType: .fullDocumentation, fullDocumentationMode: mode)
     }
 
     private func beginInitialPunchlistEntry(for property: Property) {
@@ -4453,7 +4481,11 @@ struct SessionHubView: View {
         }
     }
 
-    private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
+    private func beginInitialSessionEntry(
+        for property: Property,
+        sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture
+    ) {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
         guard appState.isNetworkAvailable else {
             showOfflinePropertyEntryAlert = true
@@ -4482,6 +4514,7 @@ struct SessionHubView: View {
             }
 
             initialSessionTypePickerProperty = nil
+            showFullDocumentationModeChoices = false
             shouldRecommendInitialOverview = false
             showInitialPunchlistConfirmation = false
             isOpeningProperty = true
@@ -4491,13 +4524,19 @@ struct SessionHubView: View {
             }
             selectionHaptic.impactOccurred()
             selectionHaptic.prepare()
-            beginFastLaneInitialSessionEntry(for: property, sessionType: sessionType, buttonTappedAt: Date())
+            beginFastLaneInitialSessionEntry(
+                for: property,
+                sessionType: sessionType,
+                fullDocumentationMode: fullDocumentationMode,
+                buttonTappedAt: Date()
+            )
         }
     }
 
     private func beginFastLaneInitialSessionEntry(
         for property: Property,
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode,
         buttonTappedAt: Date
     ) {
         fastLaneCloseResult = nil
@@ -4506,6 +4545,7 @@ struct SessionHubView: View {
             var result = await appState.runFastRuntimePrototype(
                 propertyID: property.id,
                 sessionType: sessionType,
+                fullDocumentationMode: fullDocumentationMode,
                 prepareTempStorage: true,
                 releaseClaim: false,
                 allowCurrentUserOccupiedContext: false
@@ -4545,6 +4585,7 @@ struct SessionHubView: View {
                     result = await appState.runFastRuntimePrototype(
                         propertyID: property.id,
                         sessionType: sessionType,
+                        fullDocumentationMode: fullDocumentationMode,
                         prepareTempStorage: true,
                         releaseClaim: false,
                         allowCurrentUserOccupiedContext: false
@@ -15091,11 +15132,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneSessionActionsSummary: FastLaneSessionActionsSummary {
-        FastLaneSessionActionsSummary(
-            guidedRemainingCount: fastLaneSideControlCounts.guidedRemainingCount,
-            flaggedRemainingCount: fastLaneSideControlCounts.activeIssueCount,
+        let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
+        let followUpShots = isFollowUp ? fastLaneLocalShotRecords() : []
+        let retakenPhotoCount = followUpShots.filter {
+            $0.metadataContext?.captureIntentSource?.lowercased() == "retake"
+        }.count
+        return FastLaneSessionActionsSummary(
+            guidedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.guidedRemainingCount,
+            flaggedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.activeIssueCount,
             currentSessionCaptureCount: fastLaneCurrentPhotoCountForDisplay,
+            addedPhotoCount: max(0, followUpShots.count - retakenPhotoCount),
+            retakenPhotoCount: retakenPhotoCount,
             sessionType: context.sessionType,
+            fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
             canComplete: canRunProductionComplete,
             isComplete: productionCompleteState.isComplete || didCompleteUpload,
             disabledReason: fastLaneSessionActionsCompleteDisabledReason
@@ -15111,6 +15160,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
+        if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
+            return (flagged: 0, guided: 0)
+        }
         let guided = context.sessionType == .punchlistVisit ? 0 : fastLaneSideControlCounts.guidedRemainingCount
         return (
             flagged: fastLaneSideControlCounts.activeIssueCount,
@@ -15122,6 +15174,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let counts = fastLaneCompletionRemainingCounts
         return AppState.sessionCompletionHasOutstandingChecklistItems(
             sessionType: context.sessionType,
+            fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
             guidedRemainingCount: counts.guided,
             flaggedRemainingCount: counts.flagged
         )
@@ -15139,6 +15192,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         if isSavingFastCapture || camera.isCapturing {
             return "Complete is disabled while the current photo is saving."
+        }
+        if context.fullDocumentationMode == .followUp && isFastLaneCaptureIntentArmed {
+            return "Capture or cancel the selected photo before completing this Follow-Up."
         }
         if fastLaneCurrentPhotoCountForDisplay == 0 {
             let qualifier = context.sessionType == .punchlistVisit ? "new photo" : "photo"
@@ -15211,12 +15267,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
         let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
         let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
+        let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         return [
             CameraChromeSideControl(
                 id: "active_issues",
                 systemImage: "flag.fill",
                 color: activeIssueCount > 0 ? .red : .white,
-                badgeText: activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
+                badgeText: activeIssueCount > 0 && !isFollowUp ? "\(activeIssueCount)" : nil,
                 accessibilityLabel: "Active issues",
                 isEnabled: true
             ),
@@ -15224,7 +15281,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 id: "guided",
                 systemImage: "safari",
                 color: guidedCount > 0 ? .blue : .white,
-                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
+                badgeText: guidedCount > 0 && !isFollowUp ? "\(guidedCount)" : nil,
                 accessibilityLabel: "Guided",
                 isVisible: context.sessionType != .punchlistVisit,
                 isEnabled: true
@@ -15980,6 +16037,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var canRunProductionComplete: Bool {
         fastLaneCurrentPhotoCountForDisplay > 0 &&
             !hasFastLaneCompletionRemainingDebt &&
+            !(context.fullDocumentationMode == .followUp && isFastLaneCaptureIntentArmed) &&
             !productionCompleteState.isRunning &&
             !productionCompleteState.isComplete &&
             !isFastLaneExiting &&
@@ -19644,13 +19702,20 @@ private struct FastLaneSessionActionsSummary: Equatable {
     let guidedRemainingCount: Int
     let flaggedRemainingCount: Int
     let currentSessionCaptureCount: Int
+    let addedPhotoCount: Int
+    let retakenPhotoCount: Int
     let sessionType: SessionType
+    let fullDocumentationMode: FullDocumentationMode
     let canComplete: Bool
     let isComplete: Bool
     let disabledReason: String?
 
     var isPunchlistVisit: Bool {
         sessionType == .punchlistVisit
+    }
+
+    var isFullDocumentationFollowUp: Bool {
+        sessionType == .fullDocumentation && fullDocumentationMode == .followUp
     }
 
     var hasCaptures: Bool {
@@ -19763,12 +19828,21 @@ private struct FastLaneSessionActionsSheet: View {
                             .foregroundColor(.white)
 
                         VStack(spacing: 8) {
-                            summaryRow(
-                                title: summary.isPunchlistVisit ? "Open Issues" : "Flagged Remaining",
-                                value: summary.flaggedRemainingCount
-                            )
-                            if !summary.isPunchlistVisit {
-                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                            if summary.isFullDocumentationFollowUp {
+                                summaryRow(title: "New photos", value: summary.addedPhotoCount)
+                                summaryRow(title: "Retaken photos", value: summary.retakenPhotoCount)
+                                Text("Existing photos and flags carry forward without a retake.")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.72))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                summaryRow(
+                                    title: summary.isPunchlistVisit ? "Open Issues" : "Flagged Remaining",
+                                    value: summary.flaggedRemainingCount
+                                )
+                                if !summary.isPunchlistVisit {
+                                    summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                }
                             }
                         }
                         .padding(.horizontal, 12)
@@ -24891,10 +24965,14 @@ struct PropertySessionView: View {
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $isAwaitingInitialSessionTypeSelection) {
                 InitialSessionTypeChoiceSheet(
-                    onChoose: { sessionType in
+                    hasBaseline: appState.propertyHasBaseline(propertyID),
+                    onChoose: { sessionType, fullDocumentationMode in
                         isAwaitingInitialSessionTypeSelection = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                            guard appState.persistCurrentSessionType(sessionType) != nil else { return }
+                            guard appState.persistCurrentSessionType(
+                                sessionType,
+                                fullDocumentationMode: fullDocumentationMode
+                            ) != nil else { return }
                             beginOpenFlow(forceRetry: true)
                         }
                     },
@@ -25446,31 +25524,62 @@ struct PropertySessionView: View {
     }
 
     private struct InitialSessionTypeChoiceSheet: View {
-        let onChoose: (SessionType) -> Void
+        let hasBaseline: Bool
+        let onChoose: (SessionType, FullDocumentationMode) -> Void
         let onBack: () -> Void
         @State private var selectedSessionTypeBeingOpened: SessionType? = nil
+        @State private var isChoosingFullDocumentationMode = false
 
         var body: some View {
             VStack(spacing: 16) {
-                Text("Session Type")
+                Text(isChoosingFullDocumentationMode ? "Full Documentation" : "Session Type")
                     .font(.system(size: 22, weight: .bold))
 
                 VStack(spacing: 10) {
-                    choiceButton(
-                        title: "Full Documentation",
-                        subtitle: "Complete property walkthrough with guided photos and flags",
-                        systemImage: "camera.metering.matrix",
-                        sessionType: .fullDocumentation
-                    )
-                    choiceButton(
-                        title: "Punchlist Visit",
-                        subtitle: "Flag follow-up visit without guided photos",
-                        systemImage: "checklist",
-                        sessionType: .punchlistVisit
-                    )
+                    if isChoosingFullDocumentationMode {
+                        choiceButton(
+                            title: "Complete Capture",
+                            subtitle: "Complete guided photos and flagged items",
+                            systemImage: "camera.metering.matrix",
+                            sessionType: .fullDocumentation
+                        )
+                        choiceButton(
+                            title: "Follow-Up",
+                            subtitle: "Add photos or retake selected photos",
+                            systemImage: "arrow.trianglehead.clockwise",
+                            sessionType: .fullDocumentation,
+                            fullDocumentationMode: .followUp,
+                            isEnabled: hasBaseline
+                        )
+                        if !hasBaseline {
+                            Text("Follow-Up is available after a completed Full Documentation session.")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        choiceButton(
+                            title: "Full Documentation",
+                            subtitle: "Property photos, guided photos, and flags",
+                            systemImage: "camera.metering.matrix",
+                            sessionType: .fullDocumentation,
+                            opensFullDocumentationModes: true
+                        )
+                        choiceButton(
+                            title: "Punchlist Visit",
+                            subtitle: "Flag follow-up visit without guided photos",
+                            systemImage: "checklist",
+                            sessionType: .punchlistVisit
+                        )
+                    }
                 }
 
-                Button("Back", action: onBack)
+                Button("Back") {
+                    if isChoosingFullDocumentationMode {
+                        isChoosingFullDocumentationMode = false
+                    } else {
+                        onBack()
+                    }
+                }
                     .font(.system(size: 16, weight: .semibold))
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
@@ -25485,15 +25594,22 @@ struct PropertySessionView: View {
             title: String,
             subtitle: String,
             systemImage: String,
-            sessionType: SessionType
+            sessionType: SessionType,
+            fullDocumentationMode: FullDocumentationMode = .completeCapture,
+            opensFullDocumentationModes: Bool = false,
+            isEnabled: Bool = true
         ) -> some View {
             let isSelected = selectedSessionTypeBeingOpened == sessionType
 
             return Button(action: {
-                guard selectedSessionTypeBeingOpened == nil else { return }
+                guard selectedSessionTypeBeingOpened == nil, isEnabled else { return }
+                if opensFullDocumentationModes {
+                    isChoosingFullDocumentationMode = true
+                    return
+                }
                 selectedSessionTypeBeingOpened = sessionType
                 DispatchQueue.main.async {
-                    onChoose(sessionType)
+                    onChoose(sessionType, fullDocumentationMode)
                 }
             }) {
                 HStack(spacing: 12) {
@@ -25514,7 +25630,7 @@ struct PropertySessionView: View {
                 .frame(minHeight: 72)
             }
             .buttonStyle(SessionTypeChoiceButtonStyle(isSelected: isSelected))
-            .disabled(selectedSessionTypeBeingOpened != nil && !isSelected)
+            .disabled(!isEnabled || (selectedSessionTypeBeingOpened != nil && !isSelected))
             .accessibilityValue(isSelected ? "Selected" : "")
         }
     }

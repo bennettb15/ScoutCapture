@@ -5239,6 +5239,7 @@ final class AppState: ObservableObject {
         let sessionID: UUID
         let orgID: UUID?
         let sessionType: SessionType
+        var fullDocumentationMode: FullDocumentationMode? = nil
         let ownerUserID: UUID?
         let ownerEmail: String?
         let ownerDeviceID: String?
@@ -43831,6 +43832,7 @@ final class AppState: ObservableObject {
     func runFastRuntimePrototype(
         propertyID: UUID,
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         prepareTempStorage: Bool = true,
         releaseClaim: Bool = true,
         allowCurrentUserOccupiedContext: Bool = false
@@ -43874,6 +43876,7 @@ final class AppState: ObservableObject {
                 propertyID: propertyID,
                 orgID: orgID,
                 sessionType: sessionType,
+                fullDocumentationMode: fullDocumentationMode,
                 ownerUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
                 ownerEmail: normalizedSupabaseText(status.lockedByEmail) ??
                     normalizedSupabaseText(authenticatedSupabaseUser?.email),
@@ -44361,6 +44364,7 @@ final class AppState: ObservableObject {
                 id: context.sessionID,
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
+                fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
                 startedAt: context.createdAt,
                 status: .draft,
                 captureProfile: property?.captureProfile
@@ -45962,6 +45966,7 @@ final class AppState: ObservableObject {
                 id: context.sessionID,
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
+                fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
                 startedAt: context.createdAt,
                 status: .completed,
                 endedAt: completedAt,
@@ -46749,6 +46754,7 @@ final class AppState: ObservableObject {
                     propertyID: context.propertyID,
                     orgID: context.orgID,
                     sessionType: context.sessionType,
+                    fullDocumentationMode: context.fullDocumentationMode,
                     ownerUserID: context.ownerUserID,
                     ownerEmail: context.ownerEmail,
                     ownerDeviceID: context.ownerDeviceID,
@@ -46779,6 +46785,7 @@ final class AppState: ObservableObject {
                 propertyID: summary.propertyID,
                 orgID: summary.orgID,
                 sessionType: summary.sessionType,
+                fullDocumentationMode: summary.fullDocumentationMode,
                 ownerUserID: summary.ownerUserID,
                 ownerEmail: summary.ownerEmail,
                 ownerDeviceID: summary.ownerDeviceID,
@@ -48825,6 +48832,9 @@ final class AppState: ObservableObject {
         let issueStatus = normalizedSupabaseText(shot.issueStatus)?.lowercased()
         let isIssueShot = shot.isFlagged == true || shot.issueID != nil || issueStatus != nil
         var allowed = Set([defaultKind])
+        if shot.isGuided == true {
+            allowed.insert("retake")
+        }
         guard isIssueShot else { return allowed }
         allowed.insert("follow_up_capture")
         allowed.insert("retake")
@@ -49021,6 +49031,7 @@ final class AppState: ObservableObject {
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             sessionType: context.sessionType,
+            fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
             orgID: context.orgID,
             propertyNameAtCapture: property?.name,
             propertyNameAtExport: property?.name,
@@ -49308,6 +49319,7 @@ final class AppState: ObservableObject {
                 propertyID: summary.propertyID,
                 orgID: summary.orgID,
                 sessionType: summary.sessionType,
+                fullDocumentationMode: summary.fullDocumentationMode,
                 ownerUserID: summary.ownerUserID,
                 ownerEmail: summary.ownerEmail,
                 ownerDeviceID: summary.ownerDeviceID,
@@ -49360,6 +49372,7 @@ final class AppState: ObservableObject {
                     sessionID: context.sessionID,
                     orgID: orgID,
                     sessionType: context.sessionType,
+                    fullDocumentationMode: context.fullDocumentationMode,
                     ownerUserID: context.ownerUserID,
                     ownerEmail: context.ownerEmail,
                     ownerDeviceID: context.ownerDeviceID,
@@ -49453,6 +49466,7 @@ final class AppState: ObservableObject {
                     propertyID: propertyID,
                     orgID: orgID,
                     sessionType: draft.sessionType,
+                    fullDocumentationMode: draft.fullDocumentationMode,
                     ownerUserID: metadata.capturedByUserID ?? authenticatedSupabaseUser?.id,
                     ownerEmail: metadata.capturedByEmail ?? authenticatedSupabaseUser?.email,
                     ownerDeviceID: currentDeviceIdentifier(),
@@ -49524,6 +49538,7 @@ final class AppState: ObservableObject {
                     sessionID: draft.id,
                     orgID: orgID,
                     sessionType: draft.sessionType,
+                    fullDocumentationMode: draft.fullDocumentationMode,
                     ownerUserID: context.ownerUserID,
                     ownerEmail: context.ownerEmail,
                     ownerDeviceID: context.ownerDeviceID,
@@ -49569,6 +49584,7 @@ final class AppState: ObservableObject {
                 propertyID: summary.propertyID,
                 orgID: summary.orgID,
                 sessionType: summary.sessionType,
+                fullDocumentationMode: summary.fullDocumentationMode,
                 ownerUserID: summary.ownerUserID,
                 ownerEmail: summary.ownerEmail,
                 ownerDeviceID: summary.ownerDeviceID,
@@ -49897,6 +49913,7 @@ final class AppState: ObservableObject {
                 sessionID: context.sessionID,
                 orgID: context.orgID,
                 sessionType: context.sessionType,
+                fullDocumentationMode: context.fullDocumentationMode,
                 ownerUserID: context.ownerUserID,
                 ownerEmail: context.ownerEmail,
                 ownerDeviceID: context.ownerDeviceID,
@@ -49941,6 +49958,7 @@ final class AppState: ObservableObject {
             sessionID: summary.sessionID,
             orgID: summary.orgID,
             sessionType: summary.sessionType,
+            fullDocumentationMode: summary.fullDocumentationMode,
             ownerUserID: summary.ownerUserID,
             ownerEmail: summary.ownerEmail,
             ownerDeviceID: summary.ownerDeviceID,
@@ -58776,6 +58794,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func startSession(
         sessionType: SessionType = .fullDocumentation,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         skipPropertyStatusPreflight: Bool = false,
         preferredNewSessionID: UUID? = nil
     ) -> Session? {
@@ -58835,6 +58854,7 @@ final class AppState: ObservableObject {
                 cloudBackupManager?.setCaptureModeActive(false)
                 return startSession(
                     sessionType: sessionType,
+                    fullDocumentationMode: fullDocumentationMode,
                     skipPropertyStatusPreflight: true,
                     preferredNewSessionID: preferredNewSessionID
                 )
@@ -58857,6 +58877,7 @@ final class AppState: ObservableObject {
                 cloudBackupManager?.setCaptureModeActive(false)
                 return startSession(
                     sessionType: sessionType,
+                    fullDocumentationMode: fullDocumentationMode,
                     skipPropertyStatusPreflight: true,
                     preferredNewSessionID: preferredNewSessionID
                 )
@@ -58900,6 +58921,7 @@ final class AppState: ObservableObject {
             id: preferredNewSessionID ?? UUID(),
             propertyID: selectedPropertyID,
             sessionType: sessionType,
+            fullDocumentationMode: fullDocumentationMode,
             startedAt: Date(),
             status: .draft,
             endedAt: nil,
@@ -59062,9 +59084,13 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func persistCurrentSessionType(_ sessionType: SessionType) -> Session? {
+    func persistCurrentSessionType(
+        _ sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture
+    ) -> Session? {
         guard var session = currentSession else { return nil }
         session.sessionType = sessionType
+        session.fullDocumentationMode = fullDocumentationMode
         currentSession = session
         do {
             let persisted = try localStore.upsertSession(session)
@@ -59081,9 +59107,13 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func applyCurrentSessionTypeForFastEntry(_ sessionType: SessionType) -> Session? {
+    func applyCurrentSessionTypeForFastEntry(
+        _ sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture
+    ) -> Session? {
         guard var session = currentSession else { return nil }
         session.sessionType = sessionType
+        session.fullDocumentationMode = fullDocumentationMode
         currentSession = session
         initialSessionTypeSelectedSessionIDs.insert(session.id)
         return session
@@ -59098,7 +59128,10 @@ final class AppState: ObservableObject {
                   self.currentSession?.sessionType == sessionType else {
                 return
             }
-            _ = self.persistCurrentSessionType(sessionType)
+            _ = self.persistCurrentSessionType(
+                sessionType,
+                fullDocumentationMode: self.currentSession?.fullDocumentationMode ?? .completeCapture
+            )
         }
     }
 
@@ -59116,10 +59149,11 @@ final class AppState: ObservableObject {
 
     nonisolated static func sessionCompletionHasOutstandingChecklistItems(
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         guidedRemainingCount: Int,
         flaggedRemainingCount: Int
     ) -> Bool {
-        if sessionType == .punchlistVisit {
+        if sessionType == .punchlistVisit || fullDocumentationMode == .followUp {
             // Open issues carry forward; they do not block completion of a focused visit.
             return false
         }
@@ -59128,6 +59162,7 @@ final class AppState: ObservableObject {
 
     nonisolated static func sessionCanComplete(
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         hasBaseline: Bool,
         guidedRemainingCount: Int,
         flaggedRemainingCount: Int,
@@ -59135,6 +59170,9 @@ final class AppState: ObservableObject {
     ) -> Bool {
         if sessionType == .punchlistVisit {
             return currentSessionCaptureCount > 0
+        }
+        if fullDocumentationMode == .followUp {
+            return hasBaseline && currentSessionCaptureCount > 0
         }
         return hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
     }

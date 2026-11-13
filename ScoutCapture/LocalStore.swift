@@ -6697,6 +6697,7 @@ final class LocalStore {
         metadata.sessionEndedAtLocal = session.endedAt.map { localISO8601String(for: $0, timeZone: captureTimeZone.timeZone) }
         metadata.status = session.status
         metadata.sessionType = session.sessionType
+        metadata.fullDocumentationMode = session.fullDocumentationMode
         if metadata.captureProfile == nil {
             metadata.captureProfile = session.captureProfile?.rawValue
         }
