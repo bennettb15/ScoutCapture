@@ -61,6 +61,7 @@ struct CameraChromeDisplayModel {
     var propertyName: String
     var cloudStatus: CameraChromeStatusModel?
     var showsPunchlistBadge: Bool
+    var showsFollowUpBadge: Bool
     var metadata: CameraChromeMetadataModel
     var previewStatusTitle: String
     var previewStatusColor: Color
@@ -199,6 +200,9 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                 if display.showsPunchlistBadge {
                                     punchlistVisitHeaderBadge
                                 }
+                                if display.showsFollowUpBadge {
+                                    followUpHeaderBadge
+                                }
                             }
                             .frame(height: 14)
                         }
@@ -250,7 +254,15 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
     }
 
     private var punchlistVisitHeaderBadge: some View {
-        Text("Punchlist")
+        sessionModeHeaderBadge("Punchlist", fill: .red)
+    }
+
+    private var followUpHeaderBadge: some View {
+        sessionModeHeaderBadge("Follow-Up", fill: .blue)
+    }
+
+    private func sessionModeHeaderBadge(_ title: String, fill: Color) -> some View {
+        Text(title)
             .font(.system(size: 10, weight: .semibold))
             .foregroundColor(.white.opacity(0.9))
             .lineLimit(1)
@@ -258,9 +270,9 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
             .padding(.vertical, 1)
             .background(
                 Capsule()
-                    .fill(Color.red.opacity(0.82))
+                    .fill(fill.opacity(0.82))
             )
-            .accessibilityLabel("Punchlist")
+            .accessibilityLabel(title)
     }
 
     private func metadataHUDStrip(isLandscapeStyle: Bool) -> some View {
