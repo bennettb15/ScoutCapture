@@ -600,6 +600,7 @@ function validateRows(input: {
     const issueStatus = lowerString(shot.issue_status);
     const isIssueShot = shot.is_flagged === true || nullableString(shot.issue_id) !== null || issueStatus !== null;
     const allowedKinds = new Set<string>([expectedKind]);
+    if (shot.is_guided === true) allowedKinds.add("retake");
     if (isIssueShot) {
       allowedKinds.add("follow_up_capture");
       allowedKinds.add("retake");

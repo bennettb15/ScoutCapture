@@ -84,6 +84,83 @@ class SelectiveHistoryTests(unittest.TestCase):
         displayed=next(s for s in result['shots'] if s['shot_id']=='photo-0-visit1')
         self.assertEqual(displayed['original_flagged_reason'],'Observation 0')
 
+    def test_full_documentation_follow_up_adds_and_retakes_without_resetting_baseline(self):
+        original = {
+            'shotID': 'property-original', 'sessionID': 'session-full',
+            'createdAt': '2026-10-01T10:30:00Z', 'building': 'B1',
+            'elevation': 'North', 'detailType': 'Overview', 'angleIndex': 1,
+            'shotKey': 'b1|north|overview|1', 'isGuided': True,
+            'isFlagged': False, 'originalFilename': 'original.jpg',
+            'storagePath': 'sessions/session-full/shots/property-original/original.jpg',
+        }
+        self.baseline['metadata']['shots'].append(original)
+        retake = {**original, 'shotID': 'property-retake',
+                  'sessionID': 'session-follow', 'createdAt': '2026-10-02T10:30:00Z',
+                  'captureKind': 'retake', 'originalFilename': 'retake.jpg',
+                  'storagePath': 'sessions/session-follow/shots/property-retake/retake.jpg'}
+        added = {**original, 'shotID': 'property-added',
+                 'sessionID': 'session-follow', 'createdAt': '2026-10-02T10:40:00Z',
+                 'angleIndex': 2, 'shotKey': 'b1|north|overview|2',
+                 'captureKind': 'captured', 'originalFilename': 'added.jpg',
+                 'storagePath': 'sessions/session-follow/shots/property-added/added.jpg'}
+        follow = source('follow', 2, 'full_documentation', [retake, added])
+        follow['metadata']['fullDocumentationMode'] = 'follow_up'
+        result = report_input.compose_punchlist_history([self.baseline, follow], Storage())
+        entry_ids = {entry['shot_id'] for entry in result['entries']}
+        self.assertEqual(result['baseline']['session_id'], 'session-full')
+        self.assertIn('property-retake', entry_ids)
+        self.assertIn('property-added', entry_ids)
+        self.assertNotIn('property-original', entry_ids)
+        self.assertEqual(len(entry_ids), 10)
+        self.assertEqual(len(result['punchlist_shots']), 8)
+        by_id = {shot['shot_id']: shot for shot in result['shots']}
+        self.assertTrue(by_id['property-retake']['recent_update'])
+        self.assertTrue(by_id['property-added']['recent_update'])
+        self.assertFalse(by_id['property-original']['recent_update'])
+        validation = {
+            'session_id': 'session-follow', 'session_type': 'full_documentation',
+            'inputs': {
+                'session': {'session_id': 'session-follow', 'property_address': 'Test property'},
+                'ordered_shots': result['shots'],
+                'property_report_entries': result['entries'],
+            },
+            'guided_placeholders': result['guided'],
+        }
+        plan = report_renderer.build_property_plan(
+            validation, report_renderer.media_lookup({}), '10/02/2026', {}, {})
+        markers = {
+            slot['entry']['shot_id']: slot['entry'].get('recent_update')
+            for page in plan['pages'] for slot in page.get('slots', [])
+        }
+        self.assertTrue(markers['property-retake'])
+        self.assertTrue(markers['property-added'])
+        self.assertFalse(markers['photo-0-full'])
+
+    def test_punchlist_update_marks_only_new_photo(self):
+        result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
+        by_id = {shot['shot_id']: shot for shot in result['shots']}
+        self.assertTrue(by_id['photo-0-visit1']['recent_update'])
+        self.assertFalse(by_id['photo-1-full']['recent_update'])
+
+    def test_multiple_full_documentation_follow_ups_keep_prior_additions(self):
+        def added_photo(name, day, angle):
+            return {
+                'shotID': f'property-{name}', 'sessionID': f'session-{name}',
+                'createdAt': f'2026-10-{day:02d}T10:30:00Z', 'building': 'B1',
+                'elevation': 'North', 'detailType': 'Overview', 'angleIndex': angle,
+                'isGuided': True, 'isFlagged': False, 'originalFilename': f'{name}.jpg',
+                'storagePath': f'sessions/session-{name}/shots/property-{name}/{name}.jpg',
+            }
+        first = source('first', 2, 'full_documentation', [added_photo('first', 2, 9)])
+        second = source('second', 3, 'full_documentation', [added_photo('second', 3, 10)])
+        for item in (first, second):
+            item['metadata']['fullDocumentationMode'] = 'follow_up'
+        result = report_input.compose_punchlist_history([self.baseline, first, second], Storage())
+        self.assertEqual(len(result['entries']), 10)
+        by_id = {shot['shot_id']: shot for shot in result['shots']}
+        self.assertFalse(by_id['property-first']['recent_update'])
+        self.assertTrue(by_id['property-second']['recent_update'])
+
     def test_one_of_eight_replaces_only_updated_property_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         self.assertEqual(len(result['punchlist_shots']), 8)
@@ -237,6 +314,41 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(validation['reports']['flagged_comparison']['comparison_count'], 8)
         self.assertEqual(validation['source_provenance']['guided_baseline']['snapshot_id'], 'snapshot-full')
         self.assertEqual(validation['inputs']['ordered_shots'][0]['shot_id'], 'photo-0-full')
+
+    def test_validation_uses_prior_property_and_flags_for_photo_only_follow_up(self):
+        added = {
+            'shotID': 'property-added', 'sessionID': 'session-follow',
+            'createdAt': '2026-10-02T10:40:00Z', 'building': 'B1',
+            'elevation': 'North', 'detailType': 'Overview', 'angleIndex': 9,
+            'isGuided': True, 'isFlagged': False, 'originalFilename': 'added.jpg',
+            'storagePath': 'sessions/session-follow/shots/property-added/added.jpg',
+        }
+        follow = source('follow', 2, 'full_documentation', [added])
+        follow['metadata']['fullDocumentationMode'] = 'follow_up'
+        follow['payload']['rawSessionJSON'] = json.dumps(follow['metadata'])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'row.json').write_text(json.dumps(follow['row']))
+            (root / 'payload.json').write_text(json.dumps(follow['payload']))
+            (root / 'history.json').write_text(json.dumps([
+                {'row': item['row'], 'payload': item['payload']}
+                for item in (self.baseline, follow)
+            ]))
+            (root / 'storage.json').write_text(json.dumps({'objects': [
+                {'bucket': 'scoutcapture-originals', 'path': photo['storagePath']}
+                for item in (self.baseline, follow) for photo in item['metadata']['shots']
+            ]}))
+            args = SimpleNamespace(snapshot_row_fixture=str(root / 'row.json'),
+                snapshot_payload_fixture=str(root / 'payload.json'),
+                history_fixture=str(root / 'history.json'), storage_fixture=str(root / 'storage.json'),
+                canonical_fixture=None, include_runtime=False, session_id=None, snapshot_id=None)
+            validation = report_input.build_validation(args)
+        self.assertTrue(validation['renderable_remotely'])
+        self.assertEqual(validation['inputs']['session']['full_documentation_mode'], 'follow_up')
+        self.assertEqual(validation['reports']['property_report']['photo_entry_count'], 9)
+        self.assertEqual(validation['reports']['priority_report']['flagged_shot_count'], 8)
+        self.assertTrue(next(shot['recent_update'] for shot in validation['inputs']['ordered_shots']
+                             if shot['shot_id'] == 'property-added'))
 
     def test_legacy_validation_uses_pending_photos_from_exact_sealed_visit(self):
         earlier = source('earlier', 2, 'punchlist_visit', [
