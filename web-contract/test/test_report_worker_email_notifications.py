@@ -324,7 +324,7 @@ def worker_args(output_dir: pathlib.Path) -> SimpleNamespace:
     )
 
 
-def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
+def fake_worker_run_step(session_type: str, rendered_report_types: list[str], full_documentation_mode: str = "complete_capture"):
     def run_step(cmd: list[str], cwd: pathlib.Path, env: dict[str, str]) -> None:
         joined = " ".join(cmd)
         if "report_input_phase1.py" in joined:
@@ -349,6 +349,7 @@ def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
                             "ended_at_utc": "2026-09-07T14:30:00Z",
                             "session_type": session_type,
                             "sessionType": session_type,
+                            "full_documentation_mode": full_documentation_mode,
                         },
                         "ordered_shots": [
                             {
@@ -872,7 +873,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         client = FakeSupabaseClient()
         original_run_step = worker.run_step
         with tempfile.TemporaryDirectory() as tmp:
-            worker.run_step = fake_worker_run_step("full_documentation", ["property", "priority", "comparison"])
+            worker.run_step = fake_worker_run_step("full_documentation", ["property", "priority", "comparison"], "follow_up")
             try:
                 summary = worker.process_session(
                     worker_args(pathlib.Path(tmp)),
@@ -891,6 +892,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual("ready", package_row["status"])
         self.assertEqual("full_documentation", package_row["manifest"]["sessionType"])
         self.assertEqual("full_documentation", package_row["manifest"]["session_type"])
+        self.assertEqual("follow_up", package_row["manifest"]["full_documentation_mode"])
         self.assertEqual(
             ["property_report", "flagged_observations", "flagged_comparison"],
             package_report_types,

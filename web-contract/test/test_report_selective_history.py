@@ -136,6 +136,58 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertTrue(markers['property-added'])
         self.assertFalse(markers['photo-0-full'])
 
+    def test_legacy_fast_lane_follow_up_without_mode_uses_prior_property_and_flags(self):
+        original = {
+            'shotID': 'guided-original', 'sessionID': 'session-full',
+            'createdAt': '2026-10-01T10:30:00Z', 'building': 'B1',
+            'elevation': 'North', 'detailType': 'Overview', 'angleIndex': 9,
+            'shotKey': 'b1|north|overview|9', 'isGuided': True,
+            'isFlagged': False, 'originalFilename': 'original.jpg',
+            'storagePath': 'sessions/session-full/shots/guided-original/original.jpg',
+        }
+        self.baseline['metadata']['shots'].append(original)
+        updated = {**original, 'shotID': 'guided-updated',
+                   'sessionID': 'session-follow', 'createdAt': '2026-10-02T10:30:00Z',
+                   'captureKind': 'retake', 'originalFilename': 'updated.jpg',
+                   'storagePath': 'sessions/session-follow/shots/guided-updated/updated.jpg'}
+        added = {**original, 'shotID': 'photo-added', 'sessionID': 'session-follow',
+                 'createdAt': '2026-10-02T10:40:00Z', 'angleIndex': 10,
+                 'shotKey': 'b1|north|overview|10', 'isGuided': False,
+                 'captureKind': 'captured', 'originalFilename': 'added.jpg',
+                 'storagePath': 'sessions/session-follow/shots/photo-added/added.jpg'}
+        follow = source('follow', 2, 'full_documentation', [updated, added])
+        follow['metadata']['appVersion'] = 'fast-lane-report-handoff-edge'
+        self.assertEqual(report_input.full_documentation_mode(follow['metadata']), 'follow_up')
+        result = report_input.compose_punchlist_history([self.baseline, follow], Storage())
+        entry_ids = {entry['shot_id'] for entry in result['entries'] if entry['kind'] == 'photo'}
+        self.assertIn('guided-updated', entry_ids)
+        self.assertIn('photo-added', entry_ids)
+        self.assertNotIn('guided-original', entry_ids)
+        self.assertEqual(len(result['punchlist_shots']), 8)
+        self.assertEqual(len(entry_ids), 10)
+        follow['payload']['rawSessionJSON'] = json.dumps(follow['metadata'])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'row.json').write_text(json.dumps(follow['row']))
+            (root / 'payload.json').write_text(json.dumps(follow['payload']))
+            (root / 'history.json').write_text(json.dumps([
+                {'row': item['row'], 'payload': item['payload']}
+                for item in (self.baseline, follow)
+            ]))
+            (root / 'storage.json').write_text(json.dumps({'objects': [
+                {'bucket': 'scoutcapture-originals', 'path': photo['storagePath']}
+                for item in (self.baseline, follow) for photo in item['metadata']['shots']
+            ]}))
+            args = SimpleNamespace(snapshot_row_fixture=str(root / 'row.json'),
+                snapshot_payload_fixture=str(root / 'payload.json'),
+                history_fixture=str(root / 'history.json'), storage_fixture=str(root / 'storage.json'),
+                canonical_fixture=None, include_runtime=False, session_id=None, snapshot_id=None)
+            validation = report_input.build_validation(args)
+        self.assertEqual(validation['inputs']['session']['full_documentation_mode'], 'follow_up')
+        self.assertEqual(validation['reports']['property_report']['photo_entry_count'], 10)
+        self.assertEqual(validation['reports']['priority_report']['flagged_shot_count'], 8)
+        self.assertEqual(validation['reports']['flagged_comparison']['current_flagged_or_resolved_count'], 8)
+
     def test_punchlist_update_marks_only_new_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         by_id = {shot['shot_id']: shot for shot in result['shots']}

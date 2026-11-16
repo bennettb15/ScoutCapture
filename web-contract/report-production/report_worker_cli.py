@@ -34,7 +34,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 DELIVERABLES_BUCKET = "scoutcapture-deliverables"
 BRANDING_BUCKET = "scoutcapture-org-branding"
-RENDERER_VERSION = "phase2c-photo-notes-4"
+RENDERER_VERSION = "phase2c-follow-up-history-5"
 MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
 ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
@@ -1562,6 +1562,10 @@ def get_or_create_package(
 ) -> tuple[dict[str, Any], str]:
     session = validation["inputs"]["session"]
     package_session_type = session_type(validation)
+    full_documentation_mode = (
+        str(session.get("full_documentation_mode") or "complete_capture")
+        if package_session_type == "full_documentation" else None
+    )
     snapshot_id = str(snapshot_row["id"])
     validation_snapshot_id = str(validation["source_snapshot_id"])
     if validation_snapshot_id.lower() != snapshot_id.lower():
@@ -1635,6 +1639,8 @@ def get_or_create_package(
             **(reviewed_package_manifest or {}),
             "sessionType": package_session_type,
             "session_type": package_session_type,
+            "fullDocumentationMode": full_documentation_mode,
+            "full_documentation_mode": full_documentation_mode,
             "actor": actor,
             "actor_user_id": actor.get("user_id"),
             "actor_email": actor.get("email"),
@@ -2890,6 +2896,10 @@ def process_session(
         package_actor = validation_actor(validation)
         original_photo_actors = original_photo_actor_manifest(validation, prepared)
         package_session_type = session_type(validation)
+        full_documentation_mode = (
+            str(validation["inputs"]["session"].get("full_documentation_mode") or "complete_capture")
+            if package_session_type == "full_documentation" else None
+        )
         package_rows = client.patch(
             "report_packages",
             {"id": f"eq.{package['id']}"},
@@ -2914,6 +2924,8 @@ def process_session(
                     "report_count": len(uploaded_files),
                     "sessionType": package_session_type,
                     "session_type": package_session_type,
+                    "fullDocumentationMode": full_documentation_mode,
+                    "full_documentation_mode": full_documentation_mode,
                     "skipped_reports": render_summary.get("skipped_reports", []),
                     "source_provenance": validation.get("source_provenance"),
                     "pdf_validation_failures": [],
@@ -2926,6 +2938,8 @@ def process_session(
                     **(reviewed_package_manifest or {}),
                     "sessionType": package_session_type,
                     "session_type": package_session_type,
+                    "fullDocumentationMode": full_documentation_mode,
+                    "full_documentation_mode": full_documentation_mode,
                     "environment": client.environment,
                     "production_writes_made": False,
                     "remote_validation_writes_made": client.environment == "remote-validation",

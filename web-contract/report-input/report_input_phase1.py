@@ -919,7 +919,7 @@ def session_input(metadata: dict[str, Any], payload: dict[str, Any], row: dict[s
         "session_id": str(metadata.get("sessionID") or ""),
         "session_type": session_type,
         "sessionType": session_type,
-        "full_documentation_mode": trim(metadata.get("fullDocumentationMode")) or "complete_capture",
+        "full_documentation_mode": full_documentation_mode(metadata),
         "property_id": str(metadata.get("propertyID") or ""),
         "org_id": str(metadata.get("orgID") or payload.get("orgID") or row.get("org_id") or ""),
         "org_name": trim(metadata.get("orgNameAtCapture")),
@@ -1034,13 +1034,27 @@ def scoped_snapshot_history(
     return sorted(result, key=lambda item: (item["started"], str(item["row"].get("created_at") or "")))
 
 
+def full_documentation_mode(metadata: dict[str, Any]) -> str:
+    mode = (trim(metadata.get("fullDocumentationMode") or metadata.get("full_documentation_mode")) or "").lower()
+    if mode in {"complete_capture", "follow_up"}:
+        return mode
+    # Older fast-lane snapshots did not serialize the mode. A guided retake is
+    # unambiguous evidence of a Follow-Up in those snapshots.
+    if trim(metadata.get("appVersion")) == "fast-lane-report-handoff-edge" and any(
+        bool_value(shot.get("isGuided")) and (trim(shot.get("captureKind")) or "").lower() == "retake"
+        for shot in exported_shots(metadata)
+    ):
+        return "follow_up"
+    return "complete_capture"
+
+
 def compose_punchlist_history(
     sources: list[dict[str, Any]], storage: StorageProbe, *, include_prior_issues: bool = False,
 ) -> dict[str, Any]:
     """Use the newest full visit's layout and the latest real photo per issue."""
     baseline = next((source for source in reversed(sources)
                      if source["session_type"] == "full_documentation" and
-                     trim(source["metadata"].get("fullDocumentationMode")) != "follow_up" and
+                     full_documentation_mode(source["metadata"]) != "follow_up" and
                      (source.get("declared_type") == "full_documentation" or
                       report_guided_rows(source["metadata"]) or
                       any(bool_value(shot.get("isGuided")) for shot in exported_shots(source["metadata"])))), None)
@@ -1055,7 +1069,7 @@ def compose_punchlist_history(
     current_session_id = str((current_source or {}).get("row", {}).get("session_id") or "").lower()
     current_is_photo_update = bool(current_source and (
         current_source["session_type"] == "punchlist_visit" or
-        trim(current_source["metadata"].get("fullDocumentationMode")) == "follow_up"
+        full_documentation_mode(current_source["metadata"]) == "follow_up"
     ))
     baseline_seen = False
     for source in sources:
@@ -1073,7 +1087,7 @@ def compose_punchlist_history(
             baseline_shots = shots
             baseline_entries = property_report_entries(metadata, shots)
             baseline_guided = guided_placeholders(metadata, shots)
-        elif baseline_seen and source["session_type"] == "full_documentation" and trim(metadata.get("fullDocumentationMode")) == "follow_up":
+        elif baseline_seen and source["session_type"] == "full_documentation" and full_documentation_mode(metadata) == "follow_up":
             follow_up_property_shots.extend(shot for shot in shots if shot["source_shot_session_id"].lower() == str(row.get("session_id") or "").lower())
         for iid, issue in issues.items():
             latest_issue[iid.lower()] = issue
@@ -1313,7 +1327,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         ]
     composition = None
     operational_overlays = {}
-    is_full_documentation_follow_up = session_type == "full_documentation" and trim(metadata.get("fullDocumentationMode")) == "follow_up"
+    is_full_documentation_follow_up = session_type == "full_documentation" and full_documentation_mode(metadata) == "follow_up"
     if session_type == "punchlist_visit" or current_review or is_full_documentation_follow_up:
         sources = scoped_snapshot_history(args, client, row, payload, metadata)
         composition = compose_punchlist_history(sources, storage, include_prior_issues=current_review)
