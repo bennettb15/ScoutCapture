@@ -20,6 +20,35 @@ Deno.test("validateHandoffRequest accepts full/all and normalizes IDs", () => {
   }
 });
 
+Deno.test("handoff preserves an explicit photo-only Follow-Up and infers older guided updates", () => {
+  const base = {
+    orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
+    propertyID: "1ff0eb11-5d02-4d5e-a552-1a11dee26439",
+    sessionID: "028a6f82-2356-412c-a1eb-28099f240325",
+    sessionType: "full_documentation",
+    reportMode: "all",
+  };
+  const input = {
+    user: { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" },
+    property: { id: base.propertyID, org_id: base.orgID, name: "Test Property" },
+    session: { id: base.sessionID, org_id: base.orgID, property_id: base.propertyID,
+      started_at: "2026-11-13T18:06:00Z", completed_at: "2026-11-16T20:29:00Z", is_sealed: true },
+    generatedAt: "2026-11-16T20:29:00Z",
+  };
+  const explicit = buildRawSessionMetadata({
+    ...input,
+    request: validateHandoffRequest({ ...base, fullDocumentationMode: "follow_up" }),
+    shots: [{ id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", capture_kind: "captured", is_guided: false }],
+  });
+  if (explicit.fullDocumentationMode !== "follow_up") throw new Error("photo-only Follow-Up mode missing");
+  const legacy = buildRawSessionMetadata({
+    ...input,
+    request: validateHandoffRequest(base),
+    shots: [{ id: "cccccccc-cccc-4ccc-cccc-cccccccccccc", capture_kind: "retake", is_guided: true }],
+  });
+  if (legacy.fullDocumentationMode !== "follow_up") throw new Error("older guided Follow-Up was not inferred");
+});
+
 Deno.test("validateHandoffRequest rejects mismatched punch report mode", () => {
   let threw = false;
   try {

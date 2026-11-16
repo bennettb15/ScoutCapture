@@ -12,6 +12,7 @@ type HandoffRequest = {
   sessionID: string;
   sessionType: "full_documentation" | "punchlist_visit";
   reportMode: "all" | "punchlist";
+  fullDocumentationMode?: "complete_capture" | "follow_up";
 };
 
 type SupabaseUser = {
@@ -182,6 +183,7 @@ export function validateHandoffRequest(raw: unknown): HandoffRequest {
   const sessionID = normalizeUuid(record.sessionID ?? record.session_id);
   const sessionType = lowerString(record.sessionType ?? record.session_type);
   const reportMode = lowerString(record.reportMode ?? record.report_mode);
+  const fullDocumentationMode = lowerString(record.fullDocumentationMode ?? record.full_documentation_mode);
   if (!isUuid(orgID)) throw new Error("invalid_org_id");
   if (!isUuid(propertyID)) throw new Error("invalid_property_id");
   if (!isUuid(sessionID)) throw new Error("invalid_session_id");
@@ -197,7 +199,16 @@ export function validateHandoffRequest(raw: unknown): HandoffRequest {
   if (sessionType === "punchlist_visit" && reportMode !== "punchlist") {
     throw new Error("report_mode_mismatch_for_punchlist_visit");
   }
-  return { orgID, propertyID, sessionID, sessionType, reportMode } as HandoffRequest;
+  if (fullDocumentationMode && fullDocumentationMode !== "complete_capture" && fullDocumentationMode !== "follow_up") {
+    throw new Error("invalid_full_documentation_mode");
+  }
+  if (sessionType === "punchlist_visit" && fullDocumentationMode) {
+    throw new Error("full_documentation_mode_mismatch_for_punchlist_visit");
+  }
+  return {
+    orgID, propertyID, sessionID, sessionType, reportMode,
+    fullDocumentationMode: fullDocumentationMode || undefined,
+  } as HandoffRequest;
 }
 
 async function sha256Hex(data: Uint8Array | string): Promise<string> {
@@ -288,6 +299,10 @@ export function buildRawSessionMetadata(input: {
     if (lhsDate !== rhsDate) return lhsDate.localeCompare(rhsDate);
     return lhs.id.localeCompare(rhs.id);
   });
+  const fullDocumentationMode = request.sessionType === "full_documentation"
+    ? request.fullDocumentationMode ?? (orderedShots.some((shot) => shot.is_guided === true && lowerString(shot.capture_kind) === "retake")
+      ? "follow_up" : "complete_capture")
+    : null;
   return {
     schemaVersion: SESSION_METADATA_SCHEMA_VERSION,
     propertyID: request.propertyID,
@@ -296,6 +311,7 @@ export function buildRawSessionMetadata(input: {
     sessionId: request.sessionID,
     sessionType: request.sessionType,
     session_type: request.sessionType,
+    fullDocumentationMode,
     orgID: request.orgID,
     orgId: request.orgID,
     propertyNameAtCapture: property.name ?? session.title ?? null,
@@ -447,6 +463,7 @@ export async function buildSnapshotPayload(input: {
     sessionType: input.request.sessionType,
     session_type: input.request.sessionType,
     reportMode: input.request.reportMode,
+    fullDocumentationMode: rawMetadata.fullDocumentationMode,
     status: "completed",
     isSealed: input.session.is_sealed === true,
     exportedAt: input.session.exported_at ?? null,
