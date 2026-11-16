@@ -5535,6 +5535,7 @@ final class AppState: ObservableObject {
         let sessionID: String
         let sessionType: String
         let reportMode: String
+        let fullDocumentationMode: String?
     }
 
     private struct FastRuntimeUploadIntentCompletionRecord: Decodable {
@@ -47457,7 +47458,11 @@ final class AppState: ObservableObject {
             propertyID: dryRun.propertyID.uuidString.lowercased(),
             sessionID: sessionID.uuidString.lowercased(),
             sessionType: dryRun.sessionType.rawValue,
-            reportMode: dryRun.reportMode
+            reportMode: dryRun.reportMode,
+            fullDocumentationMode: dryRun.sessionType == .fullDocumentation
+                ? (sessions(for: dryRun.propertyID).first(where: { $0.id == sessionID })?.fullDocumentationMode.rawValue
+                    ?? (currentSession?.id == sessionID ? currentSession?.fullDocumentationMode.rawValue : nil))
+                : nil
         )
 
         do {
