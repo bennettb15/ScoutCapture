@@ -428,7 +428,19 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                 .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                 .offset(y: 1.5)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CameraChromeEndPressStyle())
+    }
+
+    private struct CameraChromeEndPressStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .background {
+                    Capsule()
+                        .fill(Color.red.opacity(configuration.isPressed ? 0.24 : 0))
+                        .padding(.horizontal, -10)
+                        .padding(.vertical, -7)
+                }
+        }
     }
 
     private func profileToggleControl() -> some View {

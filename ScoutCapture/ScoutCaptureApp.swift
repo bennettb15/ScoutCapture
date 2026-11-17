@@ -14437,6 +14437,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         guard !productionCompleteState.isRunning,
                               !isSavingFastCapture,
                               !camera.isCapturing else { return }
+                        shutterHaptic.impactOccurred(intensity: 0.45)
+                        shutterHaptic.prepare()
                         fastLaneExitIntentActive = true
                         showFastLaneSessionActionsSheet = false
                         closePreview()
@@ -16275,6 +16277,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func presentFastLaneSessionActionsSheet() {
         guard !isFastLaneExiting else { return }
+        shutterHaptic.impactOccurred(intensity: 0.45)
+        shutterHaptic.prepare()
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
         showFastLaneSessionActionsSheet = true
@@ -20000,8 +20004,19 @@ private struct FastLanePopupActionButton: View {
                 )
         }
         .opacity(isEnabled ? 1.0 : 0.72)
-        .buttonStyle(.plain)
+        .buttonStyle(FastLanePopupPressStyle())
         .disabled(!isEnabled)
+    }
+}
+
+private struct FastLanePopupPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .overlay {
+                Capsule()
+                    .stroke(Color.white.opacity(configuration.isPressed ? 0.8 : 0), lineWidth: 2)
+            }
     }
 }
 
