@@ -14427,9 +14427,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 FastLaneSessionActionsSheet(
                     summary: fastLaneSessionActionsSummary,
                     isEndingSession: isFastLaneExiting || productionCompleteState.isRunning || isSavingFastCapture || camera.isCapturing,
-                    endingTitle: productionCompleteState.isRunning
-                        ? (productionCompleteStatusText ?? "Completing...")
-                        : fastLaneEndingProgressTitle,
+                    isCompletingSession: productionCompleteState.isRunning,
                     completionErrorMessage: fastLaneCompletionErrorMessage,
                     onResume: {
                         showFastLaneSessionActionsSheet = false
@@ -15199,10 +15197,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var fastLaneCurrentPhotoCountForDisplay: Int {
         max(capturedCount, fastLaneGalleryDisplayCount)
-    }
-
-    private var fastLaneEndingProgressTitle: String {
-        fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Exiting"
     }
 
     private var fastLaneCompletionErrorMessage: String? {
@@ -19970,7 +19964,7 @@ private struct FastLanePopupActionButton: View {
 private struct FastLaneSessionActionsSheet: View {
     let summary: FastLaneSessionActionsSummary
     let isEndingSession: Bool
-    let endingTitle: String
+    let isCompletingSession: Bool
     let completionErrorMessage: String?
     let onResume: () -> Void
     let onSaveDraftAndExit: () -> Void
@@ -20074,11 +20068,18 @@ private struct FastLaneSessionActionsSheet: View {
                 action: onSaveDraftAndExit
             )
             FastLanePopupActionButton(
-                title: isEndingSession ? endingTitle : summary.exportActionTitle,
+                title: summary.exportActionTitle,
                 role: .tertiary,
                 isEnabled: !isEndingSession && summary.isExportActionEnabled,
                 action: onComplete
             )
+            .overlay(alignment: .trailing) {
+                if isCompletingSession {
+                    ProgressView()
+                        .tint(.red)
+                        .padding(.trailing, 18)
+                }
+            }
 
             if let completionErrorMessage {
                 Text(completionErrorMessage)
@@ -20088,7 +20089,7 @@ private struct FastLaneSessionActionsSheet: View {
                     .padding(.top, 2)
             }
 
-            if !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
+            if !isEndingSession, !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
                 Text(disabledReason)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.72))
