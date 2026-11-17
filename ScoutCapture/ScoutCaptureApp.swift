@@ -14270,7 +14270,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var captureErrorMessage: String?
     @State private var lastCapture: FastRuntimePreviewCaptureTiming?
     @State private var fastStorageRoot: URL?
-    @State private var isTimingExpanded: Bool = false
     @State private var isRunningCompleteDryRun: Bool = false
     @State private var isRunningCompleteUpload: Bool = false
     @State private var isRunningReportPackageDryRun: Bool = false
@@ -15529,34 +15528,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .zIndex(21)
         }
 
-        if isCaptureTimingAvailable {
-            VStack(alignment: .trailing, spacing: 8) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isTimingExpanded.toggle()
-                    }
-                } label: {
-                    Text(isTimingExpanded ? "Hide Timing" : "Timing")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .background(Color.black.opacity(0.65))
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-
-                if isTimingExpanded {
-                    timingPanel
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .zIndex(18)
-        }
-
     }
 
     private func fastLaneStagedFlagPill(text: String, priority: String?) -> some View {
@@ -15779,22 +15750,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
                 Spacer(minLength: 0)
 
-                if isCaptureTimingAvailable {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isTimingExpanded.toggle()
-                        }
-                    } label: {
-                        Text(isTimingExpanded ? "Hide" : "Timing")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.92))
-                            .padding(.horizontal, 10)
-                            .frame(height: 28)
-                            .background(Color.black.opacity(0.58))
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
             }
 
             HStack(spacing: 8) {
@@ -15803,15 +15758,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 if didCompleteUpload {
                     statusBadge("Uploaded", color: .green)
                 }
-                if isCaptureTimingAvailable, let total = lastCapture?.totalMilliseconds {
-                    statusBadge("Last \(String(format: "%.0f", total)) ms", color: .white.opacity(0.82))
-                }
                 Spacer(minLength: 0)
-            }
-
-            if isCaptureTimingAvailable && isTimingExpanded {
-                timingPanel
-                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.horizontal, 12)
@@ -15965,78 +15912,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .frame(height: 24)
             .background(Color.black.opacity(0.52))
             .clipShape(Capsule())
-    }
-
-    private var isCaptureTimingAvailable: Bool {
-        #if DEBUG
-        true
-        #else
-        isDebugMode
-        #endif
-    }
-
-    private var timingPanel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            timingText("Tap -> RPC/context", contextReadyAt.timeIntervalSince(buttonTappedAt) * 1_000)
-            timingText("Context -> preview request", previewRequestedAt.timeIntervalSince(contextReadyAt) * 1_000)
-            timingText("Request -> camera view", openingDuration(previewRequestedAt, cameraViewAppearedAt))
-            timingText("Camera metadata setup", openingDuration(cameraViewAppearedAt, openingMetadataReadyAt))
-            timingText("  Side payload", openingPrimePayloadMs)
-            timingText("  Side scoping", openingPrimeScopeMs)
-            timingText("  Side angles", openingPrimeAnglesMs)
-            timingText("  Side counts", openingPrimeCountsMs)
-            timingText("  Side media", openingPrimeMediaMs)
-            timingText("  Side thumbnails", openingPrimePrewarmMs)
-            timingText("Media paths lookup", fastLaneMediaMapLookupMs)
-            Text("  Images G\(fastLaneGuidedThumbnailPathByID.count)/\(fastLaneSideControlPayload.guidedShots.count + fastLaneSideControlPayload.retiredGuidedShots.count) F\(fastLaneIssueThumbnailPathByID.count)/\(fastLaneSideControlPayload.activeObservations.count) \(isRefreshingFastLaneMediaMaps ? "loading" : "ready")")
-            Text("  Local photo index \(fastLaneIndexedLocalPhotoCount)")
-            timingText("Gallery setup", openingDuration(openingSideControlsReadyAt, openingGalleryRequestedAt))
-            timingText("Camera start -> running", openingDuration(openingPreviewRequestedAt, previewRunningAt))
-            timingText("Request -> preview running", previewRunningAt.map { $0.timeIntervalSince(previewRequestedAt) * 1_000 })
-            timingText("Total tap -> preview running", previewRunningAt.map { $0.timeIntervalSince(buttonTappedAt) * 1_000 })
-            Divider()
-                .overlay(Color.white.opacity(0.22))
-            timingText("Shutter -> haptic/visual", lastCapture?.hapticMilliseconds)
-            timingText("Shutter -> image captured", lastCapture?.imageCapturedMilliseconds)
-            timingText("Capture -> temp file", lastCapture?.fileWriteMilliseconds)
-            timingText("Temp file -> metadata", lastCapture?.metadataMilliseconds)
-            timingText("Image -> draft saved", lastCapture?.draftSaveMilliseconds)
-            timingText("Draft -> projection", lastCapture?.projectionMilliseconds)
-            timingText("  Guided local state", lastCapture?.projectionTimings?.guidedMilliseconds)
-            timingText("  Flagged local state", lastCapture?.projectionTimings?.flaggedMilliseconds)
-            timingText("  Session metadata", lastCapture?.projectionTimings?.sessionMetadataMilliseconds)
-            timingText("Projection -> pruning", lastCapture?.pruningMilliseconds)
-            timingText("Pruning -> UI ready", lastCapture?.uiMilliseconds)
-            timingText("  Profile setup", lastCapture?.uiPhases?.profileMilliseconds)
-            timingText("  Guided badge", lastCapture?.uiPhases?.guidedBadgeMilliseconds)
-            timingText("  Next angle", lastCapture?.uiPhases?.nextAngleMilliseconds)
-            timingText("  Gallery reload", lastCapture?.uiPhases?.galleryReloadMilliseconds)
-            timingText("  Count refresh", lastCapture?.uiPhases?.countRefreshMilliseconds)
-            timingText("Draft saved -> ready", lastCapture?.postDraftMilliseconds)
-            timingText("Total shutter -> saved", lastCapture?.totalMilliseconds)
-            timingText("Close handling", releaseFinishedAt.flatMap { finished in
-                releaseStartedAt.map { finished.timeIntervalSince($0) * 1_000 }
-            })
-        }
-        .font(.system(size: 11, weight: .medium, design: .monospaced))
-        .foregroundColor(.white.opacity(0.86))
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.58))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    private func timingText(_ label: String, _ milliseconds: Double?) -> some View {
-        HStack {
-            Text(label)
-            Spacer(minLength: 8)
-            Text(milliseconds.map { String(format: "%.1f ms", $0) } ?? "pending")
-        }
-    }
-
-    private func openingDuration(_ start: Date?, _ end: Date?) -> Double? {
-        guard let start, let end else { return nil }
-        return end.timeIntervalSince(start) * 1_000
     }
 
     private var canUseFastShutter: Bool {
