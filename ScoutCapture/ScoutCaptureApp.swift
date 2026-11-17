@@ -16286,7 +16286,21 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             reloadFastLaneGalleryAssets()
                             let galleryReloadMilliseconds = Date().timeIntervalSince(galleryReloadStartedAt) * 1_000
                             let countRefreshStartedAt = Date()
-                            refreshFastLaneSideControlCounts(force: true)
+                            let needsSideControlRefresh: Bool
+                            switch completedIntent {
+                            case .guided:
+                                // The guided row and badge were already updated from the saved shot.
+                                // A separately flagged guided photo still creates an issue to load.
+                                needsSideControlRefresh = capturePreparation.metadata.isFlagged == true
+                            case .flagged:
+                                // The issue list is updated when the post-capture decision is applied.
+                                needsSideControlRefresh = false
+                            default:
+                                needsSideControlRefresh = true
+                            }
+                            if needsSideControlRefresh {
+                                refreshFastLaneSideControlCounts(force: true)
+                            }
                             let countRefreshMilliseconds = Date().timeIntervalSince(countRefreshStartedAt) * 1_000
                             uiPhases = FastRuntimePreviewUIPhases(
                                 profileMilliseconds: profileMilliseconds,
@@ -16388,6 +16402,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             await MainActor.run {
                 guard !isFastLaneExiting else { return }
+                guard !didSyncFastLanePortalIssueStateAfterPreview,
+                      !isSyncingFastLanePortalIssueState,
+                      !isRefreshingFastLaneSideControlCounts else { return }
                 refreshFastLaneSideControlCounts(force: true)
             }
         }
@@ -17225,7 +17242,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func handleFastLaneSideControlTap(_ controlID: CameraChromeSideControl.ID) {
         shutterHaptic.impactOccurred(intensity: 0.42)
         shutterHaptic.prepare()
-        refreshFastLaneSideControlCountsIfNeeded()
 
         switch controlID {
         case "active_issues":
