@@ -14256,6 +14256,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var openingPrimeCountsMs: Double?
     @State private var openingPrimeMediaMs: Double?
     @State private var openingPrimePrewarmMs: Double?
+    @State private var fastLaneMediaMapLookupMs: Double?
     @State private var releaseStartedAt: Date?
     @State private var releaseFinishedAt: Date?
     @State private var isClosing: Bool = false
@@ -15982,6 +15983,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             timingText("  Side counts", openingPrimeCountsMs)
             timingText("  Side media", openingPrimeMediaMs)
             timingText("  Side thumbnails", openingPrimePrewarmMs)
+            timingText("Media paths lookup", fastLaneMediaMapLookupMs)
+            Text("  Images G\(fastLaneGuidedThumbnailPathByID.count)/\(fastLaneSideControlPayload.guidedShots.count + fastLaneSideControlPayload.retiredGuidedShots.count) F\(fastLaneIssueThumbnailPathByID.count)/\(fastLaneSideControlPayload.activeObservations.count) \(isRefreshingFastLaneMediaMaps ? "loading" : "ready")")
             timingText("Gallery setup", openingDuration(openingSideControlsReadyAt, openingGalleryRequestedAt))
             timingText("Camera start -> running", openingDuration(openingPreviewRequestedAt, previewRunningAt))
             timingText("Request -> preview running", previewRunningAt.map { $0.timeIntervalSince(previewRequestedAt) * 1_000 })
@@ -17595,11 +17598,36 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
         let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
         DispatchQueue.global(qos: .utility).async {
-            let guidedThumbnailPaths = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
+            let startedAt = Date()
+            var guidedThumbnailPaths = payload.guidedShots.reduce(into: [UUID: String]()) { partial, guidedShot in
                 if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
                     ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
                     partial[guidedShot.id] = path
                 }
+            }
+            let activeGuidedThumbnailPaths = guidedThumbnailPaths
+            DispatchQueue.main.async {
+                guard fastLaneMediaMapRequestID == requestID else { return }
+                fastLaneGuidedThumbnailPathByID.merge(activeGuidedThumbnailPaths) { current, _ in current }
+                prewarmFastLaneGuidedThumbnails(for: payload.guidedShots)
+            }
+            for guidedShot in payload.retiredGuidedShots {
+                if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
+                    ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
+                    guidedThumbnailPaths[guidedShot.id] = path
+                }
+            }
+            let issueRows = payload.activeObservations
+            let issueThumbnailPaths = issueRows.reduce(into: [UUID: String]()) { partial, observation in
+                if let path = fastLaneIssueDisplayImagePath(for: observation) {
+                    partial[observation.id] = path
+                }
+            }
+            let thumbnailPaths = guidedThumbnailPaths
+            DispatchQueue.main.async {
+                guard fastLaneMediaMapRequestID == requestID else { return }
+                fastLaneGuidedThumbnailPathByID.merge(thumbnailPaths) { current, _ in current }
+                fastLaneIssueThumbnailPathByID.merge(issueThumbnailPaths) { current, _ in current }
             }
             var guidedReferencePathsByKey: [String: String] = [:]
             let guidedReferencePaths = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
@@ -17614,12 +17642,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     guidedReferencePathsByKey[key] = path
                 }
             }
-            let issueRows = payload.activeObservations
-            let issueThumbnailPaths = issueRows.reduce(into: [UUID: String]()) { partial, observation in
-                if let path = fastLaneIssueDisplayImagePath(for: observation) {
-                    partial[observation.id] = path
-                }
-            }
             let issueReferencePaths = issueRows.reduce(into: [UUID: String]()) { partial, observation in
                 if let path = fastLaneObservationReferenceDisplayImagePath(for: observation) {
                     partial[observation.id] = path
@@ -17627,6 +17649,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
             DispatchQueue.main.async {
                 guard fastLaneMediaMapRequestID == requestID else { return }
+                fastLaneMediaMapLookupMs = Date().timeIntervalSince(startedAt) * 1_000
+                guard fastLanePendingMediaMapPayload == nil else {
+                    processPendingFastLaneMediaMaps()
+                    return
+                }
                 fastLaneGuidedThumbnailPathByID = guidedThumbnailPaths
                 fastLaneGuidedReferencePathByID = guidedReferencePaths
                 fastLaneGuidedReferencePathByKey = guidedReferencePathsByKey
