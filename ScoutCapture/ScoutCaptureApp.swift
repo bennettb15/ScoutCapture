@@ -15280,9 +15280,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
         let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
-        let guidedCount = isFollowUp
-            ? fastLaneSideControlPayload.guidedShots.count
-            : fastLaneSideControlCounts.guidedRemainingCount
+        let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
         return [
             CameraChromeSideControl(
                 id: "active_issues",
@@ -15499,7 +15497,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .zIndex(21)
         }
 
-        if isDebugMode && isTimingExpanded {
+        if isCaptureTimingAvailable && isTimingExpanded {
             timingPanel
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
@@ -15730,7 +15728,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
                 Spacer(minLength: 0)
 
-                if isDebugMode {
+                if isCaptureTimingAvailable {
                     Button {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             isTimingExpanded.toggle()
@@ -15754,13 +15752,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 if didCompleteUpload {
                     statusBadge("Uploaded", color: .green)
                 }
-                if isDebugMode, let total = lastCapture?.totalMilliseconds {
+                if isCaptureTimingAvailable, let total = lastCapture?.totalMilliseconds {
                     statusBadge("Last \(String(format: "%.0f", total)) ms", color: .white.opacity(0.82))
                 }
                 Spacer(minLength: 0)
             }
 
-            if isDebugMode && isTimingExpanded {
+            if isCaptureTimingAvailable && isTimingExpanded {
                 timingPanel
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -15918,6 +15916,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .clipShape(Capsule())
     }
 
+    private var isCaptureTimingAvailable: Bool {
+        #if DEBUG
+        true
+        #else
+        isDebugMode
+        #endif
+    }
+
     private var timingPanel: some View {
         VStack(alignment: .leading, spacing: 4) {
             timingText("Tap -> RPC/context", contextReadyAt.timeIntervalSince(buttonTappedAt) * 1_000)
@@ -15930,6 +15936,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             timingText("Shutter -> image captured", lastCapture?.imageCapturedMilliseconds)
             timingText("Capture -> temp file", lastCapture?.fileWriteMilliseconds)
             timingText("Temp file -> metadata", lastCapture?.metadataMilliseconds)
+            timingText("Image -> draft saved", lastCapture?.draftSaveMilliseconds)
+            timingText("Draft saved -> ready", lastCapture?.postDraftMilliseconds)
             timingText("Total shutter -> saved", lastCapture?.totalMilliseconds)
             timingText("Close handling", releaseFinishedAt.flatMap { finished in
                 releaseStartedAt.map { finished.timeIntervalSince($0) * 1_000 }
@@ -16088,6 +16096,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             shutterTappedAt: shutterTappedAt,
                             hapticAt: hapticAt,
                             imageCapturedAt: imageCapturedAt,
+                            draftSavedAt: nil,
                             savedAt: nil,
                             saveResult: nil
                         )
@@ -16121,6 +16130,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         storageRootOverride: fastStorageRoot,
                         metadataContext: capturePreparation.metadata
                     )
+                    let draftSavedAt = Date()
                     if saveResult.success, let savedShot = saveResult.shot {
                         appState.projectFastRuntimeCaptureToLocalCameraState(
                             context: context,
@@ -16147,6 +16157,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             shutterTappedAt: shutterTappedAt,
                             hapticAt: hapticAt,
                             imageCapturedAt: imageCapturedAt,
+                            draftSavedAt: draftSavedAt,
                             savedAt: Date(),
                             saveResult: saveResult
                         )
@@ -23231,6 +23242,7 @@ private struct FastRuntimePreviewCaptureTiming {
     let shutterTappedAt: Date
     let hapticAt: Date
     let imageCapturedAt: Date
+    let draftSavedAt: Date?
     let savedAt: Date?
     let saveResult: AppState.FastRuntimePrototypeCaptureSaveResult?
 
@@ -23248,6 +23260,15 @@ private struct FastRuntimePreviewCaptureTiming {
 
     var metadataMilliseconds: Double? {
         saveResult?.timings.metadataMilliseconds
+    }
+
+    var draftSaveMilliseconds: Double? {
+        draftSavedAt.map { $0.timeIntervalSince(imageCapturedAt) * 1_000 }
+    }
+
+    var postDraftMilliseconds: Double? {
+        guard let draftSavedAt, let savedAt else { return nil }
+        return savedAt.timeIntervalSince(draftSavedAt) * 1_000
     }
 
     var totalMilliseconds: Double? {
