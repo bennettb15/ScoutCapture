@@ -14427,7 +14427,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 FastLaneSessionActionsSheet(
                     summary: fastLaneSessionActionsSummary,
                     isEndingSession: isFastLaneExiting || productionCompleteState.isRunning || isSavingFastCapture || camera.isCapturing,
-                    endingTitle: fastLaneEndingProgressTitle,
+                    endingTitle: productionCompleteState.isRunning
+                        ? (productionCompleteStatusText ?? "Completing...")
+                        : fastLaneEndingProgressTitle,
+                    completionErrorMessage: fastLaneCompletionErrorMessage,
                     onResume: {
                         showFastLaneSessionActionsSheet = false
                     },
@@ -14440,7 +14443,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         closePreview()
                     },
                     onComplete: {
-                        showFastLaneSessionActionsSheet = false
                         runProductionComplete()
                     }
                 )
@@ -15201,6 +15203,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var fastLaneEndingProgressTitle: String {
         fastLaneCurrentPhotoCountForDisplay > 0 ? "Closing Draft..." : "Exiting"
+    }
+
+    private var fastLaneCompletionErrorMessage: String? {
+        if case let .failed(message) = productionCompleteState { return message }
+        return nil
     }
 
     private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
@@ -19080,7 +19087,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func runProductionComplete() {
-        primeFastLaneSideControlSnapshot()
+        if context.sessionType != .fullDocumentation || context.fullDocumentationMode != .followUp {
+            primeFastLaneSideControlSnapshot()
+        }
         let photoCount = fastLaneCompletionCapturedPhotoCount()
         guard canRunProductionComplete else { return }
         productionCompleteState = .validating
@@ -19962,6 +19971,7 @@ private struct FastLaneSessionActionsSheet: View {
     let summary: FastLaneSessionActionsSummary
     let isEndingSession: Bool
     let endingTitle: String
+    let completionErrorMessage: String?
     let onResume: () -> Void
     let onSaveDraftAndExit: () -> Void
     let onComplete: () -> Void
@@ -20069,6 +20079,14 @@ private struct FastLaneSessionActionsSheet: View {
                 isEnabled: !isEndingSession && summary.isExportActionEnabled,
                 action: onComplete
             )
+
+            if let completionErrorMessage {
+                Text(completionErrorMessage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 2)
+            }
 
             if !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
                 Text(disabledReason)
