@@ -133,8 +133,8 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
-    def test_recent_update_marks_only_small_changes_in_photo_lists(self) -> None:
-        for recent_count, total_count, expect_badge in ((2, 20, True), (29, 30, False), (20, 20, False)):
+    def test_recent_update_marks_all_follow_up_property_photos(self) -> None:
+        for recent_count, total_count in ((2, 20), (29, 30), (20, 20)):
             payload = validation()
             template = payload["inputs"]["ordered_shots"][0]
             shots = []
@@ -162,7 +162,7 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                     plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
                     badges = [slot["entry"].get("recent_update") for page in plan["pages"]
                               if page["kind"] == page_kind for slot in page["slots"]]
-                    expected = recent_count if expect_badge and page_kind == "photo" else 0
+                    expected = recent_count if page_kind == "photo" else 0
                     self.assertEqual(expected, sum(bool(value) for value in badges))
 
             payload["inputs"]["session"]["full_documentation_mode"] = None
