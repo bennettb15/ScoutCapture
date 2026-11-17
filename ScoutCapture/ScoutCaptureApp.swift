@@ -14257,6 +14257,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var openingPrimeMediaMs: Double?
     @State private var openingPrimePrewarmMs: Double?
     @State private var fastLaneMediaMapLookupMs: Double?
+    @State private var fastLaneIndexedLocalPhotoCount = 0
     @State private var releaseStartedAt: Date?
     @State private var releaseFinishedAt: Date?
     @State private var isClosing: Bool = false
@@ -14323,6 +14324,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneGuidedReferencePathByKey: [String: String] = [:]
     @State private var fastLaneIssueThumbnailPathByID: [UUID: String] = [:]
     @State private var fastLaneIssueReferencePathByID: [UUID: String] = [:]
+    @State private var fastLaneLocalImageIndex = FastLanePropertyImageIndex()
     @State private var fastLanePendingMediaMapPayload: AppState.FastRuntimePreviewSideControlPayload?
     @State private var isRefreshingFastLaneMediaMaps = false
     @State private var fastLaneMediaMapRequestID = UUID()
@@ -14497,6 +14499,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .onAppear {
             cameraViewAppearedAt = Date()
+            indexFastLanePropertyLocalImages()
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             refreshCameraChromeGlyphRotation()
             loadFastLaneMetadataOptionsIfNeeded()
@@ -15985,6 +15988,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             timingText("  Side thumbnails", openingPrimePrewarmMs)
             timingText("Media paths lookup", fastLaneMediaMapLookupMs)
             Text("  Images G\(fastLaneGuidedThumbnailPathByID.count)/\(fastLaneSideControlPayload.guidedShots.count + fastLaneSideControlPayload.retiredGuidedShots.count) F\(fastLaneIssueThumbnailPathByID.count)/\(fastLaneSideControlPayload.activeObservations.count) \(isRefreshingFastLaneMediaMaps ? "loading" : "ready")")
+            Text("  Local photo index \(fastLaneIndexedLocalPhotoCount)")
             timingText("Gallery setup", openingDuration(openingSideControlsReadyAt, openingGalleryRequestedAt))
             timingText("Camera start -> running", openingDuration(openingPreviewRequestedAt, previewRunningAt))
             timingText("Request -> preview running", previewRunningAt.map { $0.timeIntervalSince(previewRequestedAt) * 1_000 })
@@ -17585,6 +17589,50 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         processPendingFastLaneMediaMaps()
     }
 
+    private func indexFastLanePropertyLocalImages() {
+        let propertyID = context.propertyID
+        let requestID = fastLaneMediaMapRequestID
+        let index = fastLaneLocalImageIndex
+        let sessionsURL = appState.sharedLocalStore.sessionsFolderURL(propertyID: propertyID)
+        let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScoutCaptureGallery", isDirectory: true)
+            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+
+        DispatchQueue.global(qos: .utility).async {
+            var pathsByFilename: [String: String] = [:]
+            let fileManager = FileManager.default
+            for root in [sessionsURL, cacheURL] {
+                let sessionURLs = (try? fileManager.contentsOfDirectory(
+                    at: root,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                )) ?? []
+                for sessionURL in sessionURLs {
+                    let imageFolder = root == sessionsURL
+                        ? sessionURL.appendingPathComponent("Originals", isDirectory: true)
+                        : sessionURL
+                    let imageURLs = (try? fileManager.contentsOfDirectory(
+                        at: imageFolder,
+                        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                        options: [.skipsHiddenFiles]
+                    )) ?? []
+                    for imageURL in imageURLs where fastLaneGalleryImageIsLocallyReadable(imageURL) {
+                        let filename = imageURL.lastPathComponent.lowercased()
+                        if pathsByFilename[filename] == nil {
+                            pathsByFilename[filename] = imageURL.path
+                        }
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                guard fastLaneMediaMapRequestID == requestID else { return }
+                index.replace(with: pathsByFilename)
+                fastLaneIndexedLocalPhotoCount = pathsByFilename.count
+                refreshFastLaneSideControlMediaMaps(for: fastLaneSideControlPayload)
+            }
+        }
+    }
+
     private func processPendingFastLaneMediaMaps() {
         guard let payload = fastLanePendingMediaMapPayload else {
             isRefreshingFastLaneMediaMaps = false
@@ -17890,8 +17938,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             }
         }
-        // A stored session path identifies the photo's only valid cache namespace.
-        // Scanning every session for each unavailable historical image stalls camera UI.
+        // Check the stored session first; the one-pass property index below also
+        // covers older records whose originals moved to a different session folder.
         if storedSessionID == nil,
            let shotID = UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) {
             let cachedSessionIDs = [context.sessionID] + sessionIDs
@@ -17906,6 +17954,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     return cached.path
                 }
             }
+        }
+        if let indexedPath = fastLaneLocalImageIndex.path(for: filename),
+           fastLaneGalleryImageIsLocallyReadable(URL(fileURLWithPath: indexedPath)) {
+            return indexedPath
         }
         return nil
     }
@@ -20377,6 +20429,23 @@ private struct FastLaneIssueListSheet: View {
             guard token == inlineToastToken else { return }
             inlineToastText = nil
         }
+    }
+}
+
+private final class FastLanePropertyImageIndex {
+    private let lock = NSLock()
+    private var pathsByFilename: [String: String] = [:]
+
+    func path(for filename: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pathsByFilename[filename.lowercased()]
+    }
+
+    func replace(with paths: [String: String]) {
+        lock.lock()
+        pathsByFilename = paths
+        lock.unlock()
     }
 }
 
