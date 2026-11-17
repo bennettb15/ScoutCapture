@@ -14479,7 +14479,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .tint(.white)
-                        Text(didCompleteUpload ? "Closing…" : (fastLaneCurrentPhotoCountForDisplay > 0 ? "Saving draft…" : "Exiting"))
+                        Text(productionCompleteState.isRunning
+                             ? "Finishing session…"
+                             : (didCompleteUpload ? "Closing…" : (fastLaneCurrentPhotoCountForDisplay > 0 ? "Saving draft…" : "Exiting")))
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundColor(.white)
                     }
@@ -14534,6 +14536,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             camera.ensurePreviewRunningAsync()
             if camera.isPreviewRunning, previewRunningAt == nil {
                 previewRunningAt = Date()
+                recordFastLaneOpenDiagnostic()
                 refreshFastLaneSideControlCountsIfNeeded()
                 scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
             }
@@ -14544,6 +14547,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
             previewRunningAt = Date()
+            recordFastLaneOpenDiagnostic()
             refreshFastLaneSideControlCountsIfNeeded()
             scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
         }
@@ -16360,6 +16364,32 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         didRefreshFastLaneIssuePayload = true
     }
 
+    private func recordFastLaneOpenDiagnostic() {
+        #if DEBUG
+        guard let previewRunningAt else { return }
+        func duration(_ start: Date?, _ end: Date?) -> Int {
+            guard let start, let end else { return -1 }
+            return Int(end.timeIntervalSince(start) * 1_000)
+        }
+        let line = [
+            "property=\(context.propertyID.uuidString)",
+            "rpc=\(Int(prototypeResult.timings.rpcMilliseconds))",
+            "entry=\(Int(prototypeResult.timings.totalMilliseconds))",
+            "viewWait=\(duration(previewRequestedAt, cameraViewAppearedAt))",
+            "metadata=\(duration(cameraViewAppearedAt, openingMetadataReadyAt))",
+            "payload=\(Int(openingPrimePayloadMs ?? -1))",
+            "sideControls=\(duration(openingMetadataReadyAt, openingSideControlsReadyAt))",
+            "previewStart=\(duration(openingPreviewRequestedAt, previewRunningAt))",
+            "total=\(duration(buttonTappedAt, previewRunningAt))"
+        ].joined(separator: " ") + "\n"
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("fast-lane-open-diagnostic.txt", isDirectory: false)
+        DispatchQueue.global(qos: .utility).async {
+            try? Data(line.utf8).write(to: url, options: .atomic)
+        }
+        #endif
+    }
+
     private func prewarmFastLaneGuidedThumbnails(for guidedShots: [GuidedShot]) {
         let pixelSize = max(120, 56 * UIScreen.currentScale * 2.0)
         for guidedShot in guidedShots.prefix(8) {
@@ -17981,6 +18011,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
         let tokenPath = resolvedPath
         let px = max(220, 88 * UIScreen.currentScale * 2.0)
+        let listPx = max(120, 56 * UIScreen.currentScale * 2.0)
+        fastLaneArmedReferenceThumbnail = fastLaneGalleryImageCache.cachedThumbnail(for: asset, pixelSize: px)
+            ?? fastLaneGalleryImageCache.cachedThumbnail(for: asset, pixelSize: listPx)
         fastLaneGalleryImageCache.requestThumbnail(for: asset, pixelSize: px) { image in
             DispatchQueue.main.async {
                 guard fastLaneArmedReferencePath == tokenPath else { return }
