@@ -17581,6 +17581,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
                 return lhs.id.uuidString < rhs.id.uuidString
             })
+            .lazy
             .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
             .first {
             return latestShotPath
@@ -17742,7 +17743,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return nil
         }
 
-        let sessionIDs: [UUID] = {
+        let storedSessionID: UUID? = {
             let components = URL(fileURLWithPath: storedPath).pathComponents
             for (index, component) in components.enumerated() where component == "Sessions" {
                 let nextIndex = components.index(after: index)
@@ -17750,12 +17751,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                       let sessionID = UUID(uuidString: components[nextIndex]) else {
                     continue
                 }
-                return [sessionID]
+                return sessionID
             }
-            return ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
-                .sorted { $0.startedAt > $1.startedAt }
-                .map(\.id)
+            return nil
         }()
+        let sessionIDs = storedSessionID.map { [$0] } ??
+            (((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+                .sorted { $0.startedAt > $1.startedAt }
+                .map(\.id))
 
         for sessionID in sessionIDs {
             let candidate = appState.sharedLocalStore
@@ -17787,10 +17790,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             }
         }
-        if let shotID = UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) {
-            let cachedSessionIDs = [context.sessionID] +
-                (((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
-                    .map(\.id))
+        // A stored session path identifies the photo's only valid cache namespace.
+        // Scanning every session for each unavailable historical image stalls camera UI.
+        if storedSessionID == nil,
+           let shotID = UUID(uuidString: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent) {
+            let cachedSessionIDs = [context.sessionID] + sessionIDs
             for sessionID in Set(cachedSessionIDs) {
                 let cached = StorageRoot.galleryMediaCacheURL(
                     propertyID: context.propertyID,
@@ -18837,6 +18841,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
                 return lhs.id.uuidString < rhs.id.uuidString
             })
+            .lazy
             .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
             .first(where: { !fastLanePathBelongsToCurrentSession($0) }) {
             return latestHistoricalShot
