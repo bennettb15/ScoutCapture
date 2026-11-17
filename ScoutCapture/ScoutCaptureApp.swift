@@ -15962,6 +15962,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             timingText("  Session metadata", lastCapture?.projectionTimings?.sessionMetadataMilliseconds)
             timingText("Projection -> pruning", lastCapture?.pruningMilliseconds)
             timingText("Pruning -> UI ready", lastCapture?.uiMilliseconds)
+            timingText("  Profile setup", lastCapture?.uiPhases?.profileMilliseconds)
+            timingText("  Guided badge", lastCapture?.uiPhases?.guidedBadgeMilliseconds)
+            timingText("  Next angle", lastCapture?.uiPhases?.nextAngleMilliseconds)
+            timingText("  Gallery reload", lastCapture?.uiPhases?.galleryReloadMilliseconds)
+            timingText("  Count refresh", lastCapture?.uiPhases?.countRefreshMilliseconds)
             timingText("Draft saved -> ready", lastCapture?.postDraftMilliseconds)
             timingText("Total shutter -> saved", lastCapture?.totalMilliseconds)
             timingText("Close handling", releaseFinishedAt.flatMap { finished in
@@ -16126,7 +16131,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             pruningFinishedAt: nil,
                             savedAt: nil,
                             saveResult: nil,
-                            projectionTimings: nil
+                            projectionTimings: nil,
+                            uiPhases: nil
                         )
                         captureErrorMessage = "Capture failed: no image data."
                         isSavingFastCapture = false
@@ -16186,6 +16192,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         pruningFinishedAt = Date()
                     }
                     await MainActor.run {
+                        var uiPhases: FastRuntimePreviewUIPhases?
                         if saveResult.success {
                             let completedIntent = capturePreparation.intent
                             if capturePreparation.retakeGuidedID != nil || capturePreparation.retakeIssueID != nil {
@@ -16203,6 +16210,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             }
                             fastLaneRetakeGuidedID = nil
                             fastLaneRetakeIssueID = nil
+                            let profileStartedAt = Date()
                             if !fastLaneCaptureProfileHistoryLocked {
                                 let lockedProfile = fastLaneCaptureProfile
                                 _ = appState.setPropertyCaptureProfileDefault(
@@ -16216,8 +16224,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                 )
                                 fastLaneCaptureProfileHistoryLocked = true
                             }
+                            let profileMilliseconds = Date().timeIntervalSince(profileStartedAt) * 1_000
                             capturedCount += 1
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
+                            let guidedBadgeStartedAt = Date()
                             if let guidedID = completedIntent.guidedID,
                                let savedShot = saveResult.shot {
                                 showFastLaneGuidedCaptureImmediately(
@@ -16225,6 +16235,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                     savedShot: savedShot
                                 )
                             }
+                            let guidedBadgeMilliseconds = Date().timeIntervalSince(guidedBadgeStartedAt) * 1_000
                             let nextBaseContext: AppState.FastRuntimeCaptureMetadataContext
                             if completedIntent != .free,
                                let unarmedContext = fastLaneUnarmedMetadataSnapshot?.context {
@@ -16262,11 +16273,24 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             fastLaneUnarmedMetadataSnapshot = nil
                             fastLaneCaptureIntent = .free
                             clearFastLaneArmedReferenceState()
+                            let nextAngleStartedAt = Date()
                             fastMetadataContext = nextBaseContext.withAngleIndex(
                                 fastLaneAngleIndexForNextCapture(nextBaseContext)
                             )
+                            let nextAngleMilliseconds = Date().timeIntervalSince(nextAngleStartedAt) * 1_000
+                            let galleryReloadStartedAt = Date()
                             reloadFastLaneGalleryAssets()
+                            let galleryReloadMilliseconds = Date().timeIntervalSince(galleryReloadStartedAt) * 1_000
+                            let countRefreshStartedAt = Date()
                             refreshFastLaneSideControlCounts(force: true)
+                            let countRefreshMilliseconds = Date().timeIntervalSince(countRefreshStartedAt) * 1_000
+                            uiPhases = FastRuntimePreviewUIPhases(
+                                profileMilliseconds: profileMilliseconds,
+                                guidedBadgeMilliseconds: guidedBadgeMilliseconds,
+                                nextAngleMilliseconds: nextAngleMilliseconds,
+                                galleryReloadMilliseconds: galleryReloadMilliseconds,
+                                countRefreshMilliseconds: countRefreshMilliseconds
+                            )
                             if case .flagged(let issueID) = completedIntent,
                                let savedShotID = saveResult.shot?.id {
                                 presentFastLaneFlaggedDecision(issueID: issueID, shotID: savedShotID)
@@ -16289,7 +16313,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             pruningFinishedAt: pruningFinishedAt,
                             savedAt: Date(),
                             saveResult: saveResult,
-                            projectionTimings: projectionTimings
+                            projectionTimings: projectionTimings,
+                            uiPhases: uiPhases
                         )
                     }
                 }
@@ -23274,6 +23299,14 @@ private final class FastLaneLevelMotionModel: ObservableObject {
     }
 }
 
+private struct FastRuntimePreviewUIPhases {
+    let profileMilliseconds: Double
+    let guidedBadgeMilliseconds: Double
+    let nextAngleMilliseconds: Double
+    let galleryReloadMilliseconds: Double
+    let countRefreshMilliseconds: Double
+}
+
 private struct FastRuntimePreviewCaptureTiming {
     let shutterTappedAt: Date
     let hapticAt: Date
@@ -23284,6 +23317,7 @@ private struct FastRuntimePreviewCaptureTiming {
     let savedAt: Date?
     let saveResult: AppState.FastRuntimePrototypeCaptureSaveResult?
     let projectionTimings: AppState.FastRuntimeCaptureProjectionTimings?
+    let uiPhases: FastRuntimePreviewUIPhases?
 
     var hapticMilliseconds: Double {
         hapticAt.timeIntervalSince(shutterTappedAt) * 1_000
