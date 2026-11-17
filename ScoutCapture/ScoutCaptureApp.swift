@@ -15956,6 +15956,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             timingText("Capture -> temp file", lastCapture?.fileWriteMilliseconds)
             timingText("Temp file -> metadata", lastCapture?.metadataMilliseconds)
             timingText("Image -> draft saved", lastCapture?.draftSaveMilliseconds)
+            timingText("Draft -> projection", lastCapture?.projectionMilliseconds)
+            timingText("  Guided local state", lastCapture?.projectionTimings?.guidedMilliseconds)
+            timingText("  Flagged local state", lastCapture?.projectionTimings?.flaggedMilliseconds)
+            timingText("  Session metadata", lastCapture?.projectionTimings?.sessionMetadataMilliseconds)
+            timingText("Projection -> pruning", lastCapture?.pruningMilliseconds)
+            timingText("Pruning -> UI ready", lastCapture?.uiMilliseconds)
             timingText("Draft saved -> ready", lastCapture?.postDraftMilliseconds)
             timingText("Total shutter -> saved", lastCapture?.totalMilliseconds)
             timingText("Close handling", releaseFinishedAt.flatMap { finished in
@@ -16116,8 +16122,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             hapticAt: hapticAt,
                             imageCapturedAt: imageCapturedAt,
                             draftSavedAt: nil,
+                            projectionFinishedAt: nil,
+                            pruningFinishedAt: nil,
                             savedAt: nil,
-                            saveResult: nil
+                            saveResult: nil,
+                            projectionTimings: nil
                         )
                         captureErrorMessage = "Capture failed: no image data."
                         isSavingFastCapture = false
@@ -16150,12 +16159,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         metadataContext: capturePreparation.metadata
                     )
                     let draftSavedAt = Date()
+                    var projectionTimings: AppState.FastRuntimeCaptureProjectionTimings?
+                    var projectionFinishedAt: Date?
+                    var pruningFinishedAt: Date?
                     if saveResult.success, let savedShot = saveResult.shot {
-                        appState.projectFastRuntimeCaptureToLocalCameraState(
+                        projectionTimings = appState.projectFastRuntimeCaptureToLocalCameraState(
                             context: context,
                             shot: savedShot,
                             guidedID: capturePreparation.intent.guidedID
                         )
+                        projectionFinishedAt = Date()
                         if let retakeIssueID = capturePreparation.retakeIssueID {
                             await pruneFastLaneRetakenIssueRecords(
                                 issueID: retakeIssueID,
@@ -16170,6 +16183,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                 storageRoot: saveResult.storageRoot
                             )
                         }
+                        pruningFinishedAt = Date()
                     }
                     await MainActor.run {
                         if saveResult.success {
@@ -16271,8 +16285,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             hapticAt: hapticAt,
                             imageCapturedAt: imageCapturedAt,
                             draftSavedAt: draftSavedAt,
+                            projectionFinishedAt: projectionFinishedAt,
+                            pruningFinishedAt: pruningFinishedAt,
                             savedAt: Date(),
-                            saveResult: saveResult
+                            saveResult: saveResult,
+                            projectionTimings: projectionTimings
                         )
                     }
                 }
@@ -23262,8 +23279,11 @@ private struct FastRuntimePreviewCaptureTiming {
     let hapticAt: Date
     let imageCapturedAt: Date
     let draftSavedAt: Date?
+    let projectionFinishedAt: Date?
+    let pruningFinishedAt: Date?
     let savedAt: Date?
     let saveResult: AppState.FastRuntimePrototypeCaptureSaveResult?
+    let projectionTimings: AppState.FastRuntimeCaptureProjectionTimings?
 
     var hapticMilliseconds: Double {
         hapticAt.timeIntervalSince(shutterTappedAt) * 1_000
@@ -23288,6 +23308,21 @@ private struct FastRuntimePreviewCaptureTiming {
     var postDraftMilliseconds: Double? {
         guard let draftSavedAt, let savedAt else { return nil }
         return savedAt.timeIntervalSince(draftSavedAt) * 1_000
+    }
+
+    var projectionMilliseconds: Double? {
+        guard let draftSavedAt, let projectionFinishedAt else { return nil }
+        return projectionFinishedAt.timeIntervalSince(draftSavedAt) * 1_000
+    }
+
+    var pruningMilliseconds: Double? {
+        guard let projectionFinishedAt, let pruningFinishedAt else { return nil }
+        return pruningFinishedAt.timeIntervalSince(projectionFinishedAt) * 1_000
+    }
+
+    var uiMilliseconds: Double? {
+        guard let pruningFinishedAt, let savedAt else { return nil }
+        return savedAt.timeIntervalSince(pruningFinishedAt) * 1_000
     }
 
     var totalMilliseconds: Double? {

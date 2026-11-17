@@ -44295,15 +44295,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimeCaptureProjectionTimings {
+        let guidedMilliseconds: Double
+        let flaggedMilliseconds: Double
+        let sessionMetadataMilliseconds: Double
+    }
+
+    @discardableResult
     func projectFastRuntimeCaptureToLocalCameraState(
         context: ActiveCaptureContext,
         shot record: FastRuntimePrototypeShotRecord,
         guidedID: UUID? = nil
-    ) {
+    ) -> FastRuntimeCaptureProjectionTimings {
         guard canAccessProperty(context.propertyID),
               record.propertyID == context.propertyID,
               record.sessionID == context.sessionID else {
-            return
+            return FastRuntimeCaptureProjectionTimings(
+                guidedMilliseconds: 0,
+                flaggedMilliseconds: 0,
+                sessionMetadataMilliseconds: 0
+            )
         }
 
         let metadata = Self.normalizedFastRuntimeMetadataContext(
@@ -44324,6 +44335,7 @@ final class AppState: ObservableObject {
             note: metadata.detailNote
         )
 
+        let guidedStartedAt = Date()
         if context.sessionType != .punchlistVisit,
            metadata.isGuided == true {
             projectFastRuntimeGuidedCapture(
@@ -44334,7 +44346,9 @@ final class AppState: ObservableObject {
                 localPath: localPath
             )
         }
+        let guidedMilliseconds = Date().timeIntervalSince(guidedStartedAt) * 1_000
 
+        let flaggedStartedAt = Date()
         if metadata.isFlagged == true {
             projectFastRuntimeObservationCapture(
                 context: context,
@@ -44343,11 +44357,18 @@ final class AppState: ObservableObject {
                 localPath: localPath
             )
         }
+        let flaggedMilliseconds = Date().timeIntervalSince(flaggedStartedAt) * 1_000
+        let sessionMetadataStartedAt = Date()
         persistFastRuntimeCaptureToSessionMetadata(
             context: context,
             record: record,
             metadata: metadata,
             localPath: localPath
+        )
+        return FastRuntimeCaptureProjectionTimings(
+            guidedMilliseconds: guidedMilliseconds,
+            flaggedMilliseconds: flaggedMilliseconds,
+            sessionMetadataMilliseconds: Date().timeIntervalSince(sessionMetadataStartedAt) * 1_000
         )
     }
 
