@@ -49007,20 +49007,34 @@ final class AppState: ObservableObject {
     }
 
     func fastRuntimePriorGuidedShotKeys(propertyID: UUID, currentSessionID: UUID) -> Set<String> {
+        fastRuntimePriorPhotoIdentities(propertyID: propertyID, currentSessionID: currentSessionID).guidedShotKeys
+    }
+
+    func fastRuntimePriorPhotoIdentities(
+        propertyID: UUID,
+        currentSessionID: UUID
+    ) -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
         let priorSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? sessions(for: propertyID))
             .filter {
                 $0.id != currentSessionID &&
                     $0.status == .completed &&
-                    $0.isSealed &&
-                    $0.sessionType == .fullDocumentation
+                    $0.isSealed
             }
         var keys = Set<String>()
+        var issueIDs = Set<UUID>()
         for session in priorSessions {
             guard let metadata = try? localStore.loadSessionMetadata(
                 propertyID: propertyID,
                 sessionID: session.id
             ) else { continue }
-            for shot in metadata.shots where shot.isGuided && !shot.isFlagged && shot.issueID == nil {
+            for shot in metadata.shots {
+                if let issueID = shot.issueID {
+                    issueIDs.insert(issueID)
+                }
+                guard session.sessionType == .fullDocumentation,
+                      shot.isGuided,
+                      !shot.isFlagged,
+                      shot.issueID == nil else { continue }
                 keys.insert(shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
                 keys.insert(Self.makeFastRuntimeMetadataShotKey(
                     building: shot.building,
@@ -49030,7 +49044,7 @@ final class AppState: ObservableObject {
                 ))
             }
         }
-        return keys
+        return (guidedShotKeys: keys, flaggedIssueIDs: issueIDs)
     }
 
     func fastRuntimeCaptureUpdatesPriorGuidedPhoto(

@@ -15167,19 +15167,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private var fastLaneSessionActionsSummary: FastLaneSessionActionsSummary {
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         let followUpShots = isFollowUp ? fastLaneLocalShotRecords() : []
-        let priorGuidedShotKeys = isFollowUp
-            ? appState.fastRuntimePriorGuidedShotKeys(
+        let priorPhotoIdentities = isFollowUp
+            ? appState.fastRuntimePriorPhotoIdentities(
                 propertyID: context.propertyID,
                 currentSessionID: context.sessionID
             )
-            : []
+            : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
         let retakenPhotoCount = followUpShots.filter {
             guard let metadata = $0.metadataContext else { return false }
             return metadata.captureIntentSource?.lowercased() == "retake" ||
                 appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
                     metadata,
-                    priorGuidedShotKeys: priorGuidedShotKeys
-                )
+                    priorGuidedShotKeys: priorPhotoIdentities.guidedShotKeys
+                ) ||
+                metadata.issueID.map(priorPhotoIdentities.flaggedIssueIDs.contains) == true
         }.count
         return FastLaneSessionActionsSummary(
             guidedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.guidedRemainingCount,

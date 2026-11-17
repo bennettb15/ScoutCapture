@@ -13005,10 +13005,21 @@ extension ContentView {
             propertyID: propertyID,
             session: currentSession
         )
-        let retakenPhotoCount = currentSession.fullDocumentationMode == .followUp
+        let currentSessionShots = currentSession.fullDocumentationMode == .followUp
             ? ((try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: currentSession.id))?.shots
-                .filter { $0.sessionID == currentSession.id && $0.captureKind?.lowercased() == "retake" }.count ?? 0)
-            : 0
+                .filter { $0.sessionID == currentSession.id } ?? [])
+            : []
+        let priorPhotoIdentities = currentSession.fullDocumentationMode == .followUp
+            ? appState.fastRuntimePriorPhotoIdentities(propertyID: propertyID, currentSessionID: currentSession.id)
+            : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
+        let retakenPhotoCount = currentSessionShots.filter { shot in
+            shot.captureKind?.lowercased() == "retake" ||
+                shot.issueID.map(priorPhotoIdentities.flaggedIssueIDs.contains) == true ||
+                (shot.isGuided && !shot.isFlagged && shot.issueID == nil &&
+                 priorPhotoIdentities.guidedShotKeys.contains(
+                    shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                 ))
+        }.count
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
