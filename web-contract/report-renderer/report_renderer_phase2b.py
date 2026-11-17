@@ -1261,7 +1261,8 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
     entries = property_entries(validation, lookup)
-    if (trim(session.get("full_documentation_mode")) or "").lower() == "follow_up":
+    if ((trim(session.get("full_documentation_mode")) or "").lower() == "follow_up"
+            and (trim(session.get("report_variant")) or "").lower() != "reviewed"):
         keep_recent_update_badges_for_partial_set(entries)
     else:
         for entry in entries:
@@ -1712,6 +1713,8 @@ def build_punchlist_update_plan(
             trim(entry.get("original_filename")) or "",
         )
     )
+    for entry in entries:
+        entry["recent_update"] = False
     if not entries:
         raise Phase2BError("Punchlist update report is not applicable: no punchlist follow-up captures.")
 
@@ -2456,7 +2459,7 @@ def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any]
         if priority and state not in {"resolved", "pending_review"}:
             border = PRIORITY_COLORS[priority]
         draw_image_slot(c, entry.get("media_path"), slot.get("image_rect"), slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
-        if boolish(entry.get("recent_update")):
+        if plan.get("report_type") == "property" and boolish(entry.get("recent_update")):
             draw_recent_update_strip(c, slot.get("image_rect") or slot["photo_available_rect"], slot["photo_available_rect"])
         draw_metadata(c, entry, slot["caption_rect"], priority=priority)
     draw_footer(c, page["number"], plan["session"]["property_address"])
@@ -2602,8 +2605,6 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
                 warnings.append(f"prepared_media_missing_on_disk:{media_path}")
             missing_label = "No latest submitted photo available" if slot["role"] == "current" else (slot.get("placeholder_reason") or "No original flagged photo available")
             draw_comparison_placeholder(c, image_rect or slot["photo_available_rect"], missing_label)
-        if slot["role"] == "current" and boolish(entry.get("recent_update")):
-            draw_recent_update_strip(c, image_rect or slot["photo_available_rect"], slot["photo_available_rect"])
         draw_comparison_caption(c, slot)
     draw_footer(c, page["number"], session["property_address"])
 
