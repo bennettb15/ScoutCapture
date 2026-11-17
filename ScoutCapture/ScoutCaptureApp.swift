@@ -15497,13 +15497,32 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .zIndex(21)
         }
 
-        if isCaptureTimingAvailable && isTimingExpanded {
-            timingPanel
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-                .zIndex(18)
+        if isCaptureTimingAvailable {
+            VStack(alignment: .trailing, spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isTimingExpanded.toggle()
+                    }
+                } label: {
+                    Text(isTimingExpanded ? "Hide Timing" : "Timing")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(Color.black.opacity(0.65))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                if isTimingExpanded {
+                    timingPanel
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .zIndex(18)
         }
 
     }
@@ -16153,14 +16172,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         }
                     }
                     await MainActor.run {
-                        lastCapture = FastRuntimePreviewCaptureTiming(
-                            shutterTappedAt: shutterTappedAt,
-                            hapticAt: hapticAt,
-                            imageCapturedAt: imageCapturedAt,
-                            draftSavedAt: draftSavedAt,
-                            savedAt: Date(),
-                            saveResult: saveResult
-                        )
                         if saveResult.success {
                             let completedIntent = capturePreparation.intent
                             if capturePreparation.retakeGuidedID != nil || capturePreparation.retakeIssueID != nil {
@@ -16255,6 +16266,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             captureErrorMessage = saveResult.errorMessage ?? "Capture save failed."
                         }
                         isSavingFastCapture = false
+                        lastCapture = FastRuntimePreviewCaptureTiming(
+                            shutterTappedAt: shutterTappedAt,
+                            hapticAt: hapticAt,
+                            imageCapturedAt: imageCapturedAt,
+                            draftSavedAt: draftSavedAt,
+                            savedAt: Date(),
+                            saveResult: saveResult
+                        )
                     }
                 }
             }
