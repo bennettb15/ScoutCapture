@@ -17328,6 +17328,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneIssuePayload {
             fastLaneSideControlSheetMode = mode
             isLoadingFastLaneSideControlSheet = false
+            didCheckFastLaneIssuePanelMedia = false
             scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: mode)
         } else {
             showFastLaneSideControlToast(expectedEmptyText)
@@ -17780,8 +17781,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return
         }
         let requests = observations.compactMap { observation -> AppState.OperationalMediaHydrationRequest? in
-            guard fastLaneIssueThumbnailPathByID[observation.id] == nil,
-                  let shot = observation.shots.max(by: { $0.capturedAt < $1.capturedAt }) else {
+            guard let shot = observation.shots.max(by: { $0.capturedAt < $1.capturedAt }),
+                  fastLaneExistingLocalPath(shot.imageLocalIdentifier) == nil else {
                 return nil
             }
             return fastLanePanelHydrationRequest(shotID: shot.id, storedPath: shot.imageLocalIdentifier)
@@ -17836,7 +17837,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             case .guided:
                 didStart = await appState.ensureGuidedHistoricalMediaAvailableForRequests(pending)
             case .flagged:
-                didStart = await appState.ensureFlaggedHistoricalMediaAvailableForRequests(pending)
+                didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
             }
             await MainActor.run {
                 for request in pending {
@@ -20510,7 +20511,11 @@ private struct FastLanePanelThumbnail: View {
         cache.requestThumbnail(for: asset, pixelSize: px) { thumbnail in
             DispatchQueue.main.async {
                 guard loadedPath == path else { return }
-                image = thumbnail
+                if let thumbnail {
+                    image = thumbnail
+                } else {
+                    loadedPath = nil
+                }
             }
         }
     }
