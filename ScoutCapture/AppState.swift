@@ -49014,6 +49014,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         currentSessionID: UUID
     ) -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
         let priorSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? sessions(for: propertyID))
             .filter {
                 $0.id != currentSessionID &&
@@ -49025,7 +49026,8 @@ final class AppState: ObservableObject {
         for session in priorSessions {
             guard let metadata = try? localStore.loadSessionMetadata(
                 propertyID: propertyID,
-                sessionID: session.id
+                sessionID: session.id,
+                observations: observations
             ) else { continue }
             for shot in metadata.shots {
                 if let issueID = shot.issueID {
@@ -57392,7 +57394,10 @@ final class AppState: ObservableObject {
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+            propertyID: propertyID,
+            observations: observations
+        )
         let sortedObservations = observations
             .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
             .sorted { lhs, rhs in
@@ -57419,7 +57424,10 @@ final class AppState: ObservableObject {
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+            propertyID: propertyID,
+            observations: observations
+        )
         let sortedObservations = observations
             .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
             .sorted { lhs, rhs in
@@ -57465,7 +57473,8 @@ final class AppState: ObservableObject {
                 .flatMap { session -> [ShotMetadata] in
                     guard let metadata = try? localStore.loadSessionMetadata(
                         propertyID: propertyID,
-                        sessionID: session.id
+                        sessionID: session.id,
+                        observations: observations
                     ) else { return [] }
                     return metadata.shots.filter {
                         $0.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork($0)
@@ -57530,14 +57539,19 @@ final class AppState: ObservableObject {
     }
 
     private func fastRuntimeResolvedIssueReferencesByObservationID(
-        propertyID: UUID
+        propertyID: UUID,
+        observations: [Observation]
     ) -> [UUID: FastRuntimeIssueResolvedReference] {
         let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
         let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
         let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
         var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
         for sessionID in sessionIDs {
-            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                observations: observations
+            ) else {
                 continue
             }
             for shot in metadata.shots {
@@ -57693,7 +57707,10 @@ final class AppState: ObservableObject {
         guard canAccessProperty(propertyID), !observations.isEmpty else { return [] }
         let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
             .sorted { $0.startedAt > $1.startedAt }
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+            propertyID: propertyID,
+            observations: observations
+        )
         var requests = Set<OperationalMediaHydrationRequest>()
         for observation in observations {
             let explicitSessionIDs = [
@@ -57997,30 +58014,33 @@ final class AppState: ObservableObject {
             }
         }
 
-        if let observations = try? localStore.fetchObservations(propertyID: propertyID) {
-            for observation in observations {
-                if let targetAngle = observation.targetAngleIndex {
-                    appendReservation(
-                        building: observation.building,
-                        elevation: observation.targetElevation,
-                        detailType: observation.detailType,
-                        angleIndex: targetAngle
-                    )
-                }
-                for guidedShot in observation.guidedShots {
-                    appendReservation(
-                        building: guidedShot.building ?? observation.building,
-                        elevation: guidedShot.targetElevation ?? observation.targetElevation,
-                        detailType: guidedShot.detailType ?? observation.detailType,
-                        angleIndex: guidedShot.angleIndex
-                    )
-                }
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        for observation in observations {
+            if let targetAngle = observation.targetAngleIndex {
+                appendReservation(
+                    building: observation.building,
+                    elevation: observation.targetElevation,
+                    detailType: observation.detailType,
+                    angleIndex: targetAngle
+                )
+            }
+            for guidedShot in observation.guidedShots {
+                appendReservation(
+                    building: guidedShot.building ?? observation.building,
+                    elevation: guidedShot.targetElevation ?? observation.targetElevation,
+                    detailType: guidedShot.detailType ?? observation.detailType,
+                    angleIndex: guidedShot.angleIndex
+                )
             }
         }
 
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         for session in sessions {
-            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: session.id,
+                observations: observations
+            ) else {
                 continue
             }
             for shot in metadata.shots where shot.isActiveForDefaultWorkflows {

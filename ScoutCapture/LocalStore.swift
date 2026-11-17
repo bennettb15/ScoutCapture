@@ -3133,8 +3133,16 @@ final class LocalStore {
         )
     }
 
-    func loadSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
-        try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+    func loadSessionMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        observations: [Observation]? = nil
+    ) throws -> SessionMetadata {
+        try readOrRecoverSessionMetadata(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            observations: observations
+        )
     }
 
     func fetchSessionMetadataIDs(propertyID: UUID) throws -> [UUID] {
@@ -6729,7 +6737,11 @@ final class LocalStore {
         try writeSessionMetadata(normalized)
     }
 
-    private func readOrRecoverSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
+    private func readOrRecoverSessionMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        observations: [Observation]? = nil
+    ) throws -> SessionMetadata {
         let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: fileURL.path) {
             let now = Date()
@@ -6789,7 +6801,12 @@ final class LocalStore {
             metadata.osVersion = metadata.osVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? osVersionString()
                 : metadata.osVersion
-            return normalizeSessionMetadata(metadata, propertyID: propertyID, sessionID: sessionID)
+            return normalizeSessionMetadata(
+                metadata,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                observations: observations
+            )
         } catch {
             print("Recoverable session metadata decode failure for session \(sessionID): \(error)")
             let now = Date()
@@ -7046,7 +7063,12 @@ final class LocalStore {
         return organizations.first(where: { $0.id == organizationID })
     }
 
-    private func normalizeSessionMetadata(_ metadata: SessionMetadata, propertyID: UUID, sessionID: UUID) -> SessionMetadata {
+    private func normalizeSessionMetadata(
+        _ metadata: SessionMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        observations observationsSnapshot: [Observation]? = nil
+    ) -> SessionMetadata {
         let property = currentProperty(for: propertyID)
         let propertyName = property?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let resolvedOrgID = property?.orgId ?? metadata.orgID
@@ -7071,7 +7093,7 @@ final class LocalStore {
             metadata.propertyPhoneAtCapture ?? property?.clientPhone
         )
 
-        let observations = (try? fetchObservations(propertyID: propertyID)) ?? []
+        let observations = observationsSnapshot ?? ((try? fetchObservations(propertyID: propertyID)) ?? [])
         let fieldResolutionsByShotID = observations.reduce(into: [UUID: Observation]()) { result, observation in
             if observation.resolvedInSessionID == sessionID,
                observation.preservesFieldResolutionStatus,
