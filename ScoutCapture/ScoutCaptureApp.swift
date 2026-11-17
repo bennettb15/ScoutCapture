@@ -14245,6 +14245,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     let onDismiss: (AppState.FastRuntimePrototypeCloseResult) -> Void
 
     @State private var previewRunningAt: Date?
+    @State private var cameraViewAppearedAt: Date?
+    @State private var openingMetadataReadyAt: Date?
+    @State private var openingSideControlsReadyAt: Date?
+    @State private var openingGalleryRequestedAt: Date?
+    @State private var openingPreviewRequestedAt: Date?
+    @State private var openingPrimePayloadMs: Double?
+    @State private var openingPrimeScopeMs: Double?
+    @State private var openingPrimeAnglesMs: Double?
+    @State private var openingPrimeCountsMs: Double?
+    @State private var openingPrimeMediaMs: Double?
+    @State private var openingPrimePrewarmMs: Double?
     @State private var releaseStartedAt: Date?
     @State private var releaseFinishedAt: Date?
     @State private var isClosing: Bool = false
@@ -14481,6 +14492,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
         }
         .onAppear {
+            cameraViewAppearedAt = Date()
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             refreshCameraChromeGlyphRotation()
             loadFastLaneMetadataOptionsIfNeeded()
@@ -14504,10 +14516,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 capturedCount = initialCapturedCount
             }
             fastLaneCaptureProfileHistoryLocked = initialProfileLocked || initialCapturedCount > 0
+            openingMetadataReadyAt = Date()
             primeFastLaneSideControlSnapshot()
+            openingSideControlsReadyAt = Date()
             reloadFastLaneGalleryAssets()
+            openingGalleryRequestedAt = Date()
             shutterHaptic.prepare()
             locationManager.start()
+            openingPreviewRequestedAt = Date()
             camera.prepareForPreviewAsync()
             camera.ensurePreviewRunningAsync()
             if camera.isPreviewRunning, previewRunningAt == nil {
@@ -15952,6 +15968,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         VStack(alignment: .leading, spacing: 4) {
             timingText("Tap -> RPC/context", contextReadyAt.timeIntervalSince(buttonTappedAt) * 1_000)
             timingText("Context -> preview request", previewRequestedAt.timeIntervalSince(contextReadyAt) * 1_000)
+            timingText("Request -> camera view", openingDuration(previewRequestedAt, cameraViewAppearedAt))
+            timingText("Camera metadata setup", openingDuration(cameraViewAppearedAt, openingMetadataReadyAt))
+            timingText("  Side payload", openingPrimePayloadMs)
+            timingText("  Side scoping", openingPrimeScopeMs)
+            timingText("  Side angles", openingPrimeAnglesMs)
+            timingText("  Side counts", openingPrimeCountsMs)
+            timingText("  Side media", openingPrimeMediaMs)
+            timingText("  Side thumbnails", openingPrimePrewarmMs)
+            timingText("Gallery setup", openingDuration(openingSideControlsReadyAt, openingGalleryRequestedAt))
+            timingText("Camera start -> running", openingDuration(openingPreviewRequestedAt, previewRunningAt))
             timingText("Request -> preview running", previewRunningAt.map { $0.timeIntervalSince(previewRequestedAt) * 1_000 })
             timingText("Total tap -> preview running", previewRunningAt.map { $0.timeIntervalSince(buttonTappedAt) * 1_000 })
             Divider()
@@ -15992,6 +16018,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             Spacer(minLength: 8)
             Text(milliseconds.map { String(format: "%.1f ms", $0) } ?? "pending")
         }
+    }
+
+    private func openingDuration(_ start: Date?, _ end: Date?) -> Double? {
+        guard let start, let end else { return nil }
+        return end.timeIntervalSince(start) * 1_000
     }
 
     private var canUseFastShutter: Bool {
@@ -16411,17 +16442,30 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func primeFastLaneSideControlSnapshot() {
+        let startedAt = Date()
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
             sessionType: context.sessionType,
             currentSessionID: context.sessionID
         )
+        let payloadReadyAt = Date()
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+        let scopeReadyAt = Date()
         fastLaneSideControlPayload = scopedPayload
         refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
+        let anglesReadyAt = Date()
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+        let countsReadyAt = Date()
         refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+        let mediaReadyAt = Date()
         prewarmFastLaneGuidedThumbnails(for: scopedPayload.guidedShots)
+        let prewarmReadyAt = Date()
+        openingPrimePayloadMs = payloadReadyAt.timeIntervalSince(startedAt) * 1_000
+        openingPrimeScopeMs = scopeReadyAt.timeIntervalSince(payloadReadyAt) * 1_000
+        openingPrimeAnglesMs = anglesReadyAt.timeIntervalSince(scopeReadyAt) * 1_000
+        openingPrimeCountsMs = countsReadyAt.timeIntervalSince(anglesReadyAt) * 1_000
+        openingPrimeMediaMs = mediaReadyAt.timeIntervalSince(countsReadyAt) * 1_000
+        openingPrimePrewarmMs = prewarmReadyAt.timeIntervalSince(mediaReadyAt) * 1_000
         didRefreshFastLaneSideControlCounts = true
         didRefreshFastLaneIssuePayload = true
     }
