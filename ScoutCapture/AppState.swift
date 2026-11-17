@@ -8542,6 +8542,7 @@ final class AppState: ObservableObject {
     private var lastOccupancyHeartbeatAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceReconcileAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
+    private var portalOverlayRevisionByPropertyID: [UUID: Int] = [:]
     private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
     private let sessionArchiveAvailabilityCacheTTL: TimeInterval = 15
     private var reExportAvailabilityCache: [String: ReExportAvailabilityCacheEntry] = [:]
@@ -54484,7 +54485,7 @@ final class AppState: ObservableObject {
     func syncPortalPunchlistOperationalOverlaysForPropertyOpen(
         propertyID: UUID,
         activeOrganizationID: UUID
-    ) async -> LocalStore.PortalPunchlistOperationalOverlayApplyResult? {
+    ) async -> Bool {
         let startedAt = Date()
         guard backendFeatureFlags.supabaseEnabled,
               canAccessProperty(propertyID),
@@ -54494,7 +54495,7 @@ final class AppState: ObservableObject {
                 "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
                 "result=skipped reason=property_open_prereq_failed"
             )
-            return nil
+            return false
         }
         print(
             "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
@@ -54530,7 +54531,10 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
         )
-        if (result?.appliedCount ?? 0) > 0 || recoveredGuidedCount > 0 || recoveredFlaggedCount > 0 {
+        let didChangeLocalState = (result?.appliedCount ?? 0) > 0 ||
+            recoveredGuidedCount > 0 || recoveredFlaggedCount > 0
+        if didChangeLocalState {
+            portalOverlayRevisionByPropertyID[propertyID, default: 0] += 1
             await MainActor.run {
                 self.reloadSessionCache(for: propertyID)
                 self.schedulePersistentDataCacheRefresh(reason: "portal_reference_rows_applied")
@@ -54548,7 +54552,11 @@ final class AppState: ObservableObject {
             "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
         await policyRefresh
-        return result
+        return didChangeLocalState
+    }
+
+    func fastRuntimePortalOverlayRevision(propertyID: UUID) -> Int {
+        portalOverlayRevisionByPropertyID[propertyID, default: 0]
     }
 
     @discardableResult

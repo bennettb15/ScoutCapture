@@ -14346,6 +14346,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var deferredFastLaneSideControlRefreshForce: Bool? = nil
     @State private var isSyncingFastLanePortalIssueState: Bool = false
     @State private var didSyncFastLanePortalIssueStateAfterPreview: Bool = false
+    @State private var fastLanePortalOverlayRevisionAtPrime: Int = 0
     @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
@@ -14523,6 +14524,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
             fastLaneCaptureProfileHistoryLocked = initialProfileLocked || initialCapturedCount > 0
             openingMetadataReadyAt = Date()
+            fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
             primeFastLaneSideControlSnapshot()
             if let initialContext {
                 applyFastLaneMetadataContext(initialContext)
@@ -16417,7 +16419,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         isRefreshingFastLaneSideControlCounts = true
         Task {
-            await syncFastLanePortalIssueStateIfAvailable(force: force)
+            let portalChanged = await syncFastLanePortalIssueStateIfAvailable(force: force)
+            let portalRevisionChanged = appState.fastRuntimePortalOverlayRevision(
+                propertyID: context.propertyID
+            ) != fastLanePortalOverlayRevisionAtPrime
+            guard force || portalChanged || portalRevisionChanged else {
+                await MainActor.run {
+                    finishFastLaneSideControlRefresh()
+                }
+                return
+            }
             guard fastLaneSideControlSheetMode == nil else {
                 await MainActor.run {
                     deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
@@ -16473,6 +16484,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
                 fastLaneSideControlCounts = counts
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
                 finishFastLaneSideControlRefresh()
             }
         }
@@ -16491,7 +16503,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         refreshFastLaneSideControlCounts(force: force)
     }
 
-    private func syncFastLanePortalIssueStateIfAvailable(force: Bool) async {
+    private func syncFastLanePortalIssueStateIfAvailable(force: Bool) async -> Bool {
         let activeOrganizationID: UUID? = await MainActor.run {
             guard force || !didSyncFastLanePortalIssueStateAfterPreview else { return nil }
             guard !isSyncingFastLanePortalIssueState else { return nil }
@@ -16500,8 +16512,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return activeOrganizationID
         }
 
-        guard let activeOrganizationID else { return }
-        _ = await appState.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+        guard let activeOrganizationID else { return false }
+        let didChangeLocalState = await appState.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
             propertyID: context.propertyID,
             activeOrganizationID: activeOrganizationID
         )
@@ -16510,6 +16522,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             didSyncFastLanePortalIssueStateAfterPreview = true
             isSyncingFastLanePortalIssueState = false
         }
+        return didChangeLocalState
     }
 
     private func fastLaneSideControlCounts(
