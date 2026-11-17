@@ -14384,6 +14384,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             )
 
+            if let mode = fastLaneSideControlSheetMode {
+                fastLaneSideControlSheet(for: mode)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                    .ignoresSafeArea()
+                    .zIndex(700)
+            }
+
             if showFastLaneControlsMenu {
                 fastLaneControlsOverlay
                     .zIndex(80)
@@ -14636,9 +14644,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 cache: fastLaneGalleryImageCache,
                 viewerToken: state.id.hashValue
             )
-        }
-        .fullScreenCover(item: $fastLaneSideControlSheetMode) { mode in
-            fastLaneSideControlSheet(for: mode)
         }
     }
 
@@ -17246,12 +17251,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let expectedEmptyText = "No active flagged issues"
         let knownCount = fastLaneSideControlCounts.activeIssueCount
         let cachedRows = fastLaneSideControlPayload.activeObservations
-
-        if cachedRows.contains(where: {
-            fastLaneObservationDisplayAngleIndex($0) == nil && fastLaneMissingIssueAngleByID[$0.id] == nil
-        }) {
-            refreshFastLaneMissingIssueAngles(for: cachedRows)
-        }
 
         if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneIssuePayload {
             fastLaneSideControlSheetMode = mode
