@@ -120,7 +120,8 @@ class SelectiveHistoryTests(unittest.TestCase):
         validation = {
             'session_id': 'session-follow', 'session_type': 'full_documentation',
             'inputs': {
-                'session': {'session_id': 'session-follow', 'property_address': 'Test property'},
+                'session': {'session_id': 'session-follow', 'property_address': 'Test property',
+                            'full_documentation_mode': 'follow_up'},
                 'ordered_shots': result['shots'],
                 'property_report_entries': result['entries'],
             },

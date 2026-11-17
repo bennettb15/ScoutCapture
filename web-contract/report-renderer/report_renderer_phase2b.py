@@ -1261,7 +1261,11 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
     entries = property_entries(validation, lookup)
-    keep_recent_update_badges_for_partial_set(entries)
+    if (trim(session.get("full_documentation_mode")) or "").lower() == "follow_up":
+        keep_recent_update_badges_for_partial_set(entries)
+    else:
+        for entry in entries:
+            entry["recent_update"] = False
     sections = grouped_property_sections(entries, validation)
     assumed_index_pages = 1
     index_pages: list[list[dict[str, Any]]] = []
@@ -1351,7 +1355,8 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             trim(entry.get("original_filename")) or "",
         )
     )
-    keep_recent_update_badges_for_partial_set(entries)
+    for entry in entries:
+        entry["recent_update"] = False
     sections = []
     for level in PRIORITY_ORDER:
         level_entries = [entry for entry in entries if entry["normalized_priority"] == level]

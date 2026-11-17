@@ -155,13 +155,21 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             payload["inputs"]["ordered_shots"] = shots
             payload["inputs"]["property_report_entries"] = entries
             payload["comparisons"]["items"] = comparisons
+            payload["inputs"]["session"]["full_documentation_mode"] = "follow_up"
             for builder, page_kind in ((renderer.build_property_plan, "photo"),
                                        (renderer.build_priority_plan, "priority_photo")):
                 with self.subTest(recent=recent_count, total=total_count, report=builder.__name__):
                     plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
                     badges = [slot["entry"].get("recent_update") for page in plan["pages"]
                               if page["kind"] == page_kind for slot in page["slots"]]
-                    self.assertEqual(recent_count if expect_badge else 0, sum(bool(value) for value in badges))
+                    expected = recent_count if expect_badge and page_kind == "photo" else 0
+                    self.assertEqual(expected, sum(bool(value) for value in badges))
+
+            payload["inputs"]["session"]["full_documentation_mode"] = None
+            punchlist_property = renderer.build_property_plan(payload, media_lookup(), "09/22/2026", {}, {})
+            punchlist_badges = [slot["entry"].get("recent_update") for page in punchlist_property["pages"]
+                                 if page["kind"] == "photo" for slot in page["slots"]]
+            self.assertFalse(any(punchlist_badges))
 
             comparison = renderer.build_comparison_plan(payload, media_lookup(), "09/22/2026", {}, {})
             current_badges = [slot["entry"].get("recent_update") for page in comparison["pages"]
