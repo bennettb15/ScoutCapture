@@ -133,7 +133,7 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
-    def test_recent_update_marks_all_follow_up_property_photos(self) -> None:
+    def test_recent_update_marks_all_follow_up_and_punchlist_property_photos(self) -> None:
         for recent_count, total_count in ((2, 20), (29, 30), (20, 20)):
             payload = validation()
             template = payload["inputs"]["ordered_shots"][0]
@@ -165,13 +165,21 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
                     expected = recent_count if page_kind == "photo" else 0
                     self.assertEqual(expected, sum(bool(value) for value in badges))
 
-            payload["inputs"]["session"]["full_documentation_mode"] = None
+            payload["inputs"]["session"].update(full_documentation_mode=None, session_type="punchlist_visit")
             punchlist_property = renderer.build_property_plan(payload, media_lookup(), "09/22/2026", {}, {})
             punchlist_badges = [slot["entry"].get("recent_update") for page in punchlist_property["pages"]
                                  if page["kind"] == "photo" for slot in page["slots"]]
-            self.assertFalse(any(punchlist_badges))
+            self.assertEqual(recent_count, sum(bool(value) for value in punchlist_badges))
 
-            payload["inputs"]["session"].update(full_documentation_mode="follow_up", report_variant="reviewed")
+            payload["inputs"]["session"].update(full_documentation_mode="complete_capture",
+                                                 session_type="full_documentation")
+            complete_property = renderer.build_property_plan(payload, media_lookup(), "09/22/2026", {}, {})
+            complete_badges = [slot["entry"].get("recent_update") for page in complete_property["pages"]
+                               if page["kind"] == "photo" for slot in page["slots"]]
+            self.assertFalse(any(complete_badges))
+
+            payload["inputs"]["session"].update(full_documentation_mode="follow_up", session_type="full_documentation",
+                                                 report_variant="reviewed")
             reviewed_property = renderer.build_property_plan(payload, media_lookup(), "09/22/2026", {}, {})
             reviewed_badges = [slot["entry"].get("recent_update") for page in reviewed_property["pages"]
                                 if page["kind"] == "photo" for slot in page["slots"]]

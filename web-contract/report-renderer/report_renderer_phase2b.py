@@ -1252,8 +1252,11 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
     entries = property_entries(validation, lookup)
-    if ((trim(session.get("full_documentation_mode")) or "").lower() != "follow_up"
-            or (trim(session.get("report_variant")) or "").lower() == "reviewed"):
+    photo_update_session = (
+        (trim(session.get("full_documentation_mode")) or "").lower() == "follow_up"
+        or (trim(session.get("session_type") or validation.get("session_type")) or "").lower() == "punchlist_visit"
+    )
+    if not photo_update_session or (trim(session.get("report_variant")) or "").lower() == "reviewed":
         for entry in entries:
             entry["recent_update"] = False
     sections = grouped_property_sections(entries, validation)
