@@ -1909,7 +1909,6 @@ struct ActiveIssuesSheet: View {
         }
     }
 
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     let mode: Mode
     let observations: [Observation]
@@ -2381,10 +2380,7 @@ struct ActiveIssuesSheet: View {
     }
 
     private func closeImmediately() {
-        dismiss()
-        DispatchQueue.main.async {
-            onClose()
-        }
+        onClose()
     }
 
     private struct FlaggedReassignSheet: View {
