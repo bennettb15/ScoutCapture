@@ -14322,6 +14322,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneGuidedReferencePathByKey: [String: String] = [:]
     @State private var fastLaneIssueThumbnailPathByID: [UUID: String] = [:]
     @State private var fastLaneIssueReferencePathByID: [UUID: String] = [:]
+    @State private var fastLanePendingMediaMapPayload: AppState.FastRuntimePreviewSideControlPayload?
+    @State private var isRefreshingFastLaneMediaMaps = false
+    @State private var fastLaneMediaMapRequestID = UUID()
     @State private var fastLaneMediaHydrationAttemptedKeys: Set<String> = []
     @State private var didCheckFastLaneGuidedPanelMedia = false
     @State private var didCheckFastLaneIssuePanelMedia = false
@@ -14542,6 +14545,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
         }
         .onDisappear {
+            fastLaneMediaMapRequestID = UUID()
+            fastLanePendingMediaMapPayload = nil
+            isRefreshingFastLaneMediaMaps = false
             focusTap = nil
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
             locationManager.stop()
@@ -17571,40 +17577,63 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func refreshFastLaneSideControlMediaMaps(for payload: AppState.FastRuntimePreviewSideControlPayload) {
+        fastLanePendingMediaMapPayload = payload
+        guard !isRefreshingFastLaneMediaMaps else { return }
+        processPendingFastLaneMediaMaps()
+    }
+
+    private func processPendingFastLaneMediaMaps() {
+        guard let payload = fastLanePendingMediaMapPayload else {
+            isRefreshingFastLaneMediaMaps = false
+            return
+        }
+        fastLanePendingMediaMapPayload = nil
+        isRefreshingFastLaneMediaMaps = true
+        let requestID = fastLaneMediaMapRequestID
         let guidedRows = payload.guidedShots + payload.retiredGuidedShots
         let previousGuidedThumbnailPathByID = fastLaneGuidedThumbnailPathByID
         let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
         let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
-        fastLaneGuidedThumbnailPathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
-            if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
-                ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
-                partial[guidedShot.id] = path
+        DispatchQueue.global(qos: .utility).async {
+            let guidedThumbnailPaths = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
+                if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
+                    ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
+                    partial[guidedShot.id] = path
+                }
             }
-        }
-        var nextGuidedReferencePathByKey: [String: String] = [:]
-        fastLaneGuidedReferencePathByID = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
-            let key = fastLaneGuidedComparisonKey(guidedShot)
-            let candidate = fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
-                ?? previousGuidedReferencePathByID[guidedShot.id]
-                ?? previousGuidedReferencePathByKey[key]
-            if let path = candidate,
-               fastLaneExistingLocalPath(path) != nil,
-               !fastLanePathBelongsToCurrentSession(path) {
-                partial[guidedShot.id] = path
-                nextGuidedReferencePathByKey[key] = path
+            var guidedReferencePathsByKey: [String: String] = [:]
+            let guidedReferencePaths = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
+                let key = fastLaneGuidedComparisonKey(guidedShot)
+                let candidate = fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
+                    ?? previousGuidedReferencePathByID[guidedShot.id]
+                    ?? previousGuidedReferencePathByKey[key]
+                if let path = candidate,
+                   fastLaneExistingLocalPath(path) != nil,
+                   !fastLanePathBelongsToCurrentSession(path) {
+                    partial[guidedShot.id] = path
+                    guidedReferencePathsByKey[key] = path
+                }
             }
-        }
-        fastLaneGuidedReferencePathByKey = nextGuidedReferencePathByKey
-
-        let issueRows = payload.activeObservations
-        fastLaneIssueThumbnailPathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
-            if let path = fastLaneIssueDisplayImagePath(for: observation) {
-                partial[observation.id] = path
+            let issueRows = payload.activeObservations
+            let issueThumbnailPaths = issueRows.reduce(into: [UUID: String]()) { partial, observation in
+                if let path = fastLaneIssueDisplayImagePath(for: observation) {
+                    partial[observation.id] = path
+                }
             }
-        }
-        fastLaneIssueReferencePathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
-            if let path = fastLaneObservationReferenceDisplayImagePath(for: observation) {
-                partial[observation.id] = path
+            let issueReferencePaths = issueRows.reduce(into: [UUID: String]()) { partial, observation in
+                if let path = fastLaneObservationReferenceDisplayImagePath(for: observation) {
+                    partial[observation.id] = path
+                }
+            }
+            DispatchQueue.main.async {
+                guard fastLaneMediaMapRequestID == requestID else { return }
+                fastLaneGuidedThumbnailPathByID = guidedThumbnailPaths
+                fastLaneGuidedReferencePathByID = guidedReferencePaths
+                fastLaneGuidedReferencePathByKey = guidedReferencePathsByKey
+                fastLaneIssueThumbnailPathByID = issueThumbnailPaths
+                fastLaneIssueReferencePathByID = issueReferencePaths
+                prewarmFastLaneGuidedThumbnails(for: payload.guidedShots)
+                processPendingFastLaneMediaMaps()
             }
         }
     }
