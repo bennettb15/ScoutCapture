@@ -14505,19 +14505,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             refreshCameraChromeGlyphRotation()
             loadFastLaneMetadataOptionsIfNeeded()
             warmFastLaneMetadataListsIfNeeded()
-            if !didApplyInitialLocationMode {
-                let initialContext = fastLaneFreeMetadataContextIfNeeded(
-                    AppState.normalizedFastRuntimeMetadataContext(
-                        initialMetadataContext,
-                        fallbackLocationMode: initialLocationMode?.rawValue,
-                        fallbackPosition: 1
-                    )
+            let initialContext = didApplyInitialLocationMode ? nil : fastLaneFreeMetadataContextIfNeeded(
+                AppState.normalizedFastRuntimeMetadataContext(
+                    initialMetadataContext,
+                    fallbackLocationMode: initialLocationMode?.rawValue,
+                    fallbackPosition: 1
                 )
+            )
+            if let initialContext {
                 fastLaneCaptureProfileState =
                     CaptureProfile(storedValue: initialContext.captureProfile) ??
                     inheritedFastLaneCaptureProfile
-                applyFastLaneMetadataContext(initialContext)
-                didApplyInitialLocationMode = true
             }
             fastStorageRoot = storageRoot ?? prototypeResult.tempStorageRoot
             if capturedCount < initialCapturedCount {
@@ -14526,6 +14524,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneCaptureProfileHistoryLocked = initialProfileLocked || initialCapturedCount > 0
             openingMetadataReadyAt = Date()
             primeFastLaneSideControlSnapshot()
+            if let initialContext {
+                applyFastLaneMetadataContext(initialContext)
+                didApplyInitialLocationMode = true
+            }
             openingSideControlsReadyAt = Date()
             reloadFastLaneGalleryAssets()
             openingGalleryRequestedAt = Date()
@@ -16770,12 +16772,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 angleIndex: reservation.angleIndex
             )
         }
-        let latestPayload = appState.fastRuntimePreviewSideControlPayload(
-            propertyID: context.propertyID,
-            sessionType: context.sessionType,
-            currentSessionID: context.sessionID
-        )
-        reserveFastLanePayloadAngles(fastLanePayloadScopedToCurrentFastSession(latestPayload), in: &index)
+        // Opening already loaded this payload; fetching it again repeats the full history scan.
+        reserveFastLanePayloadAngles(fastLaneSideControlPayload, in: &index)
         return index
     }
 
