@@ -2242,18 +2242,19 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     original = trim(entry.get("original_flagged_reason"))
     current = trim(entry.get("flagged_reason"))
     if state != "none" and original and current and original != current:
-        draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, size=10, align="center")
+        line_step = 12 if priority else 14
+        draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - line_step, "width": rect["width"], "height": 14}, size=10, align="center")
         note = f"Updated note: {current}"
-        note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
+        note_rect = {"x": rect["x"], "y": top_y - 2 * line_step, "width": rect["width"], "height": 14}
         if priority:
             draw_priority_note(c, priority, "Pending Review" if state == "pending_review" else label, note_rect, state)
             detail = f"Resolved in field · {note}" if state == "pending_review" else note
-            draw_text(c, ellipsize_text(detail, "Helvetica", 10, rect["width"]), {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
+            draw_text(c, ellipsize_text(detail, "Helvetica", 10, rect["width"]), {"x": rect["x"], "y": top_y - 3 * line_step, "width": rect["width"], "height": 14}, size=10, align="center")
         else:
             if label:
                 note = f"{label} - {note}"
             draw_note(c, note, note_rect, state)
-        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (56 if priority else 42), "width": rect["width"], "height": 14}, size=10, align="center")
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (4 if priority else 3) * line_step, "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if priority:
         if label:

@@ -132,6 +132,24 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
+    def test_priority_original_and_updated_notes_stay_inside_caption(self) -> None:
+        caption = {"x": 18, "y": 200, "width": 576, "height": 66}
+        entry = {
+            "caption": "Building 1 North Overview Angle 5",
+            "visual_state": "resolved",
+            "original_flagged_reason": "Two",
+            "flagged_reason": "Two fingers",
+            "captured_at_display": "November 17, 2026 · 8:52 AM",
+        }
+        with patch.object(renderer, "draw_text") as draw_text, patch.object(renderer, "draw_priority_note") as draw_priority_note:
+            renderer.draw_metadata(MagicMock(), entry, caption, priority="low")
+        line_rects = [call.args[2] for call in draw_text.call_args_list]
+        line_rects += [call.args[3] for call in draw_priority_note.call_args_list]
+        self.assertEqual(len(line_rects), 5)
+        self.assertTrue(all(line["y"] >= caption["y"] and
+                            line["y"] + line["height"] <= caption["y"] + caption["height"]
+                            for line in line_rects))
+
     def test_all_three_indexes_use_the_field_resolution_outcome(self) -> None:
         for status, label in (("pending_review", "Resolved in field · Pending Review"), ("resolved", "Resolved")):
             payload = validation()

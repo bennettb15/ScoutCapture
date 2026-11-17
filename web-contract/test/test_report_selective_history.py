@@ -213,6 +213,50 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertFalse(by_id['property-first']['recent_update'])
         self.assertTrue(by_id['property-second']['recent_update'])
 
+    def test_later_guided_and_flagged_updates_replace_earlier_follow_up_photos(self):
+        def guided_photo(name, day, capture_kind):
+            return {
+                'shotID': f'guided-{name}', 'sessionID': f'session-{name}',
+                'createdAt': f'2026-10-{day:02d}T10:30:00Z',
+                'building': 'B1', 'elevation': 'North', 'detailType': 'Overview',
+                'angleIndex': 9, 'shotKey': 'b1|north|overview|9',
+                'isGuided': True, 'isFlagged': False, 'captureKind': capture_kind,
+                'originalFilename': f'guided-{name}.jpg',
+                'storagePath': f'sessions/session-{name}/shots/guided-{name}/guided-{name}.jpg',
+            }
+
+        first_flagged = shot(9, 'first', 2)
+        first_flagged['angleIndex'] = 10
+        second_flagged = shot(9, 'second', 3, kind='follow_up_capture')
+        second_flagged['angleIndex'] = 10
+        first = source('first', 2, 'full_documentation',
+                       [guided_photo('first', 2, 'captured'), first_flagged], [issue(9)])
+        second = source('second', 3, 'full_documentation',
+                        [guided_photo('second', 3, 'retake'), second_flagged], [issue(9)])
+        for visit in (first, second):
+            visit['metadata']['fullDocumentationMode'] = 'follow_up'
+
+        result = report_input.compose_punchlist_history([self.baseline, first, second], Storage())
+        entry_ids = [entry['shot_id'] for entry in result['entries'] if entry['kind'] == 'photo']
+        self.assertEqual(len(entry_ids), 10)
+        self.assertIn('guided-second', entry_ids)
+        self.assertIn('photo-9-second', entry_ids)
+        self.assertNotIn('guided-first', entry_ids)
+        self.assertNotIn('photo-9-first', entry_ids)
+        self.assertEqual(next(item['previous_shot_id'] for item in result['comparisons']
+                              if item['issue_id'] == 'issue-9'), 'photo-9-first')
+
+        third = source('third', 4, 'punchlist_visit',
+                       [shot(9, 'third', 4, kind='follow_up_capture')], [issue(9)])
+        result = report_input.compose_punchlist_history([self.baseline, first, second, third], Storage())
+        entry_ids = [entry['shot_id'] for entry in result['entries'] if entry['kind'] == 'photo']
+        self.assertEqual(len(entry_ids), 10)
+        self.assertIn('guided-second', entry_ids)
+        self.assertIn('photo-9-third', entry_ids)
+        self.assertNotIn('guided-first', entry_ids)
+        self.assertNotIn('photo-9-first', entry_ids)
+        self.assertNotIn('photo-9-second', entry_ids)
+
     def test_one_of_eight_replaces_only_updated_property_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         self.assertEqual(len(result['punchlist_shots']), 8)
