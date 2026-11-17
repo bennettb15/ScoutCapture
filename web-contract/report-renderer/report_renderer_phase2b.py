@@ -1137,15 +1137,6 @@ def property_entries(validation: dict[str, Any], lookup: MediaLookup) -> list[di
     return sorted(result, key=sort_key)
 
 
-def keep_recent_update_badges_for_partial_set(entries: list[dict[str, Any]]) -> None:
-    """Highlight small updates within a report, not a newly captured majority."""
-    photos = [entry for entry in entries if entry.get("kind", "photo") == "photo"]
-    recent_count = sum(boolish(entry.get("recent_update")) for entry in photos)
-    if recent_count and recent_count * 2 >= len(photos):
-        for entry in photos:
-            entry["recent_update"] = False
-
-
 def grouped_property_sections(entries: list[dict[str, Any]], validation: dict[str, Any]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     meta: dict[str, tuple[str, str]] = {}
@@ -1261,10 +1252,8 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
     entries = property_entries(validation, lookup)
-    if ((trim(session.get("full_documentation_mode")) or "").lower() == "follow_up"
-            and (trim(session.get("report_variant")) or "").lower() != "reviewed"):
-        keep_recent_update_badges_for_partial_set(entries)
-    else:
+    if ((trim(session.get("full_documentation_mode")) or "").lower() != "follow_up"
+            or (trim(session.get("report_variant")) or "").lower() == "reviewed"):
         for entry in entries:
             entry["recent_update"] = False
     sections = grouped_property_sections(entries, validation)
