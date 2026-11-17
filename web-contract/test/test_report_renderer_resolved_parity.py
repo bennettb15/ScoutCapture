@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import pathlib
 import sys
@@ -132,6 +133,84 @@ def validation() -> dict:
 
 
 class ReportRendererResolvedParityTests(unittest.TestCase):
+    def test_recent_update_marks_only_small_changes_in_photo_lists(self) -> None:
+        for recent_count, total_count, expect_badge in ((2, 20, True), (29, 30, False), (20, 20, False)):
+            payload = validation()
+            template = payload["inputs"]["ordered_shots"][0]
+            shots = []
+            entries = []
+            comparisons = []
+            for index in range(total_count):
+                shot = copy.deepcopy(template)
+                shot["shot_id"] = f"photo-{index}"
+                shot["angle_index"] = index + 1
+                shot["recent_update"] = index < recent_count
+                shots.append(shot)
+                entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
+                comparisons.append({
+                    "current_shot_id": shot["shot_id"],
+                    "previous_shot_id": f"previous-{index}",
+                    "previous_session_id": "55555555-5555-4555-8555-555555555555",
+                })
+            payload["inputs"]["ordered_shots"] = shots
+            payload["inputs"]["property_report_entries"] = entries
+            payload["comparisons"]["items"] = comparisons
+            payload["inputs"]["session"]["full_documentation_mode"] = "follow_up"
+            for builder, page_kind in ((renderer.build_property_plan, "photo"),
+                                       (renderer.build_priority_plan, "priority_photo")):
+                with self.subTest(recent=recent_count, total=total_count, report=builder.__name__):
+                    plan = builder(payload, media_lookup(), "09/22/2026", {}, {})
+                    badges = [slot["entry"].get("recent_update") for page in plan["pages"]
+                              if page["kind"] == page_kind for slot in page["slots"]]
+                    expected = recent_count if expect_badge and page_kind == "photo" else 0
+                    self.assertEqual(expected, sum(bool(value) for value in badges))
+
+            payload["inputs"]["session"]["full_documentation_mode"] = None
+            punchlist_property = renderer.build_property_plan(payload, media_lookup(), "09/22/2026", {}, {})
+            punchlist_badges = [slot["entry"].get("recent_update") for page in punchlist_property["pages"]
+                                 if page["kind"] == "photo" for slot in page["slots"]]
+            self.assertFalse(any(punchlist_badges))
+
+            payload["inputs"]["session"].update(full_documentation_mode="follow_up", report_variant="reviewed")
+            reviewed_property = renderer.build_property_plan(payload, media_lookup(), "09/22/2026", {}, {})
+            reviewed_badges = [slot["entry"].get("recent_update") for page in reviewed_property["pages"]
+                                if page["kind"] == "photo" for slot in page["slots"]]
+            self.assertFalse(any(reviewed_badges))
+
+            comparison = renderer.build_comparison_plan(payload, media_lookup(), "09/22/2026", {}, {})
+            current_badges = [slot["entry"].get("recent_update") for page in comparison["pages"]
+                              if page["kind"] == "comparison_photo" for slot in page["slots"]
+                              if slot["role"] == "current"]
+            self.assertFalse(any(current_badges))
+
+    def test_on_demand_punchlist_update_report_has_no_recent_update_badge(self) -> None:
+        payload = validation()
+        shot = payload["inputs"]["ordered_shots"][0]
+        shot.update(capture_kind="retake", recent_update=True)
+        plan = renderer.build_punchlist_update_plan(payload, media_lookup(), "09/22/2026", {}, {})
+        entries = [slot["entry"] for page in plan["pages"] if page["kind"] == "photo"
+                   for slot in page["slots"]]
+        self.assertEqual(1, len(entries))
+        self.assertFalse(entries[0]["recent_update"])
+
+    def test_priority_original_and_updated_notes_stay_inside_caption(self) -> None:
+        caption = {"x": 18, "y": 200, "width": 576, "height": 66}
+        entry = {
+            "caption": "Building 1 North Overview Angle 5",
+            "visual_state": "resolved",
+            "original_flagged_reason": "Two",
+            "flagged_reason": "Two fingers",
+            "captured_at_display": "November 17, 2026 · 8:52 AM",
+        }
+        with patch.object(renderer, "draw_text") as draw_text, patch.object(renderer, "draw_priority_note") as draw_priority_note:
+            renderer.draw_metadata(MagicMock(), entry, caption, priority="low")
+        line_rects = [call.args[2] for call in draw_text.call_args_list]
+        line_rects += [call.args[3] for call in draw_priority_note.call_args_list]
+        self.assertEqual(len(line_rects), 5)
+        self.assertTrue(all(line["y"] >= caption["y"] and
+                            line["y"] + line["height"] <= caption["y"] + caption["height"]
+                            for line in line_rects))
+
     def test_all_three_indexes_use_the_field_resolution_outcome(self) -> None:
         for status, label in (("pending_review", "Resolved in field · Pending Review"), ("resolved", "Resolved")):
             payload = validation()
