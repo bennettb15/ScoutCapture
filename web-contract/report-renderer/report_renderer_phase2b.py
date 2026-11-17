@@ -1137,6 +1137,15 @@ def property_entries(validation: dict[str, Any], lookup: MediaLookup) -> list[di
     return sorted(result, key=sort_key)
 
 
+def keep_recent_update_badges_for_partial_set(entries: list[dict[str, Any]]) -> None:
+    """Highlight small updates within a report, not a newly captured majority."""
+    photos = [entry for entry in entries if entry.get("kind", "photo") == "photo"]
+    recent_count = sum(boolish(entry.get("recent_update")) for entry in photos)
+    if recent_count and recent_count * 2 >= len(photos):
+        for entry in photos:
+            entry["recent_update"] = False
+
+
 def grouped_property_sections(entries: list[dict[str, Any]], validation: dict[str, Any]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     meta: dict[str, tuple[str, str]] = {}
@@ -1252,6 +1261,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
     entries = property_entries(validation, lookup)
+    keep_recent_update_badges_for_partial_set(entries)
     sections = grouped_property_sections(entries, validation)
     assumed_index_pages = 1
     index_pages: list[list[dict[str, Any]]] = []
@@ -1341,6 +1351,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             trim(entry.get("original_filename")) or "",
         )
     )
+    keep_recent_update_badges_for_partial_set(entries)
     sections = []
     for level in PRIORITY_ORDER:
         level_entries = [entry for entry in entries if entry["normalized_priority"] == level]
@@ -1585,6 +1596,9 @@ def build_comparison_plan(
             entry["current"].get("original_filename") or "",
         )
     )
+    # Side-by-side previous/current photos already identify the update.
+    for entry in entries:
+        entry["current"]["recent_update"] = False
     assumed_index_pages = 1
     index_pages: list[list[dict[str, Any]]] = []
     for _ in range(3):
