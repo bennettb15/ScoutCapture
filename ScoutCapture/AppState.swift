@@ -44336,15 +44336,18 @@ final class AppState: ObservableObject {
         )
 
         let guidedStartedAt = Date()
+        let projectedGuidedRows: [GuidedShot]?
         if context.sessionType != .punchlistVisit,
            metadata.isGuided == true {
-            projectFastRuntimeGuidedCapture(
+            projectedGuidedRows = projectFastRuntimeGuidedCapture(
                 context: context,
                 shot: projectedShot,
                 metadata: metadata,
                 guidedID: guidedID,
                 localPath: localPath
             )
+        } else {
+            projectedGuidedRows = nil
         }
         let guidedMilliseconds = Date().timeIntervalSince(guidedStartedAt) * 1_000
 
@@ -44363,7 +44366,8 @@ final class AppState: ObservableObject {
             context: context,
             record: record,
             metadata: metadata,
-            localPath: localPath
+            localPath: localPath,
+            projectedGuidedRows: projectedGuidedRows
         )
         return FastRuntimeCaptureProjectionTimings(
             guidedMilliseconds: guidedMilliseconds,
@@ -44376,7 +44380,8 @@ final class AppState: ObservableObject {
         context: ActiveCaptureContext,
         record: FastRuntimePrototypeShotRecord,
         metadata: FastRuntimeCaptureMetadataContext,
-        localPath: String?
+        localPath: String?,
+        projectedGuidedRows: [GuidedShot]?
     ) {
         guard let localPath, FileManager.default.fileExists(atPath: localPath) else { return }
         do {
@@ -44433,7 +44438,7 @@ final class AppState: ObservableObject {
             )
             try localStore.upsertShotMetadata(shot)
             if metadata.isGuided == true {
-                let guided = try localStore.fetchGuidedShots(propertyID: context.propertyID)
+                let guided = try projectedGuidedRows ?? localStore.fetchGuidedShots(propertyID: context.propertyID)
                 try localStore.syncGuidedShotsToSessionMetadata(
                     propertyID: context.propertyID,
                     sessionID: context.sessionID,
@@ -44451,7 +44456,7 @@ final class AppState: ObservableObject {
         metadata: FastRuntimeCaptureMetadataContext,
         guidedID: UUID?,
         localPath: String?
-    ) {
+    ) -> [GuidedShot]? {
         let propertyID = context.propertyID
         let normalizedBuilding = metadata.building.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedElevation = (CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
@@ -44460,11 +44465,14 @@ final class AppState: ObservableObject {
         guard !normalizedBuilding.isEmpty,
               !normalizedElevation.isEmpty,
               !normalizedDetail.isEmpty else {
-            return
+            return nil
         }
 
         do {
-            var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            let isOrdinaryGuidedCapture = metadata.isFlagged != true
+            var guidedRows = isOrdinaryGuidedCapture
+                ? try localStore.fetchGuidedShotsForFastCapture(propertyID: propertyID)
+                : try localStore.fetchGuidedShots(propertyID: propertyID)
             let targetIndex: Array<GuidedShot>.Index? = {
                 if let guidedID,
                    let index = guidedRows.firstIndex(where: { $0.id == guidedID }) {
@@ -44514,9 +44522,15 @@ final class AppState: ObservableObject {
                 guidedRows.append(guided)
             }
 
-            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            if isOrdinaryGuidedCapture {
+                try localStore.saveGuidedShotsForFastCapture(guidedRows, propertyID: propertyID)
+            } else {
+                try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            }
+            return guidedRows
         } catch {
             print("[FastLaneProjection] guided_projection_failed propertyID=\(propertyID.uuidString) shotID=\(shot.id.uuidString) error=\(error.localizedDescription)")
+            return nil
         }
     }
 

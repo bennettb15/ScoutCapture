@@ -16195,10 +16195,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         var uiPhases: FastRuntimePreviewUIPhases?
                         if saveResult.success {
                             let completedIntent = capturePreparation.intent
-                            if capturePreparation.retakeGuidedID != nil || capturePreparation.retakeIssueID != nil {
-                                // Retakes can remove an old reservation; rebuild from saved state.
-                                fastLaneAngleReservationIndex = nil
-                            } else if let savedMetadata = saveResult.shot?.metadataContext {
+                            if let savedMetadata = saveResult.shot?.metadataContext {
+                                // Guided and issue retakes keep their reserved angle. Reclassification
+                                // invalidates the index separately when the angle can actually change.
                                 fastLaneAngleReservationIndex?.reserve(
                                     building: savedMetadata.building,
                                     elevation: savedMetadata.elevation,
@@ -17267,7 +17266,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if !fastLaneSideControlPayload.guidedShots.isEmpty ||
             fastLaneSideControlCounts.guidedRemainingCount > 0 ||
             !didRefreshFastLaneSideControlCounts {
-            refreshFastLaneSideControlMediaMaps(for: fastLaneSideControlPayload)
             fastLaneSideControlSheetMode = .guided
             isLoadingFastLaneSideControlSheet = false
             didCheckFastLaneGuidedPanelMedia = false
@@ -18435,16 +18433,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let metadataURL = root
             .appendingPathComponent("Metadata", isDirectory: true)
             .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
-        let observationByIssueID = ((try? appState.sharedLocalStore.fetchObservations(propertyID: context.propertyID)) ?? [])
-            .reduce(into: [UUID: Observation]()) { partial, observation in
-                partial[observation.id] = observation
-            }
         let previousSession = fastLanePreviousGallerySession()
-        let activeGuidedRows = ((try? appState.sharedLocalStore.fetchGuidedShots(propertyID: context.propertyID)) ?? [])
+        let activeGuidedRows = fastLaneSideControlPayload.guidedShots
             .filter { !$0.isRetired && $0.status != .retired }
         let activeGuidedShotIDs = Set(activeGuidedRows.compactMap { $0.shot?.id })
-        let projectedObservations = Array(observationByIssueID.values)
         DispatchQueue.global(qos: .utility).async {
+            let observationByIssueID = ((try? appState.sharedLocalStore.fetchObservations(propertyID: context.propertyID)) ?? [])
+                .reduce(into: [UUID: Observation]()) { partial, observation in
+                    partial[observation.id] = observation
+                }
+            let projectedObservations = Array(observationByIssueID.values)
             let gallery: (
                 assets: [ReportAsset],
                 metadata: [String: FastLaneGalleryMetadata],
@@ -18523,7 +18521,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLanePreviousGallerySession() -> Session? {
-        ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+        appState.sessions(for: context.propertyID)
             .filter {
                 $0.id != context.sessionID &&
                 $0.status == .completed &&

@@ -2934,6 +2934,22 @@ final class LocalStore {
         try writeGuidedShots(normalized, propertyID: propertyID)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
+
+    // The camera has already loaded and reconciled the guided list before capture.
+    // An ordinary guided photo only changes one row, so avoid rescanning every
+    // historical session for promotion evidence on the shutter path.
+    func fetchGuidedShotsForFastCapture(propertyID: UUID) throws -> [GuidedShot] {
+        try ensurePropertyExists(propertyID)
+        return LocalConflictRules.normalizeGuidedCompletionStates(
+            try readGuidedShots(propertyID: propertyID)
+        )
+    }
+
+    func saveGuidedShotsForFastCapture(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
+        try ensurePropertyExists(propertyID)
+        try writeGuidedShots(guidedShots, propertyID: propertyID)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+    }
     
     // MARK: - Sessions CRUD (per-property)
     
