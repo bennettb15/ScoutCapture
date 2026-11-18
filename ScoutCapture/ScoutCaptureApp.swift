@@ -14218,6 +14218,28 @@ private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
     let priority: String
 }
 
+private final class FastLaneReadyInteractionTrace: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "ScoutCapture.ReadyInteractionTrace", qos: .utility)
+    private let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("fast-lane-ready-interaction.txt", isDirectory: false)
+
+    func record(propertyID: UUID, event: String) {
+        #if DEBUG
+        let timestamp = Int(Date().timeIntervalSince1970 * 1_000)
+        let line = "time=\(timestamp) property=\(propertyID.uuidString) event=\(event)\n"
+        queue.async { [fileURL] in
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+            }
+            guard let handle = try? FileHandle(forWritingTo: fileURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            handle.closeFile()
+        }
+        #endif
+    }
+}
+
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private struct FocusTap: Identifiable {
         let id = UUID()
@@ -14245,6 +14267,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     let onDismiss: (AppState.FastRuntimePrototypeCloseResult) -> Void
 
     @State private var previewRunningAt: Date?
+    @State private var readyInteractionTrace = FastLaneReadyInteractionTrace()
     @State private var cameraViewAppearedAt: Date?
     @State private var openingMetadataReadyAt: Date?
     @State private var openingSideControlsReadyAt: Date?
@@ -14437,6 +14460,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         guard !productionCompleteState.isRunning,
                               !isSavingFastCapture,
                               !camera.isCapturing else { return }
+                        recordFastLaneReadyEvent("exit_tap_received")
                         shutterHaptic.impactOccurred(intensity: 0.45)
                         shutterHaptic.prepare()
                         fastLaneExitIntentActive = true
@@ -14447,6 +14471,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         runProductionComplete()
                     }
                 )
+                .onAppear { recordFastLaneReadyEvent("end_sheet_visible") }
                 .zIndex(500)
             }
 
@@ -14493,6 +14518,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     .background(Color.black.opacity(0.82))
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
+                .onAppear { recordFastLaneReadyEvent("closing_overlay_visible") }
                 .zIndex(600)
             }
         }
@@ -14542,6 +14568,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             camera.ensurePreviewRunningAsync()
             if camera.isPreviewRunning, previewRunningAt == nil {
                 previewRunningAt = Date()
+                recordFastLaneReadyEvent("preview_ready")
                 recordFastLaneOpenDiagnostic()
                 refreshFastLaneSideControlCountsIfNeeded()
                 scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
@@ -14553,6 +14580,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
             previewRunningAt = Date()
+            recordFastLaneReadyEvent("preview_ready")
             recordFastLaneOpenDiagnostic()
             refreshFastLaneSideControlCountsIfNeeded()
             scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
@@ -16277,11 +16305,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func presentFastLaneSessionActionsSheet() {
         guard !isFastLaneExiting else { return }
+        recordFastLaneReadyEvent("end_tap_received")
         shutterHaptic.impactOccurred(intensity: 0.45)
         shutterHaptic.prepare()
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
         showFastLaneSessionActionsSheet = true
+        recordFastLaneReadyEvent("end_sheet_requested")
     }
 
     private func showFastLaneGuidedCaptureImmediately(
@@ -16398,6 +16428,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         #endif
     }
 
+    private func recordFastLaneReadyEvent(_ event: String) {
+        readyInteractionTrace.record(propertyID: context.propertyID, event: event)
+    }
+
     private func prewarmFastLaneGuidedThumbnails(for guidedShots: [GuidedShot]) {
         let pixelSize = max(120, 56 * UIScreen.currentScale * 2.0)
         for guidedShot in guidedShots.prefix(8) {
@@ -16422,12 +16456,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return
         }
         isRefreshingFastLaneSideControlCounts = true
+        recordFastLaneReadyEvent("refresh_started_force_\(force)")
         Task {
             let portalChanged = await syncFastLanePortalIssueStateIfAvailable(force: force)
+            recordFastLaneReadyEvent("portal_sync_finished_changed_\(portalChanged)")
             let portalRevisionChanged = appState.fastRuntimePortalOverlayRevision(
                 propertyID: context.propertyID
             ) != fastLanePortalOverlayRevisionAtPrime
             guard force || portalChanged || portalRevisionChanged else {
+                recordFastLaneReadyEvent("refresh_skipped_unchanged")
                 await MainActor.run {
                     finishFastLaneSideControlRefresh()
                 }
@@ -16441,6 +16478,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 return
             }
             let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID, currentSessionID: context.sessionID)
+            recordFastLaneReadyEvent("issue_payload_ready")
             await MainActor.run {
                 let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
                     resolutionRequiredObservations: [],
@@ -16477,6 +16515,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 sessionType: context.sessionType,
                 currentSessionID: context.sessionID
             )
+            recordFastLaneReadyEvent("full_payload_ready")
             let scopedPayload = await MainActor.run {
                 fastLanePayloadScopedToCurrentFastSession(payload)
             }
@@ -16495,6 +16534,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func finishFastLaneSideControlRefresh() {
+        recordFastLaneReadyEvent("refresh_finished")
         isRefreshingFastLaneSideControlCounts = false
         resumeDeferredFastLaneSideControlRefreshIfNeeded()
     }
@@ -16517,6 +16557,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
 
         guard let activeOrganizationID else { return false }
+        recordFastLaneReadyEvent("portal_sync_started")
         let didChangeLocalState = await appState.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
             propertyID: context.propertyID,
             activeOrganizationID: activeOrganizationID
@@ -19443,6 +19484,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
               !productionCompleteState.isRunning,
               !isSavingFastCapture,
               !camera.isCapturing else { return }
+        recordFastLaneReadyEvent("close_preview_started")
         fastLaneExitIntentActive = true
         isClosing = true
         fastLanePendingFlaggedDecision = nil
