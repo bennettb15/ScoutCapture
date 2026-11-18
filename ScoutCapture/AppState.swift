@@ -6456,6 +6456,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct LocalDraftReleaseRPCPayload: Encodable {
+        let targetPropertyID: UUID
+        let targetSessionID: UUID
+        let targetDeviceID: String
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+            case targetSessionID = "target_session_id"
+            case targetDeviceID = "target_device_id"
+        }
+    }
+
     private struct PropertyStatusDeviceRPCPayload: Encodable {
         let targetPropertyID: UUID
         let targetDeviceID: String
@@ -6492,6 +6504,7 @@ final class AppState: ObservableObject {
         case claim = "claim"
         case heartbeat = "heartbeat"
         case promoteDraft = "promote_draft"
+        case promoteLocalDraft = "promote_local_draft"
         case pendingExport = "pending_export"
         case exported = "exported"
         case release = "release"
@@ -6504,6 +6517,8 @@ final class AppState: ObservableObject {
                 return "heartbeat_property_status"
             case .promoteDraft:
                 return "promote_property_status_draft"
+            case .promoteLocalDraft:
+                return "promote_local_property_status_draft"
             case .pendingExport:
                 return "set_property_status_pending_export"
             case .exported:
@@ -6515,7 +6530,7 @@ final class AppState: ObservableObject {
 
         var requiresSessionID: Bool {
             switch self {
-            case .claim, .promoteDraft, .pendingExport, .exported:
+            case .claim, .promoteDraft, .promoteLocalDraft, .pendingExport, .exported:
                 return true
             case .heartbeat, .release:
                 return false
@@ -7820,6 +7835,7 @@ final class AppState: ObservableObject {
             refreshPropertyRowLockBadgeCache()
         }
     }
+    private var fastRuntimeDraftStatusPublishingPropertyIDs: Set<UUID> = []
     @Published private(set) var propertyRowDraftCount: Int = 0
     @Published private(set) var propertyRowDraftBadgeByPropertyID: [UUID: Bool] = [:]
     @Published private(set) var propertyRowLockBadgeByPropertyID: [UUID: Bool] = [:]
@@ -42096,6 +42112,9 @@ final class AppState: ObservableObject {
             propertyIDs: propertyIDs,
             reason: reason
         )
+        Task { @MainActor [weak self] in
+            await self?.publishSavedFastRuntimeDraftStatuses(propertyIDs: propertyIDs)
+        }
         suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
         pendingPropertyRowDetailHydrationIDs.subtract(propertyIDs)
         if pendingPropertyRowDetailHydrationIDs.isEmpty {
@@ -42110,6 +42129,14 @@ final class AppState: ObservableObject {
         await prepareInitialPropertyListForDisplay(reason: reason)
     }
 
+    func refreshVisiblePropertyStatusForHome(reason: String) async {
+        let propertyIDs = properties.filter { $0.deletedAt == nil }.map(\.id)
+        await refreshPropertyStatusCacheForInitialDisplay(
+            propertyIDs: propertyIDs,
+            reason: reason
+        )
+    }
+
     private func refreshPropertyStatusCacheForInitialDisplay(
         propertyIDs requestedPropertyIDs: [UUID],
         reason: String
@@ -42119,6 +42146,8 @@ final class AppState: ObservableObject {
               supabaseClient != nil else {
             return
         }
+        let requestedUserID = authenticatedSupabaseUser?.id
+        let requestedContextGeneration = authenticatedAccessContextGeneration
         let propertyIDs = Self.uniquePropertyIDs(requestedPropertyIDs)
             .filter { canAccessProperty($0) }
         guard !propertyIDs.isEmpty else { return }
@@ -42128,6 +42157,11 @@ final class AppState: ObservableObject {
                 orgID: activeOrganizationID,
                 propertyIDs: propertyIDs
             )
+            guard isCurrentAuthenticatedAccessContext(
+                userID: requestedUserID,
+                organizationID: activeOrganizationID,
+                generation: requestedContextGeneration
+            ) else { return }
             let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
             var nextCache = propertyStatusByPropertyID
             for propertyID in propertyIDs {
@@ -44080,12 +44114,17 @@ final class AppState: ObservableObject {
             occupiedByDeviceID: normalizedSupabaseText(context.ownerDeviceID) ?? currentDeviceIdentifier(),
             occupiedAt: context.createdAt
         )
-        let didRelease = await releasePropertySessionOccupancyIfOwned(
-            propertyID: context.propertyID,
-            sessionID: context.sessionID,
-            emitReleasedEvent: false,
-            ownershipState: ownershipState
-        )
+        let didRelease: Bool
+        if fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID {
+            didRelease = await releaseSavedFastRuntimeDraftStatus(context: context)
+        } else {
+            didRelease = await releasePropertySessionOccupancyIfOwned(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                emitReleasedEvent: false,
+                ownershipState: ownershipState
+            )
+        }
         let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
 
         return FastRuntimePrototypeReleaseResult(
@@ -44103,6 +44142,30 @@ final class AppState: ObservableObject {
             releaseMilliseconds: releaseMilliseconds,
             totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
         )
+    }
+
+    private func releaseSavedFastRuntimeDraftStatus(context: ActiveCaptureContext) async -> Bool {
+        guard let client = supabaseClient else { return false }
+        let deviceID = currentDeviceIdentifier()
+        let params = LocalDraftReleaseRPCPayload(
+            targetPropertyID: context.propertyID,
+            targetSessionID: context.sessionID,
+            targetDeviceID: deviceID
+        )
+        do {
+            let record = try await (try client.rpc("release_local_property_status_draft", params: params))
+                .execute()
+                .value as PropertyStatusRecord
+            return updateLocalPropertyStatusCacheAfterRelease(
+                record,
+                propertyID: context.propertyID,
+                deviceID: deviceID,
+                reason: "fast_local_draft_discarded"
+            )
+        } catch {
+            print("[FastLaneDraftStatus] release_failed propertyID=\(context.propertyID.uuidString) error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "unknown_error")")
+            return false
+        }
     }
 
     func saveFastRuntimePrototypeCapture(
@@ -45556,6 +45619,9 @@ final class AppState: ObservableObject {
                     reason: "fast_runtime_saved_draft"
                 )
             }
+            // The photos stay local, but every device needs the same draft owner.
+            // If offline, the saved index is retried on the next property refresh.
+            await publishSavedFastRuntimeDraftStatus(summary)
             if let property, let orgID = property.orgId {
                 var payload = propertyAuditPayload(property: property)
                 payload["session_id"] = context.sessionID.uuidString.lowercased()
@@ -49369,6 +49435,57 @@ final class AppState: ObservableObject {
         return nil
     }
 
+    @MainActor
+    private func publishSavedFastRuntimeDraftStatuses(propertyIDs: [UUID]) async {
+        for propertyID in Self.uniquePropertyIDs(propertyIDs) {
+            guard let resume = fastRuntimeDraftResumeState(for: propertyID),
+                  let summary = resume.summary,
+                  resume.errorMessage == nil,
+                  resume.context != nil else { continue }
+            await publishSavedFastRuntimeDraftStatus(summary)
+        }
+    }
+
+    @MainActor
+    private func publishSavedFastRuntimeDraftStatus(_ summary: FastRuntimeDraftSummary) async {
+        let propertyID = summary.propertyID
+        let deviceID = currentDeviceIdentifier()
+        guard backendFeatureFlags.supabaseEnabled,
+              supabaseClient != nil,
+              let currentUserID = authenticatedSupabaseUser?.id,
+              summary.photoCount > 0,
+              !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID),
+              (summary.orgID == nil || summary.orgID == activeOrganizationID),
+              canAccessProperty(propertyID),
+              (summary.ownerUserID != nil || normalizedSupabaseText(summary.ownerDeviceID) != nil),
+              summary.ownerUserID == nil || summary.ownerUserID == currentUserID,
+              normalizedSupabaseText(summary.ownerDeviceID).map({ $0 == deviceID }) ?? true,
+              !fastRuntimeDraftStatusPublishingPropertyIDs.contains(propertyID) else {
+            return
+        }
+        if let status = propertyStatusByPropertyID[propertyID],
+           status.status == .draft,
+           status.draftSessionID == summary.sessionID,
+           status.ownerUserID == nil || status.ownerUserID == currentUserID,
+           normalizedSupabaseText(status.ownerDeviceID) == deviceID,
+           status.statusReason == "fast_local_draft_saved" {
+            return
+        }
+
+        fastRuntimeDraftStatusPublishingPropertyIDs.insert(propertyID)
+        defer { fastRuntimeDraftStatusPublishingPropertyIDs.remove(propertyID) }
+        let didPublish = await performPropertyStatusShadowWrite(
+            transition: .promoteLocalDraft,
+            propertyID: propertyID,
+            sessionID: summary.sessionID,
+            deviceID: deviceID,
+            reason: "fast_local_draft_saved"
+        )
+        if !didPublish {
+            print("[FastLaneDraftStatus] retry_needed propertyID=\(propertyID.uuidString) sessionID=\(summary.sessionID.uuidString)")
+        }
+    }
+
     func fastRuntimeDraftResumeState(for propertyID: UUID) -> FastRuntimeDraftResumeState? {
         let property = properties.first(where: { $0.id == propertyID }) ??
             allProperties.first(where: { $0.id == propertyID })
@@ -49728,13 +49845,30 @@ final class AppState: ObservableObject {
 
         var releaseMessages: [String] = []
         var releaseSuccessCount = 0
+        var unreleasedSavedDraft = false
         for context in releaseContexts {
             let release = await releaseFastRuntimePrototypeClaim(context: context)
             if release.didRelease {
                 releaseSuccessCount += 1
+            } else if indexedSummaries.contains(where: {
+                $0.propertyID == context.propertyID && $0.sessionID == context.sessionID
+            }) {
+                unreleasedSavedDraft = true
             }
             releaseMessages.append(
                 "\(context.propertyID.uuidString.prefix(8))/\(context.sessionID.uuidString.prefix(8)):\(release.didRelease ? "released" : "not_released")"
+            )
+        }
+
+        if unreleasedSavedDraft {
+            // Keep the local photos and retry the shared release later.
+            return FastRuntimePrototypeCleanupResult(
+                indexDeleted: false,
+                draftFolderDeleted: false,
+                tempFoldersDeletedCount: 0,
+                claimReleaseAttemptCount: releaseContexts.count,
+                claimReleaseSuccessCount: releaseSuccessCount,
+                claimReleaseMessages: releaseMessages
             )
         }
 
@@ -50997,7 +51131,7 @@ final class AppState: ObservableObject {
         do {
             var localCacheApplied = true
             switch transition {
-            case .claim, .promoteDraft, .pendingExport, .exported:
+            case .claim, .promoteDraft, .promoteLocalDraft, .pendingExport, .exported:
                 guard let sessionID else {
                     throw NSError(
                         domain: "ScoutCapture.PropertyStatusShadowWrite",
@@ -51028,7 +51162,7 @@ final class AppState: ObservableObject {
                         deviceID: deviceID,
                         reason: reason
                     )
-                } else if transition == .promoteDraft {
+                } else if transition == .promoteDraft || transition == .promoteLocalDraft {
                     let returnedRecord = try await (try client.rpc(transition.rpcName, params: params))
                         .execute()
                         .value as PropertyStatusRecord
@@ -52984,6 +53118,10 @@ final class AppState: ObservableObject {
                 replacingOrganizationID: requestedOrganizationID
             )
             let visiblePropertyIDs = mergedPayload.properties.filter { $0.deletedAt == nil }.map(\.id)
+            await refreshPropertyStatusCacheForInitialDisplay(
+                propertyIDs: visiblePropertyIDs,
+                reason: "foreground_refresh"
+            )
             queuePropertyStatusDiagnosticsRefresh(
                 trigger: "foreground_refresh",
                 orgID: requestedOrganizationID,
@@ -52994,6 +53132,9 @@ final class AppState: ObservableObject {
                 propertyIDs: visiblePropertyIDs,
                 reason: "foreground_refresh"
             )
+            Task { @MainActor [weak self] in
+                await self?.publishSavedFastRuntimeDraftStatuses(propertyIDs: visiblePropertyIDs)
+            }
             Task { @MainActor [weak self] in
                 await self?.refreshLightweightPropertyEntryLocks(
                     propertyIDs: visiblePropertyIDs,

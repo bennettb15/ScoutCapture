@@ -873,6 +873,7 @@ private struct AppRootView: View {
 struct SessionHubView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     let initialPropertyListTimedOut: Bool
     private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
@@ -1313,6 +1314,19 @@ struct SessionHubView: View {
                 }
                 appState.triggerBackupForLifecycleEvent(after: 8.0)
                 selectionHaptic.prepare()
+            }
+            .task(id: scenePhase == .active && path.isEmpty) {
+                guard scenePhase == .active && path.isEmpty else { return }
+                await appState.refreshVisiblePropertyStatusForHome(reason: "home_visible")
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: .seconds(20))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    await appState.refreshVisiblePropertyStatusForHome(reason: "home_poll")
+                }
             }
             .onChange(of: appState.hubTransientStatusMessage) { _, newValue in
                 guard let newValue, !newValue.isEmpty else { return }
