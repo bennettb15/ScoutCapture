@@ -8543,6 +8543,7 @@ final class AppState: ObservableObject {
     private var propertyReferenceReconcileAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
     private var portalOverlayRevisionByPropertyID: [UUID: Int] = [:]
+    private var portalGuidedReferenceRevisionByPropertyID: [UUID: Int] = [:]
     private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
     private let sessionArchiveAvailabilityCacheTTL: TimeInterval = 15
     private var reExportAvailabilityCache: [String: ReExportAvailabilityCacheEntry] = [:]
@@ -54535,6 +54536,9 @@ final class AppState: ObservableObject {
             recoveredGuidedCount > 0 || recoveredFlaggedCount > 0
         if didChangeLocalState {
             portalOverlayRevisionByPropertyID[propertyID, default: 0] += 1
+            if recoveredGuidedCount > 0 {
+                portalGuidedReferenceRevisionByPropertyID[propertyID, default: 0] += 1
+            }
             await MainActor.run {
                 self.reloadSessionCache(for: propertyID)
                 self.schedulePersistentDataCacheRefresh(reason: "portal_reference_rows_applied")
@@ -54557,6 +54561,14 @@ final class AppState: ObservableObject {
 
     func fastRuntimePortalOverlayRevision(propertyID: UUID) -> Int {
         portalOverlayRevisionByPropertyID[propertyID, default: 0]
+    }
+
+    func fastRuntimePortalGuidedReferenceRevision(propertyID: UUID) -> Int {
+        portalGuidedReferenceRevisionByPropertyID[propertyID, default: 0]
+    }
+
+    func fastRuntimePropertyHasRetiredGuidedRows(propertyID: UUID) -> Bool {
+        localStore.hasRetiredGuidedRows(propertyID: propertyID)
     }
 
     @discardableResult

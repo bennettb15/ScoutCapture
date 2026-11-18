@@ -14370,6 +14370,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isSyncingFastLanePortalIssueState: Bool = false
     @State private var didSyncFastLanePortalIssueStateAfterPreview: Bool = false
     @State private var fastLanePortalOverlayRevisionAtPrime: Int = 0
+    @State private var fastLanePortalGuidedRevisionAtPrime: Int = 0
     @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
@@ -14557,6 +14558,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneCaptureProfileHistoryLocked = initialProfileLocked || initialCapturedCount > 0
             openingMetadataReadyAt = Date()
             fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
+            fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(
+                propertyID: context.propertyID
+            )
             primeFastLaneSideControlSnapshot()
             if let initialContext {
                 applyFastLaneMetadataContext(initialContext)
@@ -16512,6 +16516,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 return
             }
 
+            let guidedReferencesChanged = appState.fastRuntimePortalGuidedReferenceRevision(
+                propertyID: context.propertyID
+            ) != fastLanePortalGuidedRevisionAtPrime
+            if !force,
+               !guidedReferencesChanged,
+               !appState.fastRuntimePropertyHasRetiredGuidedRows(propertyID: context.propertyID) {
+                recordFastLaneReadyEvent("guided_history_refresh_skipped")
+                await MainActor.run {
+                    fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(
+                        propertyID: context.propertyID
+                    )
+                    finishFastLaneSideControlRefresh()
+                }
+                return
+            }
+
             await Task.yield()
             guard fastLaneSideControlSheetMode == nil,
                   !showFastLaneSessionActionsSheet,
@@ -16542,6 +16562,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneSideControlCounts = counts
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
                 fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
+                fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(
+                    propertyID: context.propertyID
+                )
                 finishFastLaneSideControlRefresh()
             }
         }

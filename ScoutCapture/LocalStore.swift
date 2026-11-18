@@ -2925,6 +2925,13 @@ final class LocalStore {
         return normalized
     }
 
+    func hasRetiredGuidedRows(propertyID: UUID) -> Bool {
+        guard let guidedShots = try? readGuidedShots(propertyID: propertyID) else { return true }
+        return guidedShots.contains {
+            $0.isRetired || $0.status == .retired
+        }
+    }
+
     func saveGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
         try ensurePropertyExists(propertyID)
         let normalized = guidedShotsRetiredForActiveFlaggedPromotions(
