@@ -1252,6 +1252,13 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def build_property_plan(validation: dict[str, Any], lookup: MediaLookup, report_date: str, logo: dict[str, Any], weather: dict[str, Any]) -> dict[str, Any]:
     session = validation.get("inputs", {}).get("session") or {}
     entries = property_entries(validation, lookup)
+    photo_update_session = (
+        (trim(session.get("full_documentation_mode")) or "").lower() == "follow_up"
+        or (trim(session.get("session_type") or validation.get("session_type")) or "").lower() == "punchlist_visit"
+    )
+    if not photo_update_session or (trim(session.get("report_variant")) or "").lower() == "reviewed":
+        for entry in entries:
+            entry["recent_update"] = False
     sections = grouped_property_sections(entries, validation)
     assumed_index_pages = 1
     index_pages: list[list[dict[str, Any]]] = []
@@ -1341,6 +1348,8 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             trim(entry.get("original_filename")) or "",
         )
     )
+    for entry in entries:
+        entry["recent_update"] = False
     sections = []
     for level in PRIORITY_ORDER:
         level_entries = [entry for entry in entries if entry["normalized_priority"] == level]
@@ -1585,6 +1594,9 @@ def build_comparison_plan(
             entry["current"].get("original_filename") or "",
         )
     )
+    # Side-by-side previous/current photos already identify the update.
+    for entry in entries:
+        entry["current"]["recent_update"] = False
     assumed_index_pages = 1
     index_pages: list[list[dict[str, Any]]] = []
     for _ in range(3):
@@ -1693,6 +1705,8 @@ def build_punchlist_update_plan(
             trim(entry.get("original_filename")) or "",
         )
     )
+    for entry in entries:
+        entry["recent_update"] = False
     if not entries:
         raise Phase2BError("Punchlist update report is not applicable: no punchlist follow-up captures.")
 
@@ -2242,18 +2256,19 @@ def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float
     original = trim(entry.get("original_flagged_reason"))
     current = trim(entry.get("flagged_reason"))
     if state != "none" and original and current and original != current:
-        draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, size=10, align="center")
+        line_step = 12 if priority else 14
+        draw_text(c, f"Original issue: {original}", {"x": rect["x"], "y": top_y - line_step, "width": rect["width"], "height": 14}, size=10, align="center")
         note = f"Updated note: {current}"
-        note_rect = {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}
+        note_rect = {"x": rect["x"], "y": top_y - 2 * line_step, "width": rect["width"], "height": 14}
         if priority:
             draw_priority_note(c, priority, "Pending Review" if state == "pending_review" else label, note_rect, state)
             detail = f"Resolved in field · {note}" if state == "pending_review" else note
-            draw_text(c, ellipsize_text(detail, "Helvetica", 10, rect["width"]), {"x": rect["x"], "y": top_y - 42, "width": rect["width"], "height": 14}, size=10, align="center")
+            draw_text(c, ellipsize_text(detail, "Helvetica", 10, rect["width"]), {"x": rect["x"], "y": top_y - 3 * line_step, "width": rect["width"], "height": 14}, size=10, align="center")
         else:
             if label:
                 note = f"{label} - {note}"
             draw_note(c, note, note_rect, state)
-        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (56 if priority else 42), "width": rect["width"], "height": 14}, size=10, align="center")
+        draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - (4 if priority else 3) * line_step, "width": rect["width"], "height": 14}, size=10, align="center")
         return
     if priority:
         if label:
@@ -2395,20 +2410,32 @@ def draw_index(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any], log
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
 
-def draw_recent_update_strip(c: canvas.Canvas, photo_rect: dict[str, float]) -> None:
+def draw_recent_update_strip(
+    c: canvas.Canvas,
+    photo_rect: dict[str, float],
+    available_rect: dict[str, float] | None = None,
+) -> None:
     """Mark a new or retaken photo beside its fitted frame at any aspect ratio."""
     width = 14.0
     x = max(1.0, photo_rect["x"] - width - 3.0)
-    y = photo_rect["y"]
-    height = photo_rect["height"]
+    bounds = available_rect or photo_rect
+    height = min(max(110.0, photo_rect["height"]), bounds["height"])
+    centered_y = photo_rect["y"] + (photo_rect["height"] - height) / 2.0
+    y = min(max(centered_y, bounds["y"]), bounds["y"] + bounds["height"] - height)
     c.saveState()
     c.setFillColorRGB(0.04, 0.35, 0.74)
     c.roundRect(x, y, width, height, 3, stroke=0, fill=1)
-    c.translate(x + width / 2, y + height / 2)
-    c.rotate(270)
     c.setFillColorRGB(1, 1, 1)
-    c.setFont("Helvetica-Bold", 8)
-    c.drawCentredString(0, -2.5, "RECENT UPDATE")
+    letters = "RECENTUPDATE"
+    word_gap = 5.0
+    line_step = min(12.0, (height - 12.0 - word_gap) / (len(letters) - 1))
+    font_size = min(8.0, line_step * 0.85)
+    c.setFont("Helvetica-Bold", font_size)
+    text_height = (len(letters) - 1) * line_step + word_gap
+    first_baseline = y + height / 2.0 + text_height / 2.0 - font_size * 0.35
+    for index, letter in enumerate(letters):
+        gap = word_gap if index >= len("RECENT") else 0.0
+        c.drawCentredString(x + width / 2.0, first_baseline - index * line_step - gap, letter)
     c.restoreState()
 
 
@@ -2424,8 +2451,8 @@ def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any]
         if priority and state not in {"resolved", "pending_review"}:
             border = PRIORITY_COLORS[priority]
         draw_image_slot(c, entry.get("media_path"), slot.get("image_rect"), slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
-        if boolish(entry.get("recent_update")):
-            draw_recent_update_strip(c, slot.get("image_rect") or slot["photo_available_rect"])
+        if plan.get("report_type") == "property" and boolish(entry.get("recent_update")):
+            draw_recent_update_strip(c, slot.get("image_rect") or slot["photo_available_rect"], slot["photo_available_rect"])
         draw_metadata(c, entry, slot["caption_rect"], priority=priority)
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
@@ -2570,8 +2597,6 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
                 warnings.append(f"prepared_media_missing_on_disk:{media_path}")
             missing_label = "No latest submitted photo available" if slot["role"] == "current" else (slot.get("placeholder_reason") or "No original flagged photo available")
             draw_comparison_placeholder(c, image_rect or slot["photo_available_rect"], missing_label)
-        if slot["role"] == "current" and boolish(entry.get("recent_update")):
-            draw_recent_update_strip(c, image_rect or slot["photo_available_rect"])
         draw_comparison_caption(c, slot)
     draw_footer(c, page["number"], session["property_address"])
 

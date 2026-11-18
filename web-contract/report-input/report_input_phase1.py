@@ -1163,6 +1163,10 @@ def compose_punchlist_history(
         if shot.get("is_guided") and not shot.get("issue_id") and (trim(shot.get("capture_kind")) or "").lower() == "retake":
             for identity in guided_identities(shot):
                 latest_guided_updates[identity] = shot
+    latest_issue_shots = {
+        (trim(shot.get("issue_id")) or "").lower(): shot for shot in latest_shots
+        if trim(shot.get("issue_id"))
+    }
     entries = []
     placed_issues = set()
     # Replace an updated issue in its baseline position; history remains available
@@ -1191,11 +1195,15 @@ def compose_punchlist_history(
     placed_shot_ids = {(trim(entry.get("shot_id")) or "").lower() for entry in entries}
     for shot in follow_up_property_shots:
         shot_id = shot["shot_id"].lower()
+        issue_id = (trim(shot.get("issue_id")) or "").lower()
+        if issue_id and latest_issue_shots.get(issue_id, {}).get("shot_id", "").lower() != shot_id:
+            continue
         identities = guided_identities(shot)
-        is_guided_retake = shot.get("is_guided") and (trim(shot.get("capture_kind")) or "").lower() == "retake"
-        if shot_id in placed_shot_ids or (is_guided_retake and identities and
-                                          any(key in latest_guided_updates and latest_guided_updates[key] is not shot
-                                              for key in identities)):
+        superseded_guided = shot.get("is_guided") and any(
+            key in latest_guided_updates and latest_guided_updates[key]["shot_id"].lower() != shot_id
+            for key in identities
+        )
+        if shot_id in placed_shot_ids or superseded_guided:
             continue
         entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
         placed_shot_ids.add(shot_id)
