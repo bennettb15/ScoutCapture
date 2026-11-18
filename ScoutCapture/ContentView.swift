@@ -5817,19 +5817,31 @@ struct ContentView: View {
         let flaggedRemainingCount: Int
         let hasBaseline: Bool
         let currentSessionCaptureCount: Int
+        let addedPhotoCount: Int
+        let retakenPhotoCount: Int
         let isSessionSealed: Bool
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
         var reExportEligibleNow: Bool
         let sessionType: SessionType
+        let fullDocumentationMode: FullDocumentationMode
+        let hasPendingSelectedPhoto: Bool
 
         var isPunchlistVisit: Bool {
             sessionType == .punchlistVisit
         }
 
+        var isFullDocumentationFollowUp: Bool {
+            sessionType == .fullDocumentation && fullDocumentationMode == .followUp
+        }
+
         var isCompletionEligible: Bool {
-            AppState.sessionCanComplete(
+            if fullDocumentationMode == .followUp && hasPendingSelectedPhoto {
+                return false
+            }
+            return AppState.sessionCanComplete(
                 sessionType: sessionType,
+                fullDocumentationMode: fullDocumentationMode,
                 hasBaseline: hasBaseline,
                 guidedRemainingCount: guidedRemainingCount,
                 flaggedRemainingCount: flaggedRemainingCount,
@@ -5844,13 +5856,14 @@ struct ContentView: View {
         var hasOutstandingChecklistItems: Bool {
             AppState.sessionCompletionHasOutstandingChecklistItems(
                 sessionType: sessionType,
+                fullDocumentationMode: fullDocumentationMode,
                 guidedRemainingCount: guidedRemainingCount,
                 flaggedRemainingCount: flaggedRemainingCount
             )
         }
 
         var canSealNow: Bool {
-            if hasBaseline { return isCompletionEligible }
+            if hasBaseline || fullDocumentationMode == .followUp { return isCompletionEligible }
             return currentSessionCaptureCount > 0
         }
 
@@ -5892,6 +5905,14 @@ struct ContentView: View {
             }
             if isPunchlistVisit && currentSessionCaptureCount == 0 {
                 return "Complete Punchlist is disabled until at least one new photo is captured."
+            }
+            if fullDocumentationMode == .followUp {
+                if hasPendingSelectedPhoto {
+                    return "Capture or cancel the selected photo before completing this Follow-Up."
+                }
+                return hasBaseline
+                    ? "Complete Session is disabled until at least one new or retaken photo is captured."
+                    : "Follow-Up is available after a completed Full Documentation session."
             }
             if !hasBaseline && currentSessionCaptureCount == 0 {
                 return "Complete Session is disabled until at least one photo is captured."
@@ -12984,6 +13005,21 @@ extension ContentView {
             propertyID: propertyID,
             session: currentSession
         )
+        let currentSessionShots = currentSession.fullDocumentationMode == .followUp
+            ? ((try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: currentSession.id))?.shots
+                .filter { $0.sessionID == currentSession.id } ?? [])
+            : []
+        let priorPhotoIdentities = currentSession.fullDocumentationMode == .followUp
+            ? appState.fastRuntimePriorPhotoIdentities(propertyID: propertyID, currentSessionID: currentSession.id)
+            : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
+        let retakenPhotoCount = currentSessionShots.filter { shot in
+            shot.captureKind?.lowercased() == "retake" ||
+                shot.issueID.map(priorPhotoIdentities.flaggedIssueIDs.contains) == true ||
+                (shot.isGuided && !shot.isFlagged && shot.issueID == nil &&
+                 priorPhotoIdentities.guidedShotKeys.contains(
+                    shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                 ))
+        }.count
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
@@ -12997,11 +13033,15 @@ extension ContentView {
             flaggedRemainingCount: flaggedRemaining,
             hasBaseline: hasBaseline,
             currentSessionCaptureCount: currentSessionCaptureCount,
+            addedPhotoCount: max(0, currentSessionCaptureCount - retakenPhotoCount),
+            retakenPhotoCount: retakenPhotoCount,
             isSessionSealed: currentSession.isSealed,
             firstDeliveredAt: currentSession.firstDeliveredAt,
             reExportExpiresAt: currentSession.reExportExpiresAt,
             reExportEligibleNow: false,
-            sessionType: currentSession.sessionType
+            sessionType: currentSession.sessionType,
+            fullDocumentationMode: currentSession.fullDocumentationMode,
+            hasPendingSelectedPhoto: armedGuidedShotID != nil || armedUpdateObservationID != nil
         )
         if let reason = sessionActionsSummary?.exportDisabledReason {
             print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=false reason=\(reason)")
@@ -15650,12 +15690,21 @@ extension ContentView {
                                 .foregroundColor(.white)
 
                             VStack(spacing: 8) {
-                                summaryRow(
-                                    title: summary.isPunchlistVisit ? "Prior Items Not Revisited" : "Flagged Remaining",
-                                    value: summary.flaggedRemainingCount
-                                )
-                                if !summary.isPunchlistVisit {
-                                    summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                if summary.isFullDocumentationFollowUp {
+                                    summaryRow(title: "New photos", value: summary.addedPhotoCount)
+                                    summaryRow(title: "Updated photos", value: summary.retakenPhotoCount)
+                                    Text("Other photos and flags carry forward unchanged.")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.72))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    summaryRow(
+                                        title: summary.isPunchlistVisit ? "Prior Items Not Revisited" : "Flagged Remaining",
+                                        value: summary.flaggedRemainingCount
+                                    )
+                                    if !summary.isPunchlistVisit {
+                                        summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                    }
                                 }
                             }
                             .padding(.horizontal, 12)
@@ -15752,6 +15801,14 @@ extension ContentView {
             }
             if summary.isPunchlistVisit {
                 return "Complete Punchlist is disabled until at least one new photo is captured."
+            }
+            if summary.fullDocumentationMode == .followUp {
+                if summary.hasPendingSelectedPhoto {
+                    return "Capture or cancel the selected photo before completing this Follow-Up."
+                }
+                return summary.hasBaseline
+                    ? "Complete Session is disabled until at least one new or retaken photo is captured."
+                    : "Follow-Up is available after a completed Full Documentation session."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }

@@ -859,6 +859,43 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         )
     }
 
+    func testFullDocumentationFollowUpAllowsPhotoOnlyChangeWithoutChecklistDebt() throws {
+        XCTAssertFalse(AppState.sessionCompletionHasOutstandingChecklistItems(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            guidedRemainingCount: 70,
+            flaggedRemainingCount: 10
+        ))
+        XCTAssertFalse(AppState.sessionCanComplete(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            hasBaseline: true,
+            guidedRemainingCount: 70,
+            flaggedRemainingCount: 10,
+            currentSessionCaptureCount: 0
+        ))
+        XCTAssertTrue(AppState.sessionCanComplete(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            hasBaseline: true,
+            guidedRemainingCount: 70,
+            flaggedRemainingCount: 10,
+            currentSessionCaptureCount: 1
+        ))
+        XCTAssertFalse(AppState.sessionCanComplete(
+            sessionType: .fullDocumentation,
+            fullDocumentationMode: .followUp,
+            hasBaseline: false,
+            guidedRemainingCount: 0,
+            flaggedRemainingCount: 0,
+            currentSessionCaptureCount: 1
+        ))
+
+        let followUp = Session(propertyID: UUID(), fullDocumentationMode: .followUp)
+        let restored = try JSONDecoder().decode(Session.self, from: JSONEncoder().encode(followUp))
+        XCTAssertEqual(restored.fullDocumentationMode, .followUp)
+    }
+
     func testEmptyPunchlistCannotBeSealedByAnyCompletionPath() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -999,5 +1036,63 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
 
         XCTAssertEqual(payload["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
         XCTAssertEqual(rawSession["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
+    }
+
+    func testFollowUpUnlocksForCompletedFullCaptureWithoutBaselinePointer() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        XCTAssertNil(fixture.property.baselineSessionID)
+        XCTAssertFalse(fixture.appState.propertyHasBaseline(fixture.property.id))
+
+        _ = try fixture.localStore.upsertSession(Session(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 200),
+            isSealed: true
+        ))
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        XCTAssertTrue(fixture.appState.propertyHasBaseline(fixture.property.id))
+    }
+
+    func testFollowUpRecognizesGuidedPhotoFromPriorCompletedSessionAsUpdate() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let prior = try fixture.localStore.upsertSession(Session(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            status: .completed,
+            isSealed: true
+        ))
+        try fixture.localStore.ensureSessionMetadata(for: prior)
+        try addMaterialShot(to: prior, in: fixture)
+
+        let keys = fixture.appState.fastRuntimePriorGuidedShotKeys(
+            propertyID: fixture.property.id,
+            currentSessionID: UUID()
+        )
+        let existing = AppState.FastRuntimeCaptureMetadataContext(
+            building: "B1", elevation: "North", detailType: "Overview", angleIndex: 1,
+            shotKey: "b1|north|overview|1", isGuided: true, isFlagged: false,
+            captureIntentSource: "guided"
+        )
+        let added = AppState.FastRuntimeCaptureMetadataContext(
+            building: "B1", elevation: "North", detailType: "Overview", angleIndex: 1,
+            shotKey: "b1|north|overview|1", isGuided: true, isFlagged: false,
+            captureIntentSource: "free"
+        )
+        let newGuidedSlot = AppState.FastRuntimeCaptureMetadataContext(
+            building: "B1", elevation: "North", detailType: "Overview", angleIndex: 2,
+            shotKey: "b1|north|overview|2", isGuided: true, isFlagged: false,
+            captureIntentSource: "guided"
+        )
+
+        XCTAssertTrue(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(existing, priorGuidedShotKeys: keys))
+        XCTAssertFalse(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(added, priorGuidedShotKeys: keys))
+        XCTAssertFalse(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(newGuidedSlot, priorGuidedShotKeys: keys))
     }
 }

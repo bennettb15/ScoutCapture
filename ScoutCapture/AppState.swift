@@ -5239,6 +5239,7 @@ final class AppState: ObservableObject {
         let sessionID: UUID
         let orgID: UUID?
         let sessionType: SessionType
+        var fullDocumentationMode: FullDocumentationMode? = nil
         let ownerUserID: UUID?
         let ownerEmail: String?
         let ownerDeviceID: String?
@@ -5534,6 +5535,7 @@ final class AppState: ObservableObject {
         let sessionID: String
         let sessionType: String
         let reportMode: String
+        let fullDocumentationMode: String?
     }
 
     private struct FastRuntimeUploadIntentCompletionRecord: Decodable {
@@ -8540,6 +8542,8 @@ final class AppState: ObservableObject {
     private var lastOccupancyHeartbeatAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceReconcileAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
+    private var portalOverlayRevisionByPropertyID: [UUID: Int] = [:]
+    private var portalGuidedReferenceRevisionByPropertyID: [UUID: Int] = [:]
     private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
     private let sessionArchiveAvailabilityCacheTTL: TimeInterval = 15
     private var reExportAvailabilityCache: [String: ReExportAvailabilityCacheEntry] = [:]
@@ -43831,6 +43835,7 @@ final class AppState: ObservableObject {
     func runFastRuntimePrototype(
         propertyID: UUID,
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         prepareTempStorage: Bool = true,
         releaseClaim: Bool = true,
         allowCurrentUserOccupiedContext: Bool = false
@@ -43874,6 +43879,7 @@ final class AppState: ObservableObject {
                 propertyID: propertyID,
                 orgID: orgID,
                 sessionType: sessionType,
+                fullDocumentationMode: fullDocumentationMode,
                 ownerUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
                 ownerEmail: normalizedSupabaseText(status.lockedByEmail) ??
                     normalizedSupabaseText(authenticatedSupabaseUser?.email),
@@ -44291,15 +44297,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimeCaptureProjectionTimings {
+        let guidedMilliseconds: Double
+        let flaggedMilliseconds: Double
+        let sessionMetadataMilliseconds: Double
+    }
+
+    @discardableResult
     func projectFastRuntimeCaptureToLocalCameraState(
         context: ActiveCaptureContext,
         shot record: FastRuntimePrototypeShotRecord,
         guidedID: UUID? = nil
-    ) {
+    ) -> FastRuntimeCaptureProjectionTimings {
         guard canAccessProperty(context.propertyID),
               record.propertyID == context.propertyID,
               record.sessionID == context.sessionID else {
-            return
+            return FastRuntimeCaptureProjectionTimings(
+                guidedMilliseconds: 0,
+                flaggedMilliseconds: 0,
+                sessionMetadataMilliseconds: 0
+            )
         }
 
         let metadata = Self.normalizedFastRuntimeMetadataContext(
@@ -44320,17 +44337,23 @@ final class AppState: ObservableObject {
             note: metadata.detailNote
         )
 
+        let guidedStartedAt = Date()
+        let projectedGuidedRows: [GuidedShot]?
         if context.sessionType != .punchlistVisit,
            metadata.isGuided == true {
-            projectFastRuntimeGuidedCapture(
+            projectedGuidedRows = projectFastRuntimeGuidedCapture(
                 context: context,
                 shot: projectedShot,
                 metadata: metadata,
                 guidedID: guidedID,
                 localPath: localPath
             )
+        } else {
+            projectedGuidedRows = nil
         }
+        let guidedMilliseconds = Date().timeIntervalSince(guidedStartedAt) * 1_000
 
+        let flaggedStartedAt = Date()
         if metadata.isFlagged == true {
             projectFastRuntimeObservationCapture(
                 context: context,
@@ -44339,11 +44362,19 @@ final class AppState: ObservableObject {
                 localPath: localPath
             )
         }
+        let flaggedMilliseconds = Date().timeIntervalSince(flaggedStartedAt) * 1_000
+        let sessionMetadataStartedAt = Date()
         persistFastRuntimeCaptureToSessionMetadata(
             context: context,
             record: record,
             metadata: metadata,
-            localPath: localPath
+            localPath: localPath,
+            projectedGuidedRows: projectedGuidedRows
+        )
+        return FastRuntimeCaptureProjectionTimings(
+            guidedMilliseconds: guidedMilliseconds,
+            flaggedMilliseconds: flaggedMilliseconds,
+            sessionMetadataMilliseconds: Date().timeIntervalSince(sessionMetadataStartedAt) * 1_000
         )
     }
 
@@ -44351,7 +44382,8 @@ final class AppState: ObservableObject {
         context: ActiveCaptureContext,
         record: FastRuntimePrototypeShotRecord,
         metadata: FastRuntimeCaptureMetadataContext,
-        localPath: String?
+        localPath: String?,
+        projectedGuidedRows: [GuidedShot]?
     ) {
         guard let localPath, FileManager.default.fileExists(atPath: localPath) else { return }
         do {
@@ -44361,6 +44393,7 @@ final class AppState: ObservableObject {
                 id: context.sessionID,
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
+                fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
                 startedAt: context.createdAt,
                 status: .draft,
                 captureProfile: property?.captureProfile
@@ -44407,7 +44440,7 @@ final class AppState: ObservableObject {
             )
             try localStore.upsertShotMetadata(shot)
             if metadata.isGuided == true {
-                let guided = try localStore.fetchGuidedShots(propertyID: context.propertyID)
+                let guided = try projectedGuidedRows ?? localStore.fetchGuidedShots(propertyID: context.propertyID)
                 try localStore.syncGuidedShotsToSessionMetadata(
                     propertyID: context.propertyID,
                     sessionID: context.sessionID,
@@ -44425,7 +44458,7 @@ final class AppState: ObservableObject {
         metadata: FastRuntimeCaptureMetadataContext,
         guidedID: UUID?,
         localPath: String?
-    ) {
+    ) -> [GuidedShot]? {
         let propertyID = context.propertyID
         let normalizedBuilding = metadata.building.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedElevation = (CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
@@ -44434,11 +44467,14 @@ final class AppState: ObservableObject {
         guard !normalizedBuilding.isEmpty,
               !normalizedElevation.isEmpty,
               !normalizedDetail.isEmpty else {
-            return
+            return nil
         }
 
         do {
-            var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            let isOrdinaryGuidedCapture = metadata.isFlagged != true
+            var guidedRows = isOrdinaryGuidedCapture
+                ? try localStore.fetchGuidedShotsForFastCapture(propertyID: propertyID)
+                : try localStore.fetchGuidedShots(propertyID: propertyID)
             let targetIndex: Array<GuidedShot>.Index? = {
                 if let guidedID,
                    let index = guidedRows.firstIndex(where: { $0.id == guidedID }) {
@@ -44488,9 +44524,15 @@ final class AppState: ObservableObject {
                 guidedRows.append(guided)
             }
 
-            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            if isOrdinaryGuidedCapture {
+                try localStore.saveGuidedShotsForFastCapture(guidedRows, propertyID: propertyID)
+            } else {
+                try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            }
+            return guidedRows
         } catch {
             print("[FastLaneProjection] guided_projection_failed propertyID=\(propertyID.uuidString) shotID=\(shot.id.uuidString) error=\(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -45951,17 +45993,23 @@ final class AppState: ObservableObject {
         do {
             await waitForUploadConnection()
             let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: context.propertyID)
+            let priorGuidedShotKeys = fastRuntimePriorGuidedShotKeys(
+                propertyID: context.propertyID,
+                currentSessionID: context.sessionID
+            )
             let metadata = makeFastRuntimeCompleteSessionMetadata(
                 context: context,
                 dryRun: dryRun,
                 property: property,
                 completedAt: completedAt,
-                localObservationByIssueID: localObservationByIssueID
+                localObservationByIssueID: localObservationByIssueID,
+                priorGuidedShotKeys: priorGuidedShotKeys
             )
             let session = Session(
                 id: context.sessionID,
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
+                fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
                 startedAt: context.createdAt,
                 status: .completed,
                 endedAt: completedAt,
@@ -46052,7 +46100,8 @@ final class AppState: ObservableObject {
                         byteSize: fingerprint.byteSize,
                         checksumSHA256: fingerprint.checksumSHA256,
                         storagePath: storagePath,
-                        localObservationByIssueID: localObservationByIssueID
+                        localObservationByIssueID: localObservationByIssueID,
+                        priorGuidedShotKeys: priorGuidedShotKeys
                     )
                     metadataWrites.append(shot)
                     newPreparedUploads.append(FastRuntimePreparedOriginalUpload(
@@ -46749,6 +46798,7 @@ final class AppState: ObservableObject {
                     propertyID: context.propertyID,
                     orgID: context.orgID,
                     sessionType: context.sessionType,
+                    fullDocumentationMode: context.fullDocumentationMode,
                     ownerUserID: context.ownerUserID,
                     ownerEmail: context.ownerEmail,
                     ownerDeviceID: context.ownerDeviceID,
@@ -46779,6 +46829,7 @@ final class AppState: ObservableObject {
                 propertyID: summary.propertyID,
                 orgID: summary.orgID,
                 sessionType: summary.sessionType,
+                fullDocumentationMode: summary.fullDocumentationMode,
                 ownerUserID: summary.ownerUserID,
                 ownerEmail: summary.ownerEmail,
                 ownerDeviceID: summary.ownerDeviceID,
@@ -47444,7 +47495,11 @@ final class AppState: ObservableObject {
             propertyID: dryRun.propertyID.uuidString.lowercased(),
             sessionID: sessionID.uuidString.lowercased(),
             sessionType: dryRun.sessionType.rawValue,
-            reportMode: dryRun.reportMode
+            reportMode: dryRun.reportMode,
+            fullDocumentationMode: dryRun.sessionType == .fullDocumentation
+                ? (sessions(for: dryRun.propertyID).first(where: { $0.id == sessionID })?.fullDocumentationMode.rawValue
+                    ?? (currentSession?.id == sessionID ? currentSession?.fullDocumentationMode.rawValue : nil))
+                : nil
         )
 
         do {
@@ -48825,6 +48880,9 @@ final class AppState: ObservableObject {
         let issueStatus = normalizedSupabaseText(shot.issueStatus)?.lowercased()
         let isIssueShot = shot.isFlagged == true || shot.issueID != nil || issueStatus != nil
         var allowed = Set([defaultKind])
+        if shot.isGuided == true {
+            allowed.insert("retake")
+        }
         guard isIssueShot else { return allowed }
         allowed.insert("follow_up_capture")
         allowed.insert("retake")
@@ -48950,6 +49008,67 @@ final class AppState: ObservableObject {
         return mapped
     }
 
+    func fastRuntimePriorGuidedShotKeys(propertyID: UUID, currentSessionID: UUID) -> Set<String> {
+        fastRuntimePriorPhotoIdentities(propertyID: propertyID, currentSessionID: currentSessionID).guidedShotKeys
+    }
+
+    func fastRuntimePriorPhotoIdentities(
+        propertyID: UUID,
+        currentSessionID: UUID
+    ) -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let priorSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? sessions(for: propertyID))
+            .filter {
+                $0.id != currentSessionID &&
+                    $0.status == .completed &&
+                    $0.isSealed
+            }
+        var keys = Set<String>()
+        var issueIDs = Set<UUID>()
+        for session in priorSessions {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: session.id,
+                observations: observations
+            ) else { continue }
+            for shot in metadata.shots {
+                if let issueID = shot.issueID {
+                    issueIDs.insert(issueID)
+                }
+                guard session.sessionType == .fullDocumentation,
+                      shot.isGuided,
+                      !shot.isFlagged,
+                      shot.issueID == nil else { continue }
+                keys.insert(shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                keys.insert(Self.makeFastRuntimeMetadataShotKey(
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    angleIndex: shot.angleIndex
+                ))
+            }
+        }
+        return (guidedShotKeys: keys, flaggedIssueIDs: issueIDs)
+    }
+
+    func fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+        _ capture: FastRuntimeCaptureMetadataContext,
+        priorGuidedShotKeys: Set<String>
+    ) -> Bool {
+        guard capture.isGuided == true,
+              capture.isFlagged != true,
+              capture.issueID == nil,
+              ["guided", "retake"].contains(capture.captureIntentSource?.lowercased() ?? "") else { return false }
+        let storedKey = capture.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let canonicalKey = Self.makeFastRuntimeMetadataShotKey(
+            building: capture.building,
+            elevation: capture.elevation,
+            detailType: capture.detailType,
+            angleIndex: capture.angleIndex
+        )
+        return priorGuidedShotKeys.contains(storedKey) || priorGuidedShotKeys.contains(canonicalKey)
+    }
+
     private func fastRuntimeProductionCaptureKind(
         sessionType: SessionType,
         metadataContext: FastRuntimeCaptureMetadataContext,
@@ -48988,7 +49107,8 @@ final class AppState: ObservableObject {
         dryRun: FastRuntimeCompleteDryRunResult,
         property: Property?,
         completedAt: Date,
-        localObservationByIssueID: [UUID: Observation]? = nil
+        localObservationByIssueID: [UUID: Observation]? = nil,
+        priorGuidedShotKeys: Set<String> = []
     ) -> SessionMetadata {
         let offsetSeconds = TimeZone.current.secondsFromGMT(for: context.createdAt)
         let offsetMinutes = offsetSeconds / 60
@@ -49008,7 +49128,8 @@ final class AppState: ObservableObject {
                 byteSize: $0.byteSize.flatMap { Int(exactly: $0) },
                 checksumSHA256: nil,
                 storagePath: nil,
-                localObservationByIssueID: localObservationByIssueID
+                localObservationByIssueID: localObservationByIssueID,
+                priorGuidedShotKeys: priorGuidedShotKeys
             )
         }
         let issues = fastRuntimeCompleteIssueMetadata(
@@ -49021,6 +49142,7 @@ final class AppState: ObservableObject {
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             sessionType: context.sessionType,
+            fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
             orgID: context.orgID,
             propertyNameAtCapture: property?.name,
             propertyNameAtExport: property?.name,
@@ -49117,7 +49239,8 @@ final class AppState: ObservableObject {
         byteSize: Int?,
         checksumSHA256: String?,
         storagePath: String?,
-        localObservationByIssueID: [UUID: Observation]? = nil
+        localObservationByIssueID: [UUID: Observation]? = nil,
+        priorGuidedShotKeys: Set<String> = []
     ) -> ShotMetadata {
         let metadataContext = Self.normalizedFastRuntimeMetadataContext(
             dryRunShot.metadataContext,
@@ -49135,7 +49258,13 @@ final class AppState: ObservableObject {
         let issueReason = observationReason ?? metadataContext.detailNote
         let isFlagged = localObservation.map { _ in true }
             ?? (metadataContext.isFlagged ?? (metadataContext.detailNote != nil))
-        let captureKind = fastRuntimeProductionCaptureKind(
+        let inferredPriorGuidedUpdate = context.sessionType == .fullDocumentation &&
+            context.fullDocumentationMode == .followUp &&
+            fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+                metadataContext,
+                priorGuidedShotKeys: priorGuidedShotKeys
+            )
+        let captureKind = inferredPriorGuidedUpdate ? "retake" : fastRuntimeProductionCaptureKind(
             sessionType: context.sessionType,
             metadataContext: metadataContext,
             localObservation: localObservation,
@@ -49308,6 +49437,7 @@ final class AppState: ObservableObject {
                 propertyID: summary.propertyID,
                 orgID: summary.orgID,
                 sessionType: summary.sessionType,
+                fullDocumentationMode: summary.fullDocumentationMode,
                 ownerUserID: summary.ownerUserID,
                 ownerEmail: summary.ownerEmail,
                 ownerDeviceID: summary.ownerDeviceID,
@@ -49360,6 +49490,7 @@ final class AppState: ObservableObject {
                     sessionID: context.sessionID,
                     orgID: orgID,
                     sessionType: context.sessionType,
+                    fullDocumentationMode: context.fullDocumentationMode,
                     ownerUserID: context.ownerUserID,
                     ownerEmail: context.ownerEmail,
                     ownerDeviceID: context.ownerDeviceID,
@@ -49453,6 +49584,7 @@ final class AppState: ObservableObject {
                     propertyID: propertyID,
                     orgID: orgID,
                     sessionType: draft.sessionType,
+                    fullDocumentationMode: draft.fullDocumentationMode,
                     ownerUserID: metadata.capturedByUserID ?? authenticatedSupabaseUser?.id,
                     ownerEmail: metadata.capturedByEmail ?? authenticatedSupabaseUser?.email,
                     ownerDeviceID: currentDeviceIdentifier(),
@@ -49524,6 +49656,7 @@ final class AppState: ObservableObject {
                     sessionID: draft.id,
                     orgID: orgID,
                     sessionType: draft.sessionType,
+                    fullDocumentationMode: draft.fullDocumentationMode,
                     ownerUserID: context.ownerUserID,
                     ownerEmail: context.ownerEmail,
                     ownerDeviceID: context.ownerDeviceID,
@@ -49569,6 +49702,7 @@ final class AppState: ObservableObject {
                 propertyID: summary.propertyID,
                 orgID: summary.orgID,
                 sessionType: summary.sessionType,
+                fullDocumentationMode: summary.fullDocumentationMode,
                 ownerUserID: summary.ownerUserID,
                 ownerEmail: summary.ownerEmail,
                 ownerDeviceID: summary.ownerDeviceID,
@@ -49897,6 +50031,7 @@ final class AppState: ObservableObject {
                 sessionID: context.sessionID,
                 orgID: context.orgID,
                 sessionType: context.sessionType,
+                fullDocumentationMode: context.fullDocumentationMode,
                 ownerUserID: context.ownerUserID,
                 ownerEmail: context.ownerEmail,
                 ownerDeviceID: context.ownerDeviceID,
@@ -49941,6 +50076,7 @@ final class AppState: ObservableObject {
             sessionID: summary.sessionID,
             orgID: summary.orgID,
             sessionType: summary.sessionType,
+            fullDocumentationMode: summary.fullDocumentationMode,
             ownerUserID: summary.ownerUserID,
             ownerEmail: summary.ownerEmail,
             ownerDeviceID: summary.ownerDeviceID,
@@ -54350,7 +54486,7 @@ final class AppState: ObservableObject {
     func syncPortalPunchlistOperationalOverlaysForPropertyOpen(
         propertyID: UUID,
         activeOrganizationID: UUID
-    ) async -> LocalStore.PortalPunchlistOperationalOverlayApplyResult? {
+    ) async -> Bool {
         let startedAt = Date()
         guard backendFeatureFlags.supabaseEnabled,
               canAccessProperty(propertyID),
@@ -54360,7 +54496,7 @@ final class AppState: ObservableObject {
                 "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
                 "result=skipped reason=property_open_prereq_failed"
             )
-            return nil
+            return false
         }
         print(
             "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
@@ -54396,7 +54532,13 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
         )
-        if (result?.appliedCount ?? 0) > 0 || recoveredGuidedCount > 0 || recoveredFlaggedCount > 0 {
+        let didChangeLocalState = (result?.appliedCount ?? 0) > 0 ||
+            recoveredGuidedCount > 0 || recoveredFlaggedCount > 0
+        if didChangeLocalState {
+            portalOverlayRevisionByPropertyID[propertyID, default: 0] += 1
+            if recoveredGuidedCount > 0 {
+                portalGuidedReferenceRevisionByPropertyID[propertyID, default: 0] += 1
+            }
             await MainActor.run {
                 self.reloadSessionCache(for: propertyID)
                 self.schedulePersistentDataCacheRefresh(reason: "portal_reference_rows_applied")
@@ -54414,7 +54556,19 @@ final class AppState: ObservableObject {
             "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
         await policyRefresh
-        return result
+        return didChangeLocalState
+    }
+
+    func fastRuntimePortalOverlayRevision(propertyID: UUID) -> Int {
+        portalOverlayRevisionByPropertyID[propertyID, default: 0]
+    }
+
+    func fastRuntimePortalGuidedReferenceRevision(propertyID: UUID) -> Int {
+        portalGuidedReferenceRevisionByPropertyID[propertyID, default: 0]
+    }
+
+    func fastRuntimePropertyHasRetiredGuidedRows(propertyID: UUID) -> Bool {
+        localStore.hasRetiredGuidedRows(propertyID: propertyID)
     }
 
     @discardableResult
@@ -57021,7 +57175,15 @@ final class AppState: ObservableObject {
 
     func propertyHasBaseline(_ propertyID: UUID) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
-        return properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil
+        if properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil {
+            return true
+        }
+        return sessions(for: propertyID).contains { session in
+            session.status == .completed &&
+                session.isSealed &&
+                session.sessionType == .fullDocumentation &&
+                session.fullDocumentationMode == .completeCapture
+        }
     }
 
     @discardableResult
@@ -57252,7 +57414,10 @@ final class AppState: ObservableObject {
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+            propertyID: propertyID,
+            observations: observations
+        )
         let sortedObservations = observations
             .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
             .sorted { lhs, rhs in
@@ -57279,7 +57444,10 @@ final class AppState: ObservableObject {
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+            propertyID: propertyID,
+            observations: observations
+        )
         let sortedObservations = observations
             .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
             .sorted { lhs, rhs in
@@ -57325,7 +57493,8 @@ final class AppState: ObservableObject {
                 .flatMap { session -> [ShotMetadata] in
                     guard let metadata = try? localStore.loadSessionMetadata(
                         propertyID: propertyID,
-                        sessionID: session.id
+                        sessionID: session.id,
+                        observations: observations
                     ) else { return [] }
                     return metadata.shots.filter {
                         $0.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork($0)
@@ -57390,14 +57559,19 @@ final class AppState: ObservableObject {
     }
 
     private func fastRuntimeResolvedIssueReferencesByObservationID(
-        propertyID: UUID
+        propertyID: UUID,
+        observations: [Observation]
     ) -> [UUID: FastRuntimeIssueResolvedReference] {
         let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
         let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
         let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
         var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
         for sessionID in sessionIDs {
-            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                observations: observations
+            ) else {
                 continue
             }
             for shot in metadata.shots {
@@ -57553,7 +57727,10 @@ final class AppState: ObservableObject {
         guard canAccessProperty(propertyID), !observations.isEmpty else { return [] }
         let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
             .sorted { $0.startedAt > $1.startedAt }
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(propertyID: propertyID)
+        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+            propertyID: propertyID,
+            observations: observations
+        )
         var requests = Set<OperationalMediaHydrationRequest>()
         for observation in observations {
             let explicitSessionIDs = [
@@ -57857,30 +58034,33 @@ final class AppState: ObservableObject {
             }
         }
 
-        if let observations = try? localStore.fetchObservations(propertyID: propertyID) {
-            for observation in observations {
-                if let targetAngle = observation.targetAngleIndex {
-                    appendReservation(
-                        building: observation.building,
-                        elevation: observation.targetElevation,
-                        detailType: observation.detailType,
-                        angleIndex: targetAngle
-                    )
-                }
-                for guidedShot in observation.guidedShots {
-                    appendReservation(
-                        building: guidedShot.building ?? observation.building,
-                        elevation: guidedShot.targetElevation ?? observation.targetElevation,
-                        detailType: guidedShot.detailType ?? observation.detailType,
-                        angleIndex: guidedShot.angleIndex
-                    )
-                }
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        for observation in observations {
+            if let targetAngle = observation.targetAngleIndex {
+                appendReservation(
+                    building: observation.building,
+                    elevation: observation.targetElevation,
+                    detailType: observation.detailType,
+                    angleIndex: targetAngle
+                )
+            }
+            for guidedShot in observation.guidedShots {
+                appendReservation(
+                    building: guidedShot.building ?? observation.building,
+                    elevation: guidedShot.targetElevation ?? observation.targetElevation,
+                    detailType: guidedShot.detailType ?? observation.detailType,
+                    angleIndex: guidedShot.angleIndex
+                )
             }
         }
 
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         for session in sessions {
-            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID,
+                sessionID: session.id,
+                observations: observations
+            ) else {
                 continue
             }
             for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
@@ -58776,6 +58956,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func startSession(
         sessionType: SessionType = .fullDocumentation,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         skipPropertyStatusPreflight: Bool = false,
         preferredNewSessionID: UUID? = nil
     ) -> Session? {
@@ -58835,6 +59016,7 @@ final class AppState: ObservableObject {
                 cloudBackupManager?.setCaptureModeActive(false)
                 return startSession(
                     sessionType: sessionType,
+                    fullDocumentationMode: fullDocumentationMode,
                     skipPropertyStatusPreflight: true,
                     preferredNewSessionID: preferredNewSessionID
                 )
@@ -58857,6 +59039,7 @@ final class AppState: ObservableObject {
                 cloudBackupManager?.setCaptureModeActive(false)
                 return startSession(
                     sessionType: sessionType,
+                    fullDocumentationMode: fullDocumentationMode,
                     skipPropertyStatusPreflight: true,
                     preferredNewSessionID: preferredNewSessionID
                 )
@@ -58900,6 +59083,7 @@ final class AppState: ObservableObject {
             id: preferredNewSessionID ?? UUID(),
             propertyID: selectedPropertyID,
             sessionType: sessionType,
+            fullDocumentationMode: fullDocumentationMode,
             startedAt: Date(),
             status: .draft,
             endedAt: nil,
@@ -59062,9 +59246,13 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func persistCurrentSessionType(_ sessionType: SessionType) -> Session? {
+    func persistCurrentSessionType(
+        _ sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture
+    ) -> Session? {
         guard var session = currentSession else { return nil }
         session.sessionType = sessionType
+        session.fullDocumentationMode = fullDocumentationMode
         currentSession = session
         do {
             let persisted = try localStore.upsertSession(session)
@@ -59081,9 +59269,13 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func applyCurrentSessionTypeForFastEntry(_ sessionType: SessionType) -> Session? {
+    func applyCurrentSessionTypeForFastEntry(
+        _ sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture
+    ) -> Session? {
         guard var session = currentSession else { return nil }
         session.sessionType = sessionType
+        session.fullDocumentationMode = fullDocumentationMode
         currentSession = session
         initialSessionTypeSelectedSessionIDs.insert(session.id)
         return session
@@ -59098,7 +59290,10 @@ final class AppState: ObservableObject {
                   self.currentSession?.sessionType == sessionType else {
                 return
             }
-            _ = self.persistCurrentSessionType(sessionType)
+            _ = self.persistCurrentSessionType(
+                sessionType,
+                fullDocumentationMode: self.currentSession?.fullDocumentationMode ?? .completeCapture
+            )
         }
     }
 
@@ -59116,10 +59311,11 @@ final class AppState: ObservableObject {
 
     nonisolated static func sessionCompletionHasOutstandingChecklistItems(
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         guidedRemainingCount: Int,
         flaggedRemainingCount: Int
     ) -> Bool {
-        if sessionType == .punchlistVisit {
+        if sessionType == .punchlistVisit || fullDocumentationMode == .followUp {
             // Open issues carry forward; they do not block completion of a focused visit.
             return false
         }
@@ -59128,6 +59324,7 @@ final class AppState: ObservableObject {
 
     nonisolated static func sessionCanComplete(
         sessionType: SessionType,
+        fullDocumentationMode: FullDocumentationMode = .completeCapture,
         hasBaseline: Bool,
         guidedRemainingCount: Int,
         flaggedRemainingCount: Int,
@@ -59135,6 +59332,9 @@ final class AppState: ObservableObject {
     ) -> Bool {
         if sessionType == .punchlistVisit {
             return currentSessionCaptureCount > 0
+        }
+        if fullDocumentationMode == .followUp {
+            return hasBaseline && currentSessionCaptureCount > 0
         }
         return hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
     }

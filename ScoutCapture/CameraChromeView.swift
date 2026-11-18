@@ -61,6 +61,8 @@ struct CameraChromeDisplayModel {
     var propertyName: String
     var cloudStatus: CameraChromeStatusModel?
     var showsPunchlistBadge: Bool
+    var showsFollowUpBadge: Bool
+    var showsFullBadge: Bool
     var metadata: CameraChromeMetadataModel
     var previewStatusTitle: String
     var previewStatusColor: Color
@@ -199,6 +201,12 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                 if display.showsPunchlistBadge {
                                     punchlistVisitHeaderBadge
                                 }
+                                if display.showsFollowUpBadge {
+                                    followUpHeaderBadge
+                                }
+                                if display.showsFullBadge {
+                                    fullHeaderBadge
+                                }
                             }
                             .frame(height: 14)
                         }
@@ -250,7 +258,19 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
     }
 
     private var punchlistVisitHeaderBadge: some View {
-        Text("Punchlist")
+        sessionModeHeaderBadge("Punchlist", fill: .red)
+    }
+
+    private var followUpHeaderBadge: some View {
+        sessionModeHeaderBadge("Follow-Up", fill: .blue)
+    }
+
+    private var fullHeaderBadge: some View {
+        sessionModeHeaderBadge("Full", fill: .blue)
+    }
+
+    private func sessionModeHeaderBadge(_ title: String, fill: Color) -> some View {
+        Text(title)
             .font(.system(size: 10, weight: .semibold))
             .foregroundColor(.white.opacity(0.9))
             .lineLimit(1)
@@ -258,9 +278,9 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
             .padding(.vertical, 1)
             .background(
                 Capsule()
-                    .fill(Color.red.opacity(0.82))
+                    .fill(fill.opacity(0.82))
             )
-            .accessibilityLabel("Punchlist")
+            .accessibilityLabel(title)
     }
 
     private func metadataHUDStrip(isLandscapeStyle: Bool) -> some View {
@@ -408,7 +428,19 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                 .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                 .offset(y: 1.5)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CameraChromeEndPressStyle())
+    }
+
+    private struct CameraChromeEndPressStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .background {
+                    Capsule()
+                        .fill(Color.red.opacity(configuration.isPressed ? 0.24 : 0))
+                        .padding(.horizontal, -10)
+                        .padding(.vertical, -7)
+                }
+        }
     }
 
     private func profileToggleControl() -> some View {
