@@ -14747,6 +14747,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 compactContextAngle: true,
                 selectionDisabledIssueIDs: fastLaneHandledIssueIDsInCurrentSession(),
                 onClose: {
+                    recordFastLaneReadyEvent("flagged_list_closed")
                     fastLaneSideControlSheetMode = nil
                 },
                 onSelectIssue: { observation in
@@ -14795,6 +14796,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 cache: fastLaneGalleryImageCache,
                 compactContextAngle: true,
                 onClose: {
+                    recordFastLaneReadyEvent("guided_list_closed")
                     fastLaneSideControlSheetMode = nil
                 },
                 onSelectGuided: { guidedShot in
@@ -15210,14 +15212,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneSessionActionsSummary: FastLaneSessionActionsSummary {
+        recordFastLaneReadyEvent("end_summary_started")
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         let followUpShots = isFollowUp ? fastLaneLocalShotRecords() : []
+        if isFollowUp { recordFastLaneReadyEvent("end_summary_shots_ready") }
         let priorPhotoIdentities = isFollowUp
             ? appState.fastRuntimePriorPhotoIdentities(
                 propertyID: context.propertyID,
                 currentSessionID: context.sessionID
             )
             : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
+        if isFollowUp { recordFastLaneReadyEvent("end_summary_prior_ready") }
         let retakenPhotoCount = followUpShots.filter {
             guard let metadata = $0.metadataContext else { return false }
             return metadata.captureIntentSource?.lowercased() == "retake" ||
@@ -15227,7 +15232,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 ) ||
                 metadata.issueID.map(priorPhotoIdentities.flaggedIssueIDs.contains) == true
         }.count
-        return FastLaneSessionActionsSummary(
+        let summary = FastLaneSessionActionsSummary(
             guidedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.guidedRemainingCount,
             flaggedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.activeIssueCount,
             currentSessionCaptureCount: fastLaneCurrentPhotoCountForDisplay,
@@ -15239,6 +15244,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             isComplete: productionCompleteState.isComplete || didCompleteUpload,
             disabledReason: fastLaneSessionActionsCompleteDisabledReason
         )
+        recordFastLaneReadyEvent("end_summary_ready")
+        return summary
     }
 
     private var fastLaneCurrentPhotoCountForDisplay: Int {
@@ -17829,6 +17836,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
         }
         guard !pending.isEmpty else { return }
+        recordFastLaneReadyEvent("panel_media_hydration_started_\(kind)")
         for request in pending {
             fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
         }
@@ -17846,12 +17854,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     fastLaneMediaHydrationAttemptedKeys.remove(fastLaneHydrationKey(for: request))
                 }
             }
+            recordFastLaneReadyEvent("panel_media_hydration_finished_\(kind)")
             guard didStart else { return }
+            recordFastLaneReadyEvent("panel_media_history_started_\(kind)")
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
                 currentSessionID: context.sessionID
             )
+            recordFastLaneReadyEvent("panel_media_history_ready_\(kind)")
             await MainActor.run {
                 let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
                 fastLaneSideControlPayload = scopedPayload
