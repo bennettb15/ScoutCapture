@@ -194,10 +194,56 @@ begin
 end;
 $$;
 
+-- A normal occupancy release must not discard an independently saved local
+-- draft. The explicit release_local_property_status_draft RPC handles discard.
+alter function public.release_property_status_if_owner(uuid, text, text)
+    rename to release_property_status_if_owner_core;
+
+create function public.release_property_status_if_owner(
+    target_property_id uuid,
+    target_device_id text,
+    target_status_reason text default 'release_if_owner'
+)
+returns public.property_status
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    target_org_id uuid := public.property_status_assert_writer(target_property_id);
+    existing public.property_status%rowtype;
+begin
+    select * into existing
+    from public.property_status
+    where property_id = target_property_id
+    for update;
+
+    if existing.org_id = target_org_id
+       and existing.status = 'draft'
+       and existing.local_draft_session_id is not null
+       and existing.local_draft_session_id = existing.draft_session_id then
+        if not public.property_status_actor_owns(
+            existing.owner_user_id, existing.owner_device_id, target_device_id
+        ) then
+            raise exception 'Only the property status owner can release this row.'
+                using errcode = '42501';
+        end if;
+        return existing;
+    end if;
+
+    return public.release_property_status_if_owner_core(
+        target_property_id, target_device_id, target_status_reason
+    );
+end;
+$$;
+
 revoke all on function public.rebuild_property_status_core(uuid, text) from public, anon, authenticated;
 revoke all on function public.rebuild_property_status(uuid, text) from public, anon;
+revoke all on function public.release_property_status_if_owner_core(uuid, text, text) from public, anon, authenticated;
+revoke all on function public.release_property_status_if_owner(uuid, text, text) from public, anon;
 revoke all on function public.promote_local_property_status_draft(uuid, uuid, text, text) from public, anon;
 revoke all on function public.release_local_property_status_draft(uuid, uuid, text) from public, anon;
 grant execute on function public.rebuild_property_status(uuid, text) to authenticated;
+grant execute on function public.release_property_status_if_owner(uuid, text, text) to authenticated;
 grant execute on function public.promote_local_property_status_draft(uuid, uuid, text, text) to authenticated;
 grant execute on function public.release_local_property_status_draft(uuid, uuid, text) to authenticated;
