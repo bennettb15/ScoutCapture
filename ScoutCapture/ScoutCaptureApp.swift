@@ -14240,6 +14240,34 @@ private final class FastLaneReadyInteractionTrace: @unchecked Sendable {
     }
 }
 
+@MainActor
+private final class FastLanePriorPhotoIdentityCache {
+    private var propertyID: UUID?
+    private var sessionID: UUID?
+    private var identities: (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>)?
+
+    func getOrLoad(
+        propertyID: UUID,
+        sessionID: UUID,
+        load: () -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>)
+    ) -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+        if self.propertyID == propertyID,
+           self.sessionID == sessionID,
+           let identities {
+            return identities
+        }
+        let loaded = load()
+        self.propertyID = propertyID
+        self.sessionID = sessionID
+        identities = loaded
+        return loaded
+    }
+
+    func invalidate() {
+        identities = nil
+    }
+}
+
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private struct FocusTap: Identifiable {
         let id = UUID()
@@ -14268,6 +14296,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     @State private var previewRunningAt: Date?
     @State private var readyInteractionTrace = FastLaneReadyInteractionTrace()
+    @State private var fastLanePriorPhotoIdentityCache = FastLanePriorPhotoIdentityCache()
     @State private var cameraViewAppearedAt: Date?
     @State private var openingMetadataReadyAt: Date?
     @State private var openingSideControlsReadyAt: Date?
@@ -14562,6 +14591,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 propertyID: context.propertyID
             )
             primeFastLaneSideControlSnapshot()
+            if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
+                _ = fastLanePriorPhotoIdentities()
+            }
             if let initialContext {
                 applyFastLaneMetadataContext(initialContext)
                 didApplyInitialLocationMode = true
@@ -15217,10 +15249,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let followUpShots = isFollowUp ? fastLaneLocalShotRecords() : []
         if isFollowUp { recordFastLaneReadyEvent("end_summary_shots_ready") }
         let priorPhotoIdentities = isFollowUp
-            ? appState.fastRuntimePriorPhotoIdentities(
-                propertyID: context.propertyID,
-                currentSessionID: context.sessionID
-            )
+            ? fastLanePriorPhotoIdentities()
             : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
         if isFollowUp { recordFastLaneReadyEvent("end_summary_prior_ready") }
         let retakenPhotoCount = followUpShots.filter {
@@ -15246,6 +15275,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
         recordFastLaneReadyEvent("end_summary_ready")
         return summary
+    }
+
+    private func fastLanePriorPhotoIdentities() -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+        fastLanePriorPhotoIdentityCache.getOrLoad(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID
+        ) {
+            appState.fastRuntimePriorPhotoIdentities(
+                propertyID: context.propertyID,
+                currentSessionID: context.sessionID
+            )
+        }
     }
 
     private var fastLaneCurrentPhotoCountForDisplay: Int {
@@ -16526,6 +16567,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             let guidedReferencesChanged = appState.fastRuntimePortalGuidedReferenceRevision(
                 propertyID: context.propertyID
             ) != fastLanePortalGuidedRevisionAtPrime
+            if guidedReferencesChanged {
+                await MainActor.run { fastLanePriorPhotoIdentityCache.invalidate() }
+            }
             if !force,
                !guidedReferencesChanged,
                !appState.fastRuntimePropertyHasRetiredGuidedRows(propertyID: context.propertyID) {
@@ -17364,10 +17408,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func armFastLaneGuidedShot(_ guidedShot: GuidedShot) {
         if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
-            let priorGuidedShotKeys = appState.fastRuntimePriorGuidedShotKeys(
-                propertyID: context.propertyID,
-                currentSessionID: context.sessionID
-            )
+            let priorGuidedShotKeys = fastLanePriorPhotoIdentities().guidedShotKeys
             let candidate = AppState.FastRuntimeCaptureMetadataContext(
                 building: guidedShot.building,
                 elevation: guidedShot.targetElevation,
