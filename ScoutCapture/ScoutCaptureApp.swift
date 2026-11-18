@@ -14455,6 +14455,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     completionErrorMessage: fastLaneCompletionErrorMessage,
                     onResume: {
                         showFastLaneSessionActionsSheet = false
+                        Task { @MainActor in
+                            await Task.yield()
+                            resumeDeferredFastLaneSideControlRefreshIfNeeded()
+                        }
                     },
                     onSaveDraftAndExit: {
                         guard !productionCompleteState.isRunning,
@@ -16451,7 +16455,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
             return
         }
-        guard fastLaneSideControlSheetMode == nil else {
+        guard fastLaneSideControlSheetMode == nil,
+              !showFastLaneSessionActionsSheet,
+              !isFastLaneExiting else {
             deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
             return
         }
@@ -16470,9 +16476,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 return
             }
-            guard fastLaneSideControlSheetMode == nil else {
+            await Task.yield()
+            guard fastLaneSideControlSheetMode == nil,
+                  !showFastLaneSessionActionsSheet,
+                  !isFastLaneExiting else {
                 await MainActor.run {
                     deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
+                    recordFastLaneReadyEvent("refresh_deferred_for_session_actions")
                     finishFastLaneSideControlRefresh()
                 }
                 return
@@ -16502,9 +16512,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 return
             }
 
-            guard fastLaneSideControlSheetMode == nil else {
+            await Task.yield()
+            guard fastLaneSideControlSheetMode == nil,
+                  !showFastLaneSessionActionsSheet,
+                  !isFastLaneExiting else {
                 await MainActor.run {
                     deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
+                    recordFastLaneReadyEvent("full_payload_deferred_for_session_actions")
                     finishFastLaneSideControlRefresh()
                 }
                 return
@@ -16541,6 +16555,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func resumeDeferredFastLaneSideControlRefreshIfNeeded() {
         guard fastLaneSideControlSheetMode == nil,
+              !showFastLaneSessionActionsSheet,
+              !isFastLaneExiting,
               !isRefreshingFastLaneSideControlCounts,
               let force = deferredFastLaneSideControlRefreshForce else { return }
         deferredFastLaneSideControlRefreshForce = nil
