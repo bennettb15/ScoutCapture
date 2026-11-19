@@ -88,6 +88,13 @@ type ShotRow = {
   image_width?: number | null;
   image_height?: number | null;
   lifecycle_state?: string | null;
+  retired_at?: string | null;
+  retired_reason?: string | null;
+  retired_by?: string | null;
+  supersedes_shot_id?: string | null;
+  superseded_by_shot_id?: string | null;
+  replacement_reason?: string | null;
+  lifecycle_updated_at?: string | null;
   storage_bucket?: string | null;
   storage_path?: string | null;
   checksum_sha256?: string | null;
@@ -96,6 +103,35 @@ type ShotRow = {
   upload_attempts?: number | null;
   last_upload_error?: string | null;
   deleted_at?: string | null;
+};
+
+type ObservationRow = {
+  id: string;
+  status?: string | null;
+  title?: string | null;
+  detail?: string | null;
+  priority?: string | null;
+  trade?: string | null;
+  shot_id?: string | null;
+  session_id?: string | null;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  resolved_at?: string | null;
+  last_update_session_id?: string | null;
+  resolved_session_id?: string | null;
+};
+
+type ObservationUpdateRow = {
+  id: string;
+  observation_id: string;
+  session_id?: string | null;
+  update_type?: string | null;
+  status?: string | null;
+  message?: string | null;
+  note?: string | null;
+  priority?: string | null;
+  trade?: string | null;
+  created_at?: string | null;
 };
 
 type ReportDispatchResult = {
@@ -287,9 +323,13 @@ export function buildRawSessionMetadata(input: {
   property: PropertyRow;
   session: SessionRow;
   shots: ShotRow[];
+  observations?: ObservationRow[];
+  observationUpdates?: ObservationUpdateRow[];
   generatedAt: string;
 }): JsonRecord {
   const { request, user, property, session, shots, generatedAt } = input;
+  const observations = input.observations ?? [];
+  const observationUpdates = input.observationUpdates ?? [];
   const startedAt = sessionTimestamp(session.started_at, generatedAt);
   const completedAt = sessionTimestamp(session.completed_at, startedAt);
   const sessionActor = actor(user, session.updated_by);
@@ -407,9 +447,50 @@ export function buildRawSessionMetadata(input: {
         imageWidth: shot.image_width ?? null,
         imageHeight: shot.image_height ?? null,
         lifecycleState: shot.lifecycle_state ?? "active",
+        retiredAt: shot.retired_at ?? null,
+        retiredReason: shot.retired_reason ?? null,
+        retiredByUserID: shot.retired_by ?? null,
+        supersedesShotID: shot.supersedes_shot_id ?? null,
+        supersededByShotID: shot.superseded_by_shot_id ?? null,
+        replacementReason: shot.replacement_reason ?? null,
+        lifecycleUpdatedAt: shot.lifecycle_updated_at ?? null,
       };
     }),
-    issues: [],
+    issues: observations.map((observation) => {
+      const linkedShot = orderedShots.find((shot) => shot.id === observation.shot_id) ??
+        [...orderedShots].reverse().find((shot) => shot.issue_id === observation.id);
+      return {
+        issueID: observation.id,
+        issueId: observation.id,
+        id: observation.id,
+        issueStatus: observation.status ?? "active",
+        status: observation.status ?? "active",
+        currentReason: observation.title ?? observation.detail ?? null,
+        detailNote: observation.detail ?? observation.title ?? null,
+        priority: observation.priority ?? linkedShot?.priority ?? null,
+        trade: observation.trade ?? linkedShot?.trade ?? null,
+        firstSeenAt: observation.first_seen_at ?? null,
+        lastSeenAt: observation.last_seen_at ?? null,
+        resolvedAt: observation.resolved_at ?? null,
+        lastCaptureSessionId: linkedShot?.session_id ?? observation.resolved_session_id ??
+          observation.last_update_session_id ?? observation.session_id ?? null,
+        shotKey: linkedShot?.shot_key ?? null,
+        historyEvents: observationUpdates.filter((update) => update.observation_id === observation.id)
+          .map((update) => ({
+            id: update.id,
+            timestamp: update.created_at ?? generatedAt,
+            sessionId: update.session_id ?? null,
+            type: update.update_type ?? "updated",
+            details: Object.fromEntries(Object.entries({
+              status: update.status,
+              message: update.message,
+              note: update.note,
+              priority: update.priority,
+              trade: update.trade,
+            }).filter(([, value]) => value != null && value !== "")),
+          })),
+      };
+    }),
     guidedShots: [],
   };
 }
@@ -420,6 +501,8 @@ export async function buildSnapshotPayload(input: {
   property: PropertyRow;
   session: SessionRow;
   shots: ShotRow[];
+  observations?: ObservationRow[];
+  observationUpdates?: ObservationUpdateRow[];
   snapshotID: string;
   generatedAt: string;
 }): Promise<{
@@ -541,6 +624,20 @@ async function selectRows<T>(config: RuntimeConfig, table: string, query: URLSea
     throw new Error(`${table}_select_failed:${response.status}:${(await response.text()).slice(0, 300)}`);
   }
   return await response.json() as T[];
+}
+
+async function selectAllRows<T>(config: RuntimeConfig, table: string, query: URLSearchParams): Promise<T[]> {
+  const all: T[] = [];
+  const pageSize = 500;
+  for (let offset = 0; offset < 100_000; offset += pageSize) {
+    const pageQuery = new URLSearchParams(query);
+    pageQuery.set("limit", String(pageSize));
+    pageQuery.set("offset", String(offset));
+    const page = await selectRows<T>(config, table, pageQuery);
+    all.push(...page);
+    if (page.length < pageSize) return all;
+  }
+  throw new Error(`${table}_select_limit_exceeded`);
 }
 
 async function insertRow(config: RuntimeConfig, table: string, row: JsonRecord): Promise<void> {
@@ -821,6 +918,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
         "building,elevation,detail_type,angle_index,shot_key,logical_shot_identity",
         "capture_kind,first_capture_kind,is_guided,is_flagged,issue_id,issue_status,trade,reason,priority",
         "capture_mode,lens,latitude,longitude,accuracy_meters,image_width,image_height,lifecycle_state",
+        "retired_at,retired_reason,retired_by,supersedes_shot_id,superseded_by_shot_id,replacement_reason,lifecycle_updated_at",
         "storage_bucket,storage_path,checksum_sha256,byte_size,upload_state,upload_attempts,last_upload_error",
       ].join(","),
       session_id: `eq.${handoff.sessionID}`,
@@ -869,6 +967,27 @@ export async function handleHandoff(request: Request): Promise<Response> {
       return outcome && outcome.observation_id === shot.issue_id ? { ...shot, issue_status: outcome.status } : shot;
     });
 
+    // Freeze issue state after field resolution finalization, so the report sees the same
+    // status, reason, priority, trade, and history that the portal exposes at handoff.
+    const observationQuery = new URLSearchParams({
+      select: "id,status,title,detail,priority,trade,shot_id,session_id,first_seen_at,last_seen_at,resolved_at,last_update_session_id,resolved_session_id",
+      property_id: `eq.${handoff.propertyID}`,
+      org_id: `eq.${handoff.orgID}`,
+      deleted_at: "is.null",
+      order: "id.asc",
+    });
+    const updateQuery = new URLSearchParams({
+      select: "id,observation_id,session_id,update_type,status,message,note,priority,trade,created_at",
+      property_id: `eq.${handoff.propertyID}`,
+      org_id: `eq.${handoff.orgID}`,
+      deleted_at: "is.null",
+      order: "created_at.asc,id.asc",
+    });
+    const [observations, observationUpdates] = await Promise.all([
+      selectAllRows<ObservationRow>(config, "observations", observationQuery),
+      selectAllRows<ObservationUpdateRow>(config, "observation_updates", updateQuery),
+    ]);
+
     const snapshotID = crypto.randomUUID();
     const generatedAt = new Date().toISOString();
     const snapshot = await buildSnapshotPayload({
@@ -877,6 +996,8 @@ export async function handleHandoff(request: Request): Promise<Response> {
       property: property!,
       session: session!,
       shots: snapshotShots,
+      observations,
+      observationUpdates,
       snapshotID,
       generatedAt,
     });
