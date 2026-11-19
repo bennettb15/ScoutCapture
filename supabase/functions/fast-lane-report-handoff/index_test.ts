@@ -174,15 +174,24 @@ Deno.test("cloud handoff freezes issue state and Guided photo lifecycle", () => 
       { id: newShotID, session_id: request.sessionID, issue_id: issueID,
         lifecycle_state: "active", supersedes_shot_id: oldShotID,
         created_at: "2026-11-19T12:01:00Z" },
+      { id: "ffffffff-ffff-4fff-bfff-ffffffffffff", session_id: request.sessionID,
+        is_guided: true, lifecycle_state: "retired", retired_reason: "duplicate",
+        retired_at: "2026-11-19T12:03:00Z", building: "B1", elevation: "N",
+        detail_type: "Overview", angle_index: 3, created_at: "2026-11-19T12:02:00Z" },
     ],
     observations: [{ id: issueID, status: "pending_review", title: "Loose flashing",
       priority: "high", trade: "Roofing", shot_id: newShotID }],
     observationUpdates: [{ id: "eeeeeeee-eeee-4eee-beee-eeeeeeeeeeee",
       observation_id: issueID, session_id: request.sessionID, update_type: "captured",
       status: "pending_review", created_at: "2026-11-19T12:02:00Z" }],
+    guidedEvents: [{ id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaab", payload: {
+      id: oldShotID, building: "B1", targetElevation: "N", detailType: "Overview",
+      angleIndex: 4, skipReason: "Obstructed", skipSessionID: request.sessionID,
+    } }],
   });
   const shots = metadata.shots as Record<string, unknown>[];
   const issues = metadata.issues as Record<string, unknown>[];
+  const guided = metadata.guidedShots as Record<string, unknown>[];
   if (shots[0].supersededByShotID !== newShotID || shots[1].supersedesShotID !== oldShotID) {
     throw new Error("Guided replacement lineage missing from report snapshot");
   }
@@ -190,6 +199,10 @@ Deno.test("cloud handoff freezes issue state and Guided photo lifecycle", () => 
       issues[0].currentReason !== "Loose flashing" || issues[0].priority !== "high" ||
       (issues[0].historyEvents as unknown[]).length !== 1) {
     throw new Error("issue state or history missing from report snapshot");
+  }
+  if (guided.length !== 2 || guided[0].skipReason !== "Obstructed" ||
+      guided[1].status !== "retired" || guided[1].retiredAt !== "2026-11-19T12:03:00Z") {
+    throw new Error("skipped and retired Guided rows missing from report snapshot");
   }
 });
 

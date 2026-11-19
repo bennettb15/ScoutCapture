@@ -134,6 +134,11 @@ type ObservationUpdateRow = {
   created_at?: string | null;
 };
 
+type GuidedEventRow = {
+  id: string;
+  payload?: JsonRecord | null;
+};
+
 type ReportDispatchResult = {
   expected: boolean;
   status: string;
@@ -325,6 +330,7 @@ export function buildRawSessionMetadata(input: {
   shots: ShotRow[];
   observations?: ObservationRow[];
   observationUpdates?: ObservationUpdateRow[];
+  guidedEvents?: GuidedEventRow[];
   generatedAt: string;
 }): JsonRecord {
   const { request, user, property, session, shots, generatedAt } = input;
@@ -491,7 +497,24 @@ export function buildRawSessionMetadata(input: {
           })),
       };
     }),
-    guidedShots: [],
+    guidedShots: [
+      ...(input.guidedEvents ?? []).map((event) => ({
+        ...(event.payload ?? {}),
+        id: nullableString(event.payload?.id) ?? event.id,
+      })),
+      ...orderedShots.filter((shot) => shot.is_guided === true && shot.lifecycle_state === "retired")
+        .map((shot) => ({
+          id: shot.id,
+          building: shot.building ?? "",
+          targetElevation: shot.elevation ?? "",
+          detailType: shot.detail_type ?? "",
+          angleIndex: Math.max(1, Number(shot.angle_index ?? 1)),
+          status: "retired",
+          isRetired: true,
+          retiredAt: shot.retired_at ?? null,
+          retiredInSessionID: request.sessionID,
+        })),
+    ],
   };
 }
 
@@ -503,6 +526,7 @@ export async function buildSnapshotPayload(input: {
   shots: ShotRow[];
   observations?: ObservationRow[];
   observationUpdates?: ObservationUpdateRow[];
+  guidedEvents?: GuidedEventRow[];
   snapshotID: string;
   generatedAt: string;
 }): Promise<{
@@ -983,9 +1007,18 @@ export async function handleHandoff(request: Request): Promise<Response> {
       deleted_at: "is.null",
       order: "created_at.asc,id.asc",
     });
-    const [observations, observationUpdates] = await Promise.all([
+    const guidedEventQuery = new URLSearchParams({
+      select: "id,payload",
+      session_id: `eq.${handoff.sessionID}`,
+      property_id: `eq.${handoff.propertyID}`,
+      org_id: `eq.${handoff.orgID}`,
+      event_type: "eq.guided_skip",
+      order: "created_at.asc,id.asc",
+    });
+    const [observations, observationUpdates, guidedEvents] = await Promise.all([
       selectAllRows<ObservationRow>(config, "observations", observationQuery),
       selectAllRows<ObservationUpdateRow>(config, "observation_updates", updateQuery),
+      selectAllRows<GuidedEventRow>(config, "session_events", guidedEventQuery),
     ]);
 
     const snapshotID = crypto.randomUUID();
@@ -998,6 +1031,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
       shots: snapshotShots,
       observations,
       observationUpdates,
+      guidedEvents,
       snapshotID,
       generatedAt,
     });
