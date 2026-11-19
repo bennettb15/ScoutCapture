@@ -150,6 +150,49 @@ Deno.test("cloud handoff reports shutter time even when shot rows were created l
   }
 });
 
+Deno.test("cloud handoff freezes issue state and Guided photo lifecycle", () => {
+  const request = validateHandoffRequest({
+    orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
+    propertyID: "1ff0eb11-5d02-4d5e-a552-1a11dee26439",
+    sessionID: "028a6f82-2356-412c-a1eb-28099f240325",
+    sessionType: "full_documentation",
+    reportMode: "all",
+  });
+  const oldShotID = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+  const newShotID = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
+  const issueID = "dddddddd-dddd-4ddd-bddd-dddddddddddd";
+  const metadata = buildRawSessionMetadata({
+    request,
+    user: { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" },
+    property: { id: request.propertyID, org_id: request.orgID, name: "Test Property" },
+    session: { id: request.sessionID, org_id: request.orgID, property_id: request.propertyID },
+    generatedAt: "2026-11-19T12:04:00Z",
+    shots: [
+      { id: oldShotID, session_id: request.sessionID, is_guided: true,
+        lifecycle_state: "superseded", superseded_by_shot_id: newShotID,
+        replacement_reason: "guided_retake", created_at: "2026-11-19T12:00:00Z" },
+      { id: newShotID, session_id: request.sessionID, issue_id: issueID,
+        lifecycle_state: "active", supersedes_shot_id: oldShotID,
+        created_at: "2026-11-19T12:01:00Z" },
+    ],
+    observations: [{ id: issueID, status: "pending_review", title: "Loose flashing",
+      priority: "high", trade: "Roofing", shot_id: newShotID }],
+    observationUpdates: [{ id: "eeeeeeee-eeee-4eee-beee-eeeeeeeeeeee",
+      observation_id: issueID, session_id: request.sessionID, update_type: "captured",
+      status: "pending_review", created_at: "2026-11-19T12:02:00Z" }],
+  });
+  const shots = metadata.shots as Record<string, unknown>[];
+  const issues = metadata.issues as Record<string, unknown>[];
+  if (shots[0].supersededByShotID !== newShotID || shots[1].supersedesShotID !== oldShotID) {
+    throw new Error("Guided replacement lineage missing from report snapshot");
+  }
+  if (issues.length !== 1 || issues[0].issueStatus !== "pending_review" ||
+      issues[0].currentReason !== "Loose flashing" || issues[0].priority !== "high" ||
+      (issues[0].historyEvents as unknown[]).length !== 1) {
+    throw new Error("issue state or history missing from report snapshot");
+  }
+});
+
 Deno.test("buildSnapshotPayload creates completed snapshot payload and path", async () => {
   const request = validateHandoffRequest({
     orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
