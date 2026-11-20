@@ -1315,8 +1315,10 @@ struct SessionHubView: View {
                 appState.triggerBackupForLifecycleEvent(after: 8.0)
                 selectionHaptic.prepare()
             }
-            .task(id: scenePhase == .active && path.isEmpty) {
-                guard scenePhase == .active && path.isEmpty else { return }
+            .task(id: scenePhase == .active && path.isEmpty &&
+                fastLaneOpeningProperty == nil && fastLanePreviewRequest == nil && !isOpeningProperty) {
+                guard scenePhase == .active && path.isEmpty &&
+                    fastLaneOpeningProperty == nil && fastLanePreviewRequest == nil && !isOpeningProperty else { return }
                 await appState.refreshVisiblePropertyStatusForHome(reason: "home_visible")
                 while !Task.isCancelled {
                     do {
@@ -1324,7 +1326,10 @@ struct SessionHubView: View {
                     } catch {
                         return
                     }
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled,
+                          fastLaneOpeningProperty == nil,
+                          fastLanePreviewRequest == nil,
+                          !isOpeningProperty else { return }
                     await appState.refreshVisiblePropertyStatusForHome(reason: "home_poll")
                 }
             }

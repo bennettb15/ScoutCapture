@@ -7868,7 +7868,6 @@ final class AppState: ObservableObject {
             refreshPropertyRowStatusChipCache()
         }
     }
-    private var checkedEmptyClaimsForAccessContext: Set<String> = []
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
@@ -37204,8 +37203,8 @@ final class AppState: ObservableObject {
         staleThreshold: TimeInterval = propertyStatusOccupiedStaleThreshold
     ) -> Bool {
         guard record.status == .occupied else { return false }
-        guard let heartbeatAt = record.heartbeatAt else { return true }
-        return now.timeIntervalSince(heartbeatAt) > staleThreshold
+        let lastActivityAt = max(record.heartbeatAt ?? .distantPast, record.updatedAt)
+        return now.timeIntervalSince(lastActivityAt) > staleThreshold
     }
 
     private func hasActiveRemoteLock(
@@ -42137,6 +42136,7 @@ final class AppState: ObservableObject {
             propertyIDs: propertyIDs,
             reason: reason
         )
+        guard !Task.isCancelled else { return }
         guard lastPropertyStatusRefreshAt != previousRefresh else { return }
         await recoverEmptyClaimsOnHome()
     }
@@ -42147,8 +42147,6 @@ final class AppState: ObservableObject {
               currentSession == nil,
               let userID = authenticatedSupabaseUser?.id,
               let orgID = activeOrganizationID else { return }
-        let accessKey = "\(userID.uuidString):\(orgID.uuidString)"
-        guard !checkedEmptyClaimsForAccessContext.contains(accessKey) else { return }
 
         let deviceID = currentDeviceIdentifier()
         let ownClaims = propertyStatusByPropertyID.values.filter {
@@ -42157,18 +42155,14 @@ final class AppState: ObservableObject {
                 normalizedSupabaseText($0.ownerDeviceID) == deviceID
         }
         var releasedAny = false
-        var shouldRetry = false
         for claim in ownClaims {
+            guard !Task.isCancelled else { return }
             let result = await releaseFastRuntimePrototypeCurrentUserClaim(
                 propertyID: claim.propertyID,
                 requireCurrentDeviceMatch: true
             )
             releasedAny = result.didRelease || releasedAny
-            if !result.didRelease && result.reason != "protected_local_work" {
-                shouldRetry = true
-            }
         }
-        if !shouldRetry { checkedEmptyClaimsForAccessContext.insert(accessKey) }
         if releasedAny {
             await refreshPropertyStatusCacheForInitialDisplay(
                 propertyIDs: ownClaims.map(\.propertyID),
@@ -50884,7 +50878,8 @@ final class AppState: ObservableObject {
             if let currentUserID,
                record.ownerUserID == currentUserID,
                let ownerDeviceID = normalizedSupabaseText(record.ownerDeviceID),
-               ownerDeviceID != currentDeviceID {
+               ownerDeviceID != currentDeviceID,
+               !isStalePropertyStatusOccupied(record) {
                 return PropertyStatusEntryPreflightDecision(
                     source: "property_status",
                     decision: "block",
@@ -52337,15 +52332,13 @@ final class AppState: ObservableObject {
                 deleteEligible: true
             )
         case .occupied:
-            if propertyStatusOccupiedIsStale(record),
-               currentUserID != nil,
-               record.ownerUserID == currentUserID {
+            if propertyStatusOccupiedIsStale(record) {
                 return PropertyStatusCompareAnswer(
                     visibleBadgeState: .idle,
                     draftCountIncluded: false,
                     pendingExportCountIncluded: false,
                     entryBlocked: false,
-                    deleteEligible: true
+                    deleteEligible: false
                 )
             }
             return PropertyStatusCompareAnswer(
