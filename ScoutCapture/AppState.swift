@@ -5015,6 +5015,18 @@ final class AppState: ObservableObject {
         )
     }
 
+    struct FastRuntimeOpeningLocalSnapshot {
+        let sessionShots: [ShotMetadata]
+        let guidedShots: [GuidedShot]?
+        let observations: [Observation]
+
+        static let empty = FastRuntimeOpeningLocalSnapshot(
+            sessionShots: [],
+            guidedShots: nil,
+            observations: []
+        )
+    }
+
     struct FastRuntimeAngleReservation: Equatable {
         let building: String
         let elevation: String
@@ -37203,8 +37215,8 @@ final class AppState: ObservableObject {
         staleThreshold: TimeInterval = propertyStatusOccupiedStaleThreshold
     ) -> Bool {
         guard record.status == .occupied else { return false }
-        guard let heartbeatAt = record.heartbeatAt else { return true }
-        return now.timeIntervalSince(heartbeatAt) > staleThreshold
+        let lastActivityAt = max(record.heartbeatAt ?? .distantPast, record.updatedAt)
+        return now.timeIntervalSince(lastActivityAt) > staleThreshold
     }
 
     private func hasActiveRemoteLock(
@@ -42131,10 +42143,44 @@ final class AppState: ObservableObject {
 
     func refreshVisiblePropertyStatusForHome(reason: String) async {
         let propertyIDs = properties.filter { $0.deletedAt == nil }.map(\.id)
+        let previousRefresh = lastPropertyStatusRefreshAt
         await refreshPropertyStatusCacheForInitialDisplay(
             propertyIDs: propertyIDs,
             reason: reason
         )
+        guard !Task.isCancelled else { return }
+        guard lastPropertyStatusRefreshAt != previousRefresh else { return }
+        await recoverEmptyClaimsOnHome()
+    }
+
+    @MainActor
+    private func recoverEmptyClaimsOnHome() async {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              currentSession == nil,
+              let userID = authenticatedSupabaseUser?.id,
+              let orgID = activeOrganizationID else { return }
+
+        let deviceID = currentDeviceIdentifier()
+        let ownClaims = propertyStatusByPropertyID.values.filter {
+            $0.orgID == orgID && $0.status == .occupied &&
+                $0.ownerUserID == userID &&
+                normalizedSupabaseText($0.ownerDeviceID) == deviceID
+        }
+        var releasedAny = false
+        for claim in ownClaims {
+            guard !Task.isCancelled else { return }
+            let result = await releaseFastRuntimePrototypeCurrentUserClaim(
+                propertyID: claim.propertyID,
+                requireCurrentDeviceMatch: true
+            )
+            releasedAny = result.didRelease || releasedAny
+        }
+        if releasedAny {
+            await refreshPropertyStatusCacheForInitialDisplay(
+                propertyIDs: ownClaims.map(\.propertyID),
+                reason: "empty_claim_recovery"
+            )
+        }
     }
 
     private func refreshPropertyStatusCacheForInitialDisplay(
@@ -42175,6 +42221,8 @@ final class AppState: ObservableObject {
                 propertyStatusByPropertyID = nextCache
             }
             lastPropertyStatusRefreshAt = Date()
+            // Expiry is time based, so badges must update even when the row is unchanged.
+            refreshPropertyRowLockBadgeCache()
         } catch {
             print(
                 "[PropertyStatusInitialDisplay] refresh_failed " +
@@ -43617,6 +43665,13 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         context: String
     ) async -> PropertyStatusEntryPreflightDecision? {
+        // The status row and read-only coordination probe are independent.
+        // Start both together; the capture screen still makes the atomic claim
+        // before it presents the camera.
+        async let lightweightStatus = evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: nil
+        )
         do {
             guard let freshRecord = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
                 if propertyStatusByPropertyID[propertyID] != nil {
@@ -43631,7 +43686,8 @@ final class AppState: ObservableObject {
                     decision: nil,
                     context: "\(context)_fresh_missing"
                 )
-                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                if let lightweightDecision = evaluateLightweightPropertyEntryBlockProbe(
+                    status: await lightweightStatus,
                     propertyID: propertyID,
                     context: "\(context)_property_status_missing"
                 ) {
@@ -43662,7 +43718,8 @@ final class AppState: ObservableObject {
             if resolvedDecision.isBlocked {
                 return resolvedDecision
             }
-            if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+            if let lightweightDecision = evaluateLightweightPropertyEntryBlockProbe(
+                status: await lightweightStatus,
                 propertyID: propertyID,
                 context: "\(context)_property_status_allowed"
             ) {
@@ -43687,7 +43744,8 @@ final class AppState: ObservableObject {
                 if resolvedCachedDecision.isBlocked {
                     return resolvedCachedDecision
                 }
-                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                if let lightweightDecision = evaluateLightweightPropertyEntryBlockProbe(
+                    status: await lightweightStatus,
                     propertyID: propertyID,
                     context: "\(context)_fresh_failed_cached_allowed"
                 ) {
@@ -43709,13 +43767,11 @@ final class AppState: ObservableObject {
     }
 
     private func evaluateLightweightPropertyEntryBlockProbe(
+        status: LightweightPropertyEntryStatus?,
         propertyID: UUID,
         context: String
-    ) async -> PropertyStatusEntryPreflightDecision? {
-        guard let status = await evaluateLightweightPropertyEntryStatus(
-            propertyID: propertyID,
-            targetSessionID: nil
-        ) else {
+    ) -> PropertyStatusEntryPreflightDecision? {
+        guard let status, status.propertyID == propertyID else {
             return nil
         }
         guard let block = sessionEntryBlock(for: status) else {
@@ -44005,9 +44061,26 @@ final class AppState: ObservableObject {
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
 
+        let localDraft = canonicalDraftSession(for: propertyID, requireCaptures: false)
+        let localDraftMetadata = localDraft.flatMap {
+            try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: $0.id)
+        }
+        let hasChecklistEdits = localDraftMetadata.map { metadata in
+            metadata.guidedShots.contains {
+                $0.skipSessionID == localDraft?.id ||
+                    $0.retiredInSessionID == localDraft?.id ||
+                    $0.reassignedInSessionID == localDraft?.id ||
+                    $0.labelEditedInSessionID == localDraft?.id
+            } || metadata.issues.contains {
+                $0.historyEvents.contains { $0.sessionId == localDraft?.id }
+            }
+        } ?? false
         if (fastRuntimeDraftsByPropertyID[propertyID]?.photoCount ?? 0) > 0 ||
             !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).isEmpty ||
             canonicalDraftSession(for: propertyID, requireCaptures: true) != nil ||
+            (localDraft?.notes?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ||
+            (localDraftMetadata?.shots.isEmpty == false) ||
+            hasChecklistEdits ||
             propertyRowPendingDeliverySession(for: propertyID) != nil {
             return FastRuntimePrototypeReleaseResult(
                 propertyID: propertyID,
@@ -45293,13 +45366,19 @@ final class AppState: ObservableObject {
 
     private func fastRuntimeReclassificationAngleSources(
         propertyID: UUID,
-        sessionID: UUID
+        sessionID: UUID,
+        openingSnapshot: FastRuntimeOpeningLocalSnapshot? = nil
     ) -> FastRuntimeReclassificationAngleSources {
-        let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let sessionIDs = Set([sessionID] + (((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)))
-        let shots = sessionIDs.flatMap { id in
-            (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: id))?.shots ?? []
+        let guided = openingSnapshot?.guidedShots ?? ((try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? [])
+        let observations = openingSnapshot?.observations ?? ((try? localStore.fetchObservations(propertyID: propertyID)) ?? [])
+        let shots: [ShotMetadata]
+        if let openingSnapshot {
+            shots = openingSnapshot.sessionShots
+        } else {
+            let sessionIDs = Set([sessionID] + (((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)))
+            shots = sessionIDs.flatMap { id in
+                (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: id))?.shots ?? []
+            }
         }
         return FastRuntimeReclassificationAngleSources(
             guided: guided, observations: observations, shots: shots
@@ -45309,9 +45388,14 @@ final class AppState: ObservableObject {
     func fastRuntimeNextReclassifiedAngles(
         propertyID: UUID,
         sessionID: UUID,
-        observations: [Observation]
+        observations: [Observation],
+        openingSnapshot: FastRuntimeOpeningLocalSnapshot? = nil
     ) -> [UUID: Int] {
-        let sources = fastRuntimeReclassificationAngleSources(propertyID: propertyID, sessionID: sessionID)
+        let sources = fastRuntimeReclassificationAngleSources(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            openingSnapshot: openingSnapshot
+        )
         return observations.reduce(into: [UUID: Int]()) { result, observation in
             result[observation.id] = fastRuntimeNextReclassifiedAngle(
                 building: observation.building ?? "",
@@ -50825,7 +50909,8 @@ final class AppState: ObservableObject {
             if let currentUserID,
                record.ownerUserID == currentUserID,
                let ownerDeviceID = normalizedSupabaseText(record.ownerDeviceID),
-               ownerDeviceID != currentDeviceID {
+               ownerDeviceID != currentDeviceID,
+               !isStalePropertyStatusOccupied(record) {
                 return PropertyStatusEntryPreflightDecision(
                     source: "property_status",
                     decision: "block",
@@ -52123,7 +52208,8 @@ final class AppState: ObservableObject {
             )
         }
         if locallyLockedPropertyIDs.contains(propertyID),
-           record.status == .draft || record.status == .occupied {
+           record.status == .draft ||
+            (record.status == .occupied && !isStalePropertyStatusOccupied(record)) {
             return PropertyStatusCompareAnswer(
                 visibleBadgeState: .locked,
                 draftCountIncluded: false,
@@ -52284,7 +52370,7 @@ final class AppState: ObservableObject {
                     draftCountIncluded: false,
                     pendingExportCountIncluded: false,
                     entryBlocked: false,
-                    deleteEligible: true
+                    deleteEligible: false
                 )
             }
             return PropertyStatusCompareAnswer(
@@ -57580,15 +57666,37 @@ final class AppState: ObservableObject {
         sessionType: SessionType,
         currentSessionID: UUID? = nil
     ) -> FastRuntimePreviewSideControlPayload {
+        var unusedSnapshot = FastRuntimeOpeningLocalSnapshot.empty
+        return fastRuntimePreviewSideControlPayload(
+            propertyID: propertyID,
+            sessionType: sessionType,
+            currentSessionID: currentSessionID,
+            openingSnapshot: &unusedSnapshot
+        )
+    }
+
+    func fastRuntimePreviewSideControlPayload(
+        propertyID: UUID,
+        sessionType: SessionType,
+        currentSessionID: UUID?,
+        openingSnapshot: inout FastRuntimeOpeningLocalSnapshot
+    ) -> FastRuntimePreviewSideControlPayload {
+        openingSnapshot = .empty
         guard canAccessProperty(propertyID) else {
             return .empty
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+        let referenceScan = fastRuntimeResolvedIssueReferenceScan(
             propertyID: propertyID,
             observations: observations
         )
+        openingSnapshot = FastRuntimeOpeningLocalSnapshot(
+            sessionShots: referenceScan.sessionShots,
+            guidedShots: nil,
+            observations: observations
+        )
+        let resolvedReferences = referenceScan.references
         let sortedObservations = observations
             .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
             .sorted { lhs, rhs in
@@ -57611,7 +57719,13 @@ final class AppState: ObservableObject {
         let otherDraftShotIDs = currentSessionID.map {
             fastRuntimeShotIDsExclusiveToOtherDrafts(propertyID: propertyID, currentSessionID: $0)
         } ?? []
-        let guidedRows = ((try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? [])
+        let allGuidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        openingSnapshot = FastRuntimeOpeningLocalSnapshot(
+            sessionShots: referenceScan.sessionShots,
+            guidedShots: allGuidedRows,
+            observations: observations
+        )
+        let guidedRows = allGuidedRows
             .filter { guidedShot in
                 guard let shotID = guidedShot.shot?.id else { return true }
                 return !otherDraftShotIDs.contains(shotID)
@@ -57703,10 +57817,22 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         observations: [Observation]
     ) -> [UUID: FastRuntimeIssueResolvedReference] {
+        fastRuntimeResolvedIssueReferenceScan(
+            propertyID: propertyID,
+            observations: observations
+        ).references
+    }
+
+    private func fastRuntimeResolvedIssueReferenceScan(
+        propertyID: UUID,
+        observations: [Observation]
+    ) -> (references: [UUID: FastRuntimeIssueResolvedReference], sessionShots: [ShotMetadata]) {
         let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
         let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
         let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
+        let indexedSessionIDSet = Set(indexedSessionIDs)
         var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
+        var sessionShots: [ShotMetadata] = []
         for sessionID in sessionIDs {
             guard let metadata = try? localStore.loadSessionMetadata(
                 propertyID: propertyID,
@@ -57716,6 +57842,9 @@ final class AppState: ObservableObject {
                 continue
             }
             for shot in metadata.shots {
+                if indexedSessionIDSet.contains(sessionID) {
+                    sessionShots.append(shot)
+                }
                 guard let observationID = shot.issueID else { continue }
                 let issueStatus = (shot.issueStatus ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 let captureKind = (shot.captureKind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -57756,7 +57885,7 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        return referencesByObservationID
+        return (referencesByObservationID, sessionShots)
     }
 
     private func fastRuntimeResolvedReference(
@@ -58136,7 +58265,8 @@ final class AppState: ObservableObject {
 
     func fastRuntimePropertyAngleReservations(
         propertyID: UUID,
-        currentSessionID: UUID? = nil
+        currentSessionID: UUID? = nil,
+        openingSnapshot: FastRuntimeOpeningLocalSnapshot? = nil
     ) -> [FastRuntimeAngleReservation] {
         guard canAccessProperty(propertyID) else { return [] }
         let otherDraftShotIDs = currentSessionID.map {
@@ -58163,7 +58293,7 @@ final class AppState: ObservableObject {
             ))
         }
 
-        if let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID) {
+        if let guidedShots = openingSnapshot?.guidedShots ?? (try? localStore.fetchGuidedShots(propertyID: propertyID)) {
             for guidedShot in guidedShots {
                 if let shotID = guidedShot.shot?.id, otherDraftShotIDs.contains(shotID) { continue }
                 appendReservation(
@@ -58175,7 +58305,7 @@ final class AppState: ObservableObject {
             }
         }
 
-        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let observations = openingSnapshot?.observations ?? ((try? localStore.fetchObservations(propertyID: propertyID)) ?? [])
         for observation in observations {
             if let targetAngle = observation.targetAngleIndex {
                 appendReservation(
@@ -58195,16 +58325,8 @@ final class AppState: ObservableObject {
             }
         }
 
-        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
-        for session in sessions {
-            guard let metadata = try? localStore.loadSessionMetadata(
-                propertyID: propertyID,
-                sessionID: session.id,
-                observations: observations
-            ) else {
-                continue
-            }
-            for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+        if let openingSnapshot {
+            for shot in openingSnapshot.sessionShots where shot.isActiveForDefaultWorkflows {
                 if otherDraftShotIDs.contains(shot.shotID) { continue }
                 appendReservation(
                     building: shot.building,
@@ -58212,6 +58334,26 @@ final class AppState: ObservableObject {
                     detailType: shot.detailType,
                     angleIndex: shot.angleIndex
                 )
+            }
+        } else {
+            let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+            for session in sessions {
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    observations: observations
+                ) else {
+                    continue
+                }
+                for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+                    if otherDraftShotIDs.contains(shot.shotID) { continue }
+                    appendReservation(
+                        building: shot.building,
+                        elevation: shot.elevation,
+                        detailType: shot.detailType,
+                        angleIndex: shot.angleIndex
+                    )
+                }
             }
         }
         return reservations

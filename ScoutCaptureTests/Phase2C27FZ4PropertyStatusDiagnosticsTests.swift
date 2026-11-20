@@ -886,9 +886,11 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             activeSessionID: UUID(),
             ownerUserID: UUID(),
             ownerDeviceID: "other-device",
-            heartbeatAt: Date().addingTimeInterval(-4 * 60)
+            heartbeatAt: Date().addingTimeInterval(-4 * 60),
+            updatedAt: Date().addingTimeInterval(-4 * 60)
         )
 
+        fixture.appState.locallyLockedPropertyIDs.insert(fixture.property.id)
         fixture.appState._debugReplacePropertyStatusCacheForTests([record])
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
@@ -935,7 +937,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertTrue(badge.showPendingExport)
     }
@@ -1146,7 +1148,8 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             activeSessionID: UUID(),
             ownerUserID: UUID(),
             ownerDeviceID: "device-b",
-            heartbeatAt: Date().addingTimeInterval(-45 * 60)
+            heartbeatAt: Date().addingTimeInterval(-45 * 60),
+            updatedAt: Date().addingTimeInterval(-45 * 60)
         )
         fixture.appState._debugReplacePropertyStatusCacheForTests([staleOccupied])
         fixture.appState._debugSetPropertyStatusFetchOverrideForTests { _, _ in
@@ -1162,6 +1165,37 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(evaluation.decision?.decision, "allow")
         XCTAssertEqual(evaluation.decision?.reason, "occupied_stale_claimable_via_rpc")
         XCTAssertNil(evaluation.decision?.block)
+    }
+
+    func testExpiredOccupiedLeaseStopsShowingLockedForAllMembers() {
+        let ownerID = UUID()
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .occupied,
+            activeSessionID: UUID(), ownerUserID: ownerID,
+            ownerDeviceID: "other-device", heartbeatAt: Date().addingTimeInterval(-4 * 60),
+            updatedAt: Date().addingTimeInterval(-4 * 60)
+        )
+        let ownerView = AppState.makePropertyStatusCompareAnswer(
+            record: record, currentUserID: ownerID, currentDeviceID: "this-device"
+        )
+        let otherView = AppState.makePropertyStatusCompareAnswer(
+            record: record, currentUserID: UUID(), currentDeviceID: "this-device"
+        )
+        XCTAssertEqual(ownerView.visibleBadgeState, .idle)
+        XCTAssertEqual(otherView.visibleBadgeState, .idle)
+    }
+
+    func testRecentStatusWriteKeepsOldHeartbeatLocked() {
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .occupied,
+            activeSessionID: UUID(), ownerUserID: UUID(),
+            ownerDeviceID: "other-device", heartbeatAt: Date().addingTimeInterval(-4 * 60),
+            updatedAt: Date().addingTimeInterval(-60)
+        )
+        let view = AppState.makePropertyStatusCompareAnswer(
+            record: record, currentUserID: UUID(), currentDeviceID: "this-device"
+        )
+        XCTAssertEqual(view.visibleBadgeState, .locked)
     }
 
     func testDraftPropertyStatusDoesNotAutoExpireFromOldHeartbeat() async throws {
