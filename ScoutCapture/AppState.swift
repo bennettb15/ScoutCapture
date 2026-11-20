@@ -52177,7 +52177,8 @@ final class AppState: ObservableObject {
             )
         }
         if locallyLockedPropertyIDs.contains(propertyID),
-           record.status == .draft || record.status == .occupied {
+           record.status == .draft ||
+            (record.status == .occupied && !isStalePropertyStatusOccupied(record)) {
             return PropertyStatusCompareAnswer(
                 visibleBadgeState: .locked,
                 draftCountIncluded: false,

@@ -890,6 +890,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             updatedAt: Date().addingTimeInterval(-4 * 60)
         )
 
+        fixture.appState.locallyLockedPropertyIDs.insert(fixture.property.id)
         fixture.appState._debugReplacePropertyStatusCacheForTests([record])
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
