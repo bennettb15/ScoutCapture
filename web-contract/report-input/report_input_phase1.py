@@ -365,6 +365,7 @@ def report_shot(
         "detail_type": trim(shot.get("detailType")),
         "angle_index": max(1, safe_int(shot.get("angleIndex"), 1)),
         "shot_key": shot_key(shot),
+        "supersedes_shot_id": trim(shot.get("supersedesShotID") or shot.get("supersedes_shot_id")),
         "logical_shot_identity": logical_shot_identity(metadata, shot),
         "captured_at_utc": captured,
         "actor": shot_actor,
@@ -1171,10 +1172,11 @@ def compose_punchlist_history(
     latest_guided_updates: dict[str, dict[str, Any]] = {}
     def guided_identities(shot: dict[str, Any]) -> list[str]:
         return [value.lower() for value in (
-            trim(shot.get("shot_key")), trim(shot.get("guided_row_id"))
+            trim(shot.get("shot_key")), trim(shot.get("guided_row_id")),
+            trim(shot.get("supersedes_shot_id")), trim(shot.get("shot_id")),
         ) if value]
     for shot in follow_up_property_shots:
-        if shot.get("is_guided") and not shot.get("issue_id") and (trim(shot.get("capture_kind")) or "").lower() == "retake":
+        if shot.get("is_guided") and not shot.get("issue_id"):
             for identity in guided_identities(shot):
                 latest_guided_updates[identity] = shot
     latest_issue_shots = {
