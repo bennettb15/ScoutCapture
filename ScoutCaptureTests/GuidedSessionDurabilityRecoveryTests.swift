@@ -85,13 +85,12 @@ final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
             propertyID: property.id, sessionID: context.sessionID
         ).appendingPathComponent("session.json").path))
         XCTAssertTrue(appState.propertyCardBadgeModel(for: property.id).showDraft)
-        XCTAssertTrue(appState.prepareFastRuntimeCompletion(
-            context: context, storageRoot: result.storageRoot, shots: []
-        ))
-        XCTAssertFalse(appState.propertyCardBadgeModel(for: property.id).showDraft)
-        XCTAssertEqual(appState.propertyRowDraftCount, 0)
-        XCTAssertNil(appState.fastRuntimeDraftResumeState(for: property.id))
-        XCTAssertNotEqual(appState.preferredPropertyEntrySessionID(for: property.id), context.sessionID)
+        // This fixture has no authenticated owner. Upload preparation requires one;
+        // the offline checkpoint remains a resumable draft after the shutter.
+        XCTAssertEqual(appState.propertyRowDraftCount, 1)
+        XCTAssertEqual(appState.fastRuntimeDraftResumeState(for: property.id)?.context?.sessionID,
+                       context.sessionID)
+        XCTAssertEqual(appState.preferredPropertyEntrySessionID(for: property.id), context.sessionID)
 
         // An older indexed draft must not displace a newer interrupted capture.
         let newerSessionID = UUID()
