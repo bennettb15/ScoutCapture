@@ -43653,6 +43653,13 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         context: String
     ) async -> PropertyStatusEntryPreflightDecision? {
+        // The status row and read-only coordination probe are independent.
+        // Start both together; the capture screen still makes the atomic claim
+        // before it presents the camera.
+        async let lightweightStatus = evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: nil
+        )
         do {
             guard let freshRecord = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
                 if propertyStatusByPropertyID[propertyID] != nil {
@@ -43667,7 +43674,8 @@ final class AppState: ObservableObject {
                     decision: nil,
                     context: "\(context)_fresh_missing"
                 )
-                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                if let lightweightDecision = evaluateLightweightPropertyEntryBlockProbe(
+                    status: await lightweightStatus,
                     propertyID: propertyID,
                     context: "\(context)_property_status_missing"
                 ) {
@@ -43698,7 +43706,8 @@ final class AppState: ObservableObject {
             if resolvedDecision.isBlocked {
                 return resolvedDecision
             }
-            if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+            if let lightweightDecision = evaluateLightweightPropertyEntryBlockProbe(
+                status: await lightweightStatus,
                 propertyID: propertyID,
                 context: "\(context)_property_status_allowed"
             ) {
@@ -43723,7 +43732,8 @@ final class AppState: ObservableObject {
                 if resolvedCachedDecision.isBlocked {
                     return resolvedCachedDecision
                 }
-                if let lightweightDecision = await evaluateLightweightPropertyEntryBlockProbe(
+                if let lightweightDecision = evaluateLightweightPropertyEntryBlockProbe(
+                    status: await lightweightStatus,
                     propertyID: propertyID,
                     context: "\(context)_fresh_failed_cached_allowed"
                 ) {
@@ -43745,13 +43755,11 @@ final class AppState: ObservableObject {
     }
 
     private func evaluateLightweightPropertyEntryBlockProbe(
+        status: LightweightPropertyEntryStatus?,
         propertyID: UUID,
         context: String
-    ) async -> PropertyStatusEntryPreflightDecision? {
-        guard let status = await evaluateLightweightPropertyEntryStatus(
-            propertyID: propertyID,
-            targetSessionID: nil
-        ) else {
+    ) -> PropertyStatusEntryPreflightDecision? {
+        guard let status, status.propertyID == propertyID else {
             return nil
         }
         guard let block = sessionEntryBlock(for: status) else {

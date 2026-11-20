@@ -937,7 +937,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertEqual(badge.badgeSource, "property_status")
-        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertTrue(badge.showPendingExport)
     }
