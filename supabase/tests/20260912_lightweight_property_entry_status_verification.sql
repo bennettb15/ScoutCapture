@@ -240,6 +240,34 @@ select public.test_assert(
     'an expired empty claim should transfer atomically to the new device'
 );
 
+alter table public.property_status disable trigger set_property_status_updated_at;
+update public.property_status
+set status = 'occupied',
+    active_session_id = '91240000-0000-0000-0000-000000000006',
+    local_draft_session_id = '91240000-0000-0000-0000-000000000006',
+    owner_user_id = '91200000-0000-0000-0000-000000000002',
+    owner_device_id = 'device-b',
+    heartbeat_at = timezone('utc', now()) - interval '4 minutes',
+    updated_at = timezone('utc', now()) - interval '4 minutes'
+where property_id = '91230000-0000-0000-0000-000000000006';
+alter table public.property_status enable trigger set_property_status_updated_at;
+
+select public.test_assert(
+    (
+        select entry_state = 'stale_claimable'
+        from public.get_or_claim_property_entry_status(
+            '91230000-0000-0000-0000-000000000006',
+            'device-a',
+            '9124bbbb-0000-0000-0000-000000000006'
+        )
+    ) and (
+        select owner_device_id = 'device-b'
+        from public.property_status
+        where property_id = '91230000-0000-0000-0000-000000000006'
+    ),
+    'a saved local draft marker must prevent stale occupied lease takeover'
+);
+
 select public.test_assert(
     (
         select entry_state = 'pending_export'

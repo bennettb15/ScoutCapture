@@ -42,6 +42,9 @@ begin
     if current_status.status not in ('occupied', 'draft') then
         return 'protected_work';
     end if;
+    if current_status.local_draft_session_id is not null then
+        return 'protected_work';
+    end if;
     if current_status.status = 'draft'
        and current_status.owner_user_id is distinct from actor_id then
         return 'different_owner';
@@ -131,6 +134,7 @@ begin
     set status = 'idle',
         active_session_id = null,
         draft_session_id = null,
+        local_draft_session_id = null,
         pending_export_session_id = null,
         owner_user_id = null,
         owner_device_id = null,
@@ -387,6 +391,7 @@ begin
         set status = 'occupied',
             active_session_id = target_session_id,
             draft_session_id = null,
+            local_draft_session_id = null,
             pending_export_session_id = null,
             owner_user_id = actor_id,
             owner_device_id = normalized_device_id,
