@@ -1164,6 +1164,23 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertNil(evaluation.decision?.block)
     }
 
+    func testStaleOccupiedBadgeClearsOnlyForTheClaimOwner() {
+        let ownerID = UUID()
+        let record = makeStatusRecord(
+            propertyID: UUID(), orgID: UUID(), status: .occupied,
+            activeSessionID: UUID(), ownerUserID: ownerID,
+            ownerDeviceID: "other-device", heartbeatAt: Date().addingTimeInterval(-4 * 60)
+        )
+        let ownerView = AppState.makePropertyStatusCompareAnswer(
+            record: record, currentUserID: ownerID, currentDeviceID: "this-device"
+        )
+        let otherView = AppState.makePropertyStatusCompareAnswer(
+            record: record, currentUserID: UUID(), currentDeviceID: "this-device"
+        )
+        XCTAssertEqual(ownerView.visibleBadgeState, .idle)
+        XCTAssertEqual(otherView.visibleBadgeState, .locked)
+    }
+
     func testDraftPropertyStatusDoesNotAutoExpireFromOldHeartbeat() async throws {
         let fixture = try makeCutoverFixture()
         let staleDraft = makeStatusRecord(

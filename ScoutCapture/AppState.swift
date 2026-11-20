@@ -7868,6 +7868,7 @@ final class AppState: ObservableObject {
             refreshPropertyRowStatusChipCache()
         }
     }
+    private var checkedEmptyClaimsForAccessContext: Set<String> = []
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
@@ -42131,10 +42132,49 @@ final class AppState: ObservableObject {
 
     func refreshVisiblePropertyStatusForHome(reason: String) async {
         let propertyIDs = properties.filter { $0.deletedAt == nil }.map(\.id)
+        let previousRefresh = lastPropertyStatusRefreshAt
         await refreshPropertyStatusCacheForInitialDisplay(
             propertyIDs: propertyIDs,
             reason: reason
         )
+        guard lastPropertyStatusRefreshAt != previousRefresh else { return }
+        await recoverEmptyClaimsOnHome()
+    }
+
+    @MainActor
+    private func recoverEmptyClaimsOnHome() async {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              currentSession == nil,
+              let userID = authenticatedSupabaseUser?.id,
+              let orgID = activeOrganizationID else { return }
+        let accessKey = "\(userID.uuidString):\(orgID.uuidString)"
+        guard !checkedEmptyClaimsForAccessContext.contains(accessKey) else { return }
+
+        let deviceID = currentDeviceIdentifier()
+        let ownClaims = propertyStatusByPropertyID.values.filter {
+            $0.orgID == orgID && $0.status == .occupied &&
+                $0.ownerUserID == userID &&
+                normalizedSupabaseText($0.ownerDeviceID) == deviceID
+        }
+        var releasedAny = false
+        var shouldRetry = false
+        for claim in ownClaims {
+            let result = await releaseFastRuntimePrototypeCurrentUserClaim(
+                propertyID: claim.propertyID,
+                requireCurrentDeviceMatch: true
+            )
+            releasedAny = result.didRelease || releasedAny
+            if !result.didRelease && result.reason != "protected_local_work" {
+                shouldRetry = true
+            }
+        }
+        if !shouldRetry { checkedEmptyClaimsForAccessContext.insert(accessKey) }
+        if releasedAny {
+            await refreshPropertyStatusCacheForInitialDisplay(
+                propertyIDs: ownClaims.map(\.propertyID),
+                reason: "empty_claim_recovery"
+            )
+        }
     }
 
     private func refreshPropertyStatusCacheForInitialDisplay(
@@ -42175,6 +42215,8 @@ final class AppState: ObservableObject {
                 propertyStatusByPropertyID = nextCache
             }
             lastPropertyStatusRefreshAt = Date()
+            // Expiry is time based, so badges must update even when the row is unchanged.
+            refreshPropertyRowLockBadgeCache()
         } catch {
             print(
                 "[PropertyStatusInitialDisplay] refresh_failed " +
@@ -44005,9 +44047,26 @@ final class AppState: ObservableObject {
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
 
+        let localDraft = canonicalDraftSession(for: propertyID, requireCaptures: false)
+        let localDraftMetadata = localDraft.flatMap {
+            try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: $0.id)
+        }
+        let hasChecklistEdits = localDraftMetadata.map { metadata in
+            metadata.guidedShots.contains {
+                $0.skipSessionID == localDraft?.id ||
+                    $0.retiredInSessionID == localDraft?.id ||
+                    $0.reassignedInSessionID == localDraft?.id ||
+                    $0.labelEditedInSessionID == localDraft?.id
+            } || metadata.issues.contains {
+                $0.historyEvents.contains { $0.sessionId == localDraft?.id }
+            }
+        } ?? false
         if (fastRuntimeDraftsByPropertyID[propertyID]?.photoCount ?? 0) > 0 ||
             !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).isEmpty ||
             canonicalDraftSession(for: propertyID, requireCaptures: true) != nil ||
+            (localDraft?.notes?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ||
+            (localDraftMetadata?.shots.isEmpty == false) ||
+            hasChecklistEdits ||
             propertyRowPendingDeliverySession(for: propertyID) != nil {
             return FastRuntimePrototypeReleaseResult(
                 propertyID: propertyID,
@@ -52278,7 +52337,9 @@ final class AppState: ObservableObject {
                 deleteEligible: true
             )
         case .occupied:
-            if propertyStatusOccupiedIsStale(record) {
+            if propertyStatusOccupiedIsStale(record),
+               currentUserID != nil,
+               record.ownerUserID == currentUserID {
                 return PropertyStatusCompareAnswer(
                     visibleBadgeState: .idle,
                     draftCountIncluded: false,
