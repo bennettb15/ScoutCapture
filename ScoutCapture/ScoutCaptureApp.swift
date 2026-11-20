@@ -4510,46 +4510,26 @@ struct SessionHubView: View {
             showOfflinePropertyEntryAlert = true
             return
         }
-        Task { @MainActor in
-            let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
-                propertyID: property.id,
-                context: "home_session_type_picker_entry"
-            )
-            guard initialSessionTypePickerProperty?.id == property.id else { return }
-            if let block = decision?.block {
-                initialSessionTypePickerProperty = nil
-                shouldRecommendInitialOverview = false
-                showInitialPunchlistConfirmation = false
-                isOpeningProperty = false
-                propertyEntryLockPrompt = PropertyEntryLockPrompt(
-                    propertyID: property.id,
-                    propertyName: property.name,
-                    block: block
-                )
-                if pressedPropertyID == property.id {
-                    pressedPropertyID = nil
-                }
-                return
-            }
-
-            initialSessionTypePickerProperty = nil
-            showFullDocumentationModeChoices = false
-            shouldRecommendInitialOverview = false
-            showInitialPunchlistConfirmation = false
-            isOpeningProperty = true
-            propertyTapToken += 1
-            if pressedPropertyID == property.id {
-                pressedPropertyID = nil
-            }
-            selectionHaptic.impactOccurred()
-            selectionHaptic.prepare()
-            beginFastLaneInitialSessionEntry(
-                for: property,
-                sessionType: sessionType,
-                fullDocumentationMode: fullDocumentationMode,
-                buttonTappedAt: Date()
-            )
+        // The property tap already ran a fresh read-only preflight. The
+        // fast-lane entry below makes the authoritative atomic claim, which
+        // also catches a lock acquired while the picker was open.
+        initialSessionTypePickerProperty = nil
+        showFullDocumentationModeChoices = false
+        shouldRecommendInitialOverview = false
+        showInitialPunchlistConfirmation = false
+        isOpeningProperty = true
+        propertyTapToken += 1
+        if pressedPropertyID == property.id {
+            pressedPropertyID = nil
         }
+        selectionHaptic.impactOccurred()
+        selectionHaptic.prepare()
+        beginFastLaneInitialSessionEntry(
+            for: property,
+            sessionType: sessionType,
+            fullDocumentationMode: fullDocumentationMode,
+            buttonTappedAt: Date()
+        )
     }
 
     private func beginFastLaneInitialSessionEntry(
@@ -14610,9 +14590,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 propertyID: context.propertyID
             )
             primeFastLaneSideControlSnapshot()
-            if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
-                _ = fastLanePriorPhotoIdentities()
-            }
             if let initialContext {
                 applyFastLaneMetadataContext(initialContext)
                 didApplyInitialLocationMode = true
@@ -14891,12 +14868,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
-    private func refreshFastLaneMissingIssueAngles(for observations: [Observation]) {
+    private func refreshFastLaneMissingIssueAngles(
+        for observations: [Observation],
+        preloadedSessionShots: [ShotMetadata]? = nil
+    ) {
         let missing = observations.filter { fastLaneObservationDisplayAngleIndex($0) == nil }
         fastLaneMissingIssueAngleByID = missing.isEmpty ? [:] : appState.fastRuntimeNextReclassifiedAngles(
             propertyID: context.propertyID,
             sessionID: context.sessionID,
-            observations: missing
+            observations: missing,
+            preloadedSessionShots: preloadedSessionShots
         )
     }
 
@@ -16450,16 +16431,24 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func primeFastLaneSideControlSnapshot() {
         let startedAt = Date()
+        var preloadedSessionShots: [ShotMetadata] = []
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
             sessionType: context.sessionType,
-            currentSessionID: context.sessionID
+            currentSessionID: context.sessionID,
+            preloadedSessionShots: &preloadedSessionShots
         )
         let payloadReadyAt = Date()
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         let scopeReadyAt = Date()
         fastLaneSideControlPayload = scopedPayload
-        refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
+        fastLaneAngleReservationIndex = makeFastLaneAngleReservationIndex(
+            preloadedSessionShots: preloadedSessionShots
+        )
+        refreshFastLaneMissingIssueAngles(
+            for: scopedPayload.activeObservations,
+            preloadedSessionShots: preloadedSessionShots
+        )
         let anglesReadyAt = Date()
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
         let countsReadyAt = Date()
@@ -16491,6 +16480,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             "viewWait=\(duration(previewRequestedAt, cameraViewAppearedAt))",
             "metadata=\(duration(cameraViewAppearedAt, openingMetadataReadyAt))",
             "payload=\(Int(openingPrimePayloadMs ?? -1))",
+            "scope=\(Int(openingPrimeScopeMs ?? -1))",
+            "angles=\(Int(openingPrimeAnglesMs ?? -1))",
+            "counts=\(Int(openingPrimeCountsMs ?? -1))",
+            "media=\(Int(openingPrimeMediaMs ?? -1))",
+            "prewarm=\(Int(openingPrimePrewarmMs ?? -1))",
             "sideControls=\(duration(openingMetadataReadyAt, openingSideControlsReadyAt))",
             "previewStart=\(duration(openingPreviewRequestedAt, previewRunningAt))",
             "total=\(duration(buttonTappedAt, previewRunningAt))"
@@ -16917,7 +16911,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         return nextAngle
     }
 
-    private func makeFastLaneAngleReservationIndex() -> FastLaneAngleReservationIndex {
+    private func makeFastLaneAngleReservationIndex(
+        preloadedSessionShots: [ShotMetadata]? = nil
+    ) -> FastLaneAngleReservationIndex {
         var index = FastLaneAngleReservationIndex()
         for shot in fastLaneLocalShotRecords() {
             guard let metadata = shot.metadataContext else { continue }
@@ -16930,7 +16926,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         for reservation in appState.fastRuntimePropertyAngleReservations(
             propertyID: context.propertyID,
-            currentSessionID: context.sessionID
+            currentSessionID: context.sessionID,
+            preloadedSessionShots: preloadedSessionShots
         ) {
             index.reserve(
                 building: reservation.building,

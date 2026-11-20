@@ -45354,13 +45354,19 @@ final class AppState: ObservableObject {
 
     private func fastRuntimeReclassificationAngleSources(
         propertyID: UUID,
-        sessionID: UUID
+        sessionID: UUID,
+        preloadedSessionShots: [ShotMetadata]? = nil
     ) -> FastRuntimeReclassificationAngleSources {
         let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let sessionIDs = Set([sessionID] + (((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)))
-        let shots = sessionIDs.flatMap { id in
-            (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: id))?.shots ?? []
+        let shots: [ShotMetadata]
+        if let preloadedSessionShots {
+            shots = preloadedSessionShots
+        } else {
+            let sessionIDs = Set([sessionID] + (((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)))
+            shots = sessionIDs.flatMap { id in
+                (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: id))?.shots ?? []
+            }
         }
         return FastRuntimeReclassificationAngleSources(
             guided: guided, observations: observations, shots: shots
@@ -45370,9 +45376,14 @@ final class AppState: ObservableObject {
     func fastRuntimeNextReclassifiedAngles(
         propertyID: UUID,
         sessionID: UUID,
-        observations: [Observation]
+        observations: [Observation],
+        preloadedSessionShots: [ShotMetadata]? = nil
     ) -> [UUID: Int] {
-        let sources = fastRuntimeReclassificationAngleSources(propertyID: propertyID, sessionID: sessionID)
+        let sources = fastRuntimeReclassificationAngleSources(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            preloadedSessionShots: preloadedSessionShots
+        )
         return observations.reduce(into: [UUID: Int]()) { result, observation in
             result[observation.id] = fastRuntimeNextReclassifiedAngle(
                 building: observation.building ?? "",
@@ -57643,15 +57654,33 @@ final class AppState: ObservableObject {
         sessionType: SessionType,
         currentSessionID: UUID? = nil
     ) -> FastRuntimePreviewSideControlPayload {
+        var unusedSessionShots: [ShotMetadata] = []
+        return fastRuntimePreviewSideControlPayload(
+            propertyID: propertyID,
+            sessionType: sessionType,
+            currentSessionID: currentSessionID,
+            preloadedSessionShots: &unusedSessionShots
+        )
+    }
+
+    func fastRuntimePreviewSideControlPayload(
+        propertyID: UUID,
+        sessionType: SessionType,
+        currentSessionID: UUID?,
+        preloadedSessionShots: inout [ShotMetadata]
+    ) -> FastRuntimePreviewSideControlPayload {
+        preloadedSessionShots = []
         guard canAccessProperty(propertyID) else {
             return .empty
         }
 
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let resolvedReferences = fastRuntimeResolvedIssueReferencesByObservationID(
+        let referenceScan = fastRuntimeResolvedIssueReferenceScan(
             propertyID: propertyID,
             observations: observations
         )
+        preloadedSessionShots = referenceScan.sessionShots
+        let resolvedReferences = referenceScan.references
         let sortedObservations = observations
             .map { fastRuntimeObservationWithResolvedReferenceIfAvailable($0, resolvedReferences: resolvedReferences) }
             .sorted { lhs, rhs in
@@ -57766,10 +57795,22 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         observations: [Observation]
     ) -> [UUID: FastRuntimeIssueResolvedReference] {
+        fastRuntimeResolvedIssueReferenceScan(
+            propertyID: propertyID,
+            observations: observations
+        ).references
+    }
+
+    private func fastRuntimeResolvedIssueReferenceScan(
+        propertyID: UUID,
+        observations: [Observation]
+    ) -> (references: [UUID: FastRuntimeIssueResolvedReference], sessionShots: [ShotMetadata]) {
         let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
         let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
         let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
+        let indexedSessionIDSet = Set(indexedSessionIDs)
         var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
+        var sessionShots: [ShotMetadata] = []
         for sessionID in sessionIDs {
             guard let metadata = try? localStore.loadSessionMetadata(
                 propertyID: propertyID,
@@ -57779,6 +57820,9 @@ final class AppState: ObservableObject {
                 continue
             }
             for shot in metadata.shots {
+                if indexedSessionIDSet.contains(sessionID) {
+                    sessionShots.append(shot)
+                }
                 guard let observationID = shot.issueID else { continue }
                 let issueStatus = (shot.issueStatus ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 let captureKind = (shot.captureKind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -57819,7 +57863,7 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        return referencesByObservationID
+        return (referencesByObservationID, sessionShots)
     }
 
     private func fastRuntimeResolvedReference(
@@ -58199,7 +58243,8 @@ final class AppState: ObservableObject {
 
     func fastRuntimePropertyAngleReservations(
         propertyID: UUID,
-        currentSessionID: UUID? = nil
+        currentSessionID: UUID? = nil,
+        preloadedSessionShots: [ShotMetadata]? = nil
     ) -> [FastRuntimeAngleReservation] {
         guard canAccessProperty(propertyID) else { return [] }
         let otherDraftShotIDs = currentSessionID.map {
@@ -58258,16 +58303,8 @@ final class AppState: ObservableObject {
             }
         }
 
-        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
-        for session in sessions {
-            guard let metadata = try? localStore.loadSessionMetadata(
-                propertyID: propertyID,
-                sessionID: session.id,
-                observations: observations
-            ) else {
-                continue
-            }
-            for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+        if let preloadedSessionShots {
+            for shot in preloadedSessionShots where shot.isActiveForDefaultWorkflows {
                 if otherDraftShotIDs.contains(shot.shotID) { continue }
                 appendReservation(
                     building: shot.building,
@@ -58275,6 +58312,26 @@ final class AppState: ObservableObject {
                     detailType: shot.detailType,
                     angleIndex: shot.angleIndex
                 )
+            }
+        } else {
+            let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+            for session in sessions {
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    observations: observations
+                ) else {
+                    continue
+                }
+                for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+                    if otherDraftShotIDs.contains(shot.shotID) { continue }
+                    appendReservation(
+                        building: shot.building,
+                        elevation: shot.elevation,
+                        detailType: shot.detailType,
+                        angleIndex: shot.angleIndex
+                    )
+                }
             }
         }
         return reservations
