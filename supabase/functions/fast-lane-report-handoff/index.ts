@@ -254,7 +254,7 @@ export function validateHandoffRequest(raw: unknown): HandoffRequest {
 
 async function sha256Hex(data: Uint8Array | string): Promise<string> {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
   return Array.from(new Uint8Array(hash))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
@@ -774,7 +774,7 @@ async function uploadSnapshotObject(config: RuntimeConfig, path: string, payload
       "cache-control": "31536000",
       "x-upsert": "false",
     },
-    body: payloadBytes,
+    body: new Uint8Array(payloadBytes),
   });
   if (!response.ok) {
     throw new Error(`snapshot_storage_upload_failed:${response.status}:${(await response.text()).slice(0, 500)}`);
