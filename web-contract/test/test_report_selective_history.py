@@ -73,6 +73,36 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.visit2 = source('visit2', 3, 'punchlist_visit',
                              [shot(1, 'visit2', 3, kind='follow_up_capture')], [issue(1)])
 
+    def test_follow_up_retirement_and_restore_of_prior_guided_photo(self):
+        guided_photo = {
+            'shotID': 'guided-original', 'sessionID': 'session-first',
+            'createdAt': '2026-10-01T10:30:00Z', 'building': 'B1',
+            'elevation': 'N', 'detailType': 'Overview', 'angleIndex': 1,
+            'isGuided': True, 'isFlagged': False,
+            'storagePath': 'sessions/session-first/shots/guided-original/original.jpg',
+        }
+        first = source('first', 1, 'full_documentation', [guided_photo])
+        retirement = source('retirement', 2, 'full_documentation', [], guided=[{
+            'id': 'guided-original', 'building': 'B1', 'targetElevation': 'N',
+            'detailType': 'Overview', 'angleIndex': 1, 'status': 'retired',
+            'isRetired': True, 'retiredAt': '2026-10-02T10:30:00Z',
+            'lifecycleInSessionID': 'session-retirement',
+        }])
+        retirement['metadata']['fullDocumentationMode'] = 'follow_up'
+        retired = report_input.compose_punchlist_history([first, retirement], Storage())
+        self.assertFalse(any(entry.get('shot_id') == 'guided-original' for entry in retired['entries']))
+        self.assertEqual(retired['guided']['retired_note_count'], 1)
+
+        restoration = source('restoration', 3, 'full_documentation', [], guided=[{
+            'id': 'guided-original', 'building': 'B1', 'targetElevation': 'N',
+            'detailType': 'Overview', 'angleIndex': 1, 'status': 'active',
+            'isRetired': False, 'lifecycleInSessionID': 'session-restoration',
+        }])
+        restoration['metadata']['fullDocumentationMode'] = 'follow_up'
+        restored = report_input.compose_punchlist_history([first, retirement, restoration], Storage())
+        self.assertTrue(any(entry.get('shot_id') == 'guided-original' for entry in restored['entries']))
+        self.assertEqual(restored['guided']['retired_note_count'], 0)
+
     def test_original_and_updated_reasons_survive_selective_composition(self):
         self.visit1['metadata']['issues'][0]['currentReason']='Updated observation'
         result=report_input.compose_punchlist_history([self.baseline,self.visit1],Storage())

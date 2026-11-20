@@ -206,6 +206,51 @@ Deno.test("cloud handoff freezes issue state and Guided photo lifecycle", () => 
   }
 });
 
+Deno.test("handoff carries earlier Guided retirement and restoration with accurate counts", async () => {
+  const request = validateHandoffRequest({
+    orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
+    propertyID: "1ff0eb11-5d02-4d5e-a552-1a11dee26439",
+    sessionID: "028a6f82-2356-412c-a1eb-28099f240325",
+    sessionType: "full_documentation",
+    reportMode: "all",
+    fullDocumentationMode: "follow_up",
+  });
+  const priorID = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+  const base = {
+    request,
+    user: { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" },
+    property: { id: request.propertyID, org_id: request.orgID },
+    session: { id: request.sessionID, org_id: request.orgID, property_id: request.propertyID,
+      status: "completed", started_at: "2026-11-20T12:00:00Z",
+      completed_at: "2026-11-20T12:05:00Z", is_sealed: true },
+    shots: [],
+    observations: [{ id: "dddddddd-dddd-4ddd-bddd-dddddddddddd", status: "active" }],
+    snapshotID: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+    generatedAt: "2026-11-20T12:06:00Z",
+  };
+  const earlier = { id: priorID, session_id: "eeeeeeee-eeee-4eee-beee-eeeeeeeeeeee",
+    is_guided: true, building: "B1", elevation: "N", detail_type: "Overview",
+    angle_index: 1, lifecycle_updated_at: "2026-11-20T12:02:00Z" };
+  const retired = await buildSnapshotPayload({ ...base, guidedLifecycleShots: [{
+    ...earlier, lifecycle_state: "retired", retired_at: "2026-11-20T12:02:00Z",
+  }] });
+  const retiredMetadata = JSON.parse(retired.rawSessionJSON);
+  if (retired.payload.issueCount !== 1 || retired.payload.guidedCount !== 1 ||
+      retiredMetadata.guidedShots[0].id !== priorID ||
+      retiredMetadata.guidedShots[0].lifecycleInSessionID !== request.sessionID ||
+      retiredMetadata.guidedShots[0].isRetired !== true) {
+    throw new Error("earlier Guided retirement or snapshot counts missing");
+  }
+  const restored = await buildSnapshotPayload({ ...base, guidedLifecycleShots: [{
+    ...earlier, lifecycle_state: "active", retired_at: null,
+  }] });
+  const restoredMetadata = JSON.parse(restored.rawSessionJSON);
+  if (restoredMetadata.guidedShots[0].isRetired !== false ||
+      restoredMetadata.guidedShots[0].lifecycleInSessionID !== request.sessionID) {
+    throw new Error("earlier Guided restoration missing");
+  }
+});
+
 Deno.test("buildSnapshotPayload creates completed snapshot payload and path", async () => {
   const request = validateHandoffRequest({
     orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",

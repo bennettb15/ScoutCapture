@@ -331,6 +331,7 @@ export function buildRawSessionMetadata(input: {
   observations?: ObservationRow[];
   observationUpdates?: ObservationUpdateRow[];
   guidedEvents?: GuidedEventRow[];
+  guidedLifecycleShots?: ShotRow[];
   generatedAt: string;
 }): JsonRecord {
   const { request, user, property, session, shots, generatedAt } = input;
@@ -502,17 +503,23 @@ export function buildRawSessionMetadata(input: {
         ...(event.payload ?? {}),
         id: nullableString(event.payload?.id) ?? event.id,
       })),
-      ...orderedShots.filter((shot) => shot.is_guided === true && shot.lifecycle_state === "retired")
+      ...[...orderedShots.filter((shot) => shot.is_guided === true && shot.lifecycle_state !== "superseded"),
+        ...(input.guidedLifecycleShots ?? []).filter((shot) => !orderedShots.some((current) => current.id === shot.id))]
         .map((shot) => ({
           id: shot.id,
           building: shot.building ?? "",
           targetElevation: shot.elevation ?? "",
           detailType: shot.detail_type ?? "",
           angleIndex: Math.max(1, Number(shot.angle_index ?? 1)),
-          status: "retired",
-          isRetired: true,
+          title: `${shot.building ?? ""} ${shot.elevation ?? ""} ${shot.detail_type ?? ""}`.trim(),
+          status: shot.lifecycle_state === "retired" ? "retired" : "active",
+          isCompleted: shot.lifecycle_state !== "retired",
+          isRetired: shot.lifecycle_state === "retired",
+          shot: { id: shot.id },
+          lifecycleUpdatedAt: shot.lifecycle_updated_at ?? null,
+          lifecycleInSessionID: shot.session_id !== request.sessionID ? request.sessionID : null,
           retiredAt: shot.retired_at ?? null,
-          retiredInSessionID: request.sessionID,
+          retiredInSessionID: shot.lifecycle_state === "retired" ? request.sessionID : null,
         })),
     ],
   };
@@ -527,6 +534,7 @@ export async function buildSnapshotPayload(input: {
   observations?: ObservationRow[];
   observationUpdates?: ObservationUpdateRow[];
   guidedEvents?: GuidedEventRow[];
+  guidedLifecycleShots?: ShotRow[];
   snapshotID: string;
   generatedAt: string;
 }): Promise<{
@@ -580,8 +588,8 @@ export async function buildSnapshotPayload(input: {
     capturedBy: sessionActor,
     uploadedBy: sessionActor,
     shotCount: input.shots.length,
-    issueCount: 0,
-    guidedCount: 0,
+    issueCount: (rawMetadata.issues as unknown[]).length,
+    guidedCount: (rawMetadata.guidedShots as unknown[]).length,
     mediaManifestCount: manifest.length,
     missingLocalOriginalsCount: 0,
     supabaseStorageMetadataCount: manifest.filter((item) => item.storageBucketPresent && item.storagePathPresent).length,
@@ -1015,10 +1023,22 @@ export async function handleHandoff(request: Request): Promise<Response> {
       event_type: "eq.guided_skip",
       order: "created_at.asc,id.asc",
     });
-    const [observations, observationUpdates, guidedEvents] = await Promise.all([
+    const guidedLifecycleQuery = new URLSearchParams({
+      select: "id,session_id,building,elevation,detail_type,angle_index,is_guided,lifecycle_state,retired_at,lifecycle_updated_at",
+      property_id: `eq.${handoff.propertyID}`,
+      org_id: `eq.${handoff.orgID}`,
+      is_guided: "eq.true",
+      lifecycle_state: "in.(active,retired)",
+      lifecycle_updated_at: `gte.${session!.started_at}`,
+      deleted_at: "is.null",
+      order: "id.asc",
+    });
+    guidedLifecycleQuery.append("lifecycle_updated_at", `lte.${session!.completed_at}`);
+    const [observations, observationUpdates, guidedEvents, guidedLifecycleShots] = await Promise.all([
       selectAllRows<ObservationRow>(config, "observations", observationQuery),
       selectAllRows<ObservationUpdateRow>(config, "observation_updates", updateQuery),
       selectAllRows<GuidedEventRow>(config, "session_events", guidedEventQuery),
+      session!.started_at ? selectAllRows<ShotRow>(config, "shots", guidedLifecycleQuery) : Promise.resolve([]),
     ]);
 
     const snapshotID = crypto.randomUUID();
@@ -1032,6 +1052,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
       observations,
       observationUpdates,
       guidedEvents,
+      guidedLifecycleShots,
       snapshotID,
       generatedAt,
     });

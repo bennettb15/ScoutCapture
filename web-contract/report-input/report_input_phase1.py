@@ -1064,6 +1064,8 @@ def compose_punchlist_history(
     baseline_shots = []
     baseline_entries = []
     baseline_guided = {"skipped_placeholders": [], "retired_notes": [], "skipped_placeholder_count": 0, "retired_note_count": 0}
+    guided_lifecycle_by_id: dict[str, bool] = {}
+    later_retired_notes: dict[str, dict[str, Any]] = {}
     follow_up_property_shots: list[dict[str, Any]] = []
     current_source = sources[-1] if sources else None
     current_session_id = str((current_source or {}).get("row", {}).get("session_id") or "").lower()
@@ -1087,8 +1089,20 @@ def compose_punchlist_history(
             baseline_shots = shots
             baseline_entries = property_report_entries(metadata, shots)
             baseline_guided = guided_placeholders(metadata, shots)
-        elif baseline_seen and source["session_type"] == "full_documentation" and full_documentation_mode(metadata) == "follow_up":
-            follow_up_property_shots.extend(shot for shot in shots if shot["source_shot_session_id"].lower() == str(row.get("session_id") or "").lower())
+        elif baseline_seen:
+            later_guided = guided_placeholders(metadata, shots)
+            for note in later_guided["retired_notes"]:
+                later_retired_notes[note["guided_row_id"].lower()] = note
+            for guided_row in report_guided_rows(metadata):
+                if str(guided_row.get("lifecycleInSessionID") or "").lower() != str(row.get("session_id") or "").lower():
+                    continue
+                guided_id = str(guided_row.get("id") or "").lower()
+                retired = bool_value(guided_row.get("isRetired")) or str(guided_row.get("status") or "").lower() == "retired"
+                guided_lifecycle_by_id[guided_id] = retired
+                if not retired:
+                    later_retired_notes.pop(guided_id, None)
+            if source["session_type"] == "full_documentation" and full_documentation_mode(metadata) == "follow_up":
+                follow_up_property_shots.extend(shot for shot in shots if shot["source_shot_session_id"].lower() == str(row.get("session_id") or "").lower())
         for iid, issue in issues.items():
             latest_issue[iid.lower()] = issue
         for shot in shots:
@@ -1168,11 +1182,19 @@ def compose_punchlist_history(
         if trim(shot.get("issue_id"))
     }
     entries = []
+    baseline_guided["retired_notes"] = [
+        *(note for note in baseline_guided["retired_notes"]
+          if guided_lifecycle_by_id.get(note["guided_row_id"].lower(), True)),
+        *later_retired_notes.values(),
+    ]
+    baseline_guided["retired_note_count"] = len(baseline_guided["retired_notes"])
     placed_issues = set()
     # Replace an updated issue in its baseline position; history remains available
     # to the comparison report without adding old photos to the Property Report.
     for entry in baseline_entries:
         original = baseline_by_id.get((trim(entry.get("shot_id")) or "").lower())
+        if guided_lifecycle_by_id.get((trim(entry.get("shot_id")) or "").lower(), False):
+            continue
         issue_id = (trim((original or {}).get("issue_id")) or "").lower()
         replacement = replacements.get(issue_id) if entry.get("kind") == "photo" else None
         if replacement:
