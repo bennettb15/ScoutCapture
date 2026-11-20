@@ -2910,13 +2910,16 @@ final class LocalStore {
     func fetchGuidedShots(propertyID: UUID) throws -> [GuidedShot] {
         try ensurePropertyExists(propertyID)
         let guidedShots = try readGuidedShots(propertyID: propertyID)
+        let history = guidedHistorySnapshot(propertyID: propertyID)
         let recovered = guidedShotsRecoveringMissingOrdinaryCaptures(
             LocalConflictRules.normalizeGuidedCompletionStates(guidedShots),
-            propertyID: propertyID
+            propertyID: propertyID,
+            history: history
         )
         let normalized = guidedShotsRetiredForActiveFlaggedPromotions(
             recovered,
-            propertyID: propertyID
+            propertyID: propertyID,
+            promotedShots: history.promotedShots
         )
         if try hasLegacyElevationValues(in: guidedShotsFileURL(for: propertyID)) ||
             normalized != guidedShots {
@@ -3392,13 +3395,37 @@ final class LocalStore {
         return shot.isFlagged || shot.issueID != nil || issueStatus == "active"
     }
 
+    private struct GuidedHistorySnapshot {
+        let sessions: [Session]
+        let metadataBySessionID: [UUID: SessionMetadata]
+        let promotedShots: [ShotMetadata]
+    }
+
+    private func guidedHistorySnapshot(propertyID: UUID) -> GuidedHistorySnapshot {
+        let sessions = (try? readSessions(propertyID: propertyID)) ?? []
+        var metadataBySessionID: [UUID: SessionMetadata] = [:]
+        var promotedShots: [ShotMetadata] = []
+        for session in sessions {
+            guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                continue
+            }
+            metadataBySessionID[session.id] = metadata
+            promotedShots.append(contentsOf: metadata.shots.filter(shotRepresentsActiveFlaggedGuidedIssue))
+        }
+        return GuidedHistorySnapshot(
+            sessions: sessions,
+            metadataBySessionID: metadataBySessionID,
+            promotedShots: promotedShots
+        )
+    }
+
     private func guidedShotsRetiredForActiveFlaggedPromotions(
         _ guidedRows: [GuidedShot],
-        propertyID: UUID
+        propertyID: UUID,
+        promotedShots: [ShotMetadata]? = nil
     ) -> [GuidedShot] {
         var result = guidedRows
-        let promotedShots = activeFlaggedGuidedPromotionShots(propertyID: propertyID)
-        for promotedShot in promotedShots {
+        for promotedShot in promotedShots ?? activeFlaggedGuidedPromotionShots(propertyID: propertyID) {
             _ = retireGuidedRowsPromotedToActiveFlaggedIssue(
                 &result,
                 promotedShot: promotedShot,
@@ -3421,15 +3448,17 @@ final class LocalStore {
 
     private func guidedShotsRecoveringMissingOrdinaryCaptures(
         _ guidedRows: [GuidedShot],
-        propertyID: UUID
+        propertyID: UUID,
+        history: GuidedHistorySnapshot? = nil
     ) -> [GuidedShot] {
-        let promotedShots = activeFlaggedGuidedPromotionShots(propertyID: propertyID)
+        let history = history ?? guidedHistorySnapshot(propertyID: propertyID)
+        let promotedShots = history.promotedShots
         let observations = (try? readObservations(propertyID: propertyID)) ?? []
         let promotionEvidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
             observations: observations,
             issueLinkedGuidedShots: promotedShots
         )
-        let sessions = ((try? readSessions(propertyID: propertyID)) ?? [])
+        let sessions = history.sessions
             .filter { session in
                 session.deletedAt == nil &&
                     (session.status == .completed || session.isSealed || session.firstDeliveredAt != nil)
@@ -3457,7 +3486,7 @@ final class LocalStore {
         }
 
         for session in sessions {
-            guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+            guard let metadata = history.metadataBySessionID[session.id] else {
                 continue
             }
             if !metadata.guidedShots.isEmpty {
