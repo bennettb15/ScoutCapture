@@ -14870,14 +14870,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func refreshFastLaneMissingIssueAngles(
         for observations: [Observation],
-        preloadedSessionShots: [ShotMetadata]? = nil
+        openingSnapshot: AppState.FastRuntimeOpeningLocalSnapshot? = nil
     ) {
         let missing = observations.filter { fastLaneObservationDisplayAngleIndex($0) == nil }
         fastLaneMissingIssueAngleByID = missing.isEmpty ? [:] : appState.fastRuntimeNextReclassifiedAngles(
             propertyID: context.propertyID,
             sessionID: context.sessionID,
             observations: missing,
-            preloadedSessionShots: preloadedSessionShots
+            openingSnapshot: openingSnapshot
         )
     }
 
@@ -16431,23 +16431,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func primeFastLaneSideControlSnapshot() {
         let startedAt = Date()
-        var preloadedSessionShots: [ShotMetadata] = []
+        var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
             sessionType: context.sessionType,
             currentSessionID: context.sessionID,
-            preloadedSessionShots: &preloadedSessionShots
+            openingSnapshot: &openingSnapshot
         )
         let payloadReadyAt = Date()
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         let scopeReadyAt = Date()
         fastLaneSideControlPayload = scopedPayload
         fastLaneAngleReservationIndex = makeFastLaneAngleReservationIndex(
-            preloadedSessionShots: preloadedSessionShots
+            openingSnapshot: openingSnapshot
         )
         refreshFastLaneMissingIssueAngles(
             for: scopedPayload.activeObservations,
-            preloadedSessionShots: preloadedSessionShots
+            openingSnapshot: openingSnapshot
         )
         let anglesReadyAt = Date()
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
@@ -16912,7 +16912,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func makeFastLaneAngleReservationIndex(
-        preloadedSessionShots: [ShotMetadata]? = nil
+        openingSnapshot: AppState.FastRuntimeOpeningLocalSnapshot? = nil
     ) -> FastLaneAngleReservationIndex {
         var index = FastLaneAngleReservationIndex()
         for shot in fastLaneLocalShotRecords() {
@@ -16927,7 +16927,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         for reservation in appState.fastRuntimePropertyAngleReservations(
             propertyID: context.propertyID,
             currentSessionID: context.sessionID,
-            preloadedSessionShots: preloadedSessionShots
+            openingSnapshot: openingSnapshot
         ) {
             index.reserve(
                 building: reservation.building,
