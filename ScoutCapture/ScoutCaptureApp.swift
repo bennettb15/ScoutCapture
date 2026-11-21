@@ -1648,7 +1648,7 @@ struct SessionHubView: View {
     ) -> some View {
         let addressLine = propertyAddressLine(property) ?? property.address
         let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
-            ?? (cloudGlyph == .uploadingElsewhere ? "Uploading on another device" : nil)
+            ?? (cloudGlyph == .uploadingElsewhere ? "Uploading elsewhere" : nil)
         let pendingUploadCount = uploadProgressLabel == nil
             ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
 
@@ -1761,7 +1761,7 @@ struct SessionHubView: View {
                 ?? rowCloudGlyphs[property.id]
             let uploadingElsewhere = cloudGlyph == .uploadingElsewhere
             let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
-                ?? (uploadingElsewhere ? "Uploading on another device" : nil)
+                ?? (uploadingElsewhere ? "Uploading elsewhere" : nil)
             let pendingUploadCount = uploadProgressLabel == nil
                 ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
             return PropertyListTableRowModel(
@@ -1801,6 +1801,11 @@ struct SessionHubView: View {
         guard let cloudGlyph else {
             return Text(title).foregroundColor(.primary)
         }
+        if cloudGlyph == .uploadingElsewhere {
+            return Text(title).foregroundColor(.primary)
+                + Text(" ")
+                + Text(Image(systemName: "icloud.and.arrow.up")).foregroundColor(.blue)
+        }
         return Text(title).foregroundColor(.primary)
             + Text(" \(propertyRowCloudGlyphText(cloudGlyph))")
                 .foregroundColor(propertyRowCloudGlyphColor(cloudGlyph))
@@ -1813,7 +1818,7 @@ struct SessionHubView: View {
         case .uploading:
             return "↑"
         case .uploadingElsewhere:
-            return "☁↑"
+            return "↑"
         case .warning:
             return "!"
         }
@@ -1835,7 +1840,7 @@ struct SessionHubView: View {
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
         let uploadingElsewhere = appState.propertyRowCloudGlyphByPropertyID[property.id] == .uploadingElsewhere
         let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
-            ?? (uploadingElsewhere ? "Uploading on another device" : nil)
+            ?? (uploadingElsewhere ? "Uploading elsewhere" : nil)
         let pendingUploadCount = uploadProgressLabel == nil
             ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
         let rawHasDraft = badgeModel.showDraft
@@ -1877,7 +1882,7 @@ struct SessionHubView: View {
                         if let sessionUploadStatus {
                             sessionSnapshotCloudIcon(sessionUploadStatus)
                         } else if uploadingElsewhere {
-                            Text("☁↑").foregroundColor(.blue)
+                            Image(systemName: "icloud.and.arrow.up").foregroundColor(.blue)
                         }
                     }
 
@@ -6327,8 +6332,16 @@ private final class PropertyListTableCell: UITableViewCell {
             glyph = " ↑"
             glyphColor = .systemBlue
         case .uploadingElsewhere:
-            glyph = " ☁↑"
-            glyphColor = .systemBlue
+            result.append(NSAttributedString(string: " "))
+            if let image = UIImage(systemName: "icloud.and.arrow.up",
+                                   withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold))?
+                .withTintColor(.systemBlue, renderingMode: .alwaysOriginal) {
+                let attachment = NSTextAttachment()
+                attachment.image = image
+                attachment.bounds = CGRect(x: 0, y: -2, width: 19, height: 19)
+                result.append(NSAttributedString(attachment: attachment))
+            }
+            return result
         case .warning:
             glyph = " !"
             glyphColor = .systemOrange

@@ -54974,6 +54974,35 @@ final class AppState: ObservableObject {
                     guided.status = guided.isRetired ? .retired : .active
                     guided.retiredAt = guided.isRetired ? (row.retiredAt ?? remoteLifecycleAt) : nil
                 }
+                // A newer capture can replace the image for an existing Guided
+                // checkpoint without changing that checkpoint's stable ID.
+                // Point both the thumbnail and the on-demand media fetch at the
+                // replacement shot, not the older image cached on this device.
+                if row.id != guided.shot?.id,
+                   row.uploadState?.lowercased() == "uploaded",
+                   let sessionID = row.sessionID,
+                   row.storageBucket?.isEmpty == false,
+                   row.storagePath?.isEmpty == false,
+                   (row.createdAt ?? .distantPast) >= (guided.shot?.capturedAt ?? .distantPast) {
+                    let relativePath = fastRuntimeHydrationRelativePath(
+                        relativePathOverride: nil,
+                        storagePath: row.storagePath,
+                        shotID: row.id
+                    )
+                    let path = localStore
+                        .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                        .appendingPathComponent(relativePath, isDirectory: false)
+                        .path
+                    guided.referenceImageLocalIdentifier = path
+                    guided.referenceImagePath = path
+                    guided.shot = Shot(
+                        id: row.id,
+                        capturedAt: row.createdAt ?? row.updatedAt ?? .distantPast,
+                        imageLocalIdentifier: path,
+                        note: row.reason
+                    )
+                    guided.isCompleted = true
+                }
                 if guided != guidedRows[index] {
                     guidedRows[index] = guided
                     updated += 1
