@@ -833,6 +833,45 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertFalse(rows[0].isRetired)
     }
 
+    func testGuidedReclassificationOnLaterPhotoUpdatesEarlierCheckpoint() throws {
+        let fixture = try makeFixture()
+        let laterShotID = UUID()
+        let earlier = GuidedShot(
+            id: fixture.guidedID, title: "A North Entry / Porch", building: "A",
+            targetElevation: "North", detailType: "Entry / Porch", angleIndex: 2,
+            shot: Shot(id: fixture.shotID, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots([earlier], propertyID: fixture.property.id)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+            [
+              {"id":"\(fixture.shotID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-18T10:00:00Z","updated_at":"2026-11-18T10:00:00Z",
+               "building":"A","elevation":"North","detail_type":"Entry / Porch","angle_index":2,
+               "shot_key":"a|north|entry / porch|2","is_guided":true},
+              {"id":"\(laterShotID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-19T10:00:00Z","updated_at":"2026-11-20T13:00:00Z",
+               "building":"A","elevation":"North","detail_type":"Overview","angle_index":1,
+               "shot_key":"a|north|overview|1",
+               "logical_shot_identity":"\(fixture.session.id.uuidString.lowercased())|flagged|no-issue|a|north|entry / porch|2",
+               "is_guided":true}
+            ]
+            """.utf8))
+
+        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 1)
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].shot?.id, fixture.shotID)
+        XCTAssertEqual(rows[0].detailType, "Overview")
+        XCTAssertEqual(rows[0].angleIndex, 1)
+    }
+
     func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
         let fixture = try makeFixture()
         let guidedShotID = UUID()

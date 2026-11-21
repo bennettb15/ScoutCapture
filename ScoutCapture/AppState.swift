@@ -54900,12 +54900,50 @@ final class AppState: ObservableObject {
         // Reclassify changes forever.
         var updated = 0
         if !guidedRows.isEmpty {
-            let remoteByShotID = Dictionary(uniqueKeysWithValues: remoteShots
-                .filter { $0.deletedAt == nil && $0.propertyID == propertyID && $0.orgID == activeOrganizationID }
-                .map { ($0.id, $0) })
+            let propertyShots = remoteShots.filter {
+                $0.deletedAt == nil && $0.propertyID == propertyID && $0.orgID == activeOrganizationID
+            }
+            let remoteByShotID = Dictionary(uniqueKeysWithValues: propertyShots.map { ($0.id, $0) })
+            // A follow-up can replace a checkpoint's photo. Android edits the
+            // newest photo for that slot, while this device may still hold the
+            // earlier photo ID. Resolve both IDs through the original slot.
+            var slotByCurrentKey: [String: String] = [:]
+            var slotByShotID: [UUID: String] = [:]
+            var newestBySlot: [String: RemoteShotMetadataRecord] = [:]
+            for row in propertyShots.sorted(by: {
+                if ($0.createdAt ?? .distantPast) != ($1.createdAt ?? .distantPast) {
+                    return ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }) {
+                guard row.isFlagged != true, row.issueID == nil else { continue }
+                let currentKey = row.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    ?? LocalConflictRules.guidedShotIdentityKey(
+                        building: row.building, elevation: row.elevation,
+                        detailType: row.detailType, angleIndex: row.angleIndex
+                    )
+                guard let currentKey else { continue }
+                let identity = row.logicalShotIdentity?.lowercased()
+                let originalKey = identity.flatMap { value -> String? in
+                    for marker in ["|flagged|no-issue|", "|normal|"] {
+                        if let range = value.range(of: marker) {
+                            return String(value[range.upperBound...])
+                        }
+                    }
+                    return nil
+                } ?? currentKey
+                let slot = originalKey == currentKey
+                    ? (slotByCurrentKey[currentKey] ?? originalKey) : originalKey
+                slotByCurrentKey[currentKey] = slot
+                slotByShotID[row.id] = slot
+                newestBySlot[slot] = row
+            }
             for index in guidedRows.indices {
                 let shotID = guidedRows[index].shot?.id ?? guidedRows[index].id
-                guard let row = remoteByShotID[shotID] else { continue }
+                let localSlot = slotByShotID[shotID]
+                    ?? LocalConflictRules.guidedShotIdentityKey(guidedRows[index])
+                guard let row = localSlot.flatMap({ newestBySlot[$0] })
+                    ?? remoteByShotID[shotID] else { continue }
                 var guided = guidedRows[index]
                 let localClassificationAt = [guided.reassignedAt, guided.labelEditedAt]
                     .compactMap { $0 }.max() ?? .distantPast
