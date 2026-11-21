@@ -691,6 +691,61 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
     }
 
     @MainActor
+    func testRetireAndRestoreFromLaterVisitUpdateOriginalShotMetadata() throws {
+        let fixture = try makeLocalStoreFixture()
+        let originalSessionID = UUID()
+        let originalSession = Session(
+            id: originalSessionID, propertyID: fixture.propertyID,
+            startedAt: Date(timeIntervalSinceReferenceDate: 10), status: .draft
+        )
+        _ = try fixture.localStore.upsertSession(originalSession)
+        try fixture.localStore.ensureSessionMetadata(for: originalSession)
+        let shotID = UUID()
+        let shot = Shot(
+            id: shotID, capturedAt: Date(timeIntervalSinceReferenceDate: 20),
+            imageLocalIdentifier: "Originals/\(shotID.uuidString).heic"
+        )
+        let guided = GuidedShot(
+            title: "North Overview", building: "Building", targetElevation: "North",
+            detailType: "Overview", angleIndex: 1, shot: shot, isCompleted: true
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID, sessionID: originalSessionID,
+            shot: makeShot(
+                shotID: shotID, propertyID: fixture.propertyID,
+                sessionID: originalSessionID, isGuided: true
+            ), matchMode: .append
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 760)
+        try fixture.localStore.retireGuidedShot(
+            propertyID: fixture.propertyID, sessionID: fixture.sessionID,
+            guidedShotID: guided.id, reason: "duplicate", retiredAt: retiredAt
+        )
+        var source = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID, sessionID: originalSessionID
+        )
+        XCTAssertEqual(source.shots.first?.lifecycleState, .retired)
+        XCTAssertEqual(source.shots.first?.retiredAt, retiredAt)
+        let current = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID, sessionID: fixture.sessionID
+        )
+        XCTAssertEqual(current.guidedShots.first?.status, .retired)
+
+        let restoredAt = Date(timeIntervalSinceReferenceDate: 780)
+        try fixture.localStore.restoreRetiredGuidedShot(
+            propertyID: fixture.propertyID, sessionID: fixture.sessionID,
+            guidedShotID: guided.id, restoredAt: restoredAt
+        )
+        source = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID, sessionID: originalSessionID
+        )
+        XCTAssertEqual(source.shots.first?.lifecycleState, .active)
+        XCTAssertEqual(source.shots.first?.lifecycleUpdatedAt, restoredAt)
+    }
+
+    @MainActor
     func testRetirePendingGuidedShotWithoutPhotoSucceedsWithReason() throws {
         let fixture = try makeLocalStoreFixture()
         let retiredAt = Date(timeIntervalSinceReferenceDate: 765)

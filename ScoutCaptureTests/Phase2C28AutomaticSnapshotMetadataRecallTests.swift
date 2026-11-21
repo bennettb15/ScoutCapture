@@ -786,6 +786,53 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         )
     }
 
+    func testExistingGuidedChecklistReceivesRemoteRetireReclassifyAndRestore() throws {
+        let fixture = try makeFixture()
+        let first = GuidedShot(
+            id: fixture.guidedID, title: "A North Overview", building: "A",
+            targetElevation: "North", detailType: "Overview", angleIndex: 1,
+            shot: Shot(id: fixture.shotID, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            isCompleted: true
+        )
+        let other = GuidedShot(
+            title: "A South Overview", building: "A", targetElevation: "South",
+            detailType: "Overview", angleIndex: 1
+        )
+        try fixture.deviceBStore.saveGuidedShots([first, other], propertyID: fixture.property.id)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        func remote(_ lifecycle: String, updatedAt: String) throws -> [RemoteShotMetadataRecord] {
+            try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+                [{"id":"\(fixture.shotID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+                  "property_id":"\(fixture.property.id.uuidString)",
+                  "session_id":"\(fixture.session.id.uuidString)",
+                  "updated_at":"\(updatedAt)","lifecycle_updated_at":"\(updatedAt)",
+                  "lifecycle_state":"\(lifecycle)","building":"B","elevation":"East",
+                  "detail_type":"Roofline","angle_index":2,"is_guided":true}]
+                """.utf8))
+        }
+
+        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            try remote("retired", updatedAt: "2026-11-20T12:00:00Z"),
+            propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 1)
+        var rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].status, .retired)
+        XCTAssertEqual(rows[0].building, "B")
+        XCTAssertEqual(rows[0].targetElevation, "East")
+        XCTAssertEqual(rows[0].detailType, "Roofline")
+        XCTAssertEqual(rows[0].angleIndex, 2)
+        XCTAssertEqual(rows[1].id, other.id)
+        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            try remote("active", updatedAt: "2026-11-20T13:00:00Z"),
+            propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 1)
+        rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows[0].status, .active)
+        XCTAssertFalse(rows[0].isRetired)
+    }
+
     func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
         let fixture = try makeFixture()
         let guidedShotID = UUID()

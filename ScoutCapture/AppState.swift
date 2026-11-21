@@ -35416,9 +35416,17 @@ final class AppState: ObservableObject {
             )
             return
         }
+        let owningSessionID = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .first { session in
+                (try? localStore.loadSessionMetadata(
+                    propertyID: propertyID, sessionID: session.id
+                ))?.shots.contains(where: {
+                    $0.shotID == shotID && $0.sessionID == session.id
+                }) == true
+            }?.id ?? sessionID
         scheduleShotMetadataSupabaseWriteIfNeeded(
             propertyID: propertyID,
-            sessionID: sessionID,
+            sessionID: owningSessionID,
             shotID: shotID,
             reason: reason
         )
@@ -54886,10 +54894,58 @@ final class AppState: ObservableObject {
         }
 
         var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-        // This is a fallback for a missing local checklist. Once any Guided
-        // rows exist, including retired rows, the checklist owns membership;
-        // historical remote shots must not fill a newly retired slot.
-        guard guidedRows.isEmpty else { return 0 }
+        // Existing checkpoints are keyed to their captured shot. Apply newer
+        // metadata from another device before considering the historical
+        // fallback below; a local checklist must not freeze remote Retire or
+        // Reclassify changes forever.
+        var updated = 0
+        if !guidedRows.isEmpty {
+            let remoteByShotID = Dictionary(uniqueKeysWithValues: remoteShots
+                .filter { $0.deletedAt == nil && $0.propertyID == propertyID && $0.orgID == activeOrganizationID }
+                .map { ($0.id, $0) })
+            for index in guidedRows.indices {
+                let shotID = guidedRows[index].shot?.id ?? guidedRows[index].id
+                guard let row = remoteByShotID[shotID] else { continue }
+                var guided = guidedRows[index]
+                let localClassificationAt = [guided.reassignedAt, guided.labelEditedAt]
+                    .compactMap { $0 }.max() ?? .distantPast
+                if let remoteAt = row.updatedAt,
+                   remoteAt > localClassificationAt,
+                   let building = row.building,
+                   let elevation = row.elevation,
+                   let detailType = row.detailType,
+                   let angleIndex = row.angleIndex,
+                   !building.isEmpty, !elevation.isEmpty, !detailType.isEmpty,
+                   angleIndex > 0 {
+                    guided.building = building
+                    guided.targetElevation = CanonicalElevation.normalize(elevation) ?? elevation
+                    guided.detailType = detailType
+                    guided.angleIndex = angleIndex
+                    guided.title = [building, guided.targetElevation, detailType]
+                        .compactMap { $0 }.joined(separator: " ")
+                    guided.reassignedAt = remoteAt
+                }
+                let remoteLifecycleAt = row.lifecycleUpdatedAt ?? row.retiredAt ?? row.updatedAt
+                let localLifecycleAt = guided.retiredAt ?? .distantPast
+                if let remoteLifecycleAt, remoteLifecycleAt > localLifecycleAt {
+                    guided.isRetired = row.lifecycleState.isHistorical
+                    guided.status = guided.isRetired ? .retired : .active
+                    guided.retiredAt = guided.isRetired ? (row.retiredAt ?? remoteLifecycleAt) : nil
+                }
+                if guided != guidedRows[index] {
+                    guidedRows[index] = guided
+                    updated += 1
+                }
+            }
+            guard updated > 0 else { return 0 }
+            do {
+                try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+                return updated
+            } catch {
+                recordDiagnosticsError(error)
+                return 0
+            }
+        }
         var representedShotIDs = Set(guidedRows.compactMap { $0.shot?.id })
         representedShotIDs.formUnion(guidedRows.map(\.id))
         var representedKeys = Set(guidedRows.compactMap(LocalConflictRules.guidedShotIdentityKey))

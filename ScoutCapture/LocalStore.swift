@@ -4060,19 +4060,28 @@ final class LocalStore {
 
         var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         if let shotID = guidedShots[guidedIndex].shot?.id,
-           let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            if metadata.shots[shotIndex].lifecycleState == .active {
-                metadata.shots[shotIndex].lifecycleState = .retired
-                metadata.shots[shotIndex].retiredAt = retiredAt
-                metadata.shots[shotIndex].retiredReason = normalizedReason
-                metadata.shots[shotIndex].retiredByUserID = retiredByUserID
-                metadata.shots[shotIndex].lifecycleUpdatedAt = retiredAt
-                metadata.shots[shotIndex].updatedAt = max(metadata.shots[shotIndex].updatedAt, retiredAt)
-            } else if metadata.shots[shotIndex].lifecycleState != .retired {
+           let owner = try guidedShotMetadataOwner(propertyID: propertyID, shotID: shotID) {
+            var ownerMetadata = owner.metadata
+            let shotIndex = owner.shotIndex
+            if ownerMetadata.shots[shotIndex].lifecycleState == .active {
+                ownerMetadata.shots[shotIndex].lifecycleState = .retired
+                ownerMetadata.shots[shotIndex].retiredAt = retiredAt
+                ownerMetadata.shots[shotIndex].retiredReason = normalizedReason
+                ownerMetadata.shots[shotIndex].retiredByUserID = retiredByUserID
+                ownerMetadata.shots[shotIndex].lifecycleUpdatedAt = retiredAt
+                ownerMetadata.shots[shotIndex].updatedAt = max(ownerMetadata.shots[shotIndex].updatedAt, retiredAt)
+            } else if ownerMetadata.shots[shotIndex].lifecycleState != .retired {
                 throw StoreError.shotLifecycleInvalidState(
                     shotID,
                     expected: .active,
-                    actual: metadata.shots[shotIndex].lifecycleState
+                    actual: ownerMetadata.shots[shotIndex].lifecycleState
+                )
+            }
+            if owner.sessionID == sessionID {
+                metadata = ownerMetadata
+            } else {
+                try saveSessionMetadataAtomically(
+                    propertyID: propertyID, sessionID: owner.sessionID, metadata: ownerMetadata
                 )
             }
         }
@@ -4120,16 +4129,25 @@ final class LocalStore {
 
         var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         if let shotID = guidedShots[guidedIndex].shot?.id,
-           let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            if metadata.shots[shotIndex].lifecycleState == .retired {
-                metadata.shots[shotIndex].lifecycleState = .active
-                metadata.shots[shotIndex].lifecycleUpdatedAt = restoredAt
-                metadata.shots[shotIndex].updatedAt = max(metadata.shots[shotIndex].updatedAt, restoredAt)
-            } else if metadata.shots[shotIndex].lifecycleState != .active {
+           let owner = try guidedShotMetadataOwner(propertyID: propertyID, shotID: shotID) {
+            var ownerMetadata = owner.metadata
+            let shotIndex = owner.shotIndex
+            if ownerMetadata.shots[shotIndex].lifecycleState == .retired {
+                ownerMetadata.shots[shotIndex].lifecycleState = .active
+                ownerMetadata.shots[shotIndex].lifecycleUpdatedAt = restoredAt
+                ownerMetadata.shots[shotIndex].updatedAt = max(ownerMetadata.shots[shotIndex].updatedAt, restoredAt)
+            } else if ownerMetadata.shots[shotIndex].lifecycleState != .active {
                 throw StoreError.shotLifecycleInvalidState(
                     shotID,
                     expected: .retired,
-                    actual: metadata.shots[shotIndex].lifecycleState
+                    actual: ownerMetadata.shots[shotIndex].lifecycleState
+                )
+            }
+            if owner.sessionID == sessionID {
+                metadata = ownerMetadata
+            } else {
+                try saveSessionMetadataAtomically(
+                    propertyID: propertyID, sessionID: owner.sessionID, metadata: ownerMetadata
                 )
             }
         }
@@ -4145,6 +4163,21 @@ final class LocalStore {
         metadata.guidedShots = normalizedGuided
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
         return normalizedGuided.first(where: { $0.id == guidedShotID }) ?? guidedShots[guidedIndex]
+    }
+
+    private func guidedShotMetadataOwner(
+        propertyID: UUID,
+        shotID: UUID
+    ) throws -> (sessionID: UUID, metadata: SessionMetadata, shotIndex: Int)? {
+        for session in try fetchSessions(propertyID: propertyID) {
+            let metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+            if let shotIndex = metadata.shots.firstIndex(where: {
+                $0.shotID == shotID && $0.sessionID == session.id
+            }) {
+                return (session.id, metadata, shotIndex)
+            }
+        }
+        return nil
     }
 
     private func flaggedGuidedPromotionEvidenceForRestore(

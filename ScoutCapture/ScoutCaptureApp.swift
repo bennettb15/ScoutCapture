@@ -4113,7 +4113,8 @@ struct SessionHubView: View {
         }
         beginPropertyPressFeedback(propertyID: property.id)
         isOpeningProperty = true
-        fastLaneOpeningProperty = property
+        // Keep the tap guarded during the read-only status check without
+        // flashing the camera-opening overlay before the session picker.
         propertyTapToken += 1
         let tapToken = propertyTapToken
 
@@ -25621,6 +25622,10 @@ struct PropertySessionView: View {
             Color.black
                 .ignoresSafeArea()
 
+            if (didStartOpenFlow || showOpenCameraTimeout || sessionEntryBlock != nil)
+                && !isCheckingSessionBeforeOpen
+                && !isCheckingSessionCoordination
+                && !isAwaitingInitialSessionTypeSelection {
             VStack(spacing: 14) {
                 if showOpenCameraTimeout {
                     Text("Unable to open camera")
@@ -25742,6 +25747,7 @@ struct PropertySessionView: View {
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
             .padding(.horizontal, 20)
+            }
         }
     }
 

@@ -14620,6 +14620,9 @@ extension ContentView {
         guard currentSessionScopedPropertyID != nil else { return }
         guard !isFinalizingCapturePersistence else { return }
         refreshActiveIssues()
+        if !isPunchlistVisitSession {
+            refreshGuidedShots()
+        }
         guard !showDetailOverlay,
               let armedID = armedUpdateObservationID,
               let propertyID = appState.selectedPropertyID,
