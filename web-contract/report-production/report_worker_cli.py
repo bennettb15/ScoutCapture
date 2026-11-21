@@ -3143,8 +3143,8 @@ def process_reviewed_current_copy(
         ):
             raise WorkerError("The review source and later content must be automatic reports for the same property.")
     try:
-        source_completed = dt.datetime.fromisoformat(source["session_completed_at"])
-        content_completed = dt.datetime.fromisoformat(content["session_completed_at"])
+        source_completed = dt.datetime.fromisoformat(str(source["session_completed_at"]).replace("Z", "+00:00"))
+        content_completed = dt.datetime.fromisoformat(str(content["session_completed_at"]).replace("Z", "+00:00"))
         is_later = content_completed > source_completed
     except (KeyError, TypeError, ValueError) as error:
         raise WorkerError("The review source and later content need known completion dates.") from error
