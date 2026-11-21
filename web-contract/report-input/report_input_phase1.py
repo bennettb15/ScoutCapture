@@ -1334,6 +1334,88 @@ def apply_operational_overlays(
             shot["normalized_priority"] = normalized_priority(priority)
 
 
+def operational_guided_shots(
+    client: SupabaseReadClient | None, row: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Read the current location and lifecycle of property Guided photos.
+
+    Older sealed snapshots describe a photo at capture time. A later visit may
+    reclassify that same photo without capturing it again, so the snapshot
+    history alone cannot identify the obsolete report slot.
+    """
+    if client is None:
+        return {}
+    org_id = str(row["org_id"]).lower()
+    property_id = str(row["property_id"]).lower()
+    result: dict[str, dict[str, Any]] = {}
+    offset = 0
+    while True:
+        page = client.select_rows("shots", {
+            "select": "id,org_id,property_id,building,elevation,detail_type,angle_index,lifecycle_state",
+            "org_id": f"eq.{org_id}", "property_id": f"eq.{property_id}",
+            "is_guided": "eq.true", "deleted_at": "is.null",
+            "order": "created_at.asc,id.asc", "limit": "200", "offset": str(offset),
+        })
+        for shot in page:
+            if (str(shot.get("org_id") or "").lower() != org_id or
+                    str(shot.get("property_id") or "").lower() != property_id):
+                raise Phase1Error("Cross-scope Guided photo in report history.")
+            result[str(shot["id"]).lower()] = shot
+        if len(page) < 200:
+            break
+        offset += len(page)
+    return result
+
+
+def apply_operational_guided_shots(
+    composition: dict[str, Any], current: dict[str, dict[str, Any]],
+) -> None:
+    if not current:
+        return
+    shots_by_id = {shot["shot_id"].lower(): shot for shot in composition["shots"]}
+    for shot_id, shot in shots_by_id.items():
+        updated = current.get(shot_id)
+        if not updated or not shot.get("is_guided"):
+            continue
+        for source, target in (("building", "building"), ("elevation", "elevation"),
+                               ("detail_type", "detail_type")):
+            if trim(updated.get(source)):
+                shot[target] = trim(updated[source])
+        shot["angle_index"] = max(1, safe_int(updated.get("angle_index"), shot["angle_index"]))
+        shot["shot_key"] = make_shot_key(
+            shot["building"], shot["elevation"], shot["detail_type"], shot["angle_index"]
+        )
+
+    # The newest photo owns a Guided slot. This also covers a reclassified
+    # historical photo whose original slot key differs from its current one.
+    newest_by_slot: dict[str, str] = {}
+    for shot in shots_by_id.values():
+        shot_id = shot["shot_id"].lower()
+        if not shot.get("is_guided") or shot.get("issue_id"):
+            continue
+        updated = current.get(shot_id)
+        if updated and (updated.get("lifecycle_state") or "active").lower() != "active":
+            continue
+        slot = shot["shot_key"].lower()
+        incumbent_id = newest_by_slot.get(slot)
+        incumbent = shots_by_id.get(incumbent_id) if incumbent_id else None
+        if incumbent is None or (shot.get("captured_at_utc") or "", shot_id) > (
+                incumbent.get("captured_at_utc") or "", incumbent_id):
+            newest_by_slot[slot] = shot_id
+
+    selected_entries = []
+    for entry in composition["entries"]:
+        shot = shots_by_id.get(str(entry.get("shot_id") or "").lower())
+        if entry.get("kind") != "photo" or shot is None or not shot.get("is_guided") or shot.get("issue_id"):
+            selected_entries.append(entry)
+            continue
+        shot_id = shot["shot_id"].lower()
+        lifecycle = ((current.get(shot_id) or {}).get("lifecycle_state") or "active").lower()
+        if lifecycle == "active" and newest_by_slot.get(shot["shot_key"].lower()) == shot_id:
+            selected_entries.append(entry)
+    composition["entries"] = selected_entries
+
+
 def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     client = None if args.snapshot_row_fixture and args.snapshot_payload_fixture else SupabaseReadClient.from_env()
     row = load_snapshot_row(args, client)
@@ -1382,6 +1464,8 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         composition = compose_punchlist_history(sources, storage, include_prior_issues=current_review)
         if is_full_documentation_follow_up and not composition["baseline"]:
             raise Phase1Error("Full Documentation Follow-Up requires a prior completed Full Documentation capture.")
+        if is_full_documentation_follow_up and not getattr(args, "snapshot_history_only", False):
+            apply_operational_guided_shots(composition, operational_guided_shots(client, row))
         operational_overlays = {} if current_review or getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
             client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
         finalized_shot_ids = {

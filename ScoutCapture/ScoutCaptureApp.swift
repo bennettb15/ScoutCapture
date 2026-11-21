@@ -1770,7 +1770,7 @@ struct SessionHubView: View {
                 subtitle: rowSubtitles[property.id],
                 address: propertyAddressLine(property) ?? property.address,
                 hasDraft: rowDraftBadges[property.id] == true,
-                isLocked: rowLockBadges[property.id] == true,
+                isLocked: rowLockBadges[property.id] == true && uploadProgressLabel == nil && !uploadingElsewhere,
                 isArchived: property.isArchived,
                 cloudGlyph: cloudGlyph,
                 pendingUploadCount: uploadingElsewhere ? 0 : pendingUploadCount,
@@ -6151,6 +6151,19 @@ private struct PropertyListTableView: UIViewRepresentable {
     }
 }
 
+private final class PropertyStatusPillLabel: UILabel {
+    private let horizontalInset: CGFloat = 10
+
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(width: size.width + horizontalInset * 2, height: size.height)
+    }
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.insetBy(dx: horizontalInset, dy: 0))
+    }
+}
+
 private final class PropertyListTableCell: UITableViewCell {
     static let reuseIdentifier = "PropertyListTableCell"
 
@@ -6158,7 +6171,7 @@ private final class PropertyListTableCell: UITableViewCell {
     private let subtitleLabel = UILabel()
     private let addressLabel = UILabel()
     private let draftLabel = UILabel()
-    private let uploadRetryLabel = UILabel()
+    private let uploadRetryLabel = PropertyStatusPillLabel()
     private let lockLabel = UILabel()
     private let archivedLabel = UILabel()
     private let textStack = UIStackView()
@@ -6193,7 +6206,7 @@ private final class PropertyListTableCell: UITableViewCell {
         addressLabel.isHidden = (addressLabel.text ?? "").isEmpty
         lockLabel.isHidden = !row.isLocked
         archivedLabel.isHidden = !row.isArchived
-        draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft
+        draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft || row.uploadProgressLabel != nil
         uploadRetryLabel.text = row.uploadProgressLabel ?? "\(row.pendingUploadCount) to upload"
         uploadRetryLabel.accessibilityLabel = row.uploadProgressLabel == "Finishing"
             ? "Finishing session upload" : uploadRetryLabel.text

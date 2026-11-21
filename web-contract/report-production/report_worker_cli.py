@@ -34,7 +34,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 DELIVERABLES_BUCKET = "scoutcapture-deliverables"
 BRANDING_BUCKET = "scoutcapture-org-branding"
-RENDERER_VERSION = "phase2c-follow-up-single-photo-caption-12"
+RENDERER_VERSION = "phase2c-guided-current-slot-13"
 MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
 ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
@@ -82,6 +82,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--snapshot-id",
         help="Specific completed sealed session_snapshots.id to process with --session-id.",
+    )
+    parser.add_argument(
+        "--expect-property-photo-count", type=int,
+        help="For an explicit correction run, stop before publishing if the selected Property Report photo count differs.",
     )
     parser.add_argument(
         "--poll-once",
@@ -2737,6 +2741,12 @@ def process_session(
     if flags or reviewed_content:
         flags.append("--snapshot-history-only")
     validation = validate_report_input(repo, env, session_id, snapshot_id, validation_path, flags)
+    if getattr(args, "expect_property_photo_count", None) is not None:
+        actual = validation["reports"]["property_report"]["photo_entry_count"]
+        if actual != args.expect_property_photo_count:
+            raise WorkerError(
+                f"Property Report photo count {actual} did not match expected {args.expect_property_photo_count}."
+            )
     if reviewed_request:
         outcomes = reviewed_request["review_outcomes"]
         if current_property_review:

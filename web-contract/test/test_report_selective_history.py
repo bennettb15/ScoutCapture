@@ -367,6 +367,55 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertNotIn('new-overview', entry_ids)
         self.assertNotIn('entry-a2', entry_ids)
 
+    def test_live_guided_classification_removes_obsolete_historical_slot(self):
+        def guided(name, session, detail, angle, captured):
+            return {
+                'shotID': name, 'sessionID': session, 'createdAt': captured,
+                'building': 'B1', 'elevation': 'North', 'detailType': detail,
+                'angleIndex': angle, 'isGuided': True, 'isFlagged': False,
+                'captureKind': 'captured',
+                'storagePath': f'sessions/{session}/shots/{name}/photo.jpg',
+            }
+
+        baseline = source('first', 1, 'full_documentation', [
+            guided('entry-a1', 'session-first', 'Entry / Porch', 1, '2026-10-01T10:00:00Z'),
+            guided('entry-a2', 'session-first', 'Entry / Porch', 2, '2026-10-01T10:01:00Z'),
+            guided('roofline', 'session-first', 'Roofline', 1, '2026-10-01T10:02:00Z'),
+            guided('driveway', 'session-first', 'Driveway / Garage', 1, '2026-10-01T10:03:00Z'),
+        ])
+        replacement = source('second', 2, 'full_documentation', [
+            guided('overview-a1', 'session-second', 'Overview', 1, '2026-10-02T10:00:00Z')
+        ])
+        replacement['metadata']['fullDocumentationMode'] = 'follow_up'
+        result = report_input.compose_punchlist_history([baseline, replacement], Storage())
+        self.assertEqual(len(result['entries']), 5)
+
+        # A prior visit reclassified Entry / Porch A2 to Overview A1 without
+        # capturing it, and a later visit replaced it. The sealed baseline
+        # still has its old label, while the operational photo has moved.
+        report_input.apply_operational_guided_shots(result, {
+            'entry-a2': {'building': 'B1', 'elevation': 'North',
+                         'detail_type': 'Overview', 'angle_index': 1,
+                         'lifecycle_state': 'active'},
+            'overview-a1': {'building': 'B1', 'elevation': 'North',
+                            'detail_type': 'Overview', 'angle_index': 1,
+                            'lifecycle_state': 'active'},
+        })
+        ids = [entry['shot_id'] for entry in result['entries']]
+        self.assertEqual(len(ids), 4)
+        self.assertIn('overview-a1', ids)
+        self.assertNotIn('entry-a2', ids)
+
+        no_replacement = report_input.compose_punchlist_history([baseline], Storage())
+        report_input.apply_operational_guided_shots(no_replacement, {
+            'entry-a2': {'building': 'B1', 'elevation': 'North',
+                         'detail_type': 'Overview', 'angle_index': 1,
+                         'lifecycle_state': 'active'},
+        })
+        self.assertEqual(len(no_replacement['entries']), 4)
+        self.assertEqual(next(shot for shot in no_replacement['shots']
+                              if shot['shot_id'] == 'entry-a2')['detail_type'], 'Overview')
+
     def test_one_of_eight_replaces_only_updated_property_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         self.assertEqual(len(result['punchlist_shots']), 8)
