@@ -1170,11 +1170,28 @@ def compose_punchlist_history(
                         shot["shot_id"].lower() not in baseline_ids)}
     baseline_by_id = {shot["shot_id"].lower(): shot for shot in baseline_shots}
     latest_guided_updates: dict[str, dict[str, Any]] = {}
+    def guided_slot_key(value: str) -> str | None:
+        parts = value.split("|")
+        if len(parts) != 4 or not parts[3].isdigit():
+            return None
+        return make_shot_key(parts[0], parts[1], parts[2], int(parts[3]))
+
     def guided_identities(shot: dict[str, Any]) -> list[str]:
-        return [value.lower() for value in (
+        values = [value.lower() for value in (
             trim(shot.get("shot_key")), trim(shot.get("guided_row_id")),
             trim(shot.get("supersedes_shot_id")), trim(shot.get("shot_id")),
         ) if value]
+        # Android preserves the original Guided slot in logicalShotIdentity
+        # when a photo is reclassified. Its new shot key can then differ from
+        # the sealed baseline's key (Entry / Porch -> Overview, for example).
+        logical = (trim(shot.get("logical_shot_identity")) or "").lower()
+        for marker in ("|flagged|no-issue|", "|normal|"):
+            if marker in logical:
+                values.append(logical.split(marker, 1)[1])
+                break
+        return list(dict.fromkeys(
+            key for value in values for key in (value, guided_slot_key(value)) if key
+        ))
     for shot in follow_up_property_shots:
         if shot.get("is_guided") and not shot.get("issue_id"):
             for identity in guided_identities(shot):

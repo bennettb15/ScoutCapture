@@ -1648,6 +1648,7 @@ struct SessionHubView: View {
     ) -> some View {
         let addressLine = propertyAddressLine(property) ?? property.address
         let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
+            ?? (cloudGlyph == .uploadingElsewhere ? "Uploading on another device" : nil)
         let pendingUploadCount = uploadProgressLabel == nil
             ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
 
@@ -1758,7 +1759,9 @@ struct SessionHubView: View {
         properties.map { property in
             let cloudGlyph = appState.propertyRowOriginalUploadCloudGlyphState(propertyID: property.id)
                 ?? rowCloudGlyphs[property.id]
+            let uploadingElsewhere = cloudGlyph == .uploadingElsewhere
             let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
+                ?? (uploadingElsewhere ? "Uploading on another device" : nil)
             let pendingUploadCount = uploadProgressLabel == nil
                 ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
             return PropertyListTableRowModel(
@@ -1770,11 +1773,11 @@ struct SessionHubView: View {
                 isLocked: rowLockBadges[property.id] == true,
                 isArchived: property.isArchived,
                 cloudGlyph: cloudGlyph,
-                pendingUploadCount: pendingUploadCount,
+                pendingUploadCount: uploadingElsewhere ? 0 : pendingUploadCount,
                 uploadProgressLabel: uploadProgressLabel,
-                canRetryUpload: rowStatusChips[property.id] != nil ||
+                canRetryUpload: !uploadingElsewhere && (rowStatusChips[property.id] != nil ||
                     cloudGlyph == .warning ||
-                    pendingUploadCount > 0,
+                    pendingUploadCount > 0),
                 canOpenMaps: mapsAddressQuery(for: property) != nil,
                 canMessage: hasValidPhoneNumber(property),
                 canCall: hasValidPhoneNumber(property)
@@ -1809,6 +1812,8 @@ struct SessionHubView: View {
             return "✓"
         case .uploading:
             return "↑"
+        case .uploadingElsewhere:
+            return "☁↑"
         case .warning:
             return "!"
         }
@@ -1816,7 +1821,7 @@ struct SessionHubView: View {
 
     private func propertyRowCloudGlyphColor(_ state: AppState.PropertyRowCloudGlyphState) -> Color {
         switch state {
-        case .current, .uploading:
+        case .current, .uploading, .uploadingElsewhere:
             return .blue
         case .warning:
             return .orange
@@ -1828,7 +1833,9 @@ struct SessionHubView: View {
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
+        let uploadingElsewhere = appState.propertyRowCloudGlyphByPropertyID[property.id] == .uploadingElsewhere
         let uploadProgressLabel = appState.propertyRowOriginalUploadProgressLabel(propertyID: property.id)
+            ?? (uploadingElsewhere ? "Uploading on another device" : nil)
         let pendingUploadCount = uploadProgressLabel == nil
             ? appState.ownedFastRuntimeCaptureRetryCount(propertyID: property.id) : 1
         let rawHasDraft = badgeModel.showDraft
@@ -1869,6 +1876,8 @@ struct SessionHubView: View {
                             .lineLimit(1)
                         if let sessionUploadStatus {
                             sessionSnapshotCloudIcon(sessionUploadStatus)
+                        } else if uploadingElsewhere {
+                            Text("☁↑").foregroundColor(.blue)
                         }
                     }
 
@@ -6316,6 +6325,9 @@ private final class PropertyListTableCell: UITableViewCell {
             glyphColor = .systemBlue
         case .uploading:
             glyph = " ↑"
+            glyphColor = .systemBlue
+        case .uploadingElsewhere:
+            glyph = " ☁↑"
             glyphColor = .systemBlue
         case .warning:
             glyph = " !"

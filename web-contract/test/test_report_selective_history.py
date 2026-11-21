@@ -323,6 +323,50 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(len(entry_ids), 4)
         self.assertNotIn('guided-first', entry_ids)
 
+    def test_reclassified_guided_slot_replacement_omits_old_label_from_report(self):
+        def guided_photo(name, detail, angle, day):
+            return {
+                'shotID': name, 'sessionID': f'session-{day}',
+                'createdAt': f'2026-10-{day:02d}T10:30:00Z',
+                'building': 'B1', 'elevation': 'North',
+                'detailType': detail, 'angleIndex': angle,
+                'isGuided': True, 'isFlagged': False, 'captureKind': 'captured',
+                'storagePath': f'sessions/session-{day}/shots/{name}/photo.jpg',
+            }
+
+        original = guided_photo('entry-a2', 'Entry / Porch', 2, 1)
+        baseline = source('1', 1, 'full_documentation', [
+            guided_photo('entry-a1', 'Entry / Porch', 1, 1),
+            original,
+            guided_photo('roofline', 'Roofline', 1, 1),
+            guided_photo('driveway', 'Driveway / Garage', 1, 1),
+        ])
+        overview = guided_photo('new-overview', 'Overview', 1, 2)
+        overview['logicalShotIdentity'] = (
+            'session-2|flagged|no-issue|b1|north|entry / porch|2'
+        )
+        follow = source('2', 2, 'full_documentation', [overview])
+        follow['metadata']['fullDocumentationMode'] = 'follow_up'
+
+        result = report_input.compose_punchlist_history([baseline, follow], Storage())
+        entry_ids = [entry['shot_id'] for entry in result['entries'] if entry['kind'] == 'photo']
+        self.assertEqual(len(entry_ids), 4)
+        self.assertIn('new-overview', entry_ids)
+        self.assertNotIn('entry-a2', entry_ids)
+
+        restored = guided_photo('entry-restored', 'Entry / Porch', 2, 3)
+        restored['logicalShotIdentity'] = (
+            'session-3|flagged|no-issue|b1|north|entry / porch|2'
+        )
+        later = source('3', 3, 'full_documentation', [restored])
+        later['metadata']['fullDocumentationMode'] = 'follow_up'
+        result = report_input.compose_punchlist_history([baseline, follow, later], Storage())
+        entry_ids = [entry['shot_id'] for entry in result['entries'] if entry['kind'] == 'photo']
+        self.assertEqual(len(entry_ids), 4)
+        self.assertIn('entry-restored', entry_ids)
+        self.assertNotIn('new-overview', entry_ids)
+        self.assertNotIn('entry-a2', entry_ids)
+
     def test_one_of_eight_replaces_only_updated_property_photo(self):
         result = report_input.compose_punchlist_history([self.baseline, self.visit1], Storage())
         self.assertEqual(len(result['punchlist_shots']), 8)

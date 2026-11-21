@@ -735,6 +735,7 @@ final class AppState: ObservableObject {
     enum PropertyRowCloudGlyphState: String, Equatable {
         case current
         case uploading
+        case uploadingElsewhere
         case warning
     }
 
@@ -42893,6 +42894,7 @@ final class AppState: ObservableObject {
     }
 
     private func refreshPropertyRowCloudGlyphCache() {
+        let localDeviceID = currentDeviceIdentifier()
         let next = propertyRowSnapshotCloudStatusByPropertyID.reduce(into: [UUID: PropertyRowCloudGlyphState]()) { partial, entry in
             partial[entry.key] = Self.propertyRowCloudGlyphState(for: entry.value)
         }
@@ -42904,6 +42906,9 @@ final class AppState: ObservableObject {
                 if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[entry.key],
                    Self.propertyRowStatusChipShowsUploading(cloudStatus) {
                     partial[entry.key] = .uploading
+                } else if let ownerDeviceID = entry.value.ownerDeviceID,
+                          ownerDeviceID.caseInsensitiveCompare(localDeviceID) != .orderedSame {
+                    partial[entry.key] = .uploadingElsewhere
                 } else {
                     partial[entry.key] = .warning
                 }
@@ -42945,9 +42950,9 @@ final class AppState: ObservableObject {
         switch status.state {
         case .uploaded:
             return .current
-        case .uploading:
+        case .queued, .uploading:
             return .uploading
-        case .queued, .retryScheduled, .failed:
+        case .retryScheduled, .failed:
             return .warning
         }
     }
