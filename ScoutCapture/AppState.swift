@@ -42906,8 +42906,7 @@ final class AppState: ObservableObject {
                 if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[entry.key],
                    Self.propertyRowStatusChipShowsUploading(cloudStatus) {
                     partial[entry.key] = .uploading
-                } else if let ownerDeviceID = entry.value.ownerDeviceID,
-                          ownerDeviceID.caseInsensitiveCompare(localDeviceID) != .orderedSame {
+                } else if entry.value.ownerDeviceID?.caseInsensitiveCompare(localDeviceID) != .orderedSame {
                     partial[entry.key] = .uploadingElsewhere
                 } else {
                     partial[entry.key] = .warning
