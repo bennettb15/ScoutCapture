@@ -14300,6 +14300,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     @EnvironmentObject private var appState: AppState
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var camera = CameraManager.shared
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let confirmationHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -14585,6 +14586,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if isAvailable, !isFastLaneExiting {
                 refreshFastLaneSideControlCounts(force: true)
             }
+        }
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            guard oldPhase != .active,
+                  newPhase == .active,
+                  previewRunningAt != nil,
+                  !isFastLaneExiting else { return }
+            fastLaneMediaHydrationAttemptedKeys.removeAll()
+            didCheckFastLaneGuidedPanelMedia = false
+            refreshFastLaneSideControlCounts(force: true)
         }
         .onAppear {
             cameraViewAppearedAt = Date()
@@ -17735,26 +17745,21 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         isRefreshingFastLaneMediaMaps = true
         let requestID = fastLaneMediaMapRequestID
         let guidedRows = payload.guidedShots + payload.retiredGuidedShots
-        let previousGuidedThumbnailPathByID = fastLaneGuidedThumbnailPathByID
-        let previousGuidedReferencePathByID = fastLaneGuidedReferencePathByID
-        let previousGuidedReferencePathByKey = fastLaneGuidedReferencePathByKey
         DispatchQueue.global(qos: .utility).async {
             let startedAt = Date()
             var guidedThumbnailPaths = payload.guidedShots.reduce(into: [UUID: String]()) { partial, guidedShot in
-                if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
-                    ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
+                if let path = fastLaneGuidedDisplayImagePath(for: guidedShot) {
                     partial[guidedShot.id] = path
                 }
             }
             let activeGuidedThumbnailPaths = guidedThumbnailPaths
             DispatchQueue.main.async {
                 guard fastLaneMediaMapRequestID == requestID else { return }
-                fastLaneGuidedThumbnailPathByID.merge(activeGuidedThumbnailPaths) { current, _ in current }
+                fastLaneGuidedThumbnailPathByID.merge(activeGuidedThumbnailPaths) { _, updated in updated }
                 prewarmFastLaneGuidedThumbnails(for: payload.guidedShots)
             }
             for guidedShot in payload.retiredGuidedShots {
-                if let path = fastLaneGuidedDisplayImagePath(for: guidedShot)
-                    ?? fastLaneExistingLocalPath(previousGuidedThumbnailPathByID[guidedShot.id]) {
+                if let path = fastLaneGuidedDisplayImagePath(for: guidedShot) {
                     guidedThumbnailPaths[guidedShot.id] = path
                 }
             }
@@ -17767,15 +17772,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             let thumbnailPaths = guidedThumbnailPaths
             DispatchQueue.main.async {
                 guard fastLaneMediaMapRequestID == requestID else { return }
-                fastLaneGuidedThumbnailPathByID.merge(thumbnailPaths) { current, _ in current }
+                fastLaneGuidedThumbnailPathByID.merge(thumbnailPaths) { _, updated in updated }
                 fastLaneIssueThumbnailPathByID.merge(issueThumbnailPaths) { current, _ in current }
             }
             var guidedReferencePathsByKey: [String: String] = [:]
             let guidedReferencePaths = guidedRows.reduce(into: [UUID: String]()) { partial, guidedShot in
                 let key = fastLaneGuidedComparisonKey(guidedShot)
                 let candidate = fastLaneGuidedReferenceDisplayImagePath(for: guidedShot)
-                    ?? previousGuidedReferencePathByID[guidedShot.id]
-                    ?? previousGuidedReferencePathByKey[key]
                 if let path = candidate,
                    fastLaneExistingLocalPath(path) != nil,
                    !fastLanePathBelongsToCurrentSession(path) {
@@ -17851,7 +17854,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         didCheckFastLaneGuidedPanelMedia = true
         let requests = (fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots)
             .compactMap { guidedShot -> AppState.OperationalMediaHydrationRequest? in
-                guard fastLaneExistingLocalPath(fastLaneGuidedThumbnailPathByID[guidedShot.id]) == nil else { return nil }
+                guard fastLaneGuidedDisplayImagePath(for: guidedShot) == nil else { return nil }
                 return fastLanePanelHydrationRequest(
                     shotID: guidedShot.shot?.id,
                     storedPath: guidedShot.shot?.imageLocalIdentifier
@@ -19016,14 +19019,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneGuidedReferenceDisplayImagePath(for guidedShot: GuidedShot) -> String? {
-        let storedReference = [
+        let referencePaths = [
             guidedShot.referenceImagePath,
             guidedShot.referenceImageLocalIdentifier
         ]
-        .compactMap { $0 }
+        .compactMap(fastLaneTrimmedNonEmpty)
+        let storedReference = referencePaths
         .compactMap(fastLaneExistingLocalPath)
         .first { !fastLanePathBelongsToCurrentSession($0) }
-        return storedReference ?? fastLaneHistoricalGuidedReferenceDisplayImagePath(for: guidedShot)
+        // Once a replacement shot identifies the reference file, do not show
+        // an older cached photo while the new file is being downloaded.
+        if !referencePaths.isEmpty { return storedReference }
+        return fastLaneHistoricalGuidedReferenceDisplayImagePath(for: guidedShot)
     }
 
     private func fastLaneHistoricalGuidedReferenceDisplayImagePath(for guidedShot: GuidedShot) -> String? {
