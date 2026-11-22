@@ -45164,15 +45164,125 @@ final class AppState: ObservableObject {
                 } else {
                     FastRuntimeOriginalMetadata.schedule(updatedRecord)
                 }
-                scheduleShotMetadataSupabaseWriteIfNeeded(
-                    propertyID: propertyID, sessionID: sessionID,
-                    shotID: updatedRecord.id, reason: "guided_reclassification"
+            }
+            // Follow-up checklists often point at a photo from a completed visit.
+            // It has no record in this draft, but its classification still needs
+            // to reach the shared shot row before another device rebuilds Guided.
+            if let linkedShotID {
+                if guidedShotID != linkedShotID {
+                    scheduleGuidedReclassificationSupabaseWrite(
+                        propertyID: propertyID, shotID: guidedShotID,
+                        building: building, elevation: elevation,
+                        detailType: detailType, angleIndex: angle,
+                        shotKey: shotKey
+                    )
+                }
+                scheduleGuidedReclassificationSupabaseWrite(
+                    propertyID: propertyID, shotID: linkedShotID,
+                    building: building, elevation: elevation,
+                    detailType: detailType, angleIndex: angle,
+                    shotKey: shotKey
                 )
             }
             return true
         } catch {
             print("[FastLanePanel] guided_reclassify_failed propertyID=\(propertyID.uuidString) guidedID=\(guidedShotID.uuidString) error=\(error.localizedDescription)")
             return false
+        }
+    }
+
+    private struct GuidedReclassificationRemoteRow: Decodable {
+        let id: UUID
+        let sessionID: UUID
+        let shotKey: String?
+        let logicalShotIdentity: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case sessionID = "session_id"
+            case shotKey = "shot_key"
+            case logicalShotIdentity = "logical_shot_identity"
+        }
+    }
+
+    private struct GuidedReclassificationPayload: Encodable {
+        let building: String
+        let elevation: String
+        let detailType: String
+        let angleIndex: Int
+        let shotKey: String
+        let logicalShotIdentity: String
+        let updatedAt: String
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case building, elevation
+            case detailType = "detail_type"
+            case angleIndex = "angle_index"
+            case shotKey = "shot_key"
+            case logicalShotIdentity = "logical_shot_identity"
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+        }
+    }
+
+    private func scheduleGuidedReclassificationSupabaseWrite(
+        propertyID: UUID,
+        shotID: UUID,
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int,
+        shotKey: String
+    ) {
+        guard isPhaseBMetadataShadowWriteEnabled,
+              let orgID = activeOrganizationID,
+              canAccessOrganization(orgID),
+              let client = supabaseClient else { return }
+        let operationKey = "guided-reclassification|\(shotID.uuidString.lowercased())"
+        guard beginSupabaseMediaOperation(operationKey) else { return }
+        Task(priority: .utility) { [weak self] in
+            defer { self?.endSupabaseMediaOperation(operationKey) }
+            do {
+                let rows: [GuidedReclassificationRemoteRow] = try await client
+                    .from("shots")
+                    .select("id, session_id, shot_key, logical_shot_identity")
+                    .eq("id", value: shotID.uuidString.lowercased())
+                    .eq("org_id", value: orgID.uuidString.lowercased())
+                    .eq("property_id", value: propertyID.uuidString.lowercased())
+                    .limit(1)
+                    .execute()
+                    .value
+                guard let source = rows.first else {
+                    print("[GuidedReclassification] missing_remote_shot shotID=\(shotID.uuidString)")
+                    return
+                }
+                // Keep the original slot identity when its visible label changes.
+                // Android uses this identity to pair a later replacement with the
+                // same checkpoint instead of adding a fifth photo.
+                let originalKey = source.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() ?? shotKey.lowercased()
+                let existingIdentity = source.logicalShotIdentity?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let identity = (existingIdentity?.isEmpty == false ? existingIdentity : nil)
+                    ?? "\(source.sessionID.uuidString.lowercased())|normal|\(originalKey)"
+                let payload = GuidedReclassificationPayload(
+                    building: building, elevation: elevation,
+                    detailType: detailType, angleIndex: angleIndex,
+                    shotKey: shotKey, logicalShotIdentity: identity,
+                    updatedAt: Date().ISO8601Format(),
+                    updatedBy: self?.authenticatedSupabaseUser?.id
+                )
+                try await client.from("shots")
+                    .update(payload, returning: .minimal)
+                    .eq("id", value: source.id.uuidString.lowercased())
+                    .eq("org_id", value: orgID.uuidString.lowercased())
+                    .eq("property_id", value: propertyID.uuidString.lowercased())
+                    .execute()
+                print("[GuidedReclassification] synced shotID=\(shotID.uuidString)")
+            } catch {
+                print("[GuidedReclassification] failed shotID=\(shotID.uuidString) error=\(error.localizedDescription)")
+            }
         }
     }
 
