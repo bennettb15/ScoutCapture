@@ -45286,6 +45286,82 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func scheduleFlaggedReclassificationSupabaseWrite(
+        propertyID: UUID,
+        observationID: UUID,
+        linkedShotID: UUID?,
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int,
+        shotKey: String
+    ) {
+        guard isPhaseBMetadataShadowWriteEnabled,
+              let orgID = activeOrganizationID,
+              canAccessOrganization(orgID),
+              let client = supabaseClient else { return }
+        let operationKey = "flagged-reclassification|\(observationID.uuidString.lowercased())"
+        guard beginSupabaseMediaOperation(operationKey) else { return }
+        Task(priority: .utility) { [weak self] in
+            defer { self?.endSupabaseMediaOperation(operationKey) }
+            do {
+                let rows: [GuidedReclassificationRemoteRow] = try await client
+                    .from("shots")
+                    .select("id, session_id, shot_key, logical_shot_identity")
+                    .eq("org_id", value: orgID.uuidString.lowercased())
+                    .eq("property_id", value: propertyID.uuidString.lowercased())
+                    .eq("issue_id", value: observationID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .order("created_at", ascending: false)
+                    .limit(1)
+                    .execute()
+                    .value
+                var targets = rows
+                if let linkedShotID, rows.first?.id != linkedShotID {
+                    let linked: [GuidedReclassificationRemoteRow] = try await client
+                        .from("shots")
+                        .select("id, session_id, shot_key, logical_shot_identity")
+                        .eq("id", value: linkedShotID.uuidString.lowercased())
+                        .eq("org_id", value: orgID.uuidString.lowercased())
+                        .eq("property_id", value: propertyID.uuidString.lowercased())
+                        .eq("issue_id", value: observationID.uuidString.lowercased())
+                        .limit(1)
+                        .execute()
+                        .value
+                    targets = linked + targets
+                }
+                guard !targets.isEmpty else {
+                    print("[FlaggedReclassification] missing_remote_shot issueID=\(observationID.uuidString)")
+                    return
+                }
+                for source in targets {
+                    let originalKey = source.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased() ?? shotKey.lowercased()
+                    let existingIdentity = source.logicalShotIdentity?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let identity = (existingIdentity?.isEmpty == false ? existingIdentity : nil)
+                        ?? "\(source.sessionID.uuidString.lowercased())|flagged|\(observationID.uuidString.lowercased())|\(originalKey)"
+                    let payload = GuidedReclassificationPayload(
+                        building: building, elevation: elevation,
+                        detailType: detailType, angleIndex: angleIndex,
+                        shotKey: shotKey, logicalShotIdentity: identity,
+                        updatedAt: Date().ISO8601Format(),
+                        updatedBy: self?.authenticatedSupabaseUser?.id
+                    )
+                    try await client.from("shots")
+                        .update(payload, returning: .minimal)
+                        .eq("id", value: source.id.uuidString.lowercased())
+                        .eq("org_id", value: orgID.uuidString.lowercased())
+                        .eq("property_id", value: propertyID.uuidString.lowercased())
+                        .execute()
+                }
+                print("[FlaggedReclassification] synced issueID=\(observationID.uuidString)")
+            } catch {
+                print("[FlaggedReclassification] failed issueID=\(observationID.uuidString) error=\(error.localizedDescription)")
+            }
+        }
+    }
+
     @discardableResult
     func fastRuntimeReclassifyObservation(
         propertyID: UUID,
@@ -45473,6 +45549,16 @@ final class AppState: ObservableObject {
                     shotID: updatedRecord.id, reason: "issue_reclassification"
                 )
             }
+            scheduleFlaggedReclassificationSupabaseWrite(
+                propertyID: propertyID, observationID: observationID,
+                linkedShotID: linkedShotID,
+                building: revisedBuilding, elevation: revisedElevation,
+                detailType: revisedDetail, angleIndex: assignedAngle,
+                shotKey: ShotMetadata.makeShotKey(
+                    building: revisedBuilding, elevation: revisedElevation,
+                    detailType: revisedDetail, angleIndex: assignedAngle
+                )
+            )
             return true
         } catch {
             print("[FastLanePanel] observation_reclassify_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
