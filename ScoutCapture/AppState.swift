@@ -55927,7 +55927,36 @@ final class AppState: ObservableObject {
             )
         }
 
-        return overlaysByIssueID.values.sorted {
+        // Activity rows can refer to an older issue photo. Keep their status and
+        // priority changes, but take the visible location and image from the
+        // newest active capture for that issue.
+        let currentShotsByIssueID = Dictionary(grouping: remoteShots.filter { shot in
+            shot.issueID != nil && shot.deletedAt == nil &&
+                shot.lifecycleState.isActiveForDefaultWorkflows &&
+                shot.storageBucket?.isEmpty == false && shot.storagePath?.isEmpty == false
+        }, by: { $0.issueID! }).compactMapValues { shots in
+            shots.max { lhs, rhs in
+                if (lhs.createdAt ?? .distantPast) != (rhs.createdAt ?? .distantPast) {
+                    return (lhs.createdAt ?? .distantPast) < (rhs.createdAt ?? .distantPast)
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        }
+        return overlaysByIssueID.values.map { overlay in
+            guard let issueID = overlay.issueID,
+                  let shot = currentShotsByIssueID[issueID] else { return overlay }
+            return PortalPunchlistOperationalOverlay(
+                issueID: issueID, propertyID: propertyID,
+                status: overlay.status, priority: overlay.priority, trade: overlay.trade,
+                updatedAt: overlay.updatedAt, shotID: shot.id,
+                building: shot.building, targetElevation: shot.elevation,
+                detailType: shot.detailType, angleIndex: shot.angleIndex,
+                shotKey: shot.shotKey,
+                locationUpdatedAt: shot.updatedAt ?? shot.createdAt,
+                reopensResolved: overlay.reopensResolved,
+                fieldResolutionOutcome: overlay.fieldResolutionOutcome
+            )
+        }.sorted {
             if ($0.updatedAt ?? .distantPast) != ($1.updatedAt ?? .distantPast) {
                 return ($0.updatedAt ?? .distantPast) < ($1.updatedAt ?? .distantPast)
             }

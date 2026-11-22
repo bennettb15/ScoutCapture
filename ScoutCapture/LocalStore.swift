@@ -2728,6 +2728,29 @@ final class LocalStore {
                 )
                 observations[index].trade = canonicalTrade.isEmpty ? nil : canonicalTrade
             }
+            if matchMethod == "issue_id",
+               let locationUpdatedAt = overlay.locationUpdatedAt,
+               let building = overlay.building,
+               let elevation = overlay.targetElevation,
+               let detailType = overlay.detailType,
+               let angleIndex = overlay.angleIndex {
+                let latestLocalReclassification = before.historyEvents
+                    .filter { $0.kind == .reclassified && $0.field == "location" }
+                    .map(\.timestamp)
+                    .max() ?? .distantPast
+                if locationUpdatedAt > latestLocalReclassification {
+                    observations[index].building = building
+                    observations[index].targetElevation = elevation
+                    observations[index].detailType = detailType
+                    observations[index].targetAngleIndex = angleIndex
+                    if let shotID = overlay.shotID {
+                        observations[index].linkedShotID = shotID
+                    }
+                    if locationUpdatedAt > observations[index].updatedAt {
+                        observations[index].updatedAt = locationUpdatedAt
+                    }
+                }
+            }
             if let updatedAt = overlay.updatedAt, updatedAt > observations[index].updatedAt {
                 observations[index].updatedAt = updatedAt
             }

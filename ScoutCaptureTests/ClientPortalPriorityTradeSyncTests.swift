@@ -6,6 +6,43 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
     private let newer = Date(timeIntervalSinceReferenceDate: 2_000)
     private let newest = Date(timeIntervalSinceReferenceDate: 3_000)
 
+    func testRemoteFlaggedReclassificationUpdatesExistingIssueWithoutDuplicatingIt() throws {
+        let (store, property) = try makeStore()
+        let originalShotID = UUID()
+        let replacementShotID = UUID()
+        var observation = makeObservation(propertyID: property.id, detailType: "Overview")
+        observation.linkedShotID = originalShotID
+        observation.shots = [Shot(
+            id: originalShotID, capturedAt: older,
+            imageLocalIdentifier: "/tmp/flagged-original.jpg", note: nil
+        )]
+        observation = try store.createObservation(observation)
+
+        // An older status activity must not mask a newer Android shot edit.
+        let overlay = PortalPunchlistOperationalOverlay(
+            issueID: observation.id, propertyID: property.id,
+            status: .active, updatedAt: older,
+            shotID: replacementShotID, building: "B1", targetElevation: "North",
+            detailType: "Fence Gate", angleIndex: 1,
+            shotKey: ShotMetadata.makeShotKey(
+                building: "B1", elevation: "North", detailType: "Fence Gate", angleIndex: 1
+            ),
+            locationUpdatedAt: newest
+        )
+        let result = try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [overlay]
+        )
+        let rows = try store.fetchObservations(propertyID: property.id)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].detailType, "Fence Gate")
+        XCTAssertEqual(rows[0].targetAngleIndex, 1)
+        XCTAssertEqual(rows[0].linkedShotID, replacementShotID)
+        XCTAssertEqual(try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [overlay]
+        ).appliedCount, 0)
+    }
+
     private typealias PortalActivityRow = (
         id: UUID,
         propertyID: UUID?,

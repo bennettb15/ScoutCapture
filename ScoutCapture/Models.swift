@@ -2607,6 +2607,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
     let detailType: String?
     let angleIndex: Int?
     let shotKey: String?
+    let locationUpdatedAt: Date?
     let reopensResolved: Bool
     let fieldResolutionOutcome: FieldResolutionOutcome?
 
@@ -2623,6 +2624,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         detailType: String? = nil,
         angleIndex: Int? = nil,
         shotKey: String? = nil,
+        locationUpdatedAt: Date? = nil,
         reopensResolved: Bool = false,
         fieldResolutionOutcome: FieldResolutionOutcome? = nil
     ) {
@@ -2638,6 +2640,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         self.detailType = Observation.trimmedNonEmpty(detailType)
         self.angleIndex = angleIndex.map { max(1, $0) }
         self.shotKey = Observation.trimmedNonEmpty(shotKey)
+        self.locationUpdatedAt = locationUpdatedAt
         self.reopensResolved = reopensResolved
         self.fieldResolutionOutcome = fieldResolutionOutcome
     }
