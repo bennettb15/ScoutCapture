@@ -1801,7 +1801,7 @@ struct SessionHubView: View {
         guard let cloudGlyph else {
             return Text(title).foregroundColor(.primary)
         }
-        if cloudGlyph == .uploadingElsewhere {
+        if cloudGlyph == .uploading || cloudGlyph == .uploadingElsewhere {
             return Text(title).foregroundColor(.primary)
                 + Text(" ")
                 + Text(Image(systemName: "icloud.and.arrow.up")).foregroundColor(.blue)
@@ -6341,10 +6341,7 @@ private final class PropertyListTableCell: UITableViewCell {
         case .current:
             glyph = " ✓"
             glyphColor = .systemBlue
-        case .uploading:
-            glyph = " ↑"
-            glyphColor = .systemBlue
-        case .uploadingElsewhere:
+        case .uploading, .uploadingElsewhere:
             result.append(NSAttributedString(string: " "))
             if let image = UIImage(systemName: "icloud.and.arrow.up",
                                    withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold))?
