@@ -475,11 +475,15 @@ def is_overview_material_shot(item: dict[str, Any]) -> bool:
     return (trim(item.get("detail_type")) or "").strip().lower() == "overview"
 
 
-def cover_candidate_score(item: dict[str, Any]) -> tuple[int, int, dt.datetime, str]:
+def cover_candidate_score(item: dict[str, Any]) -> tuple[int, int, int, dt.datetime, str]:
     media_rank = 0 if trim(item.get("media_path")) else 1
-    overview_rank = 0 if is_overview_material_shot(item) else 1
+    is_overview = is_overview_material_shot(item)
+    overview_rank = 0 if is_overview else 1
+    # When several current Overviews exist, A1 is the intended lead image.
+    # Capture time only breaks ties within the same angle.
+    overview_angle = max(1, safe_int(item.get("angle_index"), 1)) if is_overview else 0
     captured = parse_date(item.get("captured_at_utc")) or dt.datetime.max.replace(tzinfo=dt.timezone.utc)
-    return (media_rank, overview_rank, captured, trim(item.get("original_filename")) or "")
+    return (media_rank, overview_rank, overview_angle, captured, trim(item.get("original_filename")) or "")
 
 
 def priority_level(value: Any) -> str:

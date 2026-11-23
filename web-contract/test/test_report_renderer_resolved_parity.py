@@ -363,6 +363,21 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
         plan = renderer.build_punchlist_update_plan(payload,lookup,'11/05/2026',{}, {})
         self.assertEqual(plan['pages'][0]['cover_shot_id'],'overview')
 
+    def test_cover_prefers_overview_angle_one_even_when_angle_three_is_older(self) -> None:
+        payload = validation()
+        source = payload['inputs']['ordered_shots'][0]
+        older_a3 = {**source, 'shot_id': 'overview-a3', 'detail_type': 'Overview',
+                    'angle_index': 3, 'captured_at_utc': '2026-11-20T10:00:00Z'}
+        newer_a1 = {**source, 'shot_id': 'overview-a1', 'detail_type': 'Overview',
+                    'angle_index': 1, 'captured_at_utc': '2026-11-21T10:00:00Z'}
+        payload['inputs']['ordered_shots'] = [older_a3, newer_a1]
+        lookup = renderer.media_lookup({'items': [
+            {'role': 'current', 'shot_id': row['shot_id'],
+             'temporary_prepared_path': f"/{row['shot_id']}.jpg"}
+            for row in [older_a3, newer_a1]
+        ]})
+        self.assertEqual(renderer.cover_photo_entry(payload, lookup)['shot_id'], 'overview-a1')
+
     def test_flagged_overview_still_beats_an_unflagged_detail_and_missing_overview_falls_back(self) -> None:
         payload = validation()
         detail = payload["inputs"]["ordered_shots"][0]
