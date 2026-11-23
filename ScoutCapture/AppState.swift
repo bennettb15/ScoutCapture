@@ -55132,17 +55132,51 @@ final class AppState: ObservableObject {
             return nil
         }
         do {
+            // These reads have no dependency on one another. Start all three
+            // before awaiting any result so camera counts wait for one round
+            // trip instead of three sequential round trips.
+            async let observationRequest: [RemotePortalPunchlistObservationRecord] = try await client
+                .from("observations")
+                .select("id, property_id, session_id, shot_id, status, priority, trade, updated_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .limit(5_000)
+                .execute()
+                .value
+            async let updateRequest: [RemoteObservationUpdateReplayRecord] = try await client
+                .from("observation_updates")
+                .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, priority, trade, updated_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .order("updated_at", ascending: false)
+                .limit(5_000)
+                .execute()
+                .value
+            async let activityRequest: [RemotePortalPunchlistActivityRecord] = try await client
+                .from("punchlist_activity")
+                .select("id, property_id, observation_id, shot_id, activity_type, from_value, to_value, created_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .in("activity_type", values: [
+                    "priority_changed",
+                    "trade_changed",
+                    "status_changed",
+                    "completion_submitted",
+                    "completion_approved",
+                    "completion_rejected",
+                    FieldResolutionOutcome.activityType
+                ])
+                .order("created_at", ascending: false)
+                .limit(5_000)
+                .execute()
+                .value
+
             let observationRows: [RemotePortalPunchlistObservationRecord]
             do {
-                observationRows = try await client
-                    .from("observations")
-                    .select("id, property_id, session_id, shot_id, status, priority, trade, updated_at, deleted_at")
-                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                    .eq("property_id", value: propertyID.uuidString.lowercased())
-                    .is("deleted_at", value: nil)
-                    .limit(5_000)
-                    .execute()
-                    .value
+                observationRows = try await observationRequest
             } catch {
                 recordDiagnosticsError(error)
                 print(
@@ -55154,16 +55188,7 @@ final class AppState: ObservableObject {
 
             let updateRows: [RemoteObservationUpdateReplayRecord]
             do {
-                updateRows = try await client
-                    .from("observation_updates")
-                    .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, priority, trade, updated_at, deleted_at")
-                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                    .eq("property_id", value: propertyID.uuidString.lowercased())
-                    .is("deleted_at", value: nil)
-                    .order("updated_at", ascending: false)
-                    .limit(5_000)
-                    .execute()
-                    .value
+                updateRows = try await updateRequest
             } catch {
                 recordDiagnosticsError(error)
                 print(
@@ -55175,25 +55200,7 @@ final class AppState: ObservableObject {
 
             let activityRows: [RemotePortalPunchlistActivityRecord]
             do {
-                activityRows = try await client
-                    .from("punchlist_activity")
-                    .select("id, property_id, observation_id, shot_id, activity_type, from_value, to_value, created_at, deleted_at")
-                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                    .eq("property_id", value: propertyID.uuidString.lowercased())
-                    .is("deleted_at", value: nil)
-                    .in("activity_type", values: [
-                        "priority_changed",
-                        "trade_changed",
-                        "status_changed",
-                        "completion_submitted",
-                        "completion_approved",
-                        "completion_rejected",
-                        FieldResolutionOutcome.activityType
-                    ])
-                    .order("created_at", ascending: false)
-                    .limit(5_000)
-                    .execute()
-                    .value
+                activityRows = try await activityRequest
             } catch {
                 recordDiagnosticsError(error)
                 print(
