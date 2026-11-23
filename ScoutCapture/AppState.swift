@@ -12,6 +12,7 @@ extension Notification.Name {
     static let scoutClearLocalUICache = Notification.Name("scout.clearLocalUICache")
     static let scoutVerifySessionJSONSource = Notification.Name("scout.verifySessionJSONSource")
     static let scoutVerifyExportSessionJSONSource = Notification.Name("scout.verifyExportSessionJSONSource")
+    static let scoutRemoteReferencesDidRefresh = Notification.Name("scout.remoteReferencesDidRefresh")
 }
 
 struct SupabaseRuntimeConfiguration {
@@ -46274,6 +46275,9 @@ final class AppState: ObservableObject {
         if context.orgID == nil { missingFields.append("orgID") }
         if context.ownerUserID == nil { missingFields.append("ownerUserID") }
         if normalizedSupabaseText(context.ownerDeviceID) == nil { missingFields.append("ownerDeviceID") }
+        if context.sessionType == .fullDocumentation && context.fullDocumentationMode == nil {
+            missingFields.append("fullDocumentationMode")
+        }
         if root == nil { missingFields.append("storageRoot") }
         if metadataURL == nil { missingFields.append("metadataPath") }
         if let summary, summary.photoCount != capturedPhotoCount {
@@ -46315,6 +46319,17 @@ final class AppState: ObservableObject {
             }
             if shot.captureKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 missingFields.append("shot[\(shot.id.uuidString.prefix(8))].captureKind")
+            }
+            if shot.metadataContext?.isGuided == true,
+               shot.metadataContext?.isFlagged != true,
+               shot.metadataContext?.captureIntentSource?.lowercased() == "retake",
+               shot.metadataContext?.supersedesShotID == nil {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].supersedesShotID")
+            }
+            if shot.metadataContext?.isFlagged == true,
+               shot.metadataContext?.captureIntentSource?.lowercased() == "retake",
+               shot.metadataContext?.supersedesShotID == nil {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].flaggedSupersedesShotID")
             }
 
             let metadataURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
@@ -49670,6 +49685,13 @@ final class AppState: ObservableObject {
 
     func fastRuntimePriorGuidedShotKeys(propertyID: UUID, currentSessionID: UUID) -> Set<String> {
         fastRuntimePriorPhotoIdentities(propertyID: propertyID, currentSessionID: currentSessionID).guidedShotKeys
+    }
+
+    func fastRuntimeGuidedPredecessorShotID(propertyID: UUID, guidedID: UUID) -> UUID? {
+        // The camera scopes prior-session Guided rows to the current session
+        // and clears their shot field. Read the persisted checkpoint instead
+        // when recording the photo this retake supersedes.
+        localStore.guidedPredecessorShotID(propertyID: propertyID, guidedID: guidedID)
     }
 
     func fastRuntimePriorPhotoIdentities(
@@ -55330,13 +55352,14 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID
     ) async -> Bool {
-        // The checklist must use the current shot identity and its image before
-        // the camera presents cached Guided or Flagged rows.
+        // Camera startup uses local references. Reconcile cloud changes once
+        // preview is visible, then notify it to update its checklist.
         let freshness = await reconcileLatestReferenceSessionFreshness(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID,
             force: true
         )
+        guard !Task.isCancelled else { return false }
         // Reference freshness adds the latest finalized session to the local
         // index. Verify its actual capture mode before Guided lineage uses it
         // to select the property's Full-capture baseline.
@@ -55344,10 +55367,14 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
         )
+        guard !Task.isCancelled else { return false }
         let changed = await syncPortalPunchlistOperationalOverlaysForPropertyOpen(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
         )
+        await MainActor.run {
+            NotificationCenter.default.post(name: .scoutRemoteReferencesDidRefresh, object: propertyID)
+        }
         return changed || freshness?.hasPendingReferenceState == false
     }
 

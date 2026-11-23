@@ -84,4 +84,23 @@ replacement["metadata"]["shots"][0]["captureKind"] = "captured"
 current = report.compose_punchlist_history([baseline, orphan, replacement], report.StorageProbe(None, None))
 current_photo_ids = [entry["shot_id"] for entry in current["entries"] if entry["kind"] == "photo"]
 assert current_photo_ids == [shots[0], latest_baseline], current_photo_ids
+
+# Mirror the Android -> iPhone handoff: two baseline Guided slots, one
+# reclassified and replaced on Android, then reclassified and replaced again
+# on iPhone. The untouched Entry / Porch slot must remain, and neither prior
+# classification may be carried into the new report.
+entry_id = "30000000-0000-0000-0000-000000000001"
+pool_id = "30000000-0000-0000-0000-000000000002"
+landscaping_id = "30000000-0000-0000-0000-000000000003"
+window_id = "30000000-0000-0000-0000-000000000004"
+handoff_baseline = source(sessions[0], "complete_capture", guided(entry_id, sessions[0], "North", "Entry / Porch"))
+handoff_baseline["metadata"]["shots"].append(guided(pool_id, sessions[0], "East", "Pool / Outdoor Amenities"))
+handoff_android = source(sessions[1], "follow_up", guided(
+    landscaping_id, sessions[1], "North", "Landscaping", pool_id))
+handoff_iphone = source(sessions[2], "follow_up", guided(
+    window_id, sessions[2], "West", "Window", landscaping_id))
+handoff = report.compose_punchlist_history(
+    [handoff_baseline, handoff_android, handoff_iphone], report.StorageProbe(None, None))
+handoff_photo_ids = [entry["shot_id"] for entry in handoff["entries"] if entry["kind"] == "photo"]
+assert handoff_photo_ids == [entry_id, window_id], handoff_photo_ids
 print("guided replacement chain collapses to the newest photo")

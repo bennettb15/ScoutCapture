@@ -3,6 +3,65 @@ import XCTest
 
 @MainActor
 final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
+    func testRetakePredecessorUsesPersistedGuidedPhotoAcrossScopedCameraView() throws {
+        let fixture = try makeFixture()
+        let previousShotID = UUID()
+        let checkpointID = UUID()
+        try fixture.deviceBStore.saveGuidedShots([
+            GuidedShot(
+                id: checkpointID,
+                title: "B1 North Landscaping",
+                building: "B1",
+                targetElevation: "North",
+                detailType: "Landscaping",
+                angleIndex: 1,
+                shot: Shot(id: previousShotID),
+                isCompleted: true
+            )
+        ], propertyID: fixture.property.id)
+
+        // The camera intentionally scopes a prior photo out of its current
+        // session row, but its persisted checkpoint retains the source ID.
+        XCTAssertEqual(
+            fixture.appState.fastRuntimeGuidedPredecessorShotID(
+                propertyID: fixture.property.id,
+                guidedID: checkpointID
+            ),
+            previousShotID
+        )
+    }
+
+    func testVerifiedFollowUpModeWinsOverStaleMetadataDefault() throws {
+        let fixture = try makeFixture()
+        var session = fixture.session
+        session.fullDocumentationMode = .followUp
+        _ = try fixture.deviceBStore.upsertSession(session)
+        XCTAssertEqual(
+            try fixture.deviceBStore.fetchSessions(propertyID: fixture.property.id)
+                .first(where: { $0.id == session.id })?.fullDocumentationMode,
+            .followUp
+        )
+
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: session.id
+        )
+        metadata.fullDocumentationMode = .completeCapture
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: session.id,
+            metadata: metadata
+        )
+
+        XCTAssertEqual(
+            try fixture.deviceBStore.loadSessionMetadata(
+                propertyID: fixture.property.id,
+                sessionID: session.id
+            ).fullDocumentationMode,
+            .followUp
+        )
+    }
+
     func testSnapshotModeDecodeAcceptsAndroidPartialGuidedPhoto() throws {
         let sessionID = UUID()
         let propertyID = UUID()

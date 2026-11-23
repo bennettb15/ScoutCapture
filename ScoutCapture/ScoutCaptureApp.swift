@@ -887,8 +887,6 @@ struct SessionHubView: View {
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
     @State private var initialSessionTypePickerProperty: Property? = nil
-    @State private var entryReferenceSyncPropertyID: UUID? = nil
-    @State private var entryReferenceSyncTask: Task<Bool, Never>? = nil
     @State private var showFullDocumentationModeChoices = false
     @State private var shouldRecommendInitialOverview = false
     @State private var showInitialPunchlistConfirmation = false
@@ -4279,15 +4277,6 @@ struct SessionHubView: View {
             showInitialPunchlistConfirmation = false
             showFullDocumentationModeChoices = false
             initialSessionTypePickerProperty = property
-            entryReferenceSyncTask?.cancel()
-            entryReferenceSyncPropertyID = property.id
-            entryReferenceSyncTask = Task {
-                guard let orgID = property.orgId ?? appState.activeOrganizationID else { return false }
-                return await appState.refreshRemoteReferencesBeforeCameraEntry(
-                    propertyID: property.id,
-                    activeOrganizationID: orgID
-                )
-            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
                 if pressedPropertyID == property.id { pressedPropertyID = nil }
@@ -4570,12 +4559,6 @@ struct SessionHubView: View {
         fastLaneCloseResult = nil
         fastLaneOpeningProperty = property
         Task {
-            if entryReferenceSyncPropertyID == property.id,
-               let entryReferenceSyncTask {
-                _ = await entryReferenceSyncTask.value
-                entryReferenceSyncPropertyID = nil
-                self.entryReferenceSyncTask = nil
-            }
             var result = await appState.runFastRuntimePrototype(
                 propertyID: property.id,
                 sessionType: sessionType,
@@ -14458,6 +14441,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLanePortalOverlayRevisionAtPrime: Int = 0
     @State private var fastLanePortalGuidedRevisionAtPrime: Int = 0
     @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
+    @State private var didScheduleFastLaneReferenceRefresh: Bool = false
+    @State private var fastLaneReferenceRefreshTask: Task<Void, Never>?
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
     @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
@@ -14674,11 +14659,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 recordFastLaneReadyEvent("preview_ready")
                 recordFastLaneOpenDiagnostic()
                 refreshFastLaneSideControlCountsIfNeeded()
+                scheduleFastLaneReferenceRefreshAfterPreview()
                 scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
             refreshCameraChromeGlyphRotation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .scoutRemoteReferencesDidRefresh)) { notification in
+            guard notification.object as? UUID == context.propertyID,
+                  !isFastLaneExiting else { return }
+            fastLanePriorPhotoIdentityCache.invalidate()
+            reloadFastLaneSideControlPayloadFromLocalStore()
         }
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
@@ -14686,9 +14678,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             recordFastLaneReadyEvent("preview_ready")
             recordFastLaneOpenDiagnostic()
             refreshFastLaneSideControlCountsIfNeeded()
+            scheduleFastLaneReferenceRefreshAfterPreview()
             scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
         }
         .onDisappear {
+            fastLaneReferenceRefreshTask?.cancel()
+            fastLaneReferenceRefreshTask = nil
             fastLaneMediaMapRequestID = UUID()
             fastLanePendingMediaMapPayload = nil
             isRefreshingFastLaneMediaMaps = false
@@ -16521,6 +16516,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
+    private func scheduleFastLaneReferenceRefreshAfterPreview() {
+        guard !didScheduleFastLaneReferenceRefresh,
+              let orgID = appState.activeOrganizationID else { return }
+        didScheduleFastLaneReferenceRefresh = true
+        fastLaneReferenceRefreshTask = Task {
+            // Session selection and the first preview frame use local state.
+            // Remote reference reconciliation begins after the camera renders.
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, !isFastLaneExiting else { return }
+            _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
+                propertyID: context.propertyID,
+                activeOrganizationID: orgID
+            )
+        }
+    }
+
     private func primeFastLaneSideControlSnapshot() {
         let startedAt = Date()
         var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
@@ -17767,11 +17778,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             ? (fastLaneCaptureIntent.issueID ?? UUID())
             : nil
         let supersedesShotID: UUID? = {
-            guard isGuided && !isFlagged else { return nil }
-            if let shotID = fastLaneArmedGuidedShot()?.shot?.id { return shotID }
-            guard let guidedID = fastLaneRetakeGuidedID else { return nil }
-            return fastLaneSideControlPayload.guidedShots
-                .first(where: { $0.id == guidedID })?.shot?.id
+            if isGuided && !isFlagged {
+                if let shotID = fastLaneArmedGuidedShot()?.shot?.id { return shotID }
+                guard let guidedID = fastLaneRetakeGuidedID else { return nil }
+                return appState.fastRuntimeGuidedPredecessorShotID(
+                    propertyID: context.propertyID,
+                    guidedID: guidedID
+                )
+            }
+            if isFlagged, case .flagged = fastLaneCaptureIntent,
+               let observation = fastLaneArmedObservation() {
+                return observation.linkedShotID ?? observation.shots.last?.id
+            }
+            return nil
         }()
 
         return AppState.FastRuntimeCaptureMetadataContext(

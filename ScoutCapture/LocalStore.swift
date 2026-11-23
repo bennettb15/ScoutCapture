@@ -2951,6 +2951,13 @@ final class LocalStore {
         return normalized
     }
 
+    func guidedPredecessorShotID(propertyID: UUID, guidedID: UUID) -> UUID? {
+        // Capture must read the checkpoint's existing photo without running
+        // history recovery or rewriting the checklist on the shutter path.
+        (try? readGuidedShots(propertyID: propertyID))?
+            .first(where: { $0.id == guidedID })?.shot?.id
+    }
+
     func hasRetiredGuidedRows(propertyID: UUID) -> Bool {
         guard let guidedShots = try? readGuidedShots(propertyID: propertyID) else { return true }
         return guidedShots.contains {
@@ -3204,6 +3211,12 @@ final class LocalStore {
         updated.appVersion = appVersionString()
         updated.deviceModel = deviceModelString()
         updated.osVersion = osVersionString()
+        if let session = try readSessions(propertyID: propertyID).first(where: { $0.id == sessionID }),
+           session.sessionType == .fullDocumentation {
+            // A later metadata refresh must not replace the verified session
+            // mode with its default when rewriting session.json.
+            updated.fullDocumentationMode = session.fullDocumentationMode
+        }
         updated = normalizeSessionMetadata(updated, propertyID: propertyID, sessionID: sessionID)
         try writeSessionMetadata(updated)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
@@ -7295,6 +7308,7 @@ final class LocalStore {
             propertyID: propertyID,
             sessionID: sessionID,
             sessionType: metadata.sessionType,
+            fullDocumentationMode: metadata.fullDocumentationMode,
             orgID: resolvedOrgID,
             orgNameAtCapture: resolvedOrgName,
             folderIDAtCapture: resolvedFolderID,
