@@ -5019,11 +5019,13 @@ final class AppState: ObservableObject {
 
     struct FastRuntimeOpeningLocalSnapshot {
         let sessionShots: [ShotMetadata]
+        let capturedGuidedIDsBySession: [UUID: Set<UUID>]
         let guidedShots: [GuidedShot]?
         let observations: [Observation]
 
         static let empty = FastRuntimeOpeningLocalSnapshot(
             sessionShots: [],
+            capturedGuidedIDsBySession: [:],
             guidedShots: nil,
             observations: []
         )
@@ -49696,25 +49698,36 @@ final class AppState: ObservableObject {
 
     func fastRuntimePriorPhotoIdentities(
         propertyID: UUID,
-        currentSessionID: UUID
+        currentSessionID: UUID,
+        openingSnapshot: FastRuntimeOpeningLocalSnapshot? = nil
     ) -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
-        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let observations = openingSnapshot?.observations ?? ((try? localStore.fetchObservations(propertyID: propertyID)) ?? [])
         let priorSessions = sessions(for: propertyID)
             .filter {
                 $0.id != currentSessionID &&
                     $0.status == .completed &&
                     $0.isSealed
             }
+        let openingShotsBySession = openingSnapshot.map { Dictionary(grouping: $0.sessionShots, by: \.sessionID) }
         var keys = Set<String>()
         var guidedShotIDs = Set<UUID>()
         var issueIDs = Set<UUID>()
         for session in priorSessions {
-            guard let metadata = try? localStore.loadSessionMetadata(
-                propertyID: propertyID,
-                sessionID: session.id,
-                observations: observations
-            ) else { continue }
-            for shot in metadata.shots {
+            let shots: [ShotMetadata]
+            let capturedGuidedIDs: Set<UUID>
+            if let openingSnapshot {
+                shots = openingShotsBySession?[session.id] ?? []
+                capturedGuidedIDs = openingSnapshot.capturedGuidedIDsBySession[session.id] ?? []
+            } else {
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    observations: observations
+                ) else { continue }
+                shots = metadata.shots
+                capturedGuidedIDs = Set(metadata.guidedShots.compactMap { $0.shot == nil ? nil : $0.id })
+            }
+            for shot in shots {
                 if let issueID = shot.issueID {
                     issueIDs.insert(issueID)
                 }
@@ -49731,9 +49744,7 @@ final class AppState: ObservableObject {
                     angleIndex: shot.angleIndex
                 ))
             }
-            for guided in metadata.guidedShots where guided.shot != nil {
-                guidedShotIDs.insert(guided.id)
-            }
+            guidedShotIDs.formUnion(capturedGuidedIDs)
         }
         return (guidedShotKeys: keys, guidedShotIDs: guidedShotIDs, flaggedIssueIDs: issueIDs)
     }
@@ -58564,6 +58575,7 @@ final class AppState: ObservableObject {
         )
         openingSnapshot = FastRuntimeOpeningLocalSnapshot(
             sessionShots: referenceScan.sessionShots,
+            capturedGuidedIDsBySession: referenceScan.capturedGuidedIDsBySession,
             guidedShots: nil,
             observations: observations
         )
@@ -58593,6 +58605,7 @@ final class AppState: ObservableObject {
         let allGuidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
         openingSnapshot = FastRuntimeOpeningLocalSnapshot(
             sessionShots: referenceScan.sessionShots,
+            capturedGuidedIDsBySession: referenceScan.capturedGuidedIDsBySession,
             guidedShots: allGuidedRows,
             observations: observations
         )
@@ -58697,13 +58710,14 @@ final class AppState: ObservableObject {
     private func fastRuntimeResolvedIssueReferenceScan(
         propertyID: UUID,
         observations: [Observation]
-    ) -> (references: [UUID: FastRuntimeIssueResolvedReference], sessionShots: [ShotMetadata]) {
+    ) -> (references: [UUID: FastRuntimeIssueResolvedReference], sessionShots: [ShotMetadata], capturedGuidedIDsBySession: [UUID: Set<UUID>]) {
         let indexedSessionIDs = sessions(for: propertyID).map(\.id)
         let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
         let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
         let indexedSessionIDSet = Set(indexedSessionIDs)
         var referencesByObservationID: [UUID: FastRuntimeIssueResolvedReference] = [:]
         var sessionShots: [ShotMetadata] = []
+        var capturedGuidedIDsBySession: [UUID: Set<UUID>] = [:]
         for sessionID in sessionIDs {
             guard let metadata = try? localStore.loadSessionMetadata(
                 propertyID: propertyID,
@@ -58711,6 +58725,11 @@ final class AppState: ObservableObject {
                 observations: observations
             ) else {
                 continue
+            }
+            if indexedSessionIDSet.contains(sessionID) {
+                capturedGuidedIDsBySession[sessionID] = Set(
+                    metadata.guidedShots.compactMap { $0.shot == nil ? nil : $0.id }
+                )
             }
             for shot in metadata.shots {
                 if indexedSessionIDSet.contains(sessionID) {
@@ -58756,7 +58775,7 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        return (referencesByObservationID, sessionShots)
+        return (referencesByObservationID, sessionShots, capturedGuidedIDsBySession)
     }
 
     private func fastRuntimeResolvedReference(

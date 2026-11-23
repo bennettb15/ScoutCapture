@@ -1126,6 +1126,21 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             propertyID: fixture.property.id,
             currentSessionID: draftID
         )
+        var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
+        _ = fixture.appState.fastRuntimePreviewSideControlPayload(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: draftID,
+            openingSnapshot: &openingSnapshot
+        )
+        let cachedIdentities = fixture.appState.fastRuntimePriorPhotoIdentities(
+            propertyID: fixture.property.id,
+            currentSessionID: draftID,
+            openingSnapshot: openingSnapshot
+        )
+        XCTAssertEqual(cachedIdentities.guidedShotKeys, identities.guidedShotKeys)
+        XCTAssertEqual(cachedIdentities.guidedShotIDs, identities.guidedShotIDs)
+        XCTAssertEqual(cachedIdentities.flaggedIssueIDs, identities.flaggedIssueIDs)
         XCTAssertTrue(identities.guidedShotIDs.contains(original.shotID))
         XCTAssertEqual(
             fixture.appState.fastRuntimeCurrentGuidedReplacementShotIDs(

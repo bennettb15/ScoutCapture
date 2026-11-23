@@ -14305,6 +14305,16 @@ private final class FastLanePriorPhotoIdentityCache {
     func invalidate() {
         identities = nil
     }
+
+    func set(
+        propertyID: UUID,
+        sessionID: UUID,
+        identities: (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>)
+    ) {
+        self.propertyID = propertyID
+        self.sessionID = sessionID
+        self.identities = identities
+    }
 }
 
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
@@ -14962,11 +14972,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func reloadFastLaneSideControlPayloadFromLocalStore() {
+        var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
             sessionType: context.sessionType,
-            currentSessionID: context.sessionID
+            currentSessionID: context.sessionID,
+            openingSnapshot: &openingSnapshot
         )
+        cacheFastLanePriorPhotoIdentities(from: openingSnapshot)
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         fastLaneSideControlPayload = scopedPayload
         if fastLaneSideControlSheetMode == nil {
@@ -16542,6 +16555,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             openingSnapshot: &openingSnapshot
         )
         let payloadReadyAt = Date()
+        cacheFastLanePriorPhotoIdentities(from: openingSnapshot)
         let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
         let scopeReadyAt = Date()
         fastLaneSideControlPayload = scopedPayload
@@ -16567,6 +16581,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         openingPrimePrewarmMs = prewarmReadyAt.timeIntervalSince(mediaReadyAt) * 1_000
         didRefreshFastLaneSideControlCounts = true
         didRefreshFastLaneIssuePayload = true
+    }
+
+    private func cacheFastLanePriorPhotoIdentities(from snapshot: AppState.FastRuntimeOpeningLocalSnapshot) {
+        guard context.sessionType == .fullDocumentation,
+              context.fullDocumentationMode == .followUp else { return }
+        fastLanePriorPhotoIdentityCache.set(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            identities: appState.fastRuntimePriorPhotoIdentities(
+                propertyID: context.propertyID,
+                currentSessionID: context.sessionID,
+                openingSnapshot: snapshot
+            )
+        )
     }
 
     private func recordFastLaneOpenDiagnostic() {
@@ -16711,10 +16739,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 return
             }
 
+            var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
-                currentSessionID: context.sessionID
+                currentSessionID: context.sessionID,
+                openingSnapshot: &openingSnapshot
             )
             recordFastLaneReadyEvent("full_payload_ready")
             let scopedPayload = await MainActor.run {
@@ -16724,6 +16754,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneSideControlCounts(from: scopedPayload)
             }
             await MainActor.run {
+                cacheFastLanePriorPhotoIdentities(from: openingSnapshot)
                 fastLaneSideControlPayload = scopedPayload
                 refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
                 fastLaneSideControlCounts = counts
