@@ -17737,6 +17737,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let captureIssueID = isFlagged
             ? (fastLaneCaptureIntent.issueID ?? UUID())
             : nil
+        let supersedesShotID: UUID? = {
+            guard isGuided && !isFlagged else { return nil }
+            if let shotID = fastLaneArmedGuidedShot()?.shot?.id { return shotID }
+            guard let guidedID = fastLaneRetakeGuidedID else { return nil }
+            return fastLaneSideControlPayload.guidedShots
+                .first(where: { $0.id == guidedID })?.shot?.id
+        }()
 
         return AppState.FastRuntimeCaptureMetadataContext(
             captureProfile: current.captureProfile ?? fastLaneCaptureProfile.rawValue,
@@ -17754,6 +17761,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             issueID: captureIssueID,
             issueStatus: issueStatus,
             captureIntentSource: current.captureIntentSource ?? fastLaneCaptureIntent.source,
+            supersedesShotID: supersedesShotID,
             propertyName: propertyName,
             propertyAddress: propertyAddress,
             latitude: latitude,

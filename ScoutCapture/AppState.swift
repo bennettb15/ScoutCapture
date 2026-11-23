@@ -5058,6 +5058,7 @@ final class AppState: ObservableObject {
         let issueID: UUID?
         let issueStatus: String?
         let captureIntentSource: String?
+        let supersedesShotID: UUID?
         let propertyName: String?
         let propertyAddress: String?
         let latitude: Double?
@@ -5085,6 +5086,7 @@ final class AppState: ObservableObject {
             issueID: UUID? = nil,
             issueStatus: String? = nil,
             captureIntentSource: String? = nil,
+            supersedesShotID: UUID? = nil,
             propertyName: String? = nil,
             propertyAddress: String? = nil,
             latitude: Double? = nil,
@@ -5145,6 +5147,7 @@ final class AppState: ObservableObject {
                 : AppState.normalizedFastRuntimeMetadataText(issueStatus, fallback: "")
             let normalizedIntent = AppState.normalizedFastRuntimeMetadataText(captureIntentSource, fallback: "")
             self.captureIntentSource = normalizedIntent.isEmpty ? nil : normalizedIntent
+            self.supersedesShotID = supersedesShotID
             self.propertyName = propertyName
             self.propertyAddress = propertyAddress
             self.latitude = latitude
@@ -5174,6 +5177,7 @@ final class AppState: ObservableObject {
                 issueID: issueID,
                 issueStatus: issueStatus,
                 captureIntentSource: captureIntentSource,
+                supersedesShotID: supersedesShotID,
                 propertyName: propertyName,
                 propertyAddress: propertyAddress,
                 latitude: latitude,
@@ -5208,6 +5212,7 @@ final class AppState: ObservableObject {
                 issueID: issueID,
                 issueStatus: issueStatus,
                 captureIntentSource: captureIntentSource,
+                supersedesShotID: supersedesShotID,
                 propertyName: propertyName,
                 propertyAddress: propertyAddress,
                 latitude: latitude,
@@ -44598,7 +44603,8 @@ final class AppState: ObservableObject {
                 longitude: metadata.longitude,
                 accuracyMeters: metadata.accuracyMeters,
                 imageWidth: nil,
-                imageHeight: nil
+                imageHeight: nil,
+                supersedesShotID: metadata.supersedesShotID
             )
             try localStore.upsertShotMetadata(shot)
             if metadata.isGuided == true {
@@ -49759,7 +49765,8 @@ final class AppState: ObservableObject {
             longitude: embeddedGPS?.longitude,
             accuracyMeters: embeddedGPS?.accuracyMeters,
             imageWidth: nil,
-            imageHeight: nil
+            imageHeight: nil,
+            supersedesShotID: metadataContext.supersedesShotID
         )
     }
 
@@ -50330,6 +50337,7 @@ final class AppState: ObservableObject {
             issueID: value?.issueID,
             issueStatus: value?.issueStatus,
             captureIntentSource: value?.captureIntentSource,
+            supersedesShotID: value?.supersedesShotID,
             propertyName: value?.propertyName,
             propertyAddress: value?.propertyAddress,
             latitude: value?.latitude,
@@ -55236,10 +55244,15 @@ final class AppState: ObservableObject {
                     }
                     return nil
                 } ?? currentKey
-                let newest = newestByKey[currentKey] ?? newestByKey[originalKey] ?? row
+                let newest = newestByShotID[row.id]
+                    ?? row.supersedesShotID.flatMap { newestByShotID[$0] }
+                    ?? newestByKey[currentKey] ?? newestByKey[originalKey] ?? row
                 newestByKey[currentKey] = newest
                 newestByKey[originalKey] = newest
                 newestByShotID[row.id] = newest
+                if let supersededID = row.supersedesShotID {
+                    newestByShotID[supersededID] = newest
+                }
             }
             var winnerIDByGuidedID: [UUID: UUID] = [:]
             for index in guidedRows.indices {

@@ -3493,6 +3493,9 @@ final class LocalStore {
         guard !sessions.isEmpty else { return guidedRows }
 
         var recovered = guidedRows
+        let supersededShotIDs = Set(history.metadataBySessionID.values.flatMap { metadata in
+            metadata.shots.compactMap(\.supersedesShotID)
+        })
         let persistedRowIDs = Set(guidedRows.map(\.id))
         var historicalShotIDs = Set<UUID>()
         var explicitlyGuidedShotIDs = Set<UUID>()
@@ -3538,6 +3541,7 @@ final class LocalStore {
 
             for shot in metadata.shots.sorted(by: { $0.createdAt < $1.createdAt }) {
                 guard shot.lifecycleState == .active,
+                      !supersededShotIDs.contains(shot.shotID),
                       LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot),
                       let baseKey = LocalConflictRules.guidedShotBaseIdentityKey(
                         building: shot.building,

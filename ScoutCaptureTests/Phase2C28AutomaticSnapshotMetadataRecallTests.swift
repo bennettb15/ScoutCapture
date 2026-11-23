@@ -988,6 +988,69 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.detailType == "Entry / Porch" }?.shot?.id, fixture.shotID)
     }
 
+    func testSupersedesIdentityCollapsesGuidedCardsAcrossDifferentLabels() throws {
+        let fixture = try makeFixture()
+        let oldID = UUID()
+        let newID = UUID()
+        let old = GuidedShot(
+            id: oldID, title: "A South Roofline", building: "A", targetElevation: "South",
+            detailType: "Roofline", angleIndex: 1,
+            shot: Shot(id: oldID, capturedAt: Date(timeIntervalSince1970: 2_000)),
+            isCompleted: true
+        )
+        let current = GuidedShot(
+            id: newID, title: "A East Elevation", building: "A", targetElevation: "East",
+            detailType: "Elevation", angleIndex: 1,
+            shot: Shot(id: newID, capturedAt: Date(timeIntervalSince1970: 3_000)),
+            isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots([old, current], propertyID: fixture.property.id)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+            [
+              {"id":"\(oldID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-22T20:00:00Z","updated_at":"2026-11-22T20:00:00Z",
+               "building":"A","elevation":"South","detail_type":"Roofline","angle_index":1,
+               "shot_key":"a|south|roofline|1","is_guided":true,"upload_state":"uploaded",
+               "storage_bucket":"media","storage_path":"orgs/test/old.jpg"},
+              {"id":"\(newID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-22T21:00:00Z","updated_at":"2026-11-22T21:00:00Z",
+               "building":"A","elevation":"East","detail_type":"Elevation","angle_index":1,
+               "shot_key":"a|east|elevation|1","supersedes_shot_id":"\(oldID.uuidString)",
+               "is_guided":true,"upload_state":"uploaded","storage_bucket":"media",
+               "storage_path":"orgs/test/new.jpg"}
+            ]
+            """.utf8))
+
+        XCTAssertGreaterThan(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 0)
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].shot?.id, newID)
+        XCTAssertEqual(rows[0].targetElevation, "East")
+        XCTAssertEqual(rows[0].detailType, "Elevation")
+    }
+
+    func testFastRuntimeGuidedReplacementKeepsPhotoLineageThroughNormalization() {
+        let oldShotID = UUID()
+        let context = AppState.FastRuntimeCaptureMetadataContext(
+            building: "A", elevation: "East", detailType: "Elevation", angleIndex: 1,
+            isGuided: true, isFlagged: false, captureIntentSource: "guided",
+            supersedesShotID: oldShotID
+        )
+        let normalized = AppState.normalizedFastRuntimeMetadataContext(context)
+        XCTAssertEqual(normalized.supersedesShotID, oldShotID)
+        XCTAssertEqual(normalized.withAngleIndex(2).supersedesShotID, oldShotID)
+        XCTAssertEqual(normalized.reclassified(
+            building: "A", elevation: "South", detailType: "Roofline", angleIndex: 1
+        ).supersedesShotID, oldShotID)
+    }
+
     func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
         let fixture = try makeFixture()
         let guidedShotID = UUID()

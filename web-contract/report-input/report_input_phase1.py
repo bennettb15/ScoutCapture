@@ -1194,6 +1194,13 @@ def compose_punchlist_history(
         ))
     for shot in follow_up_property_shots:
         if shot.get("is_guided") and not shot.get("issue_id"):
+            superseded_id = (trim(shot.get("supersedes_shot_id")) or "").lower()
+            if superseded_id:
+                # Carry the original checkpoint identity through successive
+                # retakes, even when each visit assigns a different label.
+                for identity, current in list(latest_guided_updates.items()):
+                    if current["shot_id"].lower() == superseded_id:
+                        latest_guided_updates[identity] = shot
             for identity in guided_identities(shot):
                 latest_guided_updates[identity] = shot
     latest_issue_shots = {
