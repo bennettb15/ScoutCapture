@@ -14412,6 +14412,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
     @State private var showFastLaneDetailNoteOverlay: Bool = false
     @State private var showFastLaneSessionActionsSheet: Bool = false
+    @State private var fastLaneSessionActionsSummarySnapshot: FastLaneSessionActionsSummary?
+    @State private var fastLaneSessionActionsSummaryGeneration: UInt64 = 0
     @State private var fastLaneSideControlCounts: AppState.FastRuntimePreviewSideControlCounts = .empty
     @State private var fastLaneSideControlPayload: AppState.FastRuntimePreviewSideControlPayload = .empty
     @State private var fastLaneMissingIssueAngleByID: [UUID: Int] = [:]
@@ -14531,7 +14533,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
             if showFastLaneSessionActionsSheet {
                 FastLaneSessionActionsSheet(
-                    summary: fastLaneSessionActionsSummary,
+                    summary: fastLaneSessionActionsSummarySnapshot ?? fastLanePendingSessionActionsSummary,
+                    isPreparingSummary: fastLaneSessionActionsSummarySnapshot == nil,
                     isEndingSession: isFastLaneExiting || productionCompleteState.isRunning || isSavingFastCapture || camera.isCapturing,
                     isCompletingSession: productionCompleteState.isRunning,
                     completionErrorMessage: fastLaneCompletionErrorMessage,
@@ -15395,6 +15398,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
         recordFastLaneReadyEvent("end_summary_ready")
         return summary
+    }
+
+    // The End control must present before any disk or prior-session reads.
+    // Its counts are calculated once after the first frame, then held stable.
+    private var fastLanePendingSessionActionsSummary: FastLaneSessionActionsSummary {
+        FastLaneSessionActionsSummary(
+            guidedRemainingCount: 0,
+            flaggedRemainingCount: 0,
+            currentSessionCaptureCount: fastLaneCurrentPhotoCountForDisplay,
+            addedPhotoCount: 0,
+            retakenPhotoCount: 0,
+            sessionType: context.sessionType,
+            fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
+            canComplete: false,
+            isComplete: false,
+            disabledReason: nil
+        )
     }
 
     private func fastLanePriorPhotoIdentities() -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
@@ -16486,8 +16506,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         shutterHaptic.prepare()
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
+        fastLaneSessionActionsSummaryGeneration &+= 1
+        let generation = fastLaneSessionActionsSummaryGeneration
+        fastLaneSessionActionsSummarySnapshot = nil
         showFastLaneSessionActionsSheet = true
         recordFastLaneReadyEvent("end_sheet_requested")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard showFastLaneSessionActionsSheet,
+                  fastLaneSessionActionsSummaryGeneration == generation else { return }
+            let summary = fastLaneSessionActionsSummary
+            guard showFastLaneSessionActionsSheet,
+                  fastLaneSessionActionsSummaryGeneration == generation else { return }
+            fastLaneSessionActionsSummarySnapshot = summary
+        }
     }
 
     private func showFastLaneGuidedCaptureImmediately(
@@ -20342,6 +20374,7 @@ private struct FastLanePopupPressStyle: ButtonStyle {
 
 private struct FastLaneSessionActionsSheet: View {
     let summary: FastLaneSessionActionsSummary
+    let isPreparingSummary: Bool
     let isEndingSession: Bool
     let isCompletingSession: Bool
     let completionErrorMessage: String?
@@ -20368,8 +20401,8 @@ private struct FastLaneSessionActionsSheet: View {
 
                         VStack(spacing: 8) {
                             if summary.isFullDocumentationFollowUp {
-                                summaryRow(title: "New photos", value: summary.addedPhotoCount)
-                                summaryRow(title: "Updated photos", value: summary.retakenPhotoCount)
+                                summaryRow(title: "New photos", value: isPreparingSummary ? "…" : String(summary.addedPhotoCount))
+                                summaryRow(title: "Updated photos", value: isPreparingSummary ? "…" : String(summary.retakenPhotoCount))
                                 Text("Other photos and flags carry forward unchanged.")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundColor(.white.opacity(0.72))
@@ -20377,10 +20410,10 @@ private struct FastLaneSessionActionsSheet: View {
                             } else {
                                 summaryRow(
                                     title: summary.isPunchlistVisit ? "Open Issues" : "Flagged Remaining",
-                                    value: summary.flaggedRemainingCount
+                                    value: isPreparingSummary ? "…" : String(summary.flaggedRemainingCount)
                                 )
                                 if !summary.isPunchlistVisit {
-                                    summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                    summaryRow(title: "Guided Remaining", value: isPreparingSummary ? "…" : String(summary.guidedRemainingCount))
                                 }
                             }
                         }
@@ -20419,13 +20452,13 @@ private struct FastLaneSessionActionsSheet: View {
     }
 
     @ViewBuilder
-    private func summaryRow(title: String, value: Int) -> some View {
+    private func summaryRow(title: String, value: String) -> some View {
         HStack {
             Text(title)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(.white.opacity(0.92))
             Spacer(minLength: 0)
-            Text("\(value)")
+            Text(value)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white)
         }
@@ -20449,7 +20482,7 @@ private struct FastLaneSessionActionsSheet: View {
             FastLanePopupActionButton(
                 title: summary.exportActionTitle,
                 role: .tertiary,
-                isEnabled: !isEndingSession && summary.isExportActionEnabled,
+                isEnabled: !isPreparingSummary && !isEndingSession && summary.isExportActionEnabled,
                 action: onComplete
             )
             .overlay(alignment: .trailing) {
