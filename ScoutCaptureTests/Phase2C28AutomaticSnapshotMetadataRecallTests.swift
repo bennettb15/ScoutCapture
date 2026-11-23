@@ -678,6 +678,57 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertTrue(afterRetirement[0].isRetired)
     }
 
+    func testHistoricalRecoveryDoesNotReplaceNewerPhotoOnSameGuidedID() throws {
+        let fixture = try makeFixture()
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+        try saveMetadata(
+            store: fixture.deviceBStore, property: fixture.property, session: fixture.session,
+            orgID: fixture.orgID, shotID: fixture.shotID, issueID: fixture.issueID,
+            guidedID: fixture.guidedID,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "flagged shot", guidedTitle: "Flagged reference"
+        )
+        let olderID = UUID()
+        let newerID = UUID()
+        let remotePath = "orgs/test/older-downspout.jpg"
+        let older = ShotMetadata(
+            shotID: olderID, propertyID: fixture.property.id, sessionID: fixture.session.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 125),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            building: "A", elevation: "West", detailType: "Downspout", angleIndex: 1,
+            shotKey: "a|west|downspout|1", isGuided: true, isFlagged: false,
+            issueID: nil, issueStatus: nil, noteText: nil, noteCategory: nil,
+            originalFilename: "older-downspout.jpg", originalRelativePath: remotePath,
+            originalByteSize: 123, storageBucket: "media", storagePath: remotePath,
+            stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
+            lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
+            accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+        )
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: fixture.session.id
+        )
+        metadata.guidedShots = []
+        metadata.shots.append(older)
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: fixture.session.id, metadata: metadata
+        )
+        let current = GuidedShot(
+            id: olderID, title: "A North Window", building: "A", targetElevation: "North",
+            detailType: "Window", angleIndex: 1,
+            shot: Shot(id: newerID, capturedAt: Date(timeIntervalSinceReferenceDate: 300)),
+            isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots([current], propertyID: fixture.property.id)
+
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].id, olderID)
+        XCTAssertEqual(rows[0].detailType, "Window")
+        XCTAssertEqual(rows[0].shot?.id, newerID)
+    }
+
     func testCompletedSessionDoesNotReviveHistoricalPhotoOutsideItsGuidedChecklist() throws {
         let fixture = try makeFixture()
         try seedDeviceBMetadata(
@@ -870,6 +921,71 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(rows[0].shot?.id, fixture.shotID)
         XCTAssertEqual(rows[0].detailType, "Overview")
         XCTAssertEqual(rows[0].angleIndex, 1)
+    }
+
+    func testReclassifiedReplacementDoesNotResurrectOlderGuidedCard() throws {
+        let fixture = try makeFixture()
+        let oldPoolID = UUID()
+        let replacementID = UUID()
+        let entry = GuidedShot(
+            title: "A North Entry / Porch", building: "A", targetElevation: "North",
+            detailType: "Entry / Porch", angleIndex: 1,
+            shot: Shot(id: fixture.shotID, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            isCompleted: true
+        )
+        let oldPool = GuidedShot(
+            id: oldPoolID, title: "A East Pool / Outdoor Amenities", building: "A",
+            targetElevation: "East", detailType: "Pool / Outdoor Amenities", angleIndex: 1,
+            shot: Shot(id: oldPoolID, capturedAt: Date(timeIntervalSince1970: 2_000)),
+            isCompleted: true
+        )
+        let replacement = GuidedShot(
+            id: replacementID, title: "A North Window", building: "A",
+            targetElevation: "North", detailType: "Window", angleIndex: 1,
+            shot: Shot(id: replacementID, capturedAt: Date(timeIntervalSince1970: 3_000)),
+            isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots(
+            [entry, oldPool, replacement], propertyID: fixture.property.id
+        )
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+            [
+              {"id":"\(fixture.shotID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-18T10:00:00Z","updated_at":"2026-11-18T10:00:00Z",
+               "building":"A","elevation":"North","detail_type":"Entry / Porch","angle_index":1,
+               "shot_key":"a|north|entry / porch|1","is_guided":true},
+              {"id":"\(oldPoolID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-19T10:00:00Z","updated_at":"2026-11-19T10:00:00Z",
+               "building":"A","elevation":"East","detail_type":"Pool / Outdoor Amenities","angle_index":1,
+               "shot_key":"a|east|pool / outdoor amenities|1",
+               "logical_shot_identity":"\(fixture.session.id.uuidString.lowercased())|flagged|no-issue|a|north|overview|2",
+               "is_guided":true,"upload_state":"uploaded","storage_bucket":"media",
+               "storage_path":"orgs/test/old-pool.jpg"},
+              {"id":"\(replacementID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+               "property_id":"\(fixture.property.id.uuidString)","session_id":"\(fixture.session.id.uuidString)",
+               "created_at":"2026-11-20T10:00:00Z","updated_at":"2026-11-21T10:00:00Z",
+               "building":"A","elevation":"North","detail_type":"Window","angle_index":1,
+               "shot_key":"a|north|window|1",
+               "logical_shot_identity":"\(fixture.session.id.uuidString.lowercased())|flagged|no-issue|a|east|pool / outdoor amenities|1",
+               "is_guided":true,"upload_state":"uploaded","storage_bucket":"media",
+               "storage_path":"orgs/test/new-window.jpg"}
+            ]
+            """.utf8))
+
+        XCTAssertGreaterThan(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 0)
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.filter { $0.detailType == "Window" }.count, 1)
+        XCTAssertFalse(rows.contains { $0.detailType == "Pool / Outdoor Amenities" })
+        XCTAssertEqual(rows.first { $0.detailType == "Window" }?.shot?.id, replacementID)
+        XCTAssertEqual(rows.first { $0.detailType == "Entry / Porch" }?.shot?.id, fixture.shotID)
     }
 
     func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {

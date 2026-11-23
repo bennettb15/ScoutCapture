@@ -55208,15 +55208,15 @@ final class AppState: ObservableObject {
                 $0.deletedAt == nil && $0.propertyID == propertyID && $0.orgID == activeOrganizationID
             }
             let remoteByShotID = Dictionary(uniqueKeysWithValues: propertyShots.map { ($0.id, $0) })
-            // A follow-up can replace a checkpoint's photo. Android edits the
-            // newest photo for that slot, while this device may still hold the
-            // earlier photo ID. Resolve both IDs through the original slot.
-            var slotByCurrentKey: [String: String] = [:]
-            var slotByShotID: [UUID: String] = [:]
-            var newestBySlot: [String: RemoteShotMetadataRecord] = [:]
+            // A replacement can be reclassified after export. Walk newest
+            // first so its current and original labels both claim the same
+            // checkpoint; older photos with either label cannot reappear as
+            // separate Guided cards on this device.
+            var newestByKey: [String: RemoteShotMetadataRecord] = [:]
+            var newestByShotID: [UUID: RemoteShotMetadataRecord] = [:]
             for row in propertyShots.sorted(by: {
                 if ($0.createdAt ?? .distantPast) != ($1.createdAt ?? .distantPast) {
-                    return ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+                    return ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
                 }
                 return $0.id.uuidString < $1.id.uuidString
             }) {
@@ -55236,18 +55236,19 @@ final class AppState: ObservableObject {
                     }
                     return nil
                 } ?? currentKey
-                let slot = originalKey == currentKey
-                    ? (slotByCurrentKey[currentKey] ?? originalKey) : originalKey
-                slotByCurrentKey[currentKey] = slot
-                slotByShotID[row.id] = slot
-                newestBySlot[slot] = row
+                let newest = newestByKey[currentKey] ?? newestByKey[originalKey] ?? row
+                newestByKey[currentKey] = newest
+                newestByKey[originalKey] = newest
+                newestByShotID[row.id] = newest
             }
+            var winnerIDByGuidedID: [UUID: UUID] = [:]
             for index in guidedRows.indices {
                 let shotID = guidedRows[index].shot?.id ?? guidedRows[index].id
-                let localSlot = slotByShotID[shotID]
-                    ?? LocalConflictRules.guidedShotIdentityKey(guidedRows[index])
-                guard let row = localSlot.flatMap({ newestBySlot[$0] })
+                let localKey = LocalConflictRules.guidedShotIdentityKey(guidedRows[index])
+                guard let row = newestByShotID[shotID]
+                    ?? (remoteByShotID[shotID] == nil ? nil : localKey.flatMap { newestByKey[$0] })
                     ?? remoteByShotID[shotID] else { continue }
+                winnerIDByGuidedID[guidedRows[index].id] = row.id
                 var guided = guidedRows[index]
                 let localClassificationAt = [guided.reassignedAt, guided.labelEditedAt]
                     .compactMap { $0 }.max() ?? .distantPast
@@ -55308,6 +55309,27 @@ final class AppState: ObservableObject {
                     updated += 1
                 }
             }
+            var indexByWinnerID: [UUID: Int] = [:]
+            var mergedRows: [GuidedShot] = []
+            for guided in guidedRows {
+                guard let winnerID = winnerIDByGuidedID[guided.id] else {
+                    mergedRows.append(guided)
+                    continue
+                }
+                if let existingIndex = indexByWinnerID[winnerID] {
+                    let existing = mergedRows[existingIndex]
+                    if (guided.shot?.capturedAt ?? .distantPast) >
+                        (existing.shot?.capturedAt ?? .distantPast) ||
+                        (guided.shot?.capturedAt == existing.shot?.capturedAt && guided.id == winnerID) {
+                        mergedRows[existingIndex] = guided
+                    }
+                    updated += 1
+                } else {
+                    indexByWinnerID[winnerID] = mergedRows.count
+                    mergedRows.append(guided)
+                }
+            }
+            guidedRows = mergedRows
             guard updated > 0 else { return 0 }
             do {
                 try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)

@@ -3502,6 +3502,9 @@ final class LocalStore {
                 partial[shotID] = index
             }
         }
+        var indexByGuidedID = recovered.indices.reduce(into: [UUID: Array<GuidedShot>.Index]()) { partial, index in
+            partial[recovered[index].id] = index
+        }
         var indexByIdentityKey = recovered.indices.reduce(into: [String: Array<GuidedShot>.Index]()) { partial, index in
             if let key = LocalConflictRules.guidedShotIdentityKey(recovered[index]) {
                 partial[key] = index
@@ -3584,6 +3587,29 @@ final class LocalStore {
                     continue
                 }
 
+                // A newer remote replacement can retain the checkpoint ID
+                // while pointing at a different photo. Historical snapshot
+                // recovery must not append the old photo under that same ID
+                // and overwrite the replacement during normalization.
+                if let existingIndex = indexByGuidedID[candidate.id] {
+                    if guidedKnownStateAt(recovered[existingIndex]) >= shot.createdAt ||
+                        isMissingServerGuidedRow {
+                        continue
+                    }
+                    let restored = recoveredGuidedShot(
+                        from: shot,
+                        sourceGuided: recovered[existingIndex],
+                        propertyID: propertyID,
+                        sessionID: session.id
+                    )
+                    recovered[existingIndex] = restored
+                    indexByShotID[shot.shotID] = existingIndex
+                    if let key = LocalConflictRules.guidedShotIdentityKey(restored) {
+                        indexByIdentityKey[key] = existingIndex
+                    }
+                    continue
+                }
+
                 if let key = LocalConflictRules.guidedShotIdentityKey(candidate),
                    let existingIndex = indexByIdentityKey[key] {
                     if isMissingServerGuidedRow { continue }
@@ -3606,6 +3632,7 @@ final class LocalStore {
 
                 let newIndex = recovered.endIndex
                 recovered.append(candidate)
+                indexByGuidedID[candidate.id] = newIndex
                 if let shotID = candidate.shot?.id {
                     indexByShotID[shotID] = newIndex
                 }
