@@ -3742,7 +3742,7 @@ struct SessionHubView: View {
             VStack(spacing: 5) {
                 Text(showFullDocumentationModeChoices ? "Full Documentation" : (showInitialPunchlistConfirmation ? "Start Punchlist?" : "Session Type"))
                     .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(headerPrimaryLabel)
+                    .foregroundColor(showFullDocumentationModeChoices ? .teal : headerPrimaryLabel)
 
                 Text(property.name)
                     .font(.system(size: 17, weight: .semibold))
@@ -3770,9 +3770,10 @@ struct SessionHubView: View {
                     initialSessionChoiceButton(
                         title: "Complete Capture",
                         subtitle: "Complete guided photos and flagged items",
-                        systemImage: "camera.metering.matrix",
+                        systemImage: "photo.stack.fill",
                         isEnabled: true,
-                        disabledCaption: nil
+                        disabledCaption: nil,
+                        modeChoice: true
                     ) {
                         beginInitialFullDocumentationEntry(for: property, mode: .completeCapture)
                     }
@@ -3781,7 +3782,8 @@ struct SessionHubView: View {
                         subtitle: "Add photos or retake selected photos",
                         systemImage: "arrow.trianglehead.clockwise",
                         isEnabled: appState.propertyHasBaseline(property.id),
-                        disabledCaption: "Available after a completed Full Documentation session"
+                        disabledCaption: "Available after a completed Full Documentation session",
+                        modeChoice: true
                     ) {
                         beginInitialFullDocumentationEntry(for: property, mode: .followUp)
                     }
@@ -3810,7 +3812,7 @@ struct SessionHubView: View {
                     initialSessionChoiceButton(
                         title: "Start Full Documentation",
                         subtitle: nil,
-                        systemImage: "camera.metering.matrix",
+                        systemImage: "photo.stack.fill",
                         isEnabled: true,
                         disabledCaption: nil
                     ) {
@@ -3843,7 +3845,7 @@ struct SessionHubView: View {
                     initialSessionChoiceButton(
                         title: "Full Documentation",
                         subtitle: "Guided photos and flags",
-                        systemImage: "camera.metering.matrix",
+                        systemImage: "photo.stack.fill",
                         isEnabled: true,
                         disabledCaption: nil
                     ) {
@@ -3872,7 +3874,7 @@ struct SessionHubView: View {
             } label: {
                 Text("Back")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.blue)
+                    .foregroundColor(showFullDocumentationModeChoices ? .teal : .blue)
                     .padding(.horizontal, 18)
                     .frame(height: 38)
             }
@@ -3897,9 +3899,11 @@ struct SessionHubView: View {
         systemImage: String,
         isEnabled: Bool,
         disabledCaption: String?,
+        modeChoice: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        let tint: Color = modeChoice ? .teal : .blue
+        return Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: systemImage)
                     .font(.system(size: 22, weight: .semibold))
@@ -3923,7 +3927,7 @@ struct SessionHubView: View {
                 if isEnabled {
                     Image(systemName: "arrow.right.circle.fill")
                         .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.blue)
+                        .foregroundColor(tint)
                 } else {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 13, weight: .bold))
@@ -3933,11 +3937,11 @@ struct SessionHubView: View {
             .foregroundColor(isEnabled ? headerPrimaryLabel : .secondary)
             .padding(.horizontal, 14)
             .frame(minHeight: subtitle == nil ? 64 : 82)
-            .background(isEnabled ? Color.blue.opacity(colorScheme == .light ? 0.10 : 0.18) : Color(.tertiarySystemFill))
+            .background(isEnabled ? tint.opacity(colorScheme == .light ? 0.14 : 0.24) : Color(.tertiarySystemFill))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isEnabled ? Color.blue.opacity(0.30) : Color.secondary.opacity(0.18), lineWidth: 1)
+                    .stroke(isEnabled ? tint.opacity(modeChoice ? 0.55 : 0.30) : Color.secondary.opacity(0.18), lineWidth: 1)
             )
             .opacity(isEnabled ? 1 : 0.78)
         }
@@ -26029,7 +26033,7 @@ struct PropertySessionView: View {
                         choiceButton(
                             title: "Complete Capture",
                             subtitle: "Complete guided photos and flagged items",
-                            systemImage: "camera.metering.matrix",
+                            systemImage: "photo.stack.fill",
                             sessionType: .fullDocumentation
                         )
                         choiceButton(
@@ -26049,7 +26053,7 @@ struct PropertySessionView: View {
                         choiceButton(
                             title: "Full Documentation",
                             subtitle: "Property photos, guided photos, and flags",
-                            systemImage: "camera.metering.matrix",
+                            systemImage: "photo.stack.fill",
                             sessionType: .fullDocumentation,
                             opensFullDocumentationModes: true
                         )
