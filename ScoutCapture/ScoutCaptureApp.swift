@@ -14452,8 +14452,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var didSyncFastLanePortalIssueStateAfterPreview: Bool = false
     @State private var fastLanePortalOverlayRevisionAtPrime: Int = 0
     @State private var fastLanePortalGuidedRevisionAtPrime: Int = 0
-    @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
     @State private var didScheduleFastLaneReferenceRefresh: Bool = false
+    @State private var didFinishInitialFastLaneReferenceRefresh: Bool = false
     @State private var fastLaneReferenceRefreshTask: Task<Void, Never>?
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
@@ -14612,7 +14612,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
         }
         .onChange(of: appState.isNetworkAvailable) { _, isAvailable in
-            if isAvailable, !isFastLaneExiting {
+            if isAvailable, !isFastLaneExiting, !isFastLaneInitialReferenceSyncPending {
                 refreshFastLaneSideControlCounts(force: true)
             }
         }
@@ -14620,7 +14620,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard oldPhase != .active,
                   newPhase == .active,
                   previewRunningAt != nil,
-                  !isFastLaneExiting else { return }
+                  !isFastLaneExiting,
+                  !isFastLaneInitialReferenceSyncPending else { return }
             fastLaneMediaHydrationAttemptedKeys.removeAll()
             didCheckFastLaneGuidedPanelMedia = false
             refreshFastLaneSideControlCounts(force: true)
@@ -14671,9 +14672,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 previewRunningAt = Date()
                 recordFastLaneReadyEvent("preview_ready")
                 recordFastLaneOpenDiagnostic()
-                refreshFastLaneSideControlCountsIfNeeded()
                 scheduleFastLaneReferenceRefreshAfterPreview()
-                scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
+                refreshFastLaneSideControlCountsIfNeeded()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -14683,6 +14683,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard notification.object as? UUID == context.propertyID,
                   !isFastLaneExiting else { return }
             fastLanePriorPhotoIdentityCache.invalidate()
+            guard !isFastLaneInitialReferenceSyncPending else { return }
             reloadFastLaneSideControlPayloadFromLocalStore(includeHistory: false)
         }
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
@@ -14690,9 +14691,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             previewRunningAt = Date()
             recordFastLaneReadyEvent("preview_ready")
             recordFastLaneOpenDiagnostic()
-            refreshFastLaneSideControlCountsIfNeeded()
             scheduleFastLaneReferenceRefreshAfterPreview()
-            scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
+            refreshFastLaneSideControlCountsIfNeeded()
         }
         .onDisappear {
             fastLaneReferenceRefreshTask?.cancel()
@@ -14827,8 +14827,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         case .activeIssues:
             ActiveIssuesSheet(
                 mode: .activeIssues,
-                observations: fastLaneSideControlPayload.activeObservations,
-                isHydrating: isLoadingFastLaneSideControlSheet,
+                observations: isFastLaneInitialReferenceSyncPending ? [] : fastLaneSideControlPayload.activeObservations,
+                isHydrating: isLoadingFastLaneSideControlSheet || isFastLaneInitialReferenceSyncPending,
                 currentSessionID: context.sessionID,
                 sessionShotIDs: fastLaneCurrentSessionShotIDs(),
                 resolvedThumbnailPathByID: fastLaneIssueThumbnailPathByID,
@@ -14879,8 +14879,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
         case .guided:
             GuidedChecklistOverlay(
-                guidedShots: fastLaneSideControlPayload.guidedShots,
-                retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
+                guidedShots: isFastLaneInitialReferenceSyncPending ? [] : fastLaneSideControlPayload.guidedShots,
+                retiredGuidedShots: isFastLaneInitialReferenceSyncPending ? [] : fastLaneSideControlPayload.retiredGuidedShots,
                 resolvedThumbnailPathByID: fastLaneGuidedThumbnailPathByID,
                 referencePathByID: fastLaneGuidedReferencePathByID,
                 currentSessionID: context.sessionID,
@@ -14897,12 +14897,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 refreshToken: fastLaneGalleryRefreshToken,
                 cache: fastLaneGalleryImageCache,
+                isHydrating: isFastLaneInitialReferenceSyncPending,
                 compactContextAngle: true,
                 onClose: {
                     recordFastLaneReadyEvent("guided_list_closed")
                     fastLaneSideControlSheetMode = nil
                 },
                 onRefresh: {
+                    guard !isFastLaneInitialReferenceSyncPending else { return }
                     if let orgID = appState.activeOrganizationID {
                         _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
                             propertyID: context.propertyID,
@@ -15340,6 +15342,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         isClosing || fastLaneExitIntentActive
     }
 
+    private var isFastLaneInitialReferenceSyncPending: Bool {
+        appState.isNetworkAvailable &&
+            appState.activeOrganizationID != nil &&
+            !didFinishInitialFastLaneReferenceRefresh
+    }
+
     private var isFastLaneCaptureIntentArmed: Bool {
         fastLaneCaptureIntent != .free
     }
@@ -15544,9 +15552,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
-        let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
+        let activeIssueCount = isFastLaneInitialReferenceSyncPending ? 0 : fastLaneSideControlCounts.activeIssueCount
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
-        let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
+        let guidedCount = isFastLaneInitialReferenceSyncPending ? 0 : fastLaneSideControlCounts.guidedRemainingCount
         return [
             CameraChromeSideControl(
                 id: "active_issues",
@@ -16561,24 +16569,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func refreshFastLaneSideControlCountsIfNeeded() {
+        guard !isFastLaneInitialReferenceSyncPending else { return }
         guard !isRefreshingFastLaneSideControlCounts else { return }
         guard !didRefreshFastLaneSideControlCounts || !didSyncFastLanePortalIssueStateAfterPreview else { return }
         refreshFastLaneSideControlCounts(force: false)
-    }
-
-    private func scheduleFastLanePortalIssueFollowUpRefreshIfNeeded() {
-        guard !didScheduleFastLanePortalIssueFollowUpRefresh else { return }
-        didScheduleFastLanePortalIssueFollowUpRefresh = true
-        Task {
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            await MainActor.run {
-                guard !isFastLaneExiting else { return }
-                guard !didSyncFastLanePortalIssueStateAfterPreview,
-                      !isSyncingFastLanePortalIssueState,
-                      !isRefreshingFastLaneSideControlCounts else { return }
-                refreshFastLaneSideControlCounts(force: true)
-            }
-        }
     }
 
     private func scheduleFastLaneReferenceRefreshAfterPreview() {
@@ -16594,6 +16588,24 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 propertyID: context.propertyID,
                 activeOrganizationID: orgID
             )
+            guard !Task.isCancelled, !isFastLaneExiting else { return }
+            // Publish the complete local snapshot once all cross-device
+            // reference and issue reads have finished. Intermediate rows stay
+            // hidden from the camera badges and side panels.
+            reloadFastLaneSideControlPayloadFromLocalStore()
+            fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
+            fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
+            didSyncFastLanePortalIssueStateAfterPreview = true
+            didFinishInitialFastLaneReferenceRefresh = true
+            isLoadingFastLaneSideControlSheet = false
+            recordFastLaneReadyEvent("initial_reference_sync_finished_issues_\(fastLaneSideControlCounts.activeIssueCount)_guided_\(fastLaneSideControlCounts.guidedRemainingCount)")
+            if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.guided.id {
+                didCheckFastLaneGuidedPanelMedia = false
+                scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+            } else if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.activeIssues.id {
+                didCheckFastLaneIssuePanelMedia = false
+                scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: .activeIssues)
+            }
         }
     }
 
@@ -16697,6 +16709,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func refreshFastLaneSideControlCounts(force: Bool) {
+        guard !isFastLaneInitialReferenceSyncPending else { return }
         if isRefreshingFastLaneSideControlCounts {
             if force {
                 deferredFastLaneSideControlRefreshForce = true
@@ -17573,6 +17586,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func presentFastLaneIssueList(_ mode: FastLaneSideControlSheetMode) {
+        if isFastLaneInitialReferenceSyncPending {
+            fastLaneSideControlSheetMode = mode
+            isLoadingFastLaneSideControlSheet = true
+            return
+        }
         let expectedEmptyText = "No active flagged issues"
         let knownCount = fastLaneSideControlCounts.activeIssueCount
         let cachedRows = fastLaneSideControlPayload.activeObservations
@@ -17588,6 +17606,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func presentFastLaneGuidedChecklist() {
+        if isFastLaneInitialReferenceSyncPending {
+            fastLaneSideControlSheetMode = .guided
+            isLoadingFastLaneSideControlSheet = true
+            return
+        }
         // A remote reconciliation can finish after the camera's opening snapshot.
         // The panel must use the current durable checklist, not that older snapshot.
         reloadFastLaneSideControlPayloadFromLocalStore()

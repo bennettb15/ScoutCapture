@@ -569,6 +569,7 @@ struct GuidedChecklistOverlay: View {
     let buildingDisplayNameForOption: (String) -> String
     let refreshToken: UUID
     @ObservedObject var cache: AssetImageCache
+    var isHydrating: Bool = false
     var compactContextAngle: Bool = false
     @Environment(\.colorScheme) private var colorScheme
     private var theme: ContentView.SheetControlTheme { .forScheme(colorScheme) }
@@ -676,13 +677,22 @@ struct GuidedChecklistOverlay: View {
                         .ignoresSafeArea()
 
                     List {
-                            if visibleShots.isEmpty && !guidedShots.isEmpty {
-                                Text("No photos in this area")
-                                    .foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .listRowBackground(Color.clear)
-                            }
-                            ForEach(visibleShots) { ordered in
+                            if isHydrating {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                    Text("Syncing property photos…")
+                                        .foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .listRowBackground(Color.clear)
+                            } else {
+                                if visibleShots.isEmpty && !guidedShots.isEmpty {
+                                    Text("No photos in this area")
+                                        .foregroundColor(.secondary)
+                                        .frame(maxWidth: .infinity)
+                                        .listRowBackground(Color.clear)
+                                }
+                                ForEach(visibleShots) { ordered in
                                 let item = ordered.shot
                                 GuidedChecklistRow(
                                     guidedShot: item,
@@ -722,6 +732,7 @@ struct GuidedChecklistOverlay: View {
                                     },
                                     compactContextAngle: compactContextAngle
                                 )
+                                }
                             }
                     }
                     .listStyle(.insetGrouped)
