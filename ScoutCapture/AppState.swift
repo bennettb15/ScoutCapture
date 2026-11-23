@@ -42229,6 +42229,11 @@ final class AppState: ObservableObject {
             if propertyStatusByPropertyID != nextCache {
                 propertyStatusByPropertyID = nextCache
             }
+            for row in rows where row.status == .exported {
+                if let sessionID = row.lastExportedSessionID {
+                    clearOriginalUploadProgress(propertyID: row.propertyID, sessionID: sessionID)
+                }
+            }
             lastPropertyStatusRefreshAt = Date()
             // Expiry is time based, so badges must update even when the row is unchanged.
             refreshPropertyRowLockBadgeCache()
@@ -42243,6 +42248,15 @@ final class AppState: ObservableObject {
     }
 
     func markHomePropertyListVisible() {
+        let protectedPropertyID = selectedPropertyID
+        offloadSweepQueue.async {
+            let galleryPrune = StorageRoot.pruneGalleryMediaCache(
+                protectedPropertyID: protectedPropertyID
+            )
+            if galleryPrune.removedFiles > 0 {
+                print("[GalleryCachePrune] files=\(galleryPrune.removedFiles) bytes=\(galleryPrune.removedBytes)")
+            }
+        }
         suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
         let hydratedIDs = Set(propertyRowDetailsHydratedAtByPropertyID.keys)
         guard !pendingPropertyRowDetailHydrationIDs.isEmpty else { return }
@@ -46996,12 +47010,22 @@ final class AppState: ObservableObject {
             let title = isNetworkAvailable ? "Uploading" : "Offline"
             return "\(title) \(progress.confirmedCount)/\(progress.totalCount)"
         case .processingReports:
-            return "Finishing"
+            return "Report processing"
         case .failed:
             if progress.confirmedCount == progress.totalCount {
                 return "Retry upload"
             }
             return "Retry \(progress.confirmedCount)/\(progress.totalCount)"
+        }
+    }
+
+    @MainActor
+    func hasReportProcessingOnThisDevice() -> Bool {
+        let prefix = "scoutcapture.fast-original-upload-progress."
+        return UserDefaults.standard.dictionaryRepresentation().keys.contains { key in
+            guard key.hasPrefix(prefix),
+                  let propertyID = UUID(uuidString: String(key.dropFirst(prefix.count))) else { return false }
+            return originalUploadProgress(propertyID: propertyID)?.phase == .processingReports
         }
     }
 
@@ -47391,7 +47415,8 @@ final class AppState: ObservableObject {
         let savedUploadPropertyIDs = UserDefaults.standard.dictionaryRepresentation().keys.compactMap { key -> UUID? in
             guard key.hasPrefix(progressKeyPrefix),
                   let propertyID = UUID(uuidString: String(key.dropFirst(progressKeyPrefix.count))),
-                  originalUploadProgress(propertyID: propertyID) != nil else { return nil }
+                  let progress = originalUploadProgress(propertyID: propertyID),
+                  progress.phase != .processingReports else { return nil }
             return propertyID
         }
         let propertyIDs = Array(Set(failedPropertyIDs + savedUploadPropertyIDs))
@@ -47424,28 +47449,19 @@ final class AppState: ObservableObject {
         snapshotID: UUID?,
         snapshotPath: String?
     ) async -> Bool {
-        let didMarkExported = await performPropertyStatusShadowWrite(
-            transition: .exported,
-            propertyID: context.propertyID,
-            sessionID: context.sessionID,
-            deviceID: currentDeviceIdentifier(),
-            reason: "fast_lane_report_handoff_accepted"
-        )
-        guard didMarkExported else {
-            print(
-                "[FastRuntimeReportHandoff] accepted_but_exported_status_write_not_confirmed " +
-                "propertyID=\(context.propertyID.uuidString) " +
-                "sessionID=\(context.sessionID.uuidString)"
+        // The report worker owns the exported transition after the package
+        // and ready notification finish. The accepted handoff remains pending
+        // on this device until that server transition arrives.
+        let alreadyExported = propertyStatusByPropertyID[context.propertyID]?.status == .exported &&
+            propertyStatusByPropertyID[context.propertyID]?.lastExportedSessionID == context.sessionID
+        if !alreadyExported {
+            updateLocalPropertyStatusPresentationCache(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                status: .pendingExport,
+                reason: "fast_lane_report_handoff_accepted_local"
             )
-            return false
         }
-
-        updateLocalPropertyStatusPresentationCache(
-            propertyID: context.propertyID,
-            sessionID: context.sessionID,
-            status: .exported,
-            reason: "fast_lane_report_handoff_accepted_local"
-        )
         if let status = applyFastRuntimeCompletionCloudStatus(
             context: context,
             state: .uploaded,
@@ -47478,9 +47494,25 @@ final class AppState: ObservableObject {
         if removedLocalCaptureStores > 0 {
             print("[FastRuntimeReportHandoff] local_capture_storage_pruned=\(removedLocalCaptureStores)")
         }
-        // The cloud has accepted the complete session. Report generation now
-        // continues independently, so the upload is no longer pending here.
-        clearOriginalUploadProgress(propertyID: context.propertyID, sessionID: context.sessionID)
+        if alreadyExported {
+            clearOriginalUploadProgress(propertyID: context.propertyID, sessionID: context.sessionID)
+        } else if var progress = originalUploadProgress(propertyID: context.propertyID),
+                  progress.sessionID == context.sessionID {
+            progress.phase = .processingReports
+            progress.preparedUploads = nil
+            saveOriginalUploadProgress(progress)
+        } else if let orgID = context.orgID,
+                  let ownerUserID = context.ownerUserID {
+            saveOriginalUploadProgress(FastRuntimeOriginalUploadProgress(
+                organizationID: orgID,
+                ownerUserID: ownerUserID,
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                totalCount: completedDraftSummary?.photoCount ?? 0,
+                confirmedShotIDs: [],
+                phase: .processingReports
+            ))
+        }
         if let orgID = context.orgID ??
             propertyStatusByPropertyID[context.propertyID]?.orgID ??
             properties.first(where: { $0.id == context.propertyID })?.orgId ??
@@ -54619,10 +54651,12 @@ final class AppState: ObservableObject {
 
     private func reconcileLatestReferenceSessionFreshness(
         propertyID: UUID,
-        activeOrganizationID: UUID
+        activeOrganizationID: UUID,
+        force: Bool = false
     ) async -> ReferenceFreshnessResult? {
         let startedAt = Date()
-        if let last = propertyReferenceMetadataRefreshAtByPropertyID[propertyID],
+        if !force,
+           let last = propertyReferenceMetadataRefreshAtByPropertyID[propertyID],
            startedAt.timeIntervalSince(last) < 5.0 {
             print(
                 "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
@@ -54992,6 +55026,25 @@ final class AppState: ObservableObject {
         )
         await policyRefresh
         return didChangeLocalState
+    }
+
+    @discardableResult
+    func refreshRemoteReferencesBeforeCameraEntry(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async -> Bool {
+        let changed = await syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+        // The checklist must use the current shot identity and its image before
+        // the camera presents cached Guided or Flagged rows.
+        let freshness = await reconcileLatestReferenceSessionFreshness(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID,
+            force: true
+        )
+        return changed || freshness?.hasPendingReferenceState == false
     }
 
     func fastRuntimePortalOverlayRevision(propertyID: UUID) -> Int {

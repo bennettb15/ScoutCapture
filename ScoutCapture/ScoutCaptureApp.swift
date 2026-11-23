@@ -887,6 +887,8 @@ struct SessionHubView: View {
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
     @State private var initialSessionTypePickerProperty: Property? = nil
+    @State private var entryReferenceSyncPropertyID: UUID? = nil
+    @State private var entryReferenceSyncTask: Task<Bool, Never>? = nil
     @State private var showFullDocumentationModeChoices = false
     @State private var shouldRecommendInitialOverview = false
     @State private var showInitialPunchlistConfirmation = false
@@ -1322,7 +1324,9 @@ struct SessionHubView: View {
                 await appState.refreshVisiblePropertyStatusForHome(reason: "home_visible")
                 while !Task.isCancelled {
                     do {
-                        try await Task.sleep(for: .seconds(20))
+                        try await Task.sleep(for: .seconds(
+                            appState.hasReportProcessingOnThisDevice() ? 3 : 20
+                        ))
                     } catch {
                         return
                     }
@@ -1689,7 +1693,8 @@ struct SessionHubView: View {
                     chipLabel("Draft", tint: .orange)
                 }
                 if let uploadProgressLabel {
-                    chipLabel(uploadProgressLabel, tint: uploadProgressLabel.hasPrefix("Uploading") ? .blue : .orange)
+                    chipLabel(uploadProgressLabel, tint: uploadProgressLabel.hasPrefix("Uploading") ||
+                        uploadProgressLabel == "Report processing" ? .blue : .orange)
                 } else if pendingUploadCount > 0 {
                     chipLabel("\(pendingUploadCount) to upload", tint: .orange)
                 }
@@ -2655,17 +2660,6 @@ struct SessionHubView: View {
                             Toggle("Show Archived", isOn: $showArchivedProperties)
                                 .tint(.blue)
                         }
-
-                        #if DEBUG
-                        Section("Storage") {
-                            Button("Manage Local Storage") {
-                                dismiss()
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                    onOpenCloudBackup?()
-                                }
-                            }
-                        }
-                        #endif
 
                         if let activeOrganizationID = appState.activeOrganizationID {
                             Section("Activity") {
@@ -4278,6 +4272,15 @@ struct SessionHubView: View {
             showInitialPunchlistConfirmation = false
             showFullDocumentationModeChoices = false
             initialSessionTypePickerProperty = property
+            entryReferenceSyncTask?.cancel()
+            entryReferenceSyncPropertyID = property.id
+            entryReferenceSyncTask = Task {
+                guard let orgID = property.orgId ?? appState.activeOrganizationID else { return false }
+                return await appState.refreshRemoteReferencesBeforeCameraEntry(
+                    propertyID: property.id,
+                    activeOrganizationID: orgID
+                )
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                 guard tapToken == propertyTapToken else { return }
                 if pressedPropertyID == property.id { pressedPropertyID = nil }
@@ -4560,6 +4563,12 @@ struct SessionHubView: View {
         fastLaneCloseResult = nil
         fastLaneOpeningProperty = property
         Task {
+            if entryReferenceSyncPropertyID == property.id,
+               let entryReferenceSyncTask {
+                _ = await entryReferenceSyncTask.value
+                entryReferenceSyncPropertyID = nil
+                self.entryReferenceSyncTask = nil
+            }
             var result = await appState.runFastRuntimePrototype(
                 propertyID: property.id,
                 sessionType: sessionType,
@@ -6212,10 +6221,11 @@ private final class PropertyListTableCell: UITableViewCell {
         archivedLabel.isHidden = !row.isArchived
         draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft || row.uploadProgressLabel != nil
         uploadRetryLabel.text = row.uploadProgressLabel ?? "\(row.pendingUploadCount) to upload"
-        uploadRetryLabel.accessibilityLabel = row.uploadProgressLabel == "Finishing"
-            ? "Finishing session upload" : uploadRetryLabel.text
+        uploadRetryLabel.accessibilityLabel = row.uploadProgressLabel == "Report processing"
+            ? "Photos uploaded. Report processing." : uploadRetryLabel.text
         uploadRetryLabel.isHidden = row.uploadProgressLabel == nil && row.pendingUploadCount == 0
-        let isUploading = row.uploadProgressLabel?.hasPrefix("Uploading") == true
+        let isUploading = row.uploadProgressLabel?.hasPrefix("Uploading") == true ||
+            row.uploadProgressLabel == "Report processing"
         uploadRetryLabel.textColor = isUploading ? .systemBlue : .systemOrange
         uploadRetryLabel.backgroundColor = (isUploading ? UIColor.systemBlue : UIColor.systemOrange).withAlphaComponent(0.15)
         uploadRetryLabel.layer.borderColor = (isUploading ? UIColor.systemBlue : UIColor.systemOrange).withAlphaComponent(0.35).cgColor

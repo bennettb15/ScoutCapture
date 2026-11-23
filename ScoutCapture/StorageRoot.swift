@@ -63,6 +63,48 @@ enum StorageRoot {
             .appendingPathComponent("\(shotID.uuidString).\(fileExtension)", isDirectory: false)
     }
 
+    nonisolated static func pruneGalleryMediaCache(
+        protectedPropertyID: UUID?,
+        maximumBytes: Int64 = 160 * 1_024 * 1_024,
+        maximumAge: TimeInterval = 30 * 24 * 60 * 60
+    ) -> (removedFiles: Int, removedBytes: Int64) {
+        let root = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScoutCaptureGallery", isDirectory: true)
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return (0, 0) }
+
+        let protectedPrefix = protectedPropertyID.map {
+            root.appendingPathComponent($0.uuidString, isDirectory: true).path + "/"
+        }
+        var files: [(url: URL, size: Int64, modifiedAt: Date)] = []
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: [
+                .isRegularFileKey, .fileSizeKey, .contentModificationDateKey
+            ]), values.isRegularFile == true else { continue }
+            files.append((url, Int64(values.fileSize ?? 0), values.contentModificationDate ?? .distantPast))
+        }
+        var retainedBytes = files.reduce(Int64(0)) { $0 + $1.size }
+        let oldBefore = Date().addingTimeInterval(-maximumAge)
+        var removedFiles = 0
+        var removedBytes: Int64 = 0
+        for file in files.sorted(by: { $0.modifiedAt < $1.modifiedAt }) {
+            if file.modifiedAt >= oldBefore && retainedBytes <= maximumBytes { break }
+            if let protectedPrefix, file.url.path.hasPrefix(protectedPrefix) { continue }
+            do {
+                try fileManager.removeItem(at: file.url)
+                retainedBytes -= file.size
+                removedFiles += 1
+                removedBytes += file.size
+            } catch {
+                continue
+            }
+        }
+        return (removedFiles, removedBytes)
+    }
+
     nonisolated static func scoutRootCandidates() -> [URL] {
         let resolution = resolve()
         var candidates: [URL] = [resolution.activeRoot.appendingPathComponent("SCOUT", isDirectory: true)]
