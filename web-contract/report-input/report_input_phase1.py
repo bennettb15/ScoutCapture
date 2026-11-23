@@ -1051,6 +1051,7 @@ def full_documentation_mode(metadata: dict[str, Any]) -> str:
 
 def compose_punchlist_history(
     sources: list[dict[str, Any]], storage: StorageProbe, *, include_prior_issues: bool = False,
+    guided_lineage: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Use the newest full visit's layout and the latest real photo per issue."""
     baseline = next((source for source in reversed(sources)
@@ -1080,6 +1081,10 @@ def compose_punchlist_history(
         actor = merge_actor_identity(actor_identity(metadata), merge_actor_identity(actor_identity(payload), actor_identity(row)))
         issues = issue_by_id(metadata)
         shots = [report_shot(metadata, shot, issues, actor) for shot in exported_shots(metadata)]
+        for shot in shots:
+            if shot.get("is_guided") and not shot.get("supersedes_shot_id"):
+                current = (guided_lineage or {}).get(shot["shot_id"].lower()) or {}
+                shot["supersedes_shot_id"] = trim(current.get("supersedes_shot_id"))
         for shot in shots:
             shot["recent_update"] = current_is_photo_update and shot["source_shot_session_id"].lower() == current_session_id
         shots.sort(key=lambda shot: (shot.get("captured_at_utc") or "", shot["shot_id"]))
@@ -1112,6 +1117,36 @@ def compose_punchlist_history(
                     or (trim(shot.get("capture_kind")) or "").lower() in {"reference", "carried_forward"}):
                 continue
             issue_photos.setdefault(iid.lower(), []).append(shot)
+    if baseline:
+        # A Follow-Up retake belongs to this report only if it descends from
+        # the selected Full Documentation baseline (or matches one of its
+        # Guided slots). Older, unrelated Guided chains can still be active in
+        # historical snapshots, but they are not checkpoints in this visit.
+        eligible_ids = {shot["shot_id"].lower() for shot in baseline_shots
+                        if shot.get("is_guided") and not shot.get("issue_id")}
+        eligible_ids.update(str(shot["guided_row_id"]).lower()
+                            for shot in baseline_shots if shot.get("is_guided")
+                            and trim(shot.get("guided_row_id")))
+        eligible_keys = {(trim(shot.get("shot_key")) or "").lower()
+                         for shot in baseline_shots if shot.get("is_guided") and not shot.get("issue_id")}
+        relevant_shots = []
+        for shot in follow_up_property_shots:
+            if not shot.get("is_guided") or shot.get("issue_id"):
+                relevant_shots.append(shot)
+                continue
+            predecessor = (trim(shot.get("supersedes_shot_id")) or "").lower()
+            row_id = (trim(shot.get("guided_row_id")) or "").lower()
+            key = (trim(shot.get("shot_key")) or "").lower()
+            new_capture = not predecessor and (trim(shot.get("capture_kind")) or "").lower() != "retake"
+            if not (predecessor and predecessor in eligible_ids) and not (row_id and row_id in eligible_ids) and key not in eligible_keys and not new_capture:
+                continue
+            relevant_shots.append(shot)
+            eligible_ids.add(shot["shot_id"].lower())
+            if row_id:
+                eligible_ids.add(row_id)
+            if key:
+                eligible_keys.add(key)
+        follow_up_property_shots = relevant_shots
     latest_shots = []
     comparisons = []
     for iid, history in sorted(issue_photos.items()):
@@ -1358,7 +1393,7 @@ def operational_guided_shots(
     offset = 0
     while True:
         page = client.select_rows("shots", {
-            "select": "id,org_id,property_id,building,elevation,detail_type,angle_index,lifecycle_state",
+            "select": "id,org_id,property_id,building,elevation,detail_type,angle_index,lifecycle_state,supersedes_shot_id",
             "org_id": f"eq.{org_id}", "property_id": f"eq.{property_id}",
             "is_guided": "eq.true", "deleted_at": "is.null",
             "order": "created_at.asc,id.asc", "limit": "200", "offset": str(offset),
@@ -1468,11 +1503,13 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     is_full_documentation_follow_up = session_type == "full_documentation" and full_documentation_mode(metadata) == "follow_up"
     if session_type == "punchlist_visit" or current_review or is_full_documentation_follow_up:
         sources = scoped_snapshot_history(args, client, row, payload, metadata)
-        composition = compose_punchlist_history(sources, storage, include_prior_issues=current_review)
+        current_guided = operational_guided_shots(client, row) if is_full_documentation_follow_up and not getattr(args, "snapshot_history_only", False) else {}
+        composition = compose_punchlist_history(sources, storage, include_prior_issues=current_review,
+                                               guided_lineage=current_guided)
         if is_full_documentation_follow_up and not composition["baseline"]:
             raise Phase1Error("Full Documentation Follow-Up requires a prior completed Full Documentation capture.")
         if is_full_documentation_follow_up and not getattr(args, "snapshot_history_only", False):
-            apply_operational_guided_shots(composition, operational_guided_shots(client, row))
+            apply_operational_guided_shots(composition, current_guided)
         operational_overlays = {} if current_review or getattr(args, "snapshot_history_only", False) else operational_issue_overlays(
             client, row, [shot["issue_id"] for shot in composition["punchlist_shots"]])
         finalized_shot_ids = {

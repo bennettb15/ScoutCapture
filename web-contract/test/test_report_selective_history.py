@@ -177,6 +177,7 @@ class SelectiveHistoryTests(unittest.TestCase):
             'storagePath': 'sessions/session-full/shots/guided-original/original.jpg',
         }
         self.baseline['metadata']['shots'].append(original)
+        self.baseline['payload']['rawSessionJSON'] = json.dumps(self.baseline['metadata'])
         updated = {**original, 'shotID': 'guided-updated',
                    'sessionID': 'session-follow', 'createdAt': '2026-10-02T10:30:00Z',
                    'captureKind': 'retake', 'originalFilename': 'updated.jpg',
