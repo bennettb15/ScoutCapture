@@ -3512,10 +3512,14 @@ final class LocalStore {
                     guard shot.sessionID == session.id,
                           LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot) else { continue }
                     let key = shot.shotKey.lowercased()
+                    // A predecessor link takes precedence over a reused label.
+                    // Otherwise a retake from a separate branch can join this
+                    // baseline merely because its classification matches.
                     let linked = ids.contains(shot.shotID) ||
-                        (shot.supersedesShotID.map(ids.contains) ?? false) || keys.contains(key)
+                        (shot.supersedesShotID.map(ids.contains) ?? keys.contains(key))
                     let newCapture = shot.supersedesShotID == nil &&
-                        shot.captureKind?.lowercased() != "retake"
+                        shot.captureKind?.lowercased() != "retake" &&
+                        shot.createdAt >= session.startedAt
                     guard linked || newCapture else { continue }
                     ids.insert(shot.shotID)
                     keys.insert(key)

@@ -573,6 +573,7 @@ struct GuidedChecklistOverlay: View {
     @Environment(\.colorScheme) private var colorScheme
     private var theme: ContentView.SheetControlTheme { .forScheme(colorScheme) }
     let onClose: () -> Void
+    var onRefresh: (() async -> Void)? = nil
     let onSelectGuided: (GuidedShot) -> Void
     let onSkip: (GuidedShot, SkipReason, String?) -> Void
     let onUndoSkip: (GuidedShot) -> Void
@@ -728,6 +729,9 @@ struct GuidedChecklistOverlay: View {
                     .scrollIndicators(.hidden)
                     .scrollContentBackground(.hidden)
                     .background(Color.clear)
+                    .refreshable {
+                        await onRefresh?()
+                    }
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .top, spacing: 0) {

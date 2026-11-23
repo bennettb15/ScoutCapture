@@ -3,6 +3,26 @@ import XCTest
 
 @MainActor
 final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
+    func testSnapshotModeDecodeAcceptsAndroidPartialGuidedPhoto() throws {
+        let sessionID = UUID()
+        let propertyID = UUID()
+        let orgID = UUID()
+        let raw = Data("""
+        {
+          "orgID":"\(orgID)", "propertyID":"\(propertyID)", "sessionID":"\(sessionID)",
+          "sessionType":"full_documentation", "fullDocumentationMode":"follow_up",
+          "startedAt":"2026-11-23T12:46:02.070851+00:00",
+          "guidedShots":[{"title":"B1 West Sidewalk","shot":{"id":"\(UUID())"}}]
+        }
+        """.utf8)
+        let mode = try AppState.decodeSnapshotSessionMode(from: raw)
+        XCTAssertEqual(mode.sessionID, sessionID)
+        XCTAssertEqual(mode.propertyID, propertyID)
+        XCTAssertEqual(mode.orgID, orgID)
+        XCTAssertEqual(mode.sessionType, .fullDocumentation)
+        XCTAssertEqual(mode.fullDocumentationMode, .followUp)
+    }
+
     private struct Fixture {
         var deviceBStore: LocalStore
         var appState: AppState
@@ -1087,6 +1107,156 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertFalse(eligible.contains(oldReplacementID))
     }
 
+    func testCurrentBaselineRestoresMissingEntryAfterOrphanPrune() throws {
+        let fixture = try makeFixture()
+        let capturedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-22T21:30:00Z"))
+        var baselineSession = fixture.session
+        baselineSession.startedAt = capturedAt.addingTimeInterval(-60)
+        let baseline = try fixture.deviceBStore.upsertSession(baselineSession)
+        let entryID = UUID()
+        let foundationID = UUID()
+        let copiedOldID = UUID()
+        let olderSessionID = UUID()
+        let oldSidewalkID = UUID()
+        let sidewalkID = UUID()
+        let orphanID = UUID()
+        let followID = UUID()
+        func baselineShot(_ id: UUID, elevation: String, detail: String) -> ShotMetadata {
+            ShotMetadata(
+                shotID: id, propertyID: fixture.property.id, sessionID: baseline.id,
+                createdAt: capturedAt, updatedAt: capturedAt,
+                building: "B1", elevation: elevation, detailType: detail, angleIndex: 1,
+                shotKey: "b1|\(elevation.lowercased())|\(detail.lowercased())|1",
+                isGuided: true, isFlagged: false, issueID: nil, issueStatus: nil,
+                noteText: nil, noteCategory: nil, originalFilename: "baseline.jpg",
+                originalRelativePath: "Originals/baseline.jpg", originalByteSize: 123,
+                storageBucket: "media", storagePath: "orgs/test/baseline.jpg",
+                stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
+                lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
+                accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+            )
+        }
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: baseline.id
+        )
+        metadata.startedAt = baseline.startedAt
+        metadata.shots = [
+            baselineShot(entryID, elevation: "North", detail: "Entry / Porch"),
+            baselineShot(foundationID, elevation: "South", detail: "Foundation"),
+            baselineShot(copiedOldID, elevation: "East", detail: "Elevation")
+        ]
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: baseline.id, metadata: metadata
+        )
+        let crossWired = GuidedShot(
+            id: oldSidewalkID, title: "B1 East Elevation", building: "B1",
+            targetElevation: "East", detailType: "Elevation", angleIndex: 1,
+            shot: Shot(id: orphanID, capturedAt: capturedAt), isCompleted: true
+        )
+        let sidewalk = GuidedShot(
+            id: sidewalkID, title: "B1 West Sidewalk", building: "B1",
+            targetElevation: "West", detailType: "Sidewalk", angleIndex: 2,
+            shot: Shot(id: sidewalkID, capturedAt: capturedAt.addingTimeInterval(60)),
+            isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots(
+            [crossWired, sidewalk], propertyID: fixture.property.id
+        )
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        XCTAssertEqual(fixture.appState.sessions(for: fixture.property.id).map(\.id), [baseline.id])
+        XCTAssertEqual(try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: baseline.id
+        ).shots.count, 3)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+            [
+              {"id":"\(entryID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+               "session_id":"\(baseline.id)","created_at":"2026-11-22T21:30:00Z",
+               "building":"B1","elevation":"North","detail_type":"Entry / Porch","angle_index":1,
+               "shot_key":"b1|north|entry / porch|1","capture_kind":"captured","is_guided":true,
+               "upload_state":"uploaded","storage_bucket":"media","storage_path":"orgs/test/entry.jpg"},
+              {"id":"\(foundationID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+               "session_id":"\(baseline.id)","created_at":"2026-11-22T21:30:00Z",
+               "building":"B1","elevation":"South","detail_type":"Foundation","angle_index":1,
+               "shot_key":"b1|south|foundation|1","capture_kind":"captured","is_guided":true,
+               "upload_state":"uploaded","storage_bucket":"media","storage_path":"orgs/test/foundation.jpg"},
+              {"id":"\(copiedOldID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+               "session_id":"\(olderSessionID)","created_at":"2026-11-17T21:01:00Z",
+               "building":"B1","elevation":"East","detail_type":"Elevation","angle_index":1,
+               "shot_key":"b1|east|elevation|1","capture_kind":"captured","is_guided":true,
+               "upload_state":"uploaded","storage_bucket":"media","storage_path":"orgs/test/old-east.jpg"},
+              {"id":"\(oldSidewalkID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+               "session_id":"\(followID)","created_at":"2026-11-23T10:00:00Z",
+               "building":"B1","elevation":"West","detail_type":"Sidewalk","angle_index":2,
+               "shot_key":"b1|west|sidewalk|2","supersedes_shot_id":"\(foundationID)",
+               "is_guided":true,"upload_state":"uploaded","storage_bucket":"media",
+               "storage_path":"orgs/test/older-sidewalk.jpg"},
+              {"id":"\(sidewalkID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+               "session_id":"\(followID)","created_at":"2026-11-23T12:46:00Z",
+               "building":"B1","elevation":"West","detail_type":"Sidewalk","angle_index":2,
+               "shot_key":"b1|west|sidewalk|2","supersedes_shot_id":"\(oldSidewalkID)",
+               "is_guided":true,"upload_state":"uploaded","storage_bucket":"media",
+               "storage_path":"orgs/test/sidewalk.jpg"},
+              {"id":"\(orphanID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+               "session_id":"\(followID)","created_at":"2026-11-23T11:00:00Z",
+               "building":"B1","elevation":"East","detail_type":"Elevation","angle_index":1,
+               "shot_key":"b1|east|elevation|1","capture_kind":"retake","is_guided":true,
+               "upload_state":"uploaded","storage_bucket":"media","storage_path":"orgs/test/orphan.jpg"}
+            ]
+            """.utf8))
+
+        XCTAssertGreaterThan(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        ), 0)
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(Set(rows.compactMap { $0.shot?.id }), Set([entryID, sidewalkID]))
+        XCTAssertFalse(rows.contains { $0.shot?.id == orphanID })
+    }
+
+    func testExplicitPredecessorKeepsOrphanRetakeOffCurrentBaseline() throws {
+        let baselineID = UUID()
+        let baselineShotID = UUID()
+        let orphanRootID = UUID()
+        let orphanRetakeID = UUID()
+        let orphanLatestID = UUID()
+        let currentID = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let rows = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+        [
+          {"id":"\(baselineShotID)","session_id":"\(baselineID)",
+           "created_at":"2026-11-22T21:30:00Z","is_guided":true,
+           "shot_key":"b1|north|entry / porch|2","capture_kind":"captured"},
+          {"id":"\(orphanRootID)","created_at":"2026-11-23T02:38:00Z",
+           "is_guided":true,"shot_key":"b1|east|pool|1","capture_kind":"retake"},
+          {"id":"\(orphanRetakeID)","created_at":"2026-11-23T04:34:00Z",
+           "is_guided":true,"shot_key":"b1|south|roofline|1","capture_kind":"captured",
+           "logical_shot_identity":"other-session|flagged|no-issue|b1|north|entry / porch|2",
+           "supersedes_shot_id":"\(orphanRootID)"},
+          {"id":"\(orphanLatestID)","created_at":"2026-11-23T04:37:00Z",
+           "is_guided":true,"shot_key":"b1|east|elevation|1","capture_kind":"retake",
+           "supersedes_shot_id":"\(orphanRetakeID)"},
+          {"id":"\(currentID)","created_at":"2026-11-23T12:48:00Z",
+           "is_guided":true,"shot_key":"b1|west|sidewalk|2","capture_kind":"captured",
+           "supersedes_shot_id":"\(baselineShotID)"}
+        ]
+        """.utf8))
+        let eligible = AppState.currentGuidedRemoteShotIDs(
+            rows, baselineSessionID: baselineID,
+            baselineShotIDs: [baselineShotID],
+            baselineShotKeys: ["b1|north|entry / porch|2"],
+            baselineStartedAt: try XCTUnwrap(
+                ISO8601DateFormatter().date(from: "2026-11-22T21:29:00Z")
+            )
+        )
+        XCTAssertTrue(eligible.contains(currentID))
+        XCTAssertFalse(eligible.contains(orphanRootID))
+        XCTAssertFalse(eligible.contains(orphanRetakeID))
+        XCTAssertFalse(eligible.contains(orphanLatestID))
+    }
+
     func testHistoricalRecoveryDoesNotRecreateOrphanOutsideLatestBaseline() throws {
         let fixture = try makeFixture()
         _ = try fixture.deviceBStore.upsertSession(fixture.session)
@@ -1130,6 +1300,23 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             startedAt: Date(timeIntervalSinceReferenceDate: 300), status: .completed,
             endedAt: Date(timeIntervalSinceReferenceDate: 400), isSealed: true
         ))
+        // An older photo copied into a later session's metadata has that
+        // session ID after normalization, but its capture time predates entry.
+        // It must not become a new checkpoint or admit a later retake.
+        let copiedRootID = UUID()
+        let copiedRoot = ShotMetadata(
+            shotID: copiedRootID, propertyID: fixture.property.id, sessionID: follow.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 250),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 250),
+            building: "A", elevation: "South", detailType: "Roofline", angleIndex: 1,
+            shotKey: "a|south|roofline|1", isGuided: true, isFlagged: false,
+            issueID: nil, issueStatus: nil, noteText: nil, noteCategory: nil,
+            originalFilename: "copied.jpg", originalRelativePath: "orgs/test/copied.jpg",
+            originalByteSize: 123, storageBucket: "media", storagePath: "orgs/test/copied.jpg",
+            stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
+            lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
+            accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+        )
         let orphanShot = ShotMetadata(
             shotID: UUID(), propertyID: fixture.property.id, sessionID: follow.id,
             createdAt: Date(timeIntervalSinceReferenceDate: 350),
@@ -1142,12 +1329,13 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             storageBucket: "media", storagePath: "orgs/test/orphan.jpg",
             stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
             lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
-            accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+            accuracyMeters: nil, imageWidth: nil, imageHeight: nil,
+            supersedesShotID: copiedRootID
         )
         var followMetadata = baselineMetadata
         followMetadata.sessionID = follow.id
         followMetadata.fullDocumentationMode = .followUp
-        followMetadata.shots = [orphanShot]
+        followMetadata.shots = [copiedRoot, orphanShot]
         try fixture.deviceBStore.saveSessionMetadataAtomically(
             propertyID: fixture.property.id, sessionID: follow.id,
             metadata: followMetadata
@@ -1155,6 +1343,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
 
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertTrue(rows.contains { $0.shot?.id == baselineShotID })
+        XCTAssertFalse(rows.contains { $0.shot?.id == copiedRootID })
         XCTAssertFalse(rows.contains { $0.shot?.id == orphanShot.shotID })
     }
 

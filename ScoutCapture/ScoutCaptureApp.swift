@@ -1527,6 +1527,13 @@ struct SessionHubView: View {
         }
         Task {
             await appState.refreshPropertiesAwaitingForegroundRefresh()
+            if let propertyID = appState.selectedPropertyID,
+               let orgID = appState.activeOrganizationID {
+                _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
+                    propertyID: propertyID,
+                    activeOrganizationID: orgID
+                )
+            }
             await appState.refreshLightweightPropertyEntryLocks(
                 propertyIDs: filteredActiveProperties.map(\.id),
                 reason: "manual_home_refresh"
@@ -14887,6 +14894,24 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     recordFastLaneReadyEvent("guided_list_closed")
                     fastLaneSideControlSheetMode = nil
                 },
+                onRefresh: {
+                    if let orgID = appState.activeOrganizationID {
+                        _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
+                            propertyID: context.propertyID,
+                            activeOrganizationID: orgID
+                        )
+                    }
+                    let payload = appState.fastRuntimePreviewSideControlPayload(
+                        propertyID: context.propertyID,
+                        sessionType: context.sessionType,
+                        currentSessionID: context.sessionID
+                    )
+                    let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+                    fastLaneSideControlPayload = scopedPayload
+                    fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+                    refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                    fastLaneGalleryRefreshToken = UUID()
+                },
                 onSelectGuided: { guidedShot in
                     armFastLaneGuidedShot(guidedShot)
                 },
@@ -17520,6 +17545,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func presentFastLaneGuidedChecklist() {
+        // A remote reconciliation can finish after the camera's opening snapshot.
+        // The panel must use the current durable checklist, not that older snapshot.
+        reloadFastLaneSideControlPayloadFromLocalStore()
+        recordFastLaneReadyEvent("guided_open_reloaded_\(fastLaneSideControlPayload.guidedShots.count)")
         if !fastLaneSideControlPayload.guidedShots.isEmpty ||
             fastLaneSideControlCounts.guidedRemainingCount > 0 ||
             !didRefreshFastLaneSideControlCounts {

@@ -12665,6 +12665,8 @@ final class AppState: ObservableObject {
             let session = Session(
                 id: record.id,
                 propertyID: record.propertyID,
+                sessionType: existingSession?.sessionType ?? .fullDocumentation,
+                fullDocumentationMode: existingSession?.fullDocumentationMode ?? .completeCapture,
                 startedAt: startedAt,
                 status: reconciledStatus,
                 endedAt: reconciledEndedAt,
@@ -19323,6 +19325,8 @@ final class AppState: ObservableObject {
             let session = Session(
                 id: sessionID,
                 propertyID: propertyID,
+                sessionType: metadata.sessionType,
+                fullDocumentationMode: metadata.fullDocumentationMode,
                 startedAt: metadata.startedAt,
                 status: metadata.status,
                 endedAt: metadata.endedAt,
@@ -19369,6 +19373,19 @@ final class AppState: ObservableObject {
         let payload: SessionSnapshotPayloadForChecksum
         let payloadData: Data
         let metadata: SessionMetadata
+    }
+
+    struct SnapshotSessionModeMetadata: Decodable {
+        let orgID: UUID?
+        let propertyID: UUID
+        let sessionID: UUID
+        let sessionType: SessionType
+        let fullDocumentationMode: FullDocumentationMode
+    }
+
+    private struct VerifiedSessionSnapshotModeCandidate {
+        let row: SessionSnapshotUploadRow
+        let metadata: SnapshotSessionModeMetadata
     }
 
     @discardableResult
@@ -19464,6 +19481,22 @@ final class AppState: ObservableObject {
                     propertyID: propertyID,
                     checkedAt: checkedAt
                 )
+                try await reconcileSnapshotSessionModesThroughCurrentBaseline(
+                    rows: sortedRows,
+                    firstCandidate: VerifiedSessionSnapshotModeCandidate(
+                        row: candidate.row,
+                        metadata: SnapshotSessionModeMetadata(
+                            orgID: candidate.metadata.orgID,
+                            propertyID: candidate.metadata.propertyID,
+                            sessionID: candidate.metadata.sessionID,
+                            sessionType: candidate.metadata.sessionType,
+                            fullDocumentationMode: candidate.metadata.fullDocumentationMode
+                        )
+                    ),
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    checkedAt: checkedAt
+                )
                 print(
                     "[SessionSnapshotRecall] propertyID=\(propertyID.uuidString) " +
                     "sessionID=\(candidate.row.sessionID.uuidString) " +
@@ -19503,6 +19536,149 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func reconcileSnapshotSessionModesThroughCurrentBaseline(
+        rows: [SessionSnapshotUploadRow],
+        firstCandidate: VerifiedSessionSnapshotModeCandidate,
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        checkedAt: Date
+    ) async throws {
+        let receiptKey = "scout.snapshotSessionModes.v4.\(propertyID.uuidString)"
+        if userDefaults.string(forKey: receiptKey) == firstCandidate.row.id.uuidString { return }
+        var seenSessionIDs = Set<UUID>()
+        var page = rows
+        var nextOffset = rows.count
+        while !page.isEmpty {
+            for row in page {
+                guard seenSessionIDs.insert(row.sessionID).inserted else { continue }
+                let candidate: VerifiedSessionSnapshotModeCandidate
+                if row.id == firstCandidate.row.id {
+                    candidate = firstCandidate
+                } else {
+                    guard let verified = await verifiedSessionSnapshotModeCandidateForPropertyOpen(
+                        row: row,
+                        propertyID: propertyID,
+                        activeOrganizationID: activeOrganizationID,
+                        checkedAt: checkedAt
+                    ) else { return }
+                    candidate = verified
+                }
+                let metadata = candidate.metadata
+                if var session = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID))?
+                    .first(where: { $0.id == row.sessionID }),
+                   session.sessionType != metadata.sessionType ||
+                    session.fullDocumentationMode != metadata.fullDocumentationMode {
+                    session.sessionType = metadata.sessionType
+                    session.fullDocumentationMode = metadata.fullDocumentationMode
+                    _ = try localStore.upsertSession(session)
+                }
+                if metadata.sessionType == .fullDocumentation &&
+                    metadata.fullDocumentationMode == .completeCapture {
+                    reloadSessionCache(for: propertyID)
+                    userDefaults.set(firstCandidate.row.id.uuidString, forKey: receiptKey)
+                    return
+                }
+            }
+            let previousIDs = Set(page.map(\.id))
+            let nextPage = try await fetchSessionSnapshotRows(
+                snapshotID: nil,
+                propertyID: propertyID,
+                sessionID: nil,
+                limit: 50,
+                offset: nextOffset
+            )
+            if Set(nextPage.map(\.id)) == previousIDs { break }
+            page = nextPage
+            nextOffset += page.count
+        }
+        reloadSessionCache(for: propertyID)
+        // A property without a verified Full baseline must be checked again
+        // when more history becomes available; it is not a complete repair.
+    }
+
+    private func reconcileVerifiedSnapshotSessionModesBeforeCameraEntry(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async {
+        guard backendFeatureFlags.supabaseEnabled,
+              canAccessProperty(propertyID),
+              canAccessOrganization(activeOrganizationID) else { return }
+        do {
+            let rows = try await fetchSessionSnapshotRows(
+                snapshotID: nil, propertyID: propertyID, sessionID: nil, limit: 50
+            )
+            let sortedRows = rows
+                .filter { $0.propertyID == propertyID && $0.orgID == activeOrganizationID }
+                .sorted(by: Self.sessionSnapshotUploadRowSort)
+            guard let firstRow = sortedRows.first else { return }
+            let receiptKey = "scout.snapshotSessionModes.v4.\(propertyID.uuidString)"
+            if userDefaults.string(forKey: receiptKey) == firstRow.id.uuidString { return }
+            guard let firstCandidate = await verifiedSessionSnapshotModeCandidateForPropertyOpen(
+                    row: firstRow,
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    checkedAt: Date()
+                  ) else { return }
+            try await reconcileSnapshotSessionModesThroughCurrentBaseline(
+                rows: sortedRows,
+                firstCandidate: firstCandidate,
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID,
+                checkedAt: Date()
+            )
+        } catch {
+            print("[SessionModeRecall] propertyID=\(propertyID.uuidString) " +
+                  "result=skipped reason=\(Self.diagnosticErrorCategory(for: error).rawValue)")
+        }
+    }
+
+    private func verifiedSessionSnapshotModeCandidateForPropertyOpen(
+        row: SessionSnapshotUploadRow,
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        checkedAt: Date
+    ) async -> VerifiedSessionSnapshotModeCandidate? {
+        do {
+            let payloadData = try await downloadSessionSnapshotPayload(
+                bucket: row.payloadStorageBucket,
+                path: row.payloadStoragePath
+            )
+            let readback = Self.makeSessionSnapshotReadbackResult(
+                row: row, payloadData: payloadData, checkedAt: checkedAt, failureReason: nil
+            )
+            guard readback.checksumVerified, readback.byteSizeMatches,
+                  readback.rowObjectConsistent, row.snapshotSchemaVersion == 1,
+                  let payload = Self.decodeSessionSnapshotPayload(payloadData),
+                  payload.snapshotSchemaVersion == 1,
+                  payload.orgID == activeOrganizationID,
+                  payload.propertyID == propertyID,
+                  payload.sessionID == row.sessionID,
+                  payload.rawSessionJSONSHA256.lowercased() == row.rawSessionJSONSHA256.lowercased(),
+                  Self.sessionSnapshotSHA256Hex(for: Data(payload.rawSessionJSON.utf8)) ==
+                    row.rawSessionJSONSHA256.lowercased(),
+                  let rawData = payload.rawSessionJSON.data(using: .utf8),
+                  let raw = try JSONSerialization.jsonObject(with: rawData) as? [String: Any],
+                  let rawShots = raw["shots"] as? [Any],
+                  let rawIssues = raw["issues"] as? [Any],
+                  let rawGuided = raw["guidedShots"] as? [Any],
+                  payload.shotCount == rawShots.count,
+                  payload.issueCount == rawIssues.count,
+                  payload.guidedCount == rawGuided.count,
+                  readback.countsValid || Self.legacyFastLaneSnapshotCountsMatchPayload(
+                    row: row, payload: payload
+                  ) else { return nil }
+            let metadata = try Self.decodeSnapshotSessionMode(from: rawData)
+            guard metadata.propertyID == propertyID,
+                  metadata.sessionID == row.sessionID,
+                  metadata.orgID == nil || metadata.orgID == activeOrganizationID else { return nil }
+            return VerifiedSessionSnapshotModeCandidate(row: row, metadata: metadata)
+        } catch {
+            print("[SessionModeRecall] snapshotID=\(row.id.uuidString) " +
+                  "result=skipped reason=invalid_snapshot_or_download")
+            return nil
+        }
+    }
+
     private func verifiedSessionSnapshotMetadataCandidateForPropertyOpen(
         row: SessionSnapshotUploadRow,
         propertyID: UUID,
@@ -19522,7 +19698,6 @@ final class AppState: ObservableObject {
             )
             guard readback.checksumVerified,
                   readback.byteSizeMatches,
-                  readback.countsValid,
                   readback.rowObjectConsistent,
                   row.snapshotSchemaVersion == 1,
                   let payload = Self.decodeSessionSnapshotPayload(payloadData),
@@ -19537,7 +19712,10 @@ final class AppState: ObservableObject {
             let metadata = try Self.decodeHydratableSessionMetadata(from: payload.rawSessionJSON)
             guard metadata.propertyID == propertyID,
                   metadata.sessionID == row.sessionID,
-                  metadata.orgID == nil || metadata.orgID == activeOrganizationID else {
+                  metadata.orgID == nil || metadata.orgID == activeOrganizationID,
+                  readback.countsValid || Self.legacyFastLaneSnapshotCountsMatchRawMetadata(
+                    row: row, payload: payload, metadata: metadata
+                  ) else {
                 return nil
             }
             return VerifiedSessionSnapshotMetadataCandidate(
@@ -19571,6 +19749,8 @@ final class AppState: ObservableObject {
         let snapshotSession = Session(
             id: sessionID,
             propertyID: propertyID,
+            sessionType: mergedMetadata.sessionType,
+            fullDocumentationMode: mergedMetadata.fullDocumentationMode,
             startedAt: mergedMetadata.startedAt,
             status: mergedMetadata.status,
             endedAt: mergedMetadata.endedAt,
@@ -19584,7 +19764,9 @@ final class AppState: ObservableObject {
         )
 
         if existingSession == nil ||
-            Self.sessionKnownStateAt(existingSession) <= candidate.payload.generatedAt {
+            Self.sessionKnownStateAt(existingSession) <= candidate.payload.generatedAt ||
+            existingSession?.sessionType != mergedMetadata.sessionType ||
+            existingSession?.fullDocumentationMode != mergedMetadata.fullDocumentationMode {
             _ = try localStore.upsertSession(snapshotSession)
         }
         try localStore.saveSessionMetadataAtomically(
@@ -19752,6 +19934,10 @@ final class AppState: ObservableObject {
 
         existing.propertyID = propertyID
         existing.sessionID = sessionID
+        // Capture mode is fixed when the session starts. A local lifecycle
+        // update cannot override the mode in its sealed snapshot.
+        existing.sessionType = snapshot.sessionType
+        existing.fullDocumentationMode = snapshot.fullDocumentationMode
         existing.schemaVersion = max(existing.schemaVersion, snapshot.schemaVersion)
         existing.shots = mergeSnapshotItems(
             snapshot: snapshot.shots,
@@ -20373,7 +20559,9 @@ final class AppState: ObservableObject {
     private func fetchSessionSnapshotRows(
         snapshotID: UUID?,
         propertyID: UUID?,
-        sessionID: UUID?
+        sessionID: UUID?,
+        limit: Int = 5,
+        offset: Int = 0
     ) async throws -> [SessionSnapshotUploadRow] {
         if let sessionSnapshotRowsFetchOverride {
             return try await sessionSnapshotRowsFetchOverride(snapshotID, propertyID, sessionID)
@@ -20430,7 +20618,8 @@ final class AppState: ObservableObject {
 
         return try await query
             .order("created_at", ascending: false)
-            .limit(5)
+            .order("id", ascending: true)
+            .range(from: offset, to: offset + limit - 1)
             .execute()
             .value as [SessionSnapshotUploadRow]
     }
@@ -20470,7 +20659,7 @@ final class AppState: ObservableObject {
     private static func decodeSessionSnapshotPayload(_ data: Data?) -> SessionSnapshotPayloadForChecksum? {
         guard let data else { return nil }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = sessionSnapshotDateDecodingStrategy
         return try? decoder.decode(SessionSnapshotPayloadForChecksum.self, from: data)
     }
 
@@ -20479,8 +20668,50 @@ final class AppState: ObservableObject {
             throw SessionSnapshotUploadError.notPreviewable("snapshot_raw_session_json_unreadable")
         }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = sessionSnapshotDateDecodingStrategy
         return try decoder.decode(SessionMetadata.self, from: data)
+    }
+
+    static func decodeSnapshotSessionMode(from rawData: Data) throws -> SnapshotSessionModeMetadata {
+        try JSONDecoder().decode(SnapshotSessionModeMetadata.self, from: rawData)
+    }
+
+    private static var sessionSnapshotDateDecodingStrategy: JSONDecoder.DateDecodingStrategy {
+        .custom { decoder in
+            let value = try decoder.singleValueContainer().decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = fractional.date(from: value) { return date }
+            let standard = ISO8601DateFormatter()
+            standard.formatOptions = [.withInternetDateTime]
+            if let date = standard.date(from: value) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: try decoder.singleValueContainer(), debugDescription: "Invalid snapshot date"
+            )
+        }
+    }
+
+    private static func legacyFastLaneSnapshotCountsMatchRawMetadata(
+        row: SessionSnapshotUploadRow,
+        payload: SessionSnapshotPayloadForChecksum,
+        metadata: SessionMetadata
+    ) -> Bool {
+        legacyFastLaneSnapshotCountsMatchPayload(row: row, payload: payload) &&
+            payload.shotCount == metadata.shots.count &&
+            payload.issueCount == metadata.issues.count &&
+            payload.guidedCount == metadata.guidedShots.count
+    }
+
+    private static func legacyFastLaneSnapshotCountsMatchPayload(
+        row: SessionSnapshotUploadRow,
+        payload: SessionSnapshotPayloadForChecksum
+    ) -> Bool {
+        row.trigger == "fast_lane_report_handoff" &&
+            row.shotCount == payload.shotCount &&
+            row.mediaManifestCount == payload.mediaManifestCount &&
+            row.missingLocalOriginalsCount == payload.missingLocalOriginalsCount &&
+            row.supabaseStorageMetadataCount == payload.supabaseStorageMetadataCount &&
+            row.issueCount == 0 && row.guidedCount == 0
     }
 
     private func localSessionSnapshotRestoreComparison(
@@ -21045,9 +21276,7 @@ final class AppState: ObservableObject {
         let payloadReadable = payloadData != nil
         let computedChecksum = payloadData.map { sessionSnapshotSHA256Hex(for: $0) }
         let decodedPayload = payloadData.flatMap { data -> SessionSnapshotPayloadForChecksum? in
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            return try? decoder.decode(SessionSnapshotPayloadForChecksum.self, from: data)
+            decodeSessionSnapshotPayload(data)
         }
         let checksumVerified = row.flatMap { row in
             computedChecksum.map { $0 == row.snapshotPayloadSHA256.lowercased() }
@@ -55092,6 +55321,10 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID
     ) async -> Bool {
+        await reconcileVerifiedSnapshotSessionModesBeforeCameraEntry(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
         let changed = await syncPortalPunchlistOperationalOverlaysForPropertyOpen(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
@@ -55224,11 +55457,16 @@ final class AppState: ObservableObject {
                 }
                 return nil
             }
+            // An explicit predecessor is the authoritative lineage link. A
+            // retake on another branch can carry the same old label, but that
+            // label must not attach it to this baseline.
+            let predecessorLinked = row.supersedesShotID.map(eligibleIDs.contains)
             let linkedToBaseline = row.sessionID == baselineSessionID ||
                 eligibleIDs.contains(row.id) ||
-                (row.supersedesShotID.map(eligibleIDs.contains) ?? false) ||
-                (key.map(eligibleKeys.contains) ?? false) ||
-                (originalKey.map(eligibleKeys.contains) ?? false)
+                (predecessorLinked ?? (
+                    (key.map(eligibleKeys.contains) ?? false) ||
+                    (originalKey.map(eligibleKeys.contains) ?? false)
+                ))
             let newCapture = row.supersedesShotID == nil &&
                 row.captureKind?.lowercased() != "retake" &&
                 (row.createdAt ?? .distantPast) >= baselineStartedAt
@@ -55252,6 +55490,7 @@ final class AppState: ObservableObject {
         }
 
         var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let hadGuidedRows = !guidedRows.isEmpty
         let baselineSession = sessions(for: propertyID)
             .filter {
                 $0.deletedAt == nil && $0.status == .completed && $0.isSealed &&
@@ -55259,15 +55498,23 @@ final class AppState: ObservableObject {
             }
             .max { $0.startedAt < $1.startedAt }
         let currentGuidedIDs: Set<UUID>? = baselineSession.flatMap { baseline in
-            guard let metadata = try? localStore.loadSessionMetadata(
-                propertyID: propertyID, sessionID: baseline.id
-            ) else { return nil }
-            let baselineShots = metadata.shots.filter(LocalConflictRules.shotMetadataIsOrdinaryGuidedWork)
+            // A locally cached baseline may contain photos copied forward from
+            // older sessions. Only exported shots owned by this baseline may
+            // seed its lineage.
+            let baselineShots = remoteShots.filter { row in
+                row.deletedAt == nil && row.sessionID == baseline.id &&
+                    row.isGuided == true && row.isFlagged != true && row.issueID == nil
+            }
             guard !baselineShots.isEmpty else { return nil }
             return Self.currentGuidedRemoteShotIDs(
                 remoteShots, baselineSessionID: baseline.id,
-                baselineShotIDs: Set(baselineShots.map(\.shotID)),
-                baselineShotKeys: Set(baselineShots.map { $0.shotKey.lowercased() }),
+                baselineShotIDs: Set(baselineShots.map(\.id)),
+                baselineShotKeys: Set(baselineShots.compactMap { row in
+                    row.shotKey?.lowercased() ?? LocalConflictRules.guidedShotIdentityKey(
+                        building: row.building, elevation: row.elevation,
+                        detailType: row.detailType, angleIndex: row.angleIndex
+                    )
+                }),
                 baselineStartedAt: baseline.startedAt
             )
         }
@@ -55428,18 +55675,25 @@ final class AppState: ObservableObject {
                 }
             }
             guidedRows = mergedRows
-            guard updated > 0 else { return 0 }
-            do {
-                try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
-                return updated
-            } catch {
-                recordDiagnosticsError(error)
-                return 0
+            if updated > 0 {
+                do {
+                    try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+                } catch {
+                    recordDiagnosticsError(error)
+                    return 0
+                }
             }
         }
+        // Without a verified Full baseline, an existing checklist owns its
+        // slots. Do not backfill unrelated historical shots from the portal.
+        if hadGuidedRows && currentGuidedIDs == nil { return updated }
         var representedShotIDs = Set(guidedRows.compactMap { $0.shot?.id })
         representedShotIDs.formUnion(guidedRows.map(\.id))
         var representedKeys = Set(guidedRows.compactMap(LocalConflictRules.guidedShotIdentityKey))
+        let supersededCurrentGuidedIDs = Set(remoteShots.compactMap { row -> UUID? in
+            guard currentGuidedIDs?.contains(row.id) == true else { return nil }
+            return row.supersedesShotID
+        })
         var localMetadataBySessionID: [UUID: SessionMetadata] = [:]
         var checkedLocalSessionIDs = Set<UUID>()
         var added = 0
@@ -55455,6 +55709,7 @@ final class AppState: ObservableObject {
                   row.orgID == activeOrganizationID,
                   let sessionID = row.sessionID,
                   row.lifecycleState.isActiveForDefaultWorkflows,
+                  !supersededCurrentGuidedIDs.contains(row.id),
                   (currentGuidedIDs?.contains(row.id) ?? true) else {
                 continue
             }
@@ -55529,10 +55784,10 @@ final class AppState: ObservableObject {
             added += 1
         }
 
-        guard added > 0 else { return 0 }
+        guard added > 0 else { return updated }
         do {
             try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
-            return added
+            return updated + added
         } catch {
             recordDiagnosticsError(error)
             return 0
