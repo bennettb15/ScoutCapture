@@ -15552,24 +15552,27 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
-        let activeIssueCount = isFastLaneInitialReferenceSyncPending ? 0 : fastLaneSideControlCounts.activeIssueCount
+        let isSyncing = isFastLaneInitialReferenceSyncPending
+        let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
-        let guidedCount = isFastLaneInitialReferenceSyncPending ? 0 : fastLaneSideControlCounts.guidedRemainingCount
+        let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
         return [
             CameraChromeSideControl(
                 id: "active_issues",
                 systemImage: "flag.fill",
-                color: activeIssueCount > 0 ? .red : .white,
-                badgeText: activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
-                accessibilityLabel: "Active issues",
+                color: isSyncing || activeIssueCount > 0 ? .red : .white,
+                badgeText: !isSyncing && activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
+                badgeIsLoading: isSyncing,
+                accessibilityLabel: isSyncing ? "Active issues syncing, tap to open" : "Active issues",
                 isEnabled: true
             ),
             CameraChromeSideControl(
                 id: "guided",
                 systemImage: "safari",
-                color: guidedCount > 0 ? .blue : .white,
-                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
-                accessibilityLabel: isFollowUp ? "Guided photos available" : "Guided",
+                color: isSyncing || guidedCount > 0 ? .blue : .white,
+                badgeText: !isSyncing && guidedCount > 0 ? "\(guidedCount)" : nil,
+                badgeIsLoading: isSyncing,
+                accessibilityLabel: isSyncing ? "Guided photos syncing, tap to open" : (isFollowUp ? "Guided photos available" : "Guided"),
                 isVisible: context.sessionType != .punchlistVisit,
                 isEnabled: true
             ),

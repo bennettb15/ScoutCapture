@@ -29,6 +29,7 @@ struct CameraChromeSideControl: Identifiable, Equatable {
     var systemImage: String
     var color: Color
     var badgeText: String?
+    var badgeIsLoading: Bool
     var accessibilityLabel: String
     var isVisible: Bool
     var isEnabled: Bool
@@ -38,6 +39,7 @@ struct CameraChromeSideControl: Identifiable, Equatable {
         systemImage: String,
         color: Color = .white,
         badgeText: String? = nil,
+        badgeIsLoading: Bool = false,
         accessibilityLabel: String,
         isVisible: Bool = true,
         isEnabled: Bool = false
@@ -46,6 +48,7 @@ struct CameraChromeSideControl: Identifiable, Equatable {
         self.systemImage = systemImage
         self.color = color
         self.badgeText = badgeText
+        self.badgeIsLoading = badgeIsLoading
         self.accessibilityLabel = accessibilityLabel
         self.isVisible = isVisible
         self.isEnabled = isEnabled
@@ -589,7 +592,10 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                     .font(.system(size: symbolSize, weight: .medium))
                     .foregroundColor(control.color)
 
-                if let badge = control.badgeText, !badge.isEmpty {
+                if control.badgeIsLoading {
+                    CameraChromeRefreshBadge()
+                        .offset(x: 6, y: -6)
+                } else if let badge = control.badgeText, !badge.isEmpty {
                     Text(badge)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.black)
@@ -922,6 +928,18 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
         .buttonStyle(.plain)
         .frame(width: size, height: size)
         .disabled(!display.ellipsisEnabled)
+    }
+}
+
+private struct CameraChromeRefreshBadge: View {
+    var body: some View {
+        ProgressView()
+            .progressViewStyle(.circular)
+            .tint(.black)
+            .scaleEffect(0.62)
+            .frame(width: 20, height: 20)
+            .background(Color.white)
+            .clipShape(Circle())
     }
 }
 

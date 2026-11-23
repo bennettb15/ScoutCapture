@@ -2050,7 +2050,7 @@ struct ActiveIssuesSheet: View {
                             ProgressView()
                                 .progressViewStyle(.circular)
                                 .tint(.secondary)
-                            Text("Loading")
+                            Text("Syncing flagged items…")
                                 .font(.system(size: 15, weight: .medium))
                                 .foregroundColor(.secondary)
                         }
