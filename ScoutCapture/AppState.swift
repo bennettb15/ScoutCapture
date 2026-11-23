@@ -19543,9 +19543,10 @@ final class AppState: ObservableObject {
         activeOrganizationID: UUID,
         checkedAt: Date
     ) async throws {
-        let receiptKey = "scout.snapshotSessionModes.v4.\(propertyID.uuidString)"
+        let receiptKey = "scout.snapshotSessionModes.v5.\(propertyID.uuidString)"
         if userDefaults.string(forKey: receiptKey) == firstCandidate.row.id.uuidString { return }
         var seenSessionIDs = Set<UUID>()
+        var missingLocalSession = false
         var page = rows
         var nextOffset = rows.count
         while !page.isEmpty {
@@ -19565,17 +19566,25 @@ final class AppState: ObservableObject {
                 }
                 let metadata = candidate.metadata
                 if var session = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID))?
-                    .first(where: { $0.id == row.sessionID }),
-                   session.sessionType != metadata.sessionType ||
-                    session.fullDocumentationMode != metadata.fullDocumentationMode {
-                    session.sessionType = metadata.sessionType
-                    session.fullDocumentationMode = metadata.fullDocumentationMode
-                    _ = try localStore.upsertSession(session)
+                    .first(where: { $0.id == row.sessionID }) {
+                    if session.sessionType != metadata.sessionType ||
+                        session.fullDocumentationMode != metadata.fullDocumentationMode {
+                        session.sessionType = metadata.sessionType
+                        session.fullDocumentationMode = metadata.fullDocumentationMode
+                        _ = try localStore.upsertSession(session)
+                    }
+                } else {
+                    // The remote session index can arrive after its verified
+                    // snapshot. Retry on the next entry instead of recording
+                    // a receipt for a session whose mode was never applied.
+                    missingLocalSession = true
                 }
                 if metadata.sessionType == .fullDocumentation &&
                     metadata.fullDocumentationMode == .completeCapture {
                     reloadSessionCache(for: propertyID)
-                    userDefaults.set(firstCandidate.row.id.uuidString, forKey: receiptKey)
+                    if !missingLocalSession {
+                        userDefaults.set(firstCandidate.row.id.uuidString, forKey: receiptKey)
+                    }
                     return
                 }
             }
@@ -19611,7 +19620,7 @@ final class AppState: ObservableObject {
                 .filter { $0.propertyID == propertyID && $0.orgID == activeOrganizationID }
                 .sorted(by: Self.sessionSnapshotUploadRowSort)
             guard let firstRow = sortedRows.first else { return }
-            let receiptKey = "scout.snapshotSessionModes.v4.\(propertyID.uuidString)"
+            let receiptKey = "scout.snapshotSessionModes.v5.\(propertyID.uuidString)"
             if userDefaults.string(forKey: receiptKey) == firstRow.id.uuidString { return }
             guard let firstCandidate = await verifiedSessionSnapshotModeCandidateForPropertyOpen(
                     row: firstRow,
@@ -55321,6 +55330,16 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID
     ) async -> Bool {
+        // The checklist must use the current shot identity and its image before
+        // the camera presents cached Guided or Flagged rows.
+        let freshness = await reconcileLatestReferenceSessionFreshness(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID,
+            force: true
+        )
+        // Reference freshness adds the latest finalized session to the local
+        // index. Verify its actual capture mode before Guided lineage uses it
+        // to select the property's Full-capture baseline.
         await reconcileVerifiedSnapshotSessionModesBeforeCameraEntry(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
@@ -55328,13 +55347,6 @@ final class AppState: ObservableObject {
         let changed = await syncPortalPunchlistOperationalOverlaysForPropertyOpen(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
-        )
-        // The checklist must use the current shot identity and its image before
-        // the camera presents cached Guided or Flagged rows.
-        let freshness = await reconcileLatestReferenceSessionFreshness(
-            propertyID: propertyID,
-            activeOrganizationID: activeOrganizationID,
-            force: true
         )
         return changed || freshness?.hasPendingReferenceState == false
     }
