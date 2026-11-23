@@ -44334,7 +44334,11 @@ final class AppState: ObservableObject {
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
 
+        // A completed fast-camera upload can leave an older local session row
+        // marked draft. Its photos and checklist history were already sent;
+        // they must not prevent this device from releasing its own claim.
         let localDraft = canonicalDraftSession(for: propertyID, requireCaptures: false)
+            .flatMap { sessionHasFinalLocalStateEvidence($0) ? nil : $0 }
         let localDraftMetadata = localDraft.flatMap {
             try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: $0.id)
         }
@@ -64073,10 +64077,15 @@ final class AppState: ObservableObject {
         guard let status = sessionSnapshotCloudStatusBySessionID[session.id],
               status.propertyID == session.propertyID,
               status.state == .uploaded,
-              status.triggerSource == "completeCurrentSessionWithoutZIP" else {
+              Self.uploadedCompletionTriggerFinalizesDraft(status.triggerSource) else {
             return false
         }
         return true
+    }
+
+    nonisolated static func uploadedCompletionTriggerFinalizesDraft(_ triggerSource: String) -> Bool {
+        triggerSource == "completeCurrentSessionWithoutZIP" ||
+            triggerSource == "fast_lane_complete"
     }
 
     private func persistedSessionIncludingDeleted(propertyID: UUID, sessionID: UUID) -> Session? {

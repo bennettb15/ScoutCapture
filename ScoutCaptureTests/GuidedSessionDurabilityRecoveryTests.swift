@@ -5,6 +5,12 @@ import ImageIO
 
 @MainActor
 final class GuidedSessionDurabilityRecoveryTests: XCTestCase {
+    func testUploadedFastCameraCompletionDoesNotRemainAnOpenDraft() {
+        XCTAssertTrue(AppState.uploadedCompletionTriggerFinalizesDraft("fast_lane_complete"))
+        XCTAssertTrue(AppState.uploadedCompletionTriggerFinalizesDraft("completeCurrentSessionWithoutZIP"))
+        XCTAssertFalse(AppState.uploadedCompletionTriggerFinalizesDraft("draft"))
+    }
+
     func testElevationChecklistCountsSavedTypesAndDistinctAnglesPerElevation() {
         func capture(_ building: String, _ elevation: String, _ detail: String, _ angle: Int) -> ElevationChecklistCapture {
             ElevationChecklistCapture(
