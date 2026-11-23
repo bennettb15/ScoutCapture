@@ -49699,7 +49699,7 @@ final class AppState: ObservableObject {
         currentSessionID: UUID
     ) -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-        let priorSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? sessions(for: propertyID))
+        let priorSessions = sessions(for: propertyID)
             .filter {
                 $0.id != currentSessionID &&
                     $0.status == .completed &&
@@ -58615,7 +58615,7 @@ final class AppState: ObservableObject {
         if retiredGuidedRows.isEmpty {
             retiredGuided = []
         } else {
-            let issueLinkedGuidedShots = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            let issueLinkedGuidedShots = sessions(for: propertyID)
                 .flatMap { session -> [ShotMetadata] in
                     guard let metadata = try? localStore.loadSessionMetadata(
                         propertyID: propertyID,
@@ -58654,7 +58654,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         currentSessionID: UUID
     ) -> Set<UUID> {
-        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+        let sessions = sessions(for: propertyID)
         let otherDrafts = sessions.filter {
             $0.id != currentSessionID && $0.status == .draft && !$0.isSealed && $0.firstDeliveredAt == nil
         }
@@ -58698,7 +58698,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         observations: [Observation]
     ) -> (references: [UUID: FastRuntimeIssueResolvedReference], sessionShots: [ShotMetadata]) {
-        let indexedSessionIDs = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).map(\.id)
+        let indexedSessionIDs = sessions(for: propertyID).map(\.id)
         let metadataSessionIDs = (try? localStore.fetchSessionMetadataIDs(propertyID: propertyID)) ?? []
         let sessionIDs = Array(Set(indexedSessionIDs + metadataSessionIDs))
         let indexedSessionIDSet = Set(indexedSessionIDs)
@@ -59207,7 +59207,7 @@ final class AppState: ObservableObject {
                 )
             }
         } else {
-            let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+            let sessions = sessions(for: propertyID)
             for session in sessions {
                 guard let metadata = try? localStore.loadSessionMetadata(
                     propertyID: propertyID,
