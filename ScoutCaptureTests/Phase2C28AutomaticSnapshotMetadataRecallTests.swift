@@ -1166,6 +1166,109 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertFalse(eligible.contains(oldReplacementID))
     }
 
+    func testCanonicalRemoteGuidedSlotsUseLargestSourceVisitAndExcludeLaterNewWork() throws {
+        let baselineID = UUID()
+        let followUpID = UUID()
+        let entryID = UUID()
+        let foundationID = UUID()
+        let replacementID = UUID()
+        let unrelatedID = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let rows = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+        [
+          {"id":"\(entryID)","session_id":"\(baselineID)","created_at":"2026-11-20T10:00:00Z",
+           "shot_key":"b1|north|entry / porch|1","is_guided":true},
+          {"id":"\(foundationID)","session_id":"\(baselineID)","created_at":"2026-11-20T10:01:00Z",
+           "shot_key":"b1|south|foundation|1","is_guided":true},
+          {"id":"\(replacementID)","session_id":"\(followUpID)","created_at":"2026-11-21T10:00:00Z",
+           "shot_key":"b1|west|sidewalk|1","logical_shot_identity":"visit|normal|b1|south|foundation|1",
+           "supersedes_shot_id":"\(foundationID)","is_guided":true},
+          {"id":"\(unrelatedID)","session_id":"\(followUpID)","created_at":"2026-11-21T10:01:00Z",
+           "shot_key":"b1|east|roofline|1","is_guided":true}
+        ]
+        """.utf8))
+        let selected = try XCTUnwrap(AppState.canonicalGuidedRemoteShotIDs(
+            rows, preferredBaselineSessionID: nil
+        ))
+        XCTAssertEqual(selected, [entryID, foundationID, replacementID])
+        XCTAssertFalse(selected.contains(unrelatedID))
+    }
+
+    func testCanonicalRemoteGuidedSlotsPreserveOriginalAcrossReclassifications() throws {
+        let baselineID = UUID()
+        let followUpID = UUID()
+        let originalID = UUID()
+        let replacementID = UUID()
+        let latestID = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let rows = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+        [
+          {"id":"\(originalID)","session_id":"\(baselineID)","created_at":"2026-11-20T10:00:00Z",
+           "shot_key":"b1|north|entry / porch|1","is_guided":true},
+          {"id":"\(replacementID)","session_id":"\(followUpID)","created_at":"2026-11-21T10:00:00Z",
+           "shot_key":"b1|east|pool / outdoor amenities|1",
+           "logical_shot_identity":"visit|normal|b1|north|entry / porch|1","is_guided":true},
+          {"id":"\(latestID)","session_id":"\(followUpID)","created_at":"2026-11-22T10:00:00Z",
+           "shot_key":"b1|north|window|1",
+           "logical_shot_identity":"visit|normal|b1|east|pool / outdoor amenities|1","is_guided":true}
+        ]
+        """.utf8))
+        let selected = try XCTUnwrap(AppState.canonicalGuidedRemoteShotIDs(
+            rows, preferredBaselineSessionID: baselineID
+        ))
+        XCTAssertEqual(selected, [originalID, replacementID, latestID])
+    }
+
+    func testCanonicalCloudLineagePrunesCapturedLocalRowOutsideSourceVisit() throws {
+        let fixture = try makeFixture()
+        let laterSessionID = UUID()
+        let entryID = UUID()
+        let sidewalkID = UUID()
+        let extraID = UUID()
+        let capturedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-20T10:00:00Z"))
+        let entry = GuidedShot(
+            id: entryID, title: "A North Entry / Porch", building: "A",
+            targetElevation: "North", detailType: "Entry / Porch", angleIndex: 1,
+            shot: Shot(id: entryID, capturedAt: capturedAt), isCompleted: true
+        )
+        let sidewalk = GuidedShot(
+            id: sidewalkID, title: "A West Sidewalk", building: "A",
+            targetElevation: "West", detailType: "Sidewalk", angleIndex: 1,
+            shot: Shot(id: sidewalkID, capturedAt: capturedAt), isCompleted: true
+        )
+        let extra = GuidedShot(
+            id: extraID, title: "A East Elevation", building: "A",
+            targetElevation: "East", detailType: "Elevation", angleIndex: 1,
+            shot: Shot(id: extraID, capturedAt: capturedAt), isCompleted: true
+        )
+        try fixture.deviceBStore.saveGuidedShots(
+            [entry, sidewalk, extra], propertyID: fixture.property.id
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let rows = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+        [
+          {"id":"\(entryID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+           "session_id":"\(fixture.session.id)","created_at":"2026-11-20T10:00:00Z",
+           "shot_key":"a|north|entry / porch|1","is_guided":true},
+          {"id":"\(sidewalkID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+           "session_id":"\(fixture.session.id)","created_at":"2026-11-20T10:01:00Z",
+           "shot_key":"a|west|sidewalk|1","is_guided":true},
+          {"id":"\(extraID)","org_id":"\(fixture.orgID)","property_id":"\(fixture.property.id)",
+           "session_id":"\(laterSessionID)","created_at":"2026-11-21T10:00:00Z",
+           "shot_key":"a|east|elevation|1","is_guided":true}
+        ]
+        """.utf8))
+
+        _ = fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            rows, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+        )
+        let remaining = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(Set(remaining.map(\.id)), [entryID, sidewalkID])
+    }
+
     func testCurrentBaselineRestoresMissingEntryAfterOrphanPrune() throws {
         let fixture = try makeFixture()
         let capturedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-22T21:30:00Z"))

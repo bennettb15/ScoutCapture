@@ -54983,7 +54983,8 @@ final class AppState: ObservableObject {
     private func reconcileLatestReferenceSessionFreshness(
         propertyID: UUID,
         activeOrganizationID: UUID,
-        force: Bool = false
+        force: Bool = false,
+        applyPortalOverlay: Bool = true
     ) async -> ReferenceFreshnessResult? {
         let startedAt = Date()
         if !force,
@@ -55001,11 +55002,12 @@ final class AppState: ObservableObject {
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             ) else {
-                let overlayResult = await applyPortalPunchlistOperationalOverlaysIfAvailable(
-                    propertyID: propertyID,
-                    activeOrganizationID: activeOrganizationID,
-                    remoteShots: []
-                )
+                let overlayResult = applyPortalOverlay
+                    ? await applyPortalPunchlistOperationalOverlaysIfAvailable(
+                        propertyID: propertyID,
+                        activeOrganizationID: activeOrganizationID,
+                        remoteShots: []
+                    ) : nil
                 print(
                     "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
                     "latestFinalizedSessionID=NONE " +
@@ -55023,11 +55025,12 @@ final class AppState: ObservableObject {
                 activeOrganizationID: activeOrganizationID
             )
             applyRemoteShotMetadataRows(remoteShots, propertyID: propertyID, sessionID: latestSession.id)
-            let overlayResult = await applyPortalPunchlistOperationalOverlaysIfAvailable(
-                propertyID: propertyID,
-                activeOrganizationID: activeOrganizationID,
-                remoteShots: remoteShots
-            )
+            let overlayResult = applyPortalOverlay
+                ? await applyPortalPunchlistOperationalOverlaysIfAvailable(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    remoteShots: remoteShots
+                ) : nil
 
             let localMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: latestSession.id)
             let expectedShotIDs = Set(remoteShots.map(\.id))
@@ -55362,24 +55365,28 @@ final class AppState: ObservableObject {
     @discardableResult
     func refreshRemoteReferencesBeforeCameraEntry(
         propertyID: UUID,
-        activeOrganizationID: UUID
+        activeOrganizationID: UUID,
+        verifySnapshotModes: Bool = true
     ) async -> Bool {
         // Camera startup uses local references. Reconcile cloud changes once
         // preview is visible, then notify it to update its checklist.
         let freshness = await reconcileLatestReferenceSessionFreshness(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID,
-            force: true
+            force: true,
+            applyPortalOverlay: verifySnapshotModes
         )
         guard !Task.isCancelled else { return false }
-        // Reference freshness adds the latest finalized session to the local
-        // index. Verify its actual capture mode before Guided lineage uses it
-        // to select the property's Full-capture baseline.
-        await reconcileVerifiedSnapshotSessionModesBeforeCameraEntry(
-            propertyID: propertyID,
-            activeOrganizationID: activeOrganizationID
-        )
-        guard !Task.isCancelled else { return false }
+        if verifySnapshotModes {
+            // Legacy recovery still verifies the capture mode from signed
+            // snapshots. The fast camera read uses canonical cloud shot slots
+            // and does not need to wait for that history walk.
+            await reconcileVerifiedSnapshotSessionModesBeforeCameraEntry(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            )
+            guard !Task.isCancelled else { return false }
+        }
         let changed = await syncPortalPunchlistOperationalOverlaysForPropertyOpen(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
@@ -55529,6 +55536,95 @@ final class AppState: ObservableObject {
         return eligibleIDs
     }
 
+    // Use the same exported-shot slot lineage as Android when a property has
+    // no explicit baseline_session_id. Session rows alone cannot identify a
+    // Follow-Up: the remote sessions table does not store that mode, and a new
+    // session otherwise defaults to Complete Capture until a snapshot is read.
+    static func canonicalGuidedRemoteShotIDs(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        preferredBaselineSessionID: UUID?
+    ) -> Set<UUID>? {
+        canonicalGuidedRemoteSelection(
+            remoteShots,
+            preferredBaselineSessionID: preferredBaselineSessionID
+        )?.ids
+    }
+
+    private static func canonicalGuidedRemoteSelection(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        preferredBaselineSessionID: UUID?
+    ) -> (ids: Set<UUID>, baselineSlotCount: Int)? {
+        let rows = remoteShots.filter { row in
+            guard row.deletedAt == nil, row.sessionID != nil,
+                  row.isFlagged != true, row.issueID == nil,
+                  row.issueStatus == nil,
+                  row.isGuided == true || row.reason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            else { return false }
+            let kind = row.captureKind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !["resolved_capture", "follow_up_capture", "reference", "reclassified"].contains(kind)
+        }.sorted {
+            if ($0.createdAt ?? .distantPast) != ($1.createdAt ?? .distantPast) {
+                return ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        var slotByCurrentKey: [String: String] = [:]
+        var slotByShotID: [UUID: String] = [:]
+        var establishedSlots = Set<String>()
+        var orderedSessions: [UUID] = []
+        var slotsBySession: [UUID: Set<String>] = [:]
+        var slotByRowID: [UUID: String] = [:]
+        for row in rows {
+            guard let sessionID = row.sessionID else { continue }
+            let fallbackKey = LocalConflictRules.guidedShotIdentityKey(
+                building: row.building, elevation: row.elevation,
+                detailType: row.detailType, angleIndex: row.angleIndex
+            )
+            let rawCurrent = row.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let current = (rawCurrent?.isEmpty == false ? rawCurrent : nil) ?? fallbackKey
+            guard let current else { continue }
+            let identity = row.logicalShotIdentity?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let original = identity.flatMap { value -> String? in
+                for marker in ["|flagged|no-issue|", "|normal|"] {
+                    if let range = value.range(of: marker) {
+                        let key = String(value[range.upperBound...])
+                        if !key.isEmpty { return key }
+                    }
+                }
+                return nil
+            } ?? current
+            let stable = row.supersedesShotID.flatMap { slotByShotID[$0] }
+                ?? (establishedSlots.contains(original) ? original : nil)
+                ?? slotByCurrentKey[original]
+                ?? slotByCurrentKey[current]
+                ?? original
+            establishedSlots.insert(stable)
+            slotByCurrentKey[current] = stable
+            slotByShotID[row.id] = stable
+            slotByRowID[row.id] = stable
+            if slotsBySession[sessionID] == nil { orderedSessions.append(sessionID) }
+            slotsBySession[sessionID, default: []].insert(stable)
+        }
+        guard !slotByRowID.isEmpty else { return nil }
+        let preferred = preferredBaselineSessionID.flatMap { slotsBySession[$0] }
+        let baselineSlots: Set<String>
+        if let preferred, !preferred.isEmpty {
+            baselineSlots = preferred
+        } else {
+            let baselineSessionID = orderedSessions.reduce(nil as UUID?) { best, candidate in
+                guard let best else { return candidate }
+                return (slotsBySession[candidate]?.count ?? 0) > (slotsBySession[best]?.count ?? 0)
+                    ? candidate : best
+            }
+            guard let baselineSessionID, let inferred = slotsBySession[baselineSessionID] else { return nil }
+            baselineSlots = inferred
+        }
+        return (
+            ids: Set(slotByRowID.compactMap { baselineSlots.contains($0.value) ? $0.key : nil }),
+            baselineSlotCount: baselineSlots.count
+        )
+    }
+
     @discardableResult
     func mergeRemoteOrdinaryGuidedReferences(
         _ remoteShots: [RemoteShotMetadataRecord],
@@ -55548,7 +55644,25 @@ final class AppState: ObservableObject {
                 $0.sessionType == .fullDocumentation && $0.fullDocumentationMode == .completeCapture
             }
             .max { $0.startedAt < $1.startedAt }
-        let currentGuidedIDs: Set<UUID>? = baselineSession.flatMap { baseline in
+        let preferredBaselineSessionID = properties.first(where: { $0.id == propertyID })?.baselineSessionID
+        let canonicalSelection = Self.canonicalGuidedRemoteSelection(
+            remoteShots,
+            preferredBaselineSessionID: preferredBaselineSessionID
+        )
+        let localSlotCount = Set(guidedRows.compactMap(LocalConflictRules.guidedShotIdentityKey)).count
+        let remoteShotIDs = Set(remoteShots.map(\.id))
+        let capturedLocalShotIDs = Set(guidedRows.compactMap { $0.shot?.id })
+        let capturedRowsCoveredByCloud = !capturedLocalShotIDs.isEmpty &&
+            capturedLocalShotIDs.isSubset(of: remoteShotIDs)
+        // A sparse historical cloud read cannot invent a new checkpoint over
+        // an already larger local checklist. Keep the legacy recovery fallback
+        // for that ambiguous case. When every captured local row is present
+        // in the cloud read, its canonical lineage can remove stale extra rows.
+        let canUseCanonical = !hadGuidedRows || preferredBaselineSessionID != nil ||
+            (canonicalSelection?.baselineSlotCount ?? 0) >= localSlotCount ||
+            capturedRowsCoveredByCloud
+        let canonicalIDs = canUseCanonical ? canonicalSelection?.ids : nil
+        let currentGuidedIDs: Set<UUID>? = canonicalIDs ?? baselineSession.flatMap { baseline in
             // A locally cached baseline may contain photos copied forward from
             // older sessions. Only exported shots owned by this baseline may
             // seed its lineage.

@@ -16589,7 +16589,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard !Task.isCancelled, !isFastLaneExiting else { return }
             _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
                 propertyID: context.propertyID,
-                activeOrganizationID: orgID
+                activeOrganizationID: orgID,
+                verifySnapshotModes: false
             )
             guard !Task.isCancelled, !isFastLaneExiting else { return }
             // Publish the complete local snapshot once all cross-device
