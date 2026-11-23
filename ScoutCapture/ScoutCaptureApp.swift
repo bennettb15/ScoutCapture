@@ -15341,16 +15341,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         let followUpShots = isFollowUp ? fastLaneLocalShotRecords() : []
         if isFollowUp { recordFastLaneReadyEvent("end_summary_shots_ready") }
-        let priorPhotoIdentities = isFollowUp
+        let priorPhotoIdentities = !followUpShots.isEmpty
             ? fastLanePriorPhotoIdentities()
             : (guidedShotKeys: Set<String>(), guidedShotIDs: Set<UUID>(), flaggedIssueIDs: Set<UUID>())
         if isFollowUp { recordFastLaneReadyEvent("end_summary_prior_ready") }
-        let guidedReplacementShotIDs = isFollowUp
-            ? appState.fastRuntimeCurrentGuidedReplacementShotIDs(
-                propertyID: context.propertyID,
-                priorGuidedShotIDs: priorPhotoIdentities.guidedShotIDs
-            )
-            : Set<UUID>()
+        let guidedReplacementShotIDs: Set<UUID> = followUpShots.isEmpty ? [] : Set(
+            (fastLaneSideControlPayload.guidedShots + fastLaneSideControlPayload.retiredGuidedShots)
+                .compactMap { guided -> UUID? in
+                    guard priorPhotoIdentities.guidedShotIDs.contains(guided.id) else { return nil }
+                    return guided.shot?.id
+                }
+        )
+        recordFastLaneReadyEvent("end_summary_replacements_ready")
         let retakenPhotoCount = followUpShots.filter {
             guard let metadata = $0.metadataContext else { return false }
             return metadata.captureIntentSource?.lowercased() == "retake" ||
@@ -15361,6 +15363,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 ) ||
                 metadata.issueID.map(priorPhotoIdentities.flaggedIssueIDs.contains) == true
         }.count
+        recordFastLaneReadyEvent("end_summary_retake_count_ready")
+        let canComplete = canRunProductionComplete
+        recordFastLaneReadyEvent("end_summary_can_complete_ready")
+        let disabledReason = fastLaneSessionActionsCompleteDisabledReason
+        recordFastLaneReadyEvent("end_summary_disabled_reason_ready")
         let summary = FastLaneSessionActionsSummary(
             guidedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.guidedRemainingCount,
             flaggedRemainingCount: isFollowUp ? 0 : fastLaneSideControlCounts.activeIssueCount,
@@ -15369,9 +15376,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             retakenPhotoCount: retakenPhotoCount,
             sessionType: context.sessionType,
             fullDocumentationMode: context.fullDocumentationMode ?? .completeCapture,
-            canComplete: canRunProductionComplete,
+            canComplete: canComplete,
             isComplete: productionCompleteState.isComplete || didCompleteUpload,
-            disabledReason: fastLaneSessionActionsCompleteDisabledReason
+            disabledReason: disabledReason
         )
         recordFastLaneReadyEvent("end_summary_ready")
         return summary
@@ -19834,6 +19841,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
             await MainActor.run {
                 releaseFinishedAt = Date()
+                recordFastLaneReadyEvent("close_preview_finished_\(Int(closeResult.timings.totalMilliseconds))ms")
                 if let error = closeResult.errorMessage {
                     isClosing = false
                     fastLaneExitIntentActive = false

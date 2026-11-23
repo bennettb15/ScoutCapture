@@ -37872,7 +37872,7 @@ final class AppState: ObservableObject {
 #endif
 
         do {
-            try await deletePropertySessionOccupancyRowFromSupabase(
+            async let deleteOccupancy: Void = deletePropertySessionOccupancyRowFromSupabase(
                 orgID: orgID,
                 propertyID: propertyID
             )
@@ -37883,6 +37883,7 @@ final class AppState: ObservableObject {
                 deviceID: currentDeviceIdentifier(),
                 reason: "zero_photo_or_occupancy_release"
             )
+            try await deleteOccupancy
             guard didReleasePropertyStatus else { return false }
             if emitReleasedEvent, let sessionID {
                 occupancyOnlyClaimedSessionIDs.remove(sessionID)
