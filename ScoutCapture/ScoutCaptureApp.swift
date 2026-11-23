@@ -14293,13 +14293,13 @@ private final class FastLaneReadyInteractionTrace: @unchecked Sendable {
 private final class FastLanePriorPhotoIdentityCache {
     private var propertyID: UUID?
     private var sessionID: UUID?
-    private var identities: (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>)?
+    private var identities: (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>)?
 
     func getOrLoad(
         propertyID: UUID,
         sessionID: UUID,
-        load: () -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>)
-    ) -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+        load: () -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>)
+    ) -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
         if self.propertyID == propertyID,
            self.sessionID == sessionID,
            let identities {
@@ -15310,11 +15310,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if isFollowUp { recordFastLaneReadyEvent("end_summary_shots_ready") }
         let priorPhotoIdentities = isFollowUp
             ? fastLanePriorPhotoIdentities()
-            : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
+            : (guidedShotKeys: Set<String>(), guidedShotIDs: Set<UUID>(), flaggedIssueIDs: Set<UUID>())
         if isFollowUp { recordFastLaneReadyEvent("end_summary_prior_ready") }
+        let guidedReplacementShotIDs = isFollowUp
+            ? appState.fastRuntimeCurrentGuidedReplacementShotIDs(
+                propertyID: context.propertyID,
+                priorGuidedShotIDs: priorPhotoIdentities.guidedShotIDs
+            )
+            : Set<UUID>()
         let retakenPhotoCount = followUpShots.filter {
             guard let metadata = $0.metadataContext else { return false }
             return metadata.captureIntentSource?.lowercased() == "retake" ||
+                guidedReplacementShotIDs.contains($0.id) ||
                 appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
                     metadata,
                     priorGuidedShotKeys: priorPhotoIdentities.guidedShotKeys
@@ -15337,7 +15344,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         return summary
     }
 
-    private func fastLanePriorPhotoIdentities() -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+    private func fastLanePriorPhotoIdentities() -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
         fastLanePriorPhotoIdentityCache.getOrLoad(
             propertyID: context.propertyID,
             sessionID: context.sessionID
@@ -17038,8 +17045,45 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
 
         let localShots = fastLaneLocalShotRecords()
-        let guided = payload.guidedShots.map { guidedShot in
-            fastLaneGuidedShotScopedToCurrentSession(guidedShot, localShots: localShots)
+        let localShotIDs = Set(localShots.map(\.id))
+        let explicitlyLinkedShotIDs = Set(payload.guidedShots.compactMap { guidedShot -> UUID? in
+            guard let shotID = guidedShot.shot?.id, localShotIDs.contains(shotID) else { return nil }
+            return shotID
+        })
+        var assignedCurrentShotIDs = Set<UUID>()
+        let scopedGuided = payload.guidedShots.map { guidedShot in
+            let scoped = fastLaneGuidedShotScopedToCurrentSession(
+                guidedShot,
+                localShots: localShots,
+                explicitlyLinkedShotIDs: explicitlyLinkedShotIDs,
+                assignedCurrentShotIDs: assignedCurrentShotIDs
+            )
+            if let shotID = scoped.shot?.id { assignedCurrentShotIDs.insert(shotID) }
+            return scoped
+        }
+        // Remote hydration can leave an older checkpoint row beside its newer
+        // replacement. A single classified angle must have one Guided card.
+        var guided: [GuidedShot] = []
+        var guidedIndexByKey: [String: Int] = [:]
+        for row in scopedGuided {
+            let hasCompleteLocation = [row.building, row.targetElevation, row.detailType]
+                .allSatisfy { !normalizedFastLaneComparable($0).isEmpty }
+            let key = hasCompleteLocation
+                ? fastLaneGuidedComparisonKey(row)
+                : "id|\(row.id.uuidString)"
+            if let index = guidedIndexByKey[key] {
+                let existing = guided[index]
+                let rowIsCurrent = row.shot.map { localShotIDs.contains($0.id) } ?? false
+                let existingIsCurrent = existing.shot.map { localShotIDs.contains($0.id) } ?? false
+                if (rowIsCurrent && !existingIsCurrent) ||
+                    (rowIsCurrent == existingIsCurrent &&
+                     (row.shot?.capturedAt ?? .distantPast) > (existing.shot?.capturedAt ?? .distantPast)) {
+                    guided[index] = row
+                }
+            } else {
+                guidedIndexByKey[key] = guided.count
+                guided.append(row)
+            }
         }
         let guidedKeys = Set(guided.map(fastLaneGuidedComparisonKey))
         let linkedCurrentShotIDs = Set(guided.compactMap { $0.shot?.id })
@@ -17052,7 +17096,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return row
         }
         let retired = payload.retiredGuidedShots.map { guidedShot in
-            fastLaneGuidedShotScopedToCurrentSession(guidedShot, localShots: localShots)
+            fastLaneGuidedShotScopedToCurrentSession(
+                guidedShot,
+                localShots: localShots,
+                explicitlyLinkedShotIDs: explicitlyLinkedShotIDs,
+                assignedCurrentShotIDs: assignedCurrentShotIDs
+            )
         }
         let existingActiveIDs = Set(payload.activeObservations.map(\.id))
         let localIssues = fastLaneMergedObservationRows(from: localShots.compactMap(fastLaneObservationRow))
@@ -17285,7 +17334,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func fastLaneGuidedShotScopedToCurrentSession(
         _ guidedShot: GuidedShot,
-        localShots: [AppState.FastRuntimePrototypeShotRecord]
+        localShots: [AppState.FastRuntimePrototypeShotRecord],
+        explicitlyLinkedShotIDs: Set<UUID>,
+        assignedCurrentShotIDs: Set<UUID>
     ) -> GuidedShot {
         var scoped = guidedShot
         let historicalReferencePath = fastLaneGuidedReferencePath(for: guidedShot)
@@ -17304,10 +17355,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
 
         let linkedShot = guidedShot.shot.flatMap { linked in
-            localShots.first(where: { $0.id == linked.id })
+            localShots.first(where: { $0.id == linked.id && !assignedCurrentShotIDs.contains($0.id) })
         }
         guard let localShot = linkedShot ??
-                localShots.first(where: { fastLaneShot($0, matches: guidedShot) }) else {
+                localShots.first(where: {
+                    !explicitlyLinkedShotIDs.contains($0.id) &&
+                    !assignedCurrentShotIDs.contains($0.id) &&
+                    fastLaneShot($0, matches: guidedShot)
+                }) else {
             return scoped
         }
 
@@ -17484,7 +17539,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func armFastLaneGuidedShot(_ guidedShot: GuidedShot) {
         if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
-            let priorGuidedShotKeys = fastLanePriorPhotoIdentities().guidedShotKeys
+            let priorIdentities = fastLanePriorPhotoIdentities()
             let candidate = AppState.FastRuntimeCaptureMetadataContext(
                 building: guidedShot.building,
                 elevation: guidedShot.targetElevation,
@@ -17494,10 +17549,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 isFlagged: false,
                 captureIntentSource: "guided"
             )
-            if appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
-                candidate,
-                priorGuidedShotKeys: priorGuidedShotKeys
-            ) {
+            if priorIdentities.guidedShotIDs.contains(guidedShot.id) ||
+                guidedShot.shot.map({ priorIdentities.guidedShotIDs.contains($0.id) }) == true ||
+                appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+                    candidate,
+                    priorGuidedShotKeys: priorIdentities.guidedShotKeys
+                ) {
                 retakeFastLaneGuidedShot(guidedShot)
                 return
             }

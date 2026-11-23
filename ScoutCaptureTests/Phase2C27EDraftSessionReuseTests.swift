@@ -1095,4 +1095,45 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertFalse(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(added, priorGuidedShotKeys: keys))
         XCTAssertFalse(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(newGuidedSlot, priorGuidedShotKeys: keys))
     }
+
+    func testReclassifiedGuidedReplacementKeepsPriorPhotoIdentity() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let prior = try fixture.localStore.upsertSession(Session(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            status: .completed,
+            isSealed: true
+        ))
+        try fixture.localStore.ensureSessionMetadata(for: prior)
+        let original = try addMaterialShot(to: prior, in: fixture)
+        let draftID = UUID()
+        let replacementID = UUID()
+        let guided = GuidedShot(
+            id: original.shotID,
+            title: "B1 East Pool / Outdoor Amenities",
+            building: "B1",
+            targetElevation: "East",
+            detailType: "Pool / Outdoor Amenities",
+            angleIndex: 1,
+            shot: Shot(id: replacementID, capturedAt: Date(), imageLocalIdentifier: nil),
+            isCompleted: true
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.property.id)
+
+        let identities = fixture.appState.fastRuntimePriorPhotoIdentities(
+            propertyID: fixture.property.id,
+            currentSessionID: draftID
+        )
+        XCTAssertTrue(identities.guidedShotIDs.contains(original.shotID))
+        XCTAssertEqual(
+            fixture.appState.fastRuntimeCurrentGuidedReplacementShotIDs(
+                propertyID: fixture.property.id,
+                priorGuidedShotIDs: identities.guidedShotIDs
+            ),
+            Set([replacementID])
+        )
+        XCTAssertFalse(identities.guidedShotKeys.contains("b1|east|pool / outdoor amenities|1"))
+    }
 }

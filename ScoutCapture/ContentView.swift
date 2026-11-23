@@ -13011,9 +13011,16 @@ extension ContentView {
             : []
         let priorPhotoIdentities = currentSession.fullDocumentationMode == .followUp
             ? appState.fastRuntimePriorPhotoIdentities(propertyID: propertyID, currentSessionID: currentSession.id)
-            : (guidedShotKeys: Set<String>(), flaggedIssueIDs: Set<UUID>())
+            : (guidedShotKeys: Set<String>(), guidedShotIDs: Set<UUID>(), flaggedIssueIDs: Set<UUID>())
+        let guidedReplacementShotIDs = currentSession.fullDocumentationMode == .followUp
+            ? appState.fastRuntimeCurrentGuidedReplacementShotIDs(
+                propertyID: propertyID,
+                priorGuidedShotIDs: priorPhotoIdentities.guidedShotIDs
+            )
+            : Set<UUID>()
         let retakenPhotoCount = currentSessionShots.filter { shot in
             shot.captureKind?.lowercased() == "retake" ||
+                guidedReplacementShotIDs.contains(shot.shotID) ||
                 shot.issueID.map(priorPhotoIdentities.flaggedIssueIDs.contains) == true ||
                 (shot.isGuided && !shot.isFlagged && shot.issueID == nil &&
                  priorPhotoIdentities.guidedShotKeys.contains(

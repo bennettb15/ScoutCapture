@@ -45182,17 +45182,10 @@ final class AppState: ObservableObject {
             // Follow-up checklists often point at a photo from a completed visit.
             // It has no record in this draft, but its classification still needs
             // to reach the shared shot row before another device rebuilds Guided.
-            if let linkedShotID {
-                if guidedShotID != linkedShotID {
-                    scheduleGuidedReclassificationSupabaseWrite(
-                        propertyID: propertyID, shotID: guidedShotID,
-                        building: building, elevation: elevation,
-                        detailType: detailType, angleIndex: angle,
-                        shotKey: shotKey
-                    )
-                }
+            if linkedShotID != nil {
                 scheduleGuidedReclassificationSupabaseWrite(
-                    propertyID: propertyID, shotID: linkedShotID,
+                    propertyID: propertyID, shotID: guidedShotID,
+                    linkedShotID: linkedShotID,
                     building: building, elevation: elevation,
                     detailType: detailType, angleIndex: angle,
                     shotKey: shotKey
@@ -45243,6 +45236,7 @@ final class AppState: ObservableObject {
     private func scheduleGuidedReclassificationSupabaseWrite(
         propertyID: UUID,
         shotID: UUID,
+        linkedShotID: UUID?,
         building: String,
         elevation: String,
         detailType: String,
@@ -45267,19 +45261,36 @@ final class AppState: ObservableObject {
                     .limit(1)
                     .execute()
                     .value
-                guard let source = rows.first else {
+                let linkedRows: [GuidedReclassificationRemoteRow]
+                if let linkedShotID, linkedShotID != shotID {
+                    linkedRows = try await client
+                        .from("shots")
+                        .select("id, session_id, shot_key, logical_shot_identity")
+                        .eq("id", value: linkedShotID.uuidString.lowercased())
+                        .eq("org_id", value: orgID.uuidString.lowercased())
+                        .eq("property_id", value: propertyID.uuidString.lowercased())
+                        .limit(1)
+                        .execute()
+                        .value
+                } else {
+                    linkedRows = []
+                }
+                guard let source = rows.first ?? linkedRows.first else {
                     print("[GuidedReclassification] missing_remote_shot shotID=\(shotID.uuidString)")
                     return
+                }
+                func slotIdentity(_ row: GuidedReclassificationRemoteRow) -> String {
+                    let originalKey = row.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased() ?? shotKey.lowercased()
+                    let existingIdentity = row.logicalShotIdentity?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    return (existingIdentity?.isEmpty == false ? existingIdentity : nil)
+                        ?? "\(row.sessionID.uuidString.lowercased())|normal|\(originalKey)"
                 }
                 // Keep the original slot identity when its visible label changes.
                 // Android uses this identity to pair a later replacement with the
                 // same checkpoint instead of adding a fifth photo.
-                let originalKey = source.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased() ?? shotKey.lowercased()
-                let existingIdentity = source.logicalShotIdentity?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let identity = (existingIdentity?.isEmpty == false ? existingIdentity : nil)
-                    ?? "\(source.sessionID.uuidString.lowercased())|normal|\(originalKey)"
+                let identity = slotIdentity(source)
                 let payload = GuidedReclassificationPayload(
                     building: building, elevation: elevation,
                     detailType: detailType, angleIndex: angleIndex,
@@ -45287,13 +45298,21 @@ final class AppState: ObservableObject {
                     updatedAt: Date().ISO8601Format(),
                     updatedBy: self?.authenticatedSupabaseUser?.id
                 )
-                try await client.from("shots")
-                    .update(payload, returning: .minimal)
-                    .eq("id", value: source.id.uuidString.lowercased())
-                    .eq("org_id", value: orgID.uuidString.lowercased())
-                    .eq("property_id", value: propertyID.uuidString.lowercased())
-                    .execute()
-                print("[GuidedReclassification] synced shotID=\(shotID.uuidString)")
+                let matchingLinked = linkedRows.first.flatMap { linked -> GuidedReclassificationRemoteRow? in
+                    linked.id != source.id && slotIdentity(linked) == identity ? linked : nil
+                }
+                for target in [source, matchingLinked].compactMap({ $0 }) {
+                    try await client.from("shots")
+                        .update(payload, returning: .minimal)
+                        .eq("id", value: target.id.uuidString.lowercased())
+                        .eq("org_id", value: orgID.uuidString.lowercased())
+                        .eq("property_id", value: propertyID.uuidString.lowercased())
+                        .execute()
+                    print("[GuidedReclassification] synced shotID=\(target.id.uuidString)")
+                }
+                if let linked = linkedRows.first, matchingLinked == nil {
+                    print("[GuidedReclassification] skipped_unrelated_linked_shot shotID=\(linked.id.uuidString)")
+                }
             } catch {
                 print("[GuidedReclassification] failed shotID=\(shotID.uuidString) error=\(error.localizedDescription)")
             }
@@ -46365,9 +46384,14 @@ final class AppState: ObservableObject {
         do {
             await waitForUploadConnection()
             let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: context.propertyID)
-            let priorGuidedShotKeys = fastRuntimePriorGuidedShotKeys(
+            let priorPhotoIdentities = fastRuntimePriorPhotoIdentities(
                 propertyID: context.propertyID,
                 currentSessionID: context.sessionID
+            )
+            let priorGuidedShotKeys = priorPhotoIdentities.guidedShotKeys
+            let guidedReplacementShotIDs = fastRuntimeCurrentGuidedReplacementShotIDs(
+                propertyID: context.propertyID,
+                priorGuidedShotIDs: priorPhotoIdentities.guidedShotIDs
             )
             let metadata = makeFastRuntimeCompleteSessionMetadata(
                 context: context,
@@ -46375,7 +46399,8 @@ final class AppState: ObservableObject {
                 property: property,
                 completedAt: completedAt,
                 localObservationByIssueID: localObservationByIssueID,
-                priorGuidedShotKeys: priorGuidedShotKeys
+                priorGuidedShotKeys: priorGuidedShotKeys,
+                guidedReplacementShotIDs: guidedReplacementShotIDs
             )
             let session = Session(
                 id: context.sessionID,
@@ -46473,7 +46498,8 @@ final class AppState: ObservableObject {
                         checksumSHA256: fingerprint.checksumSHA256,
                         storagePath: storagePath,
                         localObservationByIssueID: localObservationByIssueID,
-                        priorGuidedShotKeys: priorGuidedShotKeys
+                        priorGuidedShotKeys: priorGuidedShotKeys,
+                        guidedReplacementShotIDs: guidedReplacementShotIDs
                     )
                     metadataWrites.append(shot)
                     newPreparedUploads.append(FastRuntimePreparedOriginalUpload(
@@ -49405,7 +49431,7 @@ final class AppState: ObservableObject {
     func fastRuntimePriorPhotoIdentities(
         propertyID: UUID,
         currentSessionID: UUID
-    ) -> (guidedShotKeys: Set<String>, flaggedIssueIDs: Set<UUID>) {
+    ) -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
         let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
         let priorSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? sessions(for: propertyID))
             .filter {
@@ -49414,6 +49440,7 @@ final class AppState: ObservableObject {
                     $0.isSealed
             }
         var keys = Set<String>()
+        var guidedShotIDs = Set<UUID>()
         var issueIDs = Set<UUID>()
         for session in priorSessions {
             guard let metadata = try? localStore.loadSessionMetadata(
@@ -49429,6 +49456,7 @@ final class AppState: ObservableObject {
                       shot.isGuided,
                       !shot.isFlagged,
                       shot.issueID == nil else { continue }
+                guidedShotIDs.insert(shot.shotID)
                 keys.insert(shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
                 keys.insert(Self.makeFastRuntimeMetadataShotKey(
                     building: shot.building,
@@ -49437,8 +49465,27 @@ final class AppState: ObservableObject {
                     angleIndex: shot.angleIndex
                 ))
             }
+            for guided in metadata.guidedShots where guided.shot != nil {
+                guidedShotIDs.insert(guided.id)
+            }
         }
-        return (guidedShotKeys: keys, flaggedIssueIDs: issueIDs)
+        return (guidedShotKeys: keys, guidedShotIDs: guidedShotIDs, flaggedIssueIDs: issueIDs)
+    }
+
+    func fastRuntimeCurrentGuidedReplacementShotIDs(
+        propertyID: UUID,
+        priorGuidedShotIDs: Set<UUID>
+    ) -> Set<UUID> {
+        guard !priorGuidedShotIDs.isEmpty,
+              let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID) else {
+            return []
+        }
+        return Set(guidedShots.compactMap { guided -> UUID? in
+            guard priorGuidedShotIDs.contains(guided.id),
+                  let currentShotID = guided.shot?.id,
+                  currentShotID != guided.id else { return nil }
+            return currentShotID
+        })
     }
 
     func fastRuntimeCaptureUpdatesPriorGuidedPhoto(
@@ -49498,7 +49545,8 @@ final class AppState: ObservableObject {
         property: Property?,
         completedAt: Date,
         localObservationByIssueID: [UUID: Observation]? = nil,
-        priorGuidedShotKeys: Set<String> = []
+        priorGuidedShotKeys: Set<String> = [],
+        guidedReplacementShotIDs: Set<UUID> = []
     ) -> SessionMetadata {
         let offsetSeconds = TimeZone.current.secondsFromGMT(for: context.createdAt)
         let offsetMinutes = offsetSeconds / 60
@@ -49519,7 +49567,8 @@ final class AppState: ObservableObject {
                 checksumSHA256: nil,
                 storagePath: nil,
                 localObservationByIssueID: localObservationByIssueID,
-                priorGuidedShotKeys: priorGuidedShotKeys
+                priorGuidedShotKeys: priorGuidedShotKeys,
+                guidedReplacementShotIDs: guidedReplacementShotIDs
             )
         }
         let issues = fastRuntimeCompleteIssueMetadata(
@@ -49630,7 +49679,8 @@ final class AppState: ObservableObject {
         checksumSHA256: String?,
         storagePath: String?,
         localObservationByIssueID: [UUID: Observation]? = nil,
-        priorGuidedShotKeys: Set<String> = []
+        priorGuidedShotKeys: Set<String> = [],
+        guidedReplacementShotIDs: Set<UUID> = []
     ) -> ShotMetadata {
         let metadataContext = Self.normalizedFastRuntimeMetadataContext(
             dryRunShot.metadataContext,
@@ -49650,10 +49700,11 @@ final class AppState: ObservableObject {
             ?? (metadataContext.isFlagged ?? (metadataContext.detailNote != nil))
         let inferredPriorGuidedUpdate = context.sessionType == .fullDocumentation &&
             context.fullDocumentationMode == .followUp &&
-            fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+            (guidedReplacementShotIDs.contains(dryRunShot.id) ||
+             fastRuntimeCaptureUpdatesPriorGuidedPhoto(
                 metadataContext,
                 priorGuidedShotKeys: priorGuidedShotKeys
-            )
+             ))
         let captureKind = inferredPriorGuidedUpdate ? "retake" : fastRuntimeProductionCaptureKind(
             sessionType: context.sessionType,
             metadataContext: metadataContext,
