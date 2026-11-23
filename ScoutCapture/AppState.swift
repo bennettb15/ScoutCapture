@@ -55194,6 +55194,52 @@ final class AppState: ObservableObject {
         }
     }
 
+    static func currentGuidedRemoteShotIDs(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        baselineSessionID: UUID,
+        baselineShotIDs: Set<UUID>,
+        baselineShotKeys: Set<String>,
+        baselineStartedAt: Date
+    ) -> Set<UUID> {
+        var eligibleIDs = baselineShotIDs
+        var eligibleKeys = baselineShotKeys
+        for row in remoteShots.sorted(by: {
+            if ($0.createdAt ?? .distantPast) != ($1.createdAt ?? .distantPast) {
+                return ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }) {
+            guard row.deletedAt == nil, row.isGuided == true,
+                  row.isFlagged != true, row.issueID == nil else { continue }
+            let key = row.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                ?? LocalConflictRules.guidedShotIdentityKey(
+                    building: row.building, elevation: row.elevation,
+                    detailType: row.detailType, angleIndex: row.angleIndex
+                )
+            let originalKey = (row.logicalShotIdentity?.lowercased()).flatMap { identity -> String? in
+                for marker in ["|flagged|no-issue|", "|normal|"] {
+                    if let range = identity.range(of: marker) {
+                        return String(identity[range.upperBound...])
+                    }
+                }
+                return nil
+            }
+            let linkedToBaseline = row.sessionID == baselineSessionID ||
+                eligibleIDs.contains(row.id) ||
+                (row.supersedesShotID.map(eligibleIDs.contains) ?? false) ||
+                (key.map(eligibleKeys.contains) ?? false) ||
+                (originalKey.map(eligibleKeys.contains) ?? false)
+            let newCapture = row.supersedesShotID == nil &&
+                row.captureKind?.lowercased() != "retake" &&
+                (row.createdAt ?? .distantPast) >= baselineStartedAt
+            guard linkedToBaseline || newCapture else { continue }
+            eligibleIDs.insert(row.id)
+            if let key { eligibleKeys.insert(key) }
+            if let originalKey { eligibleKeys.insert(originalKey) }
+        }
+        return eligibleIDs
+    }
+
     @discardableResult
     func mergeRemoteOrdinaryGuidedReferences(
         _ remoteShots: [RemoteShotMetadataRecord],
@@ -55206,14 +55252,53 @@ final class AppState: ObservableObject {
         }
 
         var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let baselineSession = sessions(for: propertyID)
+            .filter {
+                $0.deletedAt == nil && $0.status == .completed && $0.isSealed &&
+                $0.sessionType == .fullDocumentation && $0.fullDocumentationMode == .completeCapture
+            }
+            .max { $0.startedAt < $1.startedAt }
+        let currentGuidedIDs: Set<UUID>? = baselineSession.flatMap { baseline in
+            guard let metadata = try? localStore.loadSessionMetadata(
+                propertyID: propertyID, sessionID: baseline.id
+            ) else { return nil }
+            let baselineShots = metadata.shots.filter(LocalConflictRules.shotMetadataIsOrdinaryGuidedWork)
+            guard !baselineShots.isEmpty else { return nil }
+            return Self.currentGuidedRemoteShotIDs(
+                remoteShots, baselineSessionID: baseline.id,
+                baselineShotIDs: Set(baselineShots.map(\.shotID)),
+                baselineShotKeys: Set(baselineShots.map { $0.shotKey.lowercased() }),
+                baselineStartedAt: baseline.startedAt
+            )
+        }
+        var pruned = 0
+        if let currentGuidedIDs {
+            let remoteIDs = Set(remoteShots.map(\.id))
+            let before = guidedRows.count
+            guidedRows.removeAll { guided in
+                guard let shotID = guided.shot?.id ?? (remoteIDs.contains(guided.id) ? guided.id : nil),
+                      remoteIDs.contains(shotID) else { return false }
+                return !currentGuidedIDs.contains(shotID)
+            }
+            pruned = before - guidedRows.count
+            if pruned > 0 {
+                do {
+                    try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+                } catch {
+                    recordDiagnosticsError(error)
+                }
+            }
+        }
         // Existing checkpoints are keyed to their captured shot. Apply newer
         // metadata from another device before considering the historical
         // fallback below; a local checklist must not freeze remote Retire or
         // Reclassify changes forever.
-        var updated = 0
+        var updated = pruned
         if !guidedRows.isEmpty {
             let propertyShots = remoteShots.filter {
-                $0.deletedAt == nil && $0.propertyID == propertyID && $0.orgID == activeOrganizationID
+                $0.deletedAt == nil && $0.propertyID == propertyID && $0.orgID == activeOrganizationID &&
+                ((currentGuidedIDs?.contains($0.id) ?? true) ||
+                 $0.isFlagged == true || $0.issueID != nil)
             }
             let remoteByShotID = Dictionary(uniqueKeysWithValues: propertyShots.map { ($0.id, $0) })
             // A replacement can be reclassified after export. Walk newest
@@ -55369,7 +55454,8 @@ final class AppState: ObservableObject {
                   row.propertyID == propertyID,
                   row.orgID == activeOrganizationID,
                   let sessionID = row.sessionID,
-                  row.lifecycleState.isActiveForDefaultWorkflows else {
+                  row.lifecycleState.isActiveForDefaultWorkflows,
+                  (currentGuidedIDs?.contains(row.id) ?? true) else {
                 continue
             }
 

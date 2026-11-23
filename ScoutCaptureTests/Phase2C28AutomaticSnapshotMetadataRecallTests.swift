@@ -1051,6 +1051,113 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         ).supersedesShotID, oldShotID)
     }
 
+    func testCurrentGuidedLineageExcludesLegacyOrphanRetake() throws {
+        let baselineID = UUID()
+        let entryID = UUID()
+        let foundationID = UUID()
+        let oldRetakeID = UUID()
+        let oldReplacementID = UUID()
+        let latestID = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let rows = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+            [
+              {"id":"\(entryID)","session_id":"\(baselineID)","created_at":"2026-11-20T10:00:00Z",
+               "shot_key":"b1|north|entry / porch|1","capture_kind":"captured","is_guided":true},
+              {"id":"\(foundationID)","session_id":"\(baselineID)","created_at":"2026-11-20T10:01:00Z",
+               "shot_key":"b1|south|foundation|1","capture_kind":"captured","is_guided":true},
+              {"id":"\(oldRetakeID)","created_at":"2026-11-21T10:00:00Z",
+               "shot_key":"b1|south|roofline|1","capture_kind":"retake","is_guided":true},
+              {"id":"\(oldReplacementID)","created_at":"2026-11-22T10:00:00Z",
+               "shot_key":"b1|east|elevation|1","capture_kind":"retake","is_guided":true,
+               "supersedes_shot_id":"\(oldRetakeID)"},
+              {"id":"\(latestID)","created_at":"2026-11-23T10:00:00Z",
+               "shot_key":"b1|west|sidewalk|2","capture_kind":"captured","is_guided":true,
+               "supersedes_shot_id":"\(foundationID)"}
+            ]
+            """.utf8))
+        let eligible = AppState.currentGuidedRemoteShotIDs(
+            rows, baselineSessionID: baselineID,
+            baselineShotIDs: [entryID, foundationID],
+            baselineShotKeys: ["b1|north|entry / porch|1", "b1|south|foundation|1"],
+            baselineStartedAt: try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-20T10:00:00Z"))
+        )
+        XCTAssertTrue(eligible.contains(latestID))
+        XCTAssertFalse(eligible.contains(oldRetakeID))
+        XCTAssertFalse(eligible.contains(oldReplacementID))
+    }
+
+    func testHistoricalRecoveryDoesNotRecreateOrphanOutsideLatestBaseline() throws {
+        let fixture = try makeFixture()
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+        try saveMetadata(
+            store: fixture.deviceBStore, property: fixture.property, session: fixture.session,
+            orgID: fixture.orgID, shotID: fixture.shotID, issueID: fixture.issueID,
+            guidedID: fixture.guidedID,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "baseline", guidedTitle: "Baseline"
+        )
+        let baselineShotID = UUID()
+        let baselinePath = "orgs/test/baseline-guided.jpg"
+        let baselineShot = ShotMetadata(
+            shotID: baselineShotID, propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 150),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 150),
+            building: "A", elevation: "North", detailType: "Entry / Porch", angleIndex: 1,
+            shotKey: "a|north|entry / porch|1", isGuided: true, isFlagged: false,
+            issueID: nil, issueStatus: nil, noteText: nil, noteCategory: nil,
+            originalFilename: "baseline.jpg", originalRelativePath: baselinePath,
+            originalByteSize: 123, storageBucket: "media", storagePath: baselinePath,
+            stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
+            lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
+            accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+        )
+        var baselineMetadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id, sessionID: fixture.session.id
+        )
+        baselineMetadata.guidedShots = []
+        baselineMetadata.shots.append(baselineShot)
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: fixture.session.id,
+            metadata: baselineMetadata
+        )
+
+        let follow = try fixture.deviceBStore.upsertSession(Session(
+            propertyID: fixture.property.id, fullDocumentationMode: .followUp,
+            startedAt: Date(timeIntervalSinceReferenceDate: 300), status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 400), isSealed: true
+        ))
+        let orphanShot = ShotMetadata(
+            shotID: UUID(), propertyID: fixture.property.id, sessionID: follow.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 350),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 350),
+            building: "A", elevation: "East", detailType: "Elevation", angleIndex: 1,
+            shotKey: "a|east|elevation|1", isGuided: true, isFlagged: false,
+            issueID: nil, issueStatus: nil, captureKind: "retake",
+            noteText: nil, noteCategory: nil, originalFilename: "orphan.jpg",
+            originalRelativePath: "orgs/test/orphan.jpg", originalByteSize: 123,
+            storageBucket: "media", storagePath: "orgs/test/orphan.jpg",
+            stampedFilename: nil, stampedRelativePath: nil, captureMode: nil,
+            lens: nil, exifOrientation: nil, latitude: nil, longitude: nil,
+            accuracyMeters: nil, imageWidth: nil, imageHeight: nil
+        )
+        var followMetadata = baselineMetadata
+        followMetadata.sessionID = follow.id
+        followMetadata.fullDocumentationMode = .followUp
+        followMetadata.shots = [orphanShot]
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id, sessionID: follow.id,
+            metadata: followMetadata
+        )
+
+        let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertTrue(rows.contains { $0.shot?.id == baselineShotID })
+        XCTAssertFalse(rows.contains { $0.shot?.id == orphanShot.shotID })
+    }
+
     func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
         let fixture = try makeFixture()
         let guidedShotID = UUID()

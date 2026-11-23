@@ -3492,6 +3492,38 @@ final class LocalStore {
             }
         guard !sessions.isEmpty else { return guidedRows }
 
+        // Recovery must start from the same latest Full Documentation baseline
+        // as the checklist. A legacy retake with no path back to that baseline
+        // is historical evidence, even if its old snapshot says "active".
+        let currentBaselineShotIDs: Set<UUID>? = {
+            guard let baselineIndex = sessions.lastIndex(where: {
+                $0.sessionType == .fullDocumentation &&
+                $0.fullDocumentationMode == .completeCapture
+            }), let baseline = history.metadataBySessionID[sessions[baselineIndex].id] else {
+                return nil
+            }
+            let baselineShots = baseline.shots.filter(LocalConflictRules.shotMetadataIsOrdinaryGuidedWork)
+            guard !baselineShots.isEmpty else { return nil }
+            var ids = Set(baselineShots.map(\.shotID))
+            var keys = Set(baselineShots.map { $0.shotKey.lowercased() })
+            for session in sessions.dropFirst(baselineIndex + 1) {
+                guard let metadata = history.metadataBySessionID[session.id] else { continue }
+                for shot in metadata.shots.sorted(by: { $0.createdAt < $1.createdAt }) {
+                    guard shot.sessionID == session.id,
+                          LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot) else { continue }
+                    let key = shot.shotKey.lowercased()
+                    let linked = ids.contains(shot.shotID) ||
+                        (shot.supersedesShotID.map(ids.contains) ?? false) || keys.contains(key)
+                    let newCapture = shot.supersedesShotID == nil &&
+                        shot.captureKind?.lowercased() != "retake"
+                    guard linked || newCapture else { continue }
+                    ids.insert(shot.shotID)
+                    keys.insert(key)
+                }
+            }
+            return ids
+        }()
+
         var recovered = guidedRows
         let supersededShotIDs = Set(history.metadataBySessionID.values.flatMap { metadata in
             metadata.shots.compactMap(\.supersedesShotID)
@@ -3542,6 +3574,7 @@ final class LocalStore {
             for shot in metadata.shots.sorted(by: { $0.createdAt < $1.createdAt }) {
                 guard shot.lifecycleState == .active,
                       !supersededShotIDs.contains(shot.shotID),
+                      (currentBaselineShotIDs?.contains(shot.shotID) ?? true),
                       LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot),
                       let baseKey = LocalConflictRules.guidedShotBaseIdentityKey(
                         building: shot.building,
