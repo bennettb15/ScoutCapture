@@ -58558,6 +58558,56 @@ final class AppState: ObservableObject {
         )
     }
 
+    // Remote reference sync has already written the current property rows. Keep
+    // the camera responsive while reflecting those rows; the full history scan
+    // remains available when the checklist is explicitly refreshed.
+    func fastRuntimePreviewSideControlPayloadFromCurrentRows(
+        propertyID: UUID,
+        sessionType: SessionType,
+        currentSessionID: UUID?,
+        priorPayload: FastRuntimePreviewSideControlPayload
+    ) -> FastRuntimePreviewSideControlPayload {
+        guard canAccessProperty(propertyID) else { return .empty }
+        let observations = ((try? localStore.fetchObservations(propertyID: propertyID)) ?? [])
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        let active = observations.filter { $0.appearsInFieldIssueList(currentSessionID: currentSessionID) }
+        guard sessionType != .punchlistVisit else {
+            return FastRuntimePreviewSideControlPayload(
+                resolutionRequiredObservations: [],
+                activeObservations: active,
+                guidedShots: [],
+                retiredGuidedShots: []
+            )
+        }
+
+        let otherDraftShotIDs = currentSessionID.map {
+            fastRuntimeShotIDsExclusiveToOtherDrafts(propertyID: propertyID, currentSessionID: $0)
+        } ?? []
+        let rows = ((try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? [])
+            .filter { guided in
+                guard let shotID = guided.shot?.id else { return true }
+                return !otherDraftShotIDs.contains(shotID)
+            }
+            .sorted { lhs, rhs in
+                let lhsTitle = lhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let rhsTitle = rhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if lhsTitle != rhsTitle {
+                    return lhsTitle.localizedCaseInsensitiveCompare(rhsTitle) == .orderedAscending
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        let retiredIDs = Set(rows.filter { $0.isRetired || $0.status == .retired }.map(\.id))
+        return FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: [],
+            activeObservations: active,
+            guidedShots: rows.filter { !$0.isRetired && $0.status != .retired },
+            retiredGuidedShots: priorPayload.retiredGuidedShots.filter { retiredIDs.contains($0.id) }
+        )
+    }
+
     func fastRuntimePreviewSideControlPayload(
         propertyID: UUID,
         sessionType: SessionType,

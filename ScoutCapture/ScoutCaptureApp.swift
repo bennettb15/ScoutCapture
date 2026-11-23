@@ -14680,7 +14680,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard notification.object as? UUID == context.propertyID,
                   !isFastLaneExiting else { return }
             fastLanePriorPhotoIdentityCache.invalidate()
-            reloadFastLaneSideControlPayloadFromLocalStore()
+            reloadFastLaneSideControlPayloadFromLocalStore(includeHistory: false)
         }
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
@@ -14971,7 +14971,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
-    private func reloadFastLaneSideControlPayloadFromLocalStore() {
+    private func reloadFastLaneSideControlPayloadFromLocalStore(includeHistory: Bool = true) {
+        if !includeHistory {
+            let payload = appState.fastRuntimePreviewSideControlPayloadFromCurrentRows(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType,
+                currentSessionID: context.sessionID,
+                priorPayload: fastLaneSideControlPayload
+            )
+            let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+            fastLaneSideControlPayload = scopedPayload
+            fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+            refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+            return
+        }
         var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
         let payload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
@@ -16690,70 +16703,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 return
             }
-            let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID, currentSessionID: context.sessionID)
-            recordFastLaneReadyEvent("issue_payload_ready")
-            await MainActor.run {
-                let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
-                    resolutionRequiredObservations: [],
-                    activeObservations: issuePayload.activeObservations,
-                    guidedShots: fastLaneSideControlPayload.guidedShots,
-                    retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
-                )
-                let scopedPayload = fastLanePayloadScopedToCurrentFastSession(rawPayload)
-                fastLaneSideControlPayload = scopedPayload
-                refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
-                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
-                fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
-                didRefreshFastLaneSideControlCounts = true
-                didRefreshFastLaneIssuePayload = true
-            }
-
-            guard context.sessionType != .punchlistVisit else {
-                await MainActor.run {
-                    finishFastLaneSideControlRefresh()
-                }
-                return
-            }
-
             let guidedReferencesChanged = appState.fastRuntimePortalGuidedReferenceRevision(
                 propertyID: context.propertyID
             ) != fastLanePortalGuidedRevisionAtPrime
             if guidedReferencesChanged {
                 await MainActor.run { fastLanePriorPhotoIdentityCache.invalidate() }
             }
-            if !force,
-               !guidedReferencesChanged,
-               !appState.fastRuntimePropertyHasRetiredGuidedRows(propertyID: context.propertyID) {
-                recordFastLaneReadyEvent("guided_history_refresh_skipped")
-                await MainActor.run {
-                    fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(
-                        propertyID: context.propertyID
-                    )
-                    finishFastLaneSideControlRefresh()
-                }
-                return
-            }
-
-            await Task.yield()
-            guard fastLaneSideControlSheetMode == nil,
-                  !showFastLaneSessionActionsSheet,
-                  !isFastLaneExiting else {
-                await MainActor.run {
-                    deferredFastLaneSideControlRefreshForce = (deferredFastLaneSideControlRefreshForce ?? false) || force
-                    recordFastLaneReadyEvent("full_payload_deferred_for_session_actions")
-                    finishFastLaneSideControlRefresh()
-                }
-                return
-            }
-
-            var openingSnapshot = AppState.FastRuntimeOpeningLocalSnapshot.empty
-            let payload = appState.fastRuntimePreviewSideControlPayload(
+            let payload = appState.fastRuntimePreviewSideControlPayloadFromCurrentRows(
                 propertyID: context.propertyID,
                 sessionType: context.sessionType,
                 currentSessionID: context.sessionID,
-                openingSnapshot: &openingSnapshot
+                priorPayload: fastLaneSideControlPayload
             )
-            recordFastLaneReadyEvent("full_payload_ready")
+            recordFastLaneReadyEvent("current_rows_payload_ready")
             let scopedPayload = await MainActor.run {
                 fastLanePayloadScopedToCurrentFastSession(payload)
             }
@@ -16761,11 +16723,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneSideControlCounts(from: scopedPayload)
             }
             await MainActor.run {
-                cacheFastLanePriorPhotoIdentities(from: openingSnapshot)
                 fastLaneSideControlPayload = scopedPayload
-                refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)
                 fastLaneSideControlCounts = counts
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                didRefreshFastLaneSideControlCounts = true
+                didRefreshFastLaneIssuePayload = true
                 fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
                 fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(
                     propertyID: context.propertyID

@@ -427,6 +427,8 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                 .rotationEffect(usesLandscapeChrome ? display.glyphRotationAngle : .zero)
                 .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                 .offset(y: 1.5)
+                .frame(width: 64, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(CameraChromeEndPressStyle())
     }

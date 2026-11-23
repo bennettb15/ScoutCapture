@@ -1150,5 +1150,31 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             Set([replacementID])
         )
         XCTAssertFalse(identities.guidedShotKeys.contains("b1|east|pool / outdoor amenities|1"))
+
+        let previousPayload = fixture.appState.fastRuntimePreviewSideControlPayload(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: draftID
+        )
+        let refreshedGuided = GuidedShot(
+            id: guided.id,
+            title: "B1 North Window",
+            building: "B1",
+            targetElevation: "North",
+            detailType: "Window",
+            angleIndex: 1,
+            shot: guided.shot,
+            isCompleted: true
+        )
+        try fixture.localStore.saveGuidedShots([refreshedGuided], propertyID: fixture.property.id)
+        let currentRowsPayload = fixture.appState.fastRuntimePreviewSideControlPayloadFromCurrentRows(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            currentSessionID: draftID,
+            priorPayload: previousPayload
+        )
+        XCTAssertEqual(currentRowsPayload.guidedShots.map(\.id), [guided.id])
+        XCTAssertEqual(currentRowsPayload.guidedShots.first?.detailType, "Window")
+        XCTAssertEqual(currentRowsPayload.guidedShots.first?.shot?.id, replacementID)
     }
 }
