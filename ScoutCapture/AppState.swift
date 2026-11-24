@@ -27321,12 +27321,9 @@ final class AppState: ObservableObject {
         let localHasChildren = (canonicalDiagnostics.localShotCount ?? 0) > 0 ||
             (canonicalDiagnostics.localIssueObservationCount ?? 0) > 0 ||
             (canonicalDiagnostics.localGuidedCount ?? 0) > 0
-        let remoteChildrenMissing = localHasChildren && (
-            ((canonicalDiagnostics.localShotCount ?? 0) > 0 &&
-             (canonicalDiagnostics.remoteShotCount ?? 0) == 0) ||
-            ((canonicalDiagnostics.localIssueObservationCount ?? 0) > 0 &&
-             (canonicalDiagnostics.remoteIssueObservationCount ?? 0) == 0)
-        )
+        let remoteChildrenMissing = localHasChildren &&
+            (canonicalDiagnostics.remoteShotCount ?? 0) == 0 &&
+            (canonicalDiagnostics.remoteIssueObservationCount ?? 0) == 0
         if remoteChildrenMissing {
             taxonomy.append(.missingRemoteChildren)
         }
