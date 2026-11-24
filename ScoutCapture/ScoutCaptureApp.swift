@@ -16596,7 +16596,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             // Remote reference reconciliation begins after the camera renders.
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled, !isFastLaneExiting else { return }
-            _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
+            let didVerifyReferences = await appState.refreshRemoteReferencesBeforeCameraEntry(
                 propertyID: context.propertyID,
                 activeOrganizationID: orgID,
                 verifySnapshotModes: false
@@ -16609,10 +16609,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
             didSyncFastLanePortalIssueStateAfterPreview = true
             didFinishInitialFastLaneReferenceRefresh = true
-            appState.markFastRuntimeReferencesVerified(
-                propertyID: context.propertyID,
-                organizationID: orgID
-            )
+            if didVerifyReferences {
+                appState.markFastRuntimeReferencesVerified(
+                    propertyID: context.propertyID,
+                    organizationID: orgID
+                )
+            }
             isLoadingFastLaneSideControlSheet = false
             recordFastLaneReadyEvent("initial_reference_sync_finished_issues_\(fastLaneSideControlCounts.activeIssueCount)_guided_\(fastLaneSideControlCounts.guidedRemainingCount)")
             if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.guided.id {

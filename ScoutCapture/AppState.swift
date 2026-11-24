@@ -55320,6 +55320,26 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID
     ) async -> Bool {
+        let result = await syncPortalPunchlistOperationalOverlaysWithShots(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID,
+            awaitPolicyRefresh: true
+        )
+        return result.didChangeLocalState
+    }
+
+    private struct PortalPropertyOpenSyncResult {
+        let didChangeLocalState: Bool
+        let didFetchRemoteShots: Bool
+        let didApplyOperationalOverlay: Bool
+    }
+
+    private func syncPortalPunchlistOperationalOverlaysWithShots(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        awaitPolicyRefresh: Bool,
+        latestSession: RemoteSessionDeltaRecord? = nil
+    ) async -> PortalPropertyOpenSyncResult {
         let startedAt = Date()
         guard backendFeatureFlags.supabaseEnabled,
               canAccessProperty(propertyID),
@@ -55329,25 +55349,41 @@ final class AppState: ObservableObject {
                 "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
                 "result=skipped reason=property_open_prereq_failed"
             )
-            return false
+            return PortalPropertyOpenSyncResult(
+                didChangeLocalState: false,
+                didFetchRemoteShots: false,
+                didApplyOperationalOverlay: false
+            )
         }
         print(
             "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
             "orgID=\(activeOrganizationID.uuidString) trigger=property_open fetch=starting"
         )
-        async let policyRefresh: Void = refreshFieldResolutionReviewPolicy(organizationID: activeOrganizationID)
+        let policyRefresh = Task {
+            await refreshFieldResolutionReviewPolicy(organizationID: activeOrganizationID)
+        }
         let remoteShots: [RemoteShotMetadataRecord]
+        let didFetchRemoteShots: Bool
         do {
             remoteShots = try await fetchRemotePortalPunchlistShotMetadataRows(
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             )
+            didFetchRemoteShots = true
         } catch {
             recordDiagnosticsError(error)
             remoteShots = []
+            didFetchRemoteShots = false
             print(
                 "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
                 "source=shots result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+        }
+        if didFetchRemoteShots, let latestSession {
+            applyRemoteShotMetadataRows(
+                remoteShots.filter { $0.sessionID == latestSession.id },
+                propertyID: propertyID,
+                sessionID: latestSession.id
             )
         }
         let result = await applyPortalPunchlistOperationalOverlaysIfAvailable(
@@ -55388,8 +55424,14 @@ final class AppState: ObservableObject {
             "resolvedSkipped=\(result?.skippedResolvedCount ?? 0) " +
             "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
-        await policyRefresh
-        return didChangeLocalState
+        if awaitPolicyRefresh {
+            await policyRefresh.value
+        }
+        return PortalPropertyOpenSyncResult(
+            didChangeLocalState: didChangeLocalState,
+            didFetchRemoteShots: didFetchRemoteShots,
+            didApplyOperationalOverlay: result != nil
+        )
     }
 
     @discardableResult
@@ -55400,6 +55442,46 @@ final class AppState: ObservableObject {
     ) async -> Bool {
         // Camera startup uses local references. Reconcile cloud changes once
         // preview is visible, then notify it to update its checklist.
+        if !verifySnapshotModes {
+            // The fast camera needs one property-wide shot read for Guided and
+            // Active. Use those same rows to update the previous session's
+            // metadata instead of fetching its shots a second time. Gallery
+            // and panel images hydrate only when those views need them.
+            let startedAt = Date()
+            let latestSession: RemoteSessionDeltaRecord?
+            do {
+                latestSession = try await fetchLatestFinalizedReferenceSession(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID
+                )
+            } catch {
+                recordDiagnosticsError(error)
+                latestSession = nil
+            }
+            guard !Task.isCancelled else { return false }
+            if let latestSession {
+                _ = applySyncDeltaSessions(records: [latestSession], orgID: activeOrganizationID)
+            }
+            let sessionReadyAt = Date()
+            let portal = await syncPortalPunchlistOperationalOverlaysWithShots(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID,
+                awaitPolicyRefresh: false,
+                latestSession: latestSession
+            )
+            guard !Task.isCancelled else { return false }
+            let portalReadyAt = Date()
+            print(
+                "[FastReferenceRefresh] propertyID=\(propertyID.uuidString) " +
+                "sessionMs=\(Int(sessionReadyAt.timeIntervalSince(startedAt) * 1000)) " +
+                "propertyRowsMs=\(Int(portalReadyAt.timeIntervalSince(sessionReadyAt) * 1000)) " +
+                "totalMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
+            await MainActor.run {
+                NotificationCenter.default.post(name: .scoutRemoteReferencesDidRefresh, object: propertyID)
+            }
+            return portal.didFetchRemoteShots && portal.didApplyOperationalOverlay
+        }
         let freshness = await reconcileLatestReferenceSessionFreshness(
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID,
@@ -56420,16 +56502,26 @@ final class AppState: ObservableObject {
         guard let client = supabaseClient else {
             throw RemotePropertyFetchError.missingClient
         }
-        return try await client
-            .from("shots")
-            .select("id, org_id, property_id, session_id, created_at, updated_at, updated_by, revision, deleted_at, building, elevation, detail_type, angle_index, shot_key, logical_shot_identity, capture_kind, first_capture_kind, is_guided, is_flagged, issue_id, issue_status, trade, reason, priority, capture_mode, lens, latitude, longitude, accuracy_meters, image_width, image_height, lifecycle_state, retired_at, retired_reason, retired_by, superseded_by_shot_id, supersedes_shot_id, replacement_reason, hidden_from_reports, hidden_from_gallery, lifecycle_updated_at, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state, upload_attempts, last_upload_error")
-            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .is("deleted_at", value: nil)
-            .order("updated_at", ascending: false)
-            .limit(5_000)
-            .execute()
-            .value
+        let pageSize = 500
+        var offset = 0
+        var rows: [RemoteShotMetadataRecord] = []
+        while true {
+            try Task.checkCancellation()
+            let page: [RemoteShotMetadataRecord] = try await client
+                .from("shots")
+                .select("id, org_id, property_id, session_id, created_at, updated_at, updated_by, revision, deleted_at, building, elevation, detail_type, angle_index, shot_key, logical_shot_identity, capture_kind, first_capture_kind, is_guided, is_flagged, issue_id, issue_status, trade, reason, priority, capture_mode, lens, latitude, longitude, accuracy_meters, image_width, image_height, lifecycle_state, retired_at, retired_reason, retired_by, superseded_by_shot_id, supersedes_shot_id, replacement_reason, hidden_from_reports, hidden_from_gallery, lifecycle_updated_at, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state, upload_attempts, last_upload_error")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .order("updated_at", ascending: false)
+                .order("id", ascending: true)
+                .range(from: offset, to: offset + pageSize - 1)
+                .execute()
+                .value
+            rows.append(contentsOf: page)
+            guard page.count == pageSize else { return rows }
+            offset += pageSize
+        }
     }
 
     private nonisolated static func portalPunchlistOperationalOverlays(
