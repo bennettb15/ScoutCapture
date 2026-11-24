@@ -15623,6 +15623,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
+        // An export on another device can leave the local Guided rows between
+        // revisions. Keep the control available, but publish its count only
+        // after the property-wide reference read completes.
+        let guidedCountIsProvisional = isFastLaneInitialReferenceSyncPending
         return [
             CameraChromeSideControl(
                 id: "active_issues",
@@ -15635,8 +15639,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             CameraChromeSideControl(
                 id: "guided",
                 systemImage: "safari",
-                color: guidedCount > 0 ? .blue : .white,
-                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
+                color: guidedCount > 0 || guidedCountIsProvisional ? .blue : .white,
+                badgeText: !guidedCountIsProvisional && guidedCount > 0 ? "\(guidedCount)" : nil,
                 accessibilityLabel: isFollowUp ? "Guided photos available" : "Guided",
                 isVisible: context.sessionType != .punchlistVisit,
                 isEnabled: true
@@ -16711,6 +16715,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let anglesReadyAt = Date()
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
         let countsReadyAt = Date()
+        recordFastLaneReadyEvent(
+            "opening_local_counts_issues_\(fastLaneSideControlCounts.activeIssueCount)_guided_\(fastLaneSideControlCounts.guidedRemainingCount)"
+        )
         refreshFastLaneSideControlMediaMaps(for: scopedPayload)
         let mediaReadyAt = Date()
         prewarmFastLaneGuidedThumbnails(for: scopedPayload.guidedShots)
