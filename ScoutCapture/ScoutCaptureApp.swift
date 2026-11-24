@@ -14890,9 +14890,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             )
         case .guided:
+            if isFastLaneInitialReferenceSyncPending {
+                fastLaneGuidedSyncPlaceholder
+                    .onAppear {
+                        recordFastLaneReadyEvent("guided_loading_visible")
+                    }
+            } else {
             GuidedChecklistOverlay(
-                guidedShots: isFastLaneInitialReferenceSyncPending ? [] : fastLaneSideControlPayload.guidedShots,
-                retiredGuidedShots: isFastLaneInitialReferenceSyncPending ? [] : fastLaneSideControlPayload.retiredGuidedShots,
+                guidedShots: fastLaneSideControlPayload.guidedShots,
+                retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
                 resolvedThumbnailPathByID: fastLaneGuidedThumbnailPathByID,
                 referencePathByID: fastLaneGuidedReferencePathByID,
                 currentSessionID: context.sessionID,
@@ -14909,7 +14915,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 refreshToken: fastLaneGalleryRefreshToken,
                 cache: fastLaneGalleryImageCache,
-                isHydrating: isFastLaneInitialReferenceSyncPending,
+                isHydrating: false,
                 compactContextAngle: true,
                 onClose: {
                     recordFastLaneReadyEvent("guided_list_closed")
@@ -14961,7 +14967,36 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     )
                 }
             )
+            .onAppear {
+                recordFastLaneReadyEvent("guided_list_visible")
+            }
+            }
         }
+    }
+
+    private var fastLaneGuidedSyncPlaceholder: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer(minLength: 72)
+                Text("Guided Checklist")
+                    .font(.system(size: 18, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                Button("Done") {
+                    fastLaneSideControlSheetMode = nil
+                }
+                .font(.system(size: 18, weight: .medium))
+                .frame(width: 72, height: 42)
+                .background(Color(uiColor: .tertiarySystemFill))
+                .clipShape(Capsule())
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            Spacer()
+            ProgressView("Syncing property photos…")
+                .font(.system(size: 16))
+            Spacer()
+        }
+        .foregroundStyle(.primary)
     }
 
     private func fastLaneCurrentSessionShotIDs() -> Set<UUID> {
@@ -16619,7 +16654,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             recordFastLaneReadyEvent("initial_reference_sync_finished_issues_\(fastLaneSideControlCounts.activeIssueCount)_guided_\(fastLaneSideControlCounts.guidedRemainingCount)")
             if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.guided.id {
                 didCheckFastLaneGuidedPanelMedia = false
-                scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+                scheduleFastLaneGuidedPanelMediaAfterPresentation()
             } else if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.activeIssues.id {
                 didCheckFastLaneIssuePanelMedia = false
                 scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: .activeIssues)
@@ -17580,6 +17615,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func handleFastLaneSideControlTap(_ controlID: CameraChromeSideControl.ID) {
+        recordFastLaneReadyEvent("side_control_tap_\(controlID)")
         shutterHaptic.impactOccurred(intensity: 0.42)
         shutterHaptic.prepare()
 
@@ -17625,6 +17661,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func presentFastLaneGuidedChecklist() {
         if isFastLaneInitialReferenceSyncPending {
+            recordFastLaneReadyEvent("guided_open_pending")
             fastLaneSideControlSheetMode = .guided
             isLoadingFastLaneSideControlSheet = true
             return
@@ -17638,9 +17675,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneSideControlSheetMode = .guided
             isLoadingFastLaneSideControlSheet = false
             didCheckFastLaneGuidedPanelMedia = false
-            scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+            scheduleFastLaneGuidedPanelMediaAfterPresentation()
         } else {
             showFastLaneSideControlToast("No guided photos")
+        }
+    }
+
+    private func scheduleFastLaneGuidedPanelMediaAfterPresentation() {
+        Task {
+            try? await Task.sleep(nanoseconds: 75_000_000)
+            guard !Task.isCancelled,
+                  fastLaneSideControlSheetMode == .guided,
+                  !isFastLaneInitialReferenceSyncPending else { return }
+            scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
         }
     }
 
