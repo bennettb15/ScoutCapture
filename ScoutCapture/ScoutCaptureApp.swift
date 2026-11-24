@@ -14661,9 +14661,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 propertyID: context.propertyID,
                 organizationID: organizationID
                ) {
-                // An immediate return to the same property can use the local
-                // snapshot that was just reconciled. The remote check still
-                // runs after preview and updates it if anything changed.
+                // Repeat entry can use the last verified local snapshot while
+                // the remote check runs after preview. AppState rejects this
+                // cache when another device changes the property status.
                 didFinishInitialFastLaneReferenceRefresh = true
                 didSyncFastLanePortalIssueStateAfterPreview = true
                 recordFastLaneReadyEvent("recent_verified_references_reused")

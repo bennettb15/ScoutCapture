@@ -7868,7 +7868,13 @@ final class AppState: ObservableObject {
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
     @Published private(set) var isAuthenticationReady: Bool = false
     @Published private(set) var isAuthenticating: Bool = false
-    @Published private(set) var isNetworkAvailable: Bool = true
+    @Published private(set) var isNetworkAvailable: Bool = true {
+        didSet {
+            if !isNetworkAvailable {
+                fastRuntimeVerifiedReferencesByPropertyID.removeAll()
+            }
+        }
+    }
     @Published private(set) var isLoadingPropertiesForOrgSwitch: Bool = false
     @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser? {
         didSet {
@@ -7883,6 +7889,7 @@ final class AppState: ObservableObject {
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
     @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:] {
         didSet {
+            invalidateFastRuntimeVerifiedReferencesForStatusChanges(previous: oldValue)
             refreshPropertyRowDraftBadgeCache()
             refreshPropertyRowLockBadgeCache()
             refreshPropertyRowCloudGlyphCache()
@@ -7894,13 +7901,15 @@ final class AppState: ObservableObject {
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
     private(set) var lastPropertyStatusRefreshAt: Date?
     private struct FastRuntimeVerifiedReferenceEntry {
-        let verifiedAt: Date
         let organizationID: UUID
         let lastExportedSessionID: UUID?
+        let statusRevision: Int64
+        let statusUpdatedAt: Date
         let portalOverlayRevision: Int
         let portalGuidedRevision: Int
     }
     private var fastRuntimeVerifiedReferencesByPropertyID: [UUID: FastRuntimeVerifiedReferenceEntry] = [:]
+    private var fastRuntimeOwnStatusTransitionPropertyIDs: Set<UUID> = []
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
     private var propertyStatusDiagnosticsRefreshTaskID: UUID?
@@ -52058,7 +52067,9 @@ final class AppState: ObservableObject {
 
         var nextCache = propertyStatusByPropertyID
         nextCache[propertyID] = record
+        fastRuntimeOwnStatusTransitionPropertyIDs.insert(propertyID)
         propertyStatusByPropertyID = nextCache
+        fastRuntimeOwnStatusTransitionPropertyIDs.remove(propertyID)
         lastPropertyStatusRefreshAt = Date()
         reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
         print(
@@ -55429,12 +55440,49 @@ final class AppState: ObservableObject {
               let status = propertyStatusByPropertyID[propertyID],
               status.orgID == organizationID else { return }
         fastRuntimeVerifiedReferencesByPropertyID[propertyID] = FastRuntimeVerifiedReferenceEntry(
-            verifiedAt: Date(),
             organizationID: organizationID,
             lastExportedSessionID: status.lastExportedSessionID,
+            statusRevision: status.revision,
+            statusUpdatedAt: status.updatedAt,
             portalOverlayRevision: fastRuntimePortalOverlayRevision(propertyID: propertyID),
             portalGuidedRevision: fastRuntimePortalGuidedReferenceRevision(propertyID: propertyID)
         )
+    }
+
+    private func invalidateFastRuntimeVerifiedReferencesForStatusChanges(
+        previous: [UUID: PropertyStatusRecord]
+    ) {
+        guard !fastRuntimeVerifiedReferencesByPropertyID.isEmpty else { return }
+        let thisDeviceID = currentDeviceIdentifier()
+        var invalidatedPropertyIDs: [UUID] = []
+        for (propertyID, entry) in fastRuntimeVerifiedReferencesByPropertyID {
+            guard let status = propertyStatusByPropertyID[propertyID],
+                  status.orgID == entry.organizationID,
+                  status.lastExportedSessionID == entry.lastExportedSessionID else {
+                invalidatedPropertyIDs.append(propertyID)
+                continue
+            }
+            let prior = previous[propertyID]
+            let statusChanged = prior?.revision != status.revision ||
+                prior?.updatedAt != status.updatedAt
+            if statusChanged && fastRuntimeOwnStatusTransitionPropertyIDs.contains(propertyID) {
+                fastRuntimeVerifiedReferencesByPropertyID[propertyID] = FastRuntimeVerifiedReferenceEntry(
+                    organizationID: entry.organizationID,
+                    lastExportedSessionID: entry.lastExportedSessionID,
+                    statusRevision: status.revision,
+                    statusUpdatedAt: status.updatedAt,
+                    portalOverlayRevision: entry.portalOverlayRevision,
+                    portalGuidedRevision: entry.portalGuidedRevision
+                )
+                continue
+            }
+            if statusChanged && normalizedSupabaseText(status.ownerDeviceID) != thisDeviceID {
+                invalidatedPropertyIDs.append(propertyID)
+            }
+        }
+        for propertyID in invalidatedPropertyIDs {
+            fastRuntimeVerifiedReferencesByPropertyID.removeValue(forKey: propertyID)
+        }
     }
 
     func hasRecentVerifiedFastRuntimeReferences(propertyID: UUID, organizationID: UUID) -> Bool {
@@ -55443,13 +55491,19 @@ final class AppState: ObservableObject {
               status.orgID == organizationID,
               let entry = fastRuntimeVerifiedReferencesByPropertyID[propertyID],
               entry.organizationID == organizationID,
-              Date().timeIntervalSince(entry.verifiedAt) < 60,
               status.lastExportedSessionID == entry.lastExportedSessionID,
               fastRuntimePortalOverlayRevision(propertyID: propertyID) == entry.portalOverlayRevision,
               fastRuntimePortalGuidedReferenceRevision(propertyID: propertyID) == entry.portalGuidedRevision else {
             return false
         }
-        return true
+        // Our own lock claim and release can advance the property revision
+        // without changing any references. A different device's transition
+        // must be checked before we display the saved badge counts.
+        let statusUnchanged = status.revision == entry.statusRevision &&
+            status.updatedAt == entry.statusUpdatedAt
+        let statusStillOwnedByThisDevice = normalizedSupabaseText(status.ownerDeviceID) ==
+            currentDeviceIdentifier()
+        return statusUnchanged || statusStillOwnedByThisDevice
     }
 
     func fastRuntimePropertyHasRetiredGuidedRows(propertyID: UUID) -> Bool {
