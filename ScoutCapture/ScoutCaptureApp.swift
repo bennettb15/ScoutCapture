@@ -15564,7 +15564,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
-        let isSyncing = isFastLaneInitialReferenceSyncPending
         let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
         let isFollowUp = context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp
         let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
@@ -15572,19 +15571,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             CameraChromeSideControl(
                 id: "active_issues",
                 systemImage: "flag.fill",
-                color: isSyncing || activeIssueCount > 0 ? .red : .white,
-                badgeText: !isSyncing && activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
-                badgeIsLoading: isSyncing,
-                accessibilityLabel: isSyncing ? "Active issues syncing, tap to open" : "Active issues",
+                color: activeIssueCount > 0 ? .red : .white,
+                badgeText: activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
+                accessibilityLabel: "Active issues",
                 isEnabled: true
             ),
             CameraChromeSideControl(
                 id: "guided",
                 systemImage: "safari",
-                color: isSyncing || guidedCount > 0 ? .blue : .white,
-                badgeText: !isSyncing && guidedCount > 0 ? "\(guidedCount)" : nil,
-                badgeIsLoading: isSyncing,
-                accessibilityLabel: isSyncing ? "Guided photos syncing, tap to open" : (isFollowUp ? "Guided photos available" : "Guided"),
+                color: guidedCount > 0 ? .blue : .white,
+                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
+                accessibilityLabel: isFollowUp ? "Guided photos available" : "Guided",
                 isVisible: context.sessionType != .punchlistVisit,
                 isEnabled: true
             ),
@@ -16605,9 +16602,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 verifySnapshotModes: false
             )
             guard !Task.isCancelled, !isFastLaneExiting else { return }
-            // Publish the complete local snapshot once all cross-device
-            // reference and issue reads have finished. Intermediate rows stay
-            // hidden from the camera badges and side panels.
+            // Keep the local badge counts until the cross-device reads finish,
+            // then publish one complete replacement for both side controls.
             reloadFastLaneSideControlPayloadFromLocalStore()
             fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
