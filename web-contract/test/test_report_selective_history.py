@@ -18,6 +18,11 @@ renderer_spec = importlib.util.spec_from_file_location('report_renderer_phase2b'
 report_renderer = importlib.util.module_from_spec(renderer_spec)
 sys.modules[renderer_spec.name] = report_renderer
 renderer_spec.loader.exec_module(report_renderer)
+MEDIA_PATH = ROOT / 'report-media' / 'report_media_phase2a.py'
+media_spec = importlib.util.spec_from_file_location('report_media_phase2a', MEDIA_PATH)
+report_media = importlib.util.module_from_spec(media_spec)
+sys.modules[media_spec.name] = report_media
+media_spec.loader.exec_module(report_media)
 
 ORG = 'org-a'
 PROPERTY = 'property-a'
@@ -72,6 +77,41 @@ class SelectiveHistoryTests(unittest.TestCase):
                              [shot(0, 'visit1', 2, kind='follow_up_capture')], [issue(0)])
         self.visit2 = source('visit2', 3, 'punchlist_visit',
                              [shot(1, 'visit2', 3, kind='follow_up_capture')], [issue(1)])
+
+    def test_original_overview_remains_cover_without_reentering_report_body(self):
+        original = shot(1, 'original', 1, guided=True)
+        original.update(issueID=None, isFlagged=False)
+        first = source('original', 1, 'full_documentation', [original])
+        newer = shot(3, 'newer', 2, guided=True)
+        newer.update(issueID=None, isFlagged=False)
+        baseline = source('newer', 2, 'full_documentation', [newer])
+        follow = source('follow', 3, 'full_documentation', [])
+        follow['metadata']['fullDocumentationMode'] = 'follow_up'
+
+        result = report_input.compose_punchlist_history([first, baseline, follow], Storage())
+        self.assertEqual([s['shot_id'] for s in result['cover_shots']], ['photo-1-original'])
+        self.assertEqual([s['shot_id'] for s in result['shots']], ['photo-3-newer'])
+        self.assertEqual([e['shot_id'] for e in result['entries'] if e['kind'] == 'photo'], ['photo-3-newer'])
+
+        validation = {'session_id': 'session-follow', 'inputs': {
+            'session': {'session_id': 'session-follow'},
+            'ordered_shots': result['shots'], 'cover_shots': result['cover_shots'],
+        }}
+        media_items = report_media.current_media_items(validation)
+        self.assertEqual([(item.shot_id, item.role) for item in media_items],
+                         [('photo-3-newer', 'current'), ('photo-1-original', 'cover')])
+        lookup = report_renderer.media_lookup({'items': [
+            {'role': item.role, 'shot_id': item.shot_id,
+             'temporary_prepared_path': f'/{item.shot_id}.jpg'} for item in media_items
+        ]})
+        self.assertEqual(report_renderer.cover_photo_entry(validation, lookup)['shot_id'], 'photo-1-original')
+
+        class MissingOriginal(Storage):
+            def exists(self, bucket, path):
+                return 'photo-1-original' not in (path or '')
+
+        missing = report_input.compose_punchlist_history([first, baseline, follow], MissingOriginal())
+        self.assertEqual(missing['cover_shots'], [])
 
     def test_follow_up_retirement_and_restore_of_prior_guided_photo(self):
         guided_photo = {

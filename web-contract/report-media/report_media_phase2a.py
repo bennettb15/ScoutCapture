@@ -481,11 +481,15 @@ def prepare_image(item: MediaItem, source_path: pathlib.Path, output_path: pathl
 def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
     result = []
     session = validation.get("inputs", {}).get("session", {})
-    for shot in validation["inputs"]["ordered_shots"]:
+    ordered = validation["inputs"]["ordered_shots"]
+    ordered_ids = {str(shot["shot_id"]).lower() for shot in ordered}
+    cover_only = [shot for shot in validation["inputs"].get("cover_shots", [])
+                  if str(shot["shot_id"]).lower() not in ordered_ids]
+    for shot in ordered + cover_only:
         media = shot["media"]
         result.append(
             MediaItem(
-                role="current",
+                role="current" if str(shot["shot_id"]).lower() in ordered_ids else "cover",
                 shot_id=str(shot["shot_id"]),
                 session_id=str(shot.get("session_id") or validation.get("session_id") or ""),
                 source_bucket=media.get("bucket") or ORIGINALS_BUCKET,
@@ -627,6 +631,7 @@ def main() -> int:
 
     prepared = []
     errors = []
+    optional_warnings = []
     used_names_by_folder: dict[str, set[str]] = {}
     for item in items:
         try:
@@ -665,6 +670,11 @@ def main() -> int:
                 }
             )
         except Exception as error:
+            if item.role == "cover":
+                # The historical cover is optional. Its disappearance must not
+                # block a report whose current photos are all available.
+                optional_warnings.append(f"historical_cover_unavailable:{item.shot_id}")
+                continue
             errors.append(
                 {
                     "role": item.role,
@@ -702,7 +712,7 @@ def main() -> int:
         },
         "items": sorted(prepared, key=lambda item: (item["role"], item["shot_id"])),
         "errors": errors,
-        "warnings": sorted({warning for item in prepared for warning in item.get("warnings", [])}),
+        "warnings": sorted({*optional_warnings, *(warning for item in prepared for warning in item.get("warnings", []))}),
     }
     (output_dir / "prepared_report_media.json").write_text(stable_json(manifest, args.pretty), encoding="utf-8")
     sys.stdout.write(stable_json({"ok": not errors, "manifest": str(output_dir / "prepared_report_media.json"), "counts": manifest["counts"], "warnings": manifest["warnings"]}, True))

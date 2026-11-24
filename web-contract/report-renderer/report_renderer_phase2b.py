@@ -531,15 +531,19 @@ def media_for(lookup: MediaLookup, role: str, shot_id: Any) -> dict[str, Any] | 
 
 
 def cover_photo_entry(validation: dict[str, Any], lookup: MediaLookup) -> dict[str, Any] | None:
-    """Choose the first available Overview from the full scoped photo collection.
+    """Choose the first available Overview, including an original cover photo.
 
     Punchlist-only collections deliberately omit unflagged Guided Shots and must
     never be the cover source when the full documentation photos are available.
     """
     inputs = validation.get("inputs") or {}
     shots = inputs.get("ordered_shots") or inputs.get("punchlist_shots") or []
-    candidates = [{**shot, "media_path": trim((media_for(lookup, "current", shot.get("shot_id")) or {}).get("temporary_prepared_path"))}
-                  for shot in shots if shot.get("kind") != "skipped"]
+    candidates = []
+    for role, rows in (("current", shots), ("cover", inputs.get("cover_shots") or [])):
+        candidates.extend(
+            {**shot, "media_path": trim((media_for(lookup, role, shot.get("shot_id")) or {}).get("temporary_prepared_path"))}
+            for shot in rows if shot.get("kind") != "skipped"
+        )
     return next((shot for shot in sorted(candidates, key=cover_candidate_score) if shot.get("media_path")), None)
 
 
@@ -1400,7 +1404,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             break
         assumed_index_pages = resolved
     cover_shot = cover_photo_entry(validation, lookup)
-    cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
+    cover_media = {"temporary_prepared_path": cover_shot.get("media_path")} if cover_shot else None
     pages = [
         {
             "number": 1,
@@ -1622,7 +1626,7 @@ def build_comparison_plan(
     if not index_pages:
         index_pages = [[]]
     cover_shot = cover_photo_entry(validation, lookup)
-    cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
+    cover_media = {"temporary_prepared_path": cover_shot.get("media_path")} if cover_shot else None
     pages = [
         {"number": 1, "kind": "cover", "title": "Flagged Comparison Report", "cover_shot_id": cover_shot.get("shot_id") if cover_shot else None, "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None},
     ]

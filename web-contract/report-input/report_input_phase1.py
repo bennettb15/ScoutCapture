@@ -1063,6 +1063,7 @@ def compose_punchlist_history(
     issue_photos: dict[str, list[dict[str, Any]]] = {}
     latest_issue: dict[str, dict[str, Any]] = {}
     all_sources = []
+    historical_cover_shots = []
     baseline_shots = []
     baseline_entries = []
     baseline_guided = {"skipped_placeholders": [], "retired_notes": [], "skipped_placeholder_count": 0, "retired_note_count": 0}
@@ -1088,6 +1089,13 @@ def compose_punchlist_history(
         for shot in shots:
             shot["recent_update"] = current_is_photo_update and shot["source_shot_session_id"].lower() == current_session_id
         shots.sort(key=lambda shot: (shot.get("captured_at_utc") or "", shot["shot_id"]))
+        if source["session_type"] == "full_documentation" and full_documentation_mode(metadata) != "follow_up":
+            historical_cover_shots.extend(
+                shot for shot in shots
+                if (trim(shot.get("detail_type")) or "").lower() == "overview"
+                and safe_int(shot.get("angle_index"), 0) == 1
+                and (trim(shot.get("capture_kind")) or "captured").lower() == "captured"
+            )
         all_sources.append({"snapshot_id": str(row.get("id") or ""), "session_id": str(row.get("session_id") or ""),
                             "session_type": source["session_type"]})
         if source is baseline:
@@ -1290,7 +1298,12 @@ def compose_punchlist_history(
             continue
         entries.append({"kind": "photo", "shot_id": shot["shot_id"]})
         placed_shot_ids.add(shot_id)
+    current_ids = {shot["shot_id"].lower() for shot in (all_shots if baseline else latest_shots)}
+    original_cover = next((shot for shot in historical_cover_shots
+                           if shot["shot_id"].lower() not in current_ids
+                           and storage.exists(shot["media"].get("bucket"), shot["media"].get("path"))), None)
     return {"shots": all_shots if baseline else latest_shots, "punchlist_shots": latest_shots,
+            "cover_shots": [original_cover] if original_cover else [],
             "entries": entries, "guided": baseline_guided, "comparisons": comparisons,
             "baseline": all_sources[sources.index(baseline)] if baseline else None,
             "sources": all_sources}
@@ -1620,6 +1633,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         "inputs": {
             "session": session_input(metadata, payload, row),
             "ordered_shots": shots,
+            "cover_shots": composition["cover_shots"] if composition else [],
             "punchlist_shots": punchlist_shots if composition else None,
             "property_report_entries": entries,
         },
