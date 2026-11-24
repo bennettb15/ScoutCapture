@@ -14656,6 +14656,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 propertyID: context.propertyID
             )
             primeFastLaneSideControlSnapshot()
+            if let organizationID = appState.activeOrganizationID,
+               appState.hasRecentVerifiedFastRuntimeReferences(
+                propertyID: context.propertyID,
+                organizationID: organizationID
+               ) {
+                // An immediate return to the same property can use the local
+                // snapshot that was just reconciled. The remote check still
+                // runs after preview and updates it if anything changed.
+                didFinishInitialFastLaneReferenceRefresh = true
+                didSyncFastLanePortalIssueStateAfterPreview = true
+                recordFastLaneReadyEvent("recent_verified_references_reused")
+            }
             if let initialContext {
                 applyFastLaneMetadataContext(initialContext)
                 didApplyInitialLocationMode = true
@@ -16601,6 +16613,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
             didSyncFastLanePortalIssueStateAfterPreview = true
             didFinishInitialFastLaneReferenceRefresh = true
+            appState.markFastRuntimeReferencesVerified(
+                propertyID: context.propertyID,
+                organizationID: orgID
+            )
             isLoadingFastLaneSideControlSheet = false
             recordFastLaneReadyEvent("initial_reference_sync_finished_issues_\(fastLaneSideControlCounts.activeIssueCount)_guided_\(fastLaneSideControlCounts.guidedRemainingCount)")
             if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.guided.id {

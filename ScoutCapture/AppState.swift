@@ -7893,6 +7893,14 @@ final class AppState: ObservableObject {
     @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
     private(set) var lastPropertyStatusRefreshAt: Date?
+    private struct FastRuntimeVerifiedReferenceEntry {
+        let verifiedAt: Date
+        let organizationID: UUID
+        let lastExportedSessionID: UUID?
+        let portalOverlayRevision: Int
+        let portalGuidedRevision: Int
+    }
+    private var fastRuntimeVerifiedReferencesByPropertyID: [UUID: FastRuntimeVerifiedReferenceEntry] = [:]
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
     private var propertyStatusDiagnosticsRefreshTaskID: UUID?
@@ -55416,6 +55424,34 @@ final class AppState: ObservableObject {
         portalGuidedReferenceRevisionByPropertyID[propertyID, default: 0]
     }
 
+    func markFastRuntimeReferencesVerified(propertyID: UUID, organizationID: UUID) {
+        guard isNetworkAvailable,
+              let status = propertyStatusByPropertyID[propertyID],
+              status.orgID == organizationID else { return }
+        fastRuntimeVerifiedReferencesByPropertyID[propertyID] = FastRuntimeVerifiedReferenceEntry(
+            verifiedAt: Date(),
+            organizationID: organizationID,
+            lastExportedSessionID: status.lastExportedSessionID,
+            portalOverlayRevision: fastRuntimePortalOverlayRevision(propertyID: propertyID),
+            portalGuidedRevision: fastRuntimePortalGuidedReferenceRevision(propertyID: propertyID)
+        )
+    }
+
+    func hasRecentVerifiedFastRuntimeReferences(propertyID: UUID, organizationID: UUID) -> Bool {
+        guard isNetworkAvailable,
+              let status = propertyStatusByPropertyID[propertyID],
+              status.orgID == organizationID,
+              let entry = fastRuntimeVerifiedReferencesByPropertyID[propertyID],
+              entry.organizationID == organizationID,
+              Date().timeIntervalSince(entry.verifiedAt) < 60,
+              status.lastExportedSessionID == entry.lastExportedSessionID,
+              fastRuntimePortalOverlayRevision(propertyID: propertyID) == entry.portalOverlayRevision,
+              fastRuntimePortalGuidedReferenceRevision(propertyID: propertyID) == entry.portalGuidedRevision else {
+            return false
+        }
+        return true
+    }
+
     func fastRuntimePropertyHasRetiredGuidedRows(propertyID: UUID) -> Bool {
         localStore.hasRetiredGuidedRows(propertyID: propertyID)
     }
@@ -61926,6 +61962,7 @@ final class AppState: ObservableObject {
     }
 
     func handleSceneDidEnterBackground() {
+        fastRuntimeVerifiedReferencesByPropertyID.removeAll()
         deferredLifecycleBackupWorkItem?.cancel()
         deferredLifecycleBackupWorkItem = nil
         deferredForegroundBackupStatusWorkItem?.cancel()
