@@ -1261,6 +1261,7 @@ struct SessionHubView: View {
                     contextReadyAt: request.contextReadyAt,
                     previewRequestedAt: request.previewRequestedAt,
                     initialCapturedCount: request.initialCapturedCount,
+                    hasPriorPropertySession: request.hasPriorPropertySession,
                     storageRoot: request.storageRoot,
                     isDraftResume: request.isDraftResume,
                     initialLocationMode: request.initialLocationMode,
@@ -4332,6 +4333,11 @@ struct SessionHubView: View {
             contextReadyAt: buttonTappedAt,
             previewRequestedAt: Date(),
             initialCapturedCount: summary.photoCount,
+            hasPriorPropertySession: fastLaneHasPriorPropertySession(
+                appState,
+                propertyID: property.id,
+                currentSessionID: context.sessionID
+            ),
             storageRoot: storageRoot,
             isDraftResume: true,
             initialLocationMode: CameraChromeLocationMode(fastRuntimeRawValue: summary.lastMetadataContext?.locationMode ?? summary.lastLocationMode),
@@ -4645,6 +4651,11 @@ struct SessionHubView: View {
                     contextReadyAt: contextReadyAt,
                     previewRequestedAt: Date(),
                     initialCapturedCount: 0,
+                    hasPriorPropertySession: fastLaneHasPriorPropertySession(
+                        appState,
+                        propertyID: property.id,
+                        currentSessionID: context.sessionID
+                    ),
                     storageRoot: result.tempStorageRoot,
                     isDraftResume: false,
                     initialLocationMode: .exterior,
@@ -13727,11 +13738,21 @@ private struct FastRuntimeCameraPreviewRequest: Identifiable {
     let contextReadyAt: Date
     let previewRequestedAt: Date
     let initialCapturedCount: Int
+    let hasPriorPropertySession: Bool
     let storageRoot: URL?
     let isDraftResume: Bool
     let initialLocationMode: CameraChromeLocationMode?
     let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
     let initialProfileLocked: Bool
+}
+
+private func fastLaneHasPriorPropertySession(
+    _ appState: AppState,
+    propertyID: UUID,
+    currentSessionID: UUID
+) -> Bool {
+    appState.properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil ||
+        appState.sessions(for: propertyID).contains { $0.id != currentSessionID }
 }
 
 private extension CameraChromeLocationMode {
@@ -13945,6 +13966,7 @@ private struct DebugFastRuntimePrototypeView: View {
                     contextReadyAt: request.contextReadyAt,
                     previewRequestedAt: request.previewRequestedAt,
                     initialCapturedCount: request.initialCapturedCount,
+                    hasPriorPropertySession: request.hasPriorPropertySession,
                     storageRoot: request.storageRoot,
                     isDraftResume: request.isDraftResume,
                     initialLocationMode: request.initialLocationMode,
@@ -14014,6 +14036,11 @@ private struct DebugFastRuntimePrototypeView: View {
                     contextReadyAt: contextReadyAt,
                     previewRequestedAt: Date(),
                     initialCapturedCount: 0,
+                    hasPriorPropertySession: fastLaneHasPriorPropertySession(
+                        appState,
+                        propertyID: selectedPropertyID,
+                        currentSessionID: context.sessionID
+                    ),
                     storageRoot: prototypeResult.tempStorageRoot,
                     isDraftResume: false,
                     initialLocationMode: .exterior,
@@ -14342,6 +14369,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     let contextReadyAt: Date
     let previewRequestedAt: Date
     let initialCapturedCount: Int
+    let hasPriorPropertySession: Bool
     let storageRoot: URL?
     let isDraftResume: Bool
     let initialLocationMode: CameraChromeLocationMode?
@@ -15639,7 +15667,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             CameraChromeSideControl(
                 id: "guided",
                 systemImage: "safari",
-                color: guidedCount > 0 || guidedCountIsProvisional ? .blue : .white,
+                color: guidedCount > 0 || (guidedCountIsProvisional && hasPriorPropertySession) ? .blue : .white,
                 badgeText: !guidedCountIsProvisional && guidedCount > 0 ? "\(guidedCount)" : nil,
                 accessibilityLabel: isFollowUp ? "Guided photos available" : "Guided",
                 isVisible: context.sessionType != .punchlistVisit,
@@ -24972,6 +25000,7 @@ private struct DebugToolsView: View {
                 contextReadyAt: request.contextReadyAt,
                 previewRequestedAt: request.previewRequestedAt,
                     initialCapturedCount: request.initialCapturedCount,
+                    hasPriorPropertySession: request.hasPriorPropertySession,
                     storageRoot: request.storageRoot,
                     isDraftResume: request.isDraftResume,
                     initialLocationMode: request.initialLocationMode,
@@ -25271,6 +25300,11 @@ private struct DebugToolsView: View {
                     contextReadyAt: contextReadyAt,
                     previewRequestedAt: Date(),
                     initialCapturedCount: 0,
+                    hasPriorPropertySession: fastLaneHasPriorPropertySession(
+                        appState,
+                        propertyID: propertyID,
+                        currentSessionID: context.sessionID
+                    ),
                     storageRoot: result.tempStorageRoot,
                     isDraftResume: false,
                     initialLocationMode: .exterior,
