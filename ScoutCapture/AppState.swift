@@ -13384,7 +13384,9 @@ final class AppState: ObservableObject {
                 message.contains("rls") else {
             return false
         }
-        guard message.contains("properties") || message.contains("sessions") else { return false }
+        // A sessions-table RLS failure can be transient after a claim or
+        // parent write changes; only properties-table debt is terminal here.
+        guard message.contains("properties") else { return false }
         if Self.isTransientReplayErrorMessage(message) {
             return false
         }
@@ -15901,7 +15903,8 @@ final class AppState: ObservableObject {
         if operation == "upsert_property", isRLSFailure {
             return .staleRLSPropertyUpsert
         }
-        if operation == "upsert_session", isRLSFailure {
+        if operation == "upsert_session", isRLSFailure,
+           normalizedError.contains("properties") {
             return .staleRLSSessionParentProperty
         }
         if lastErrorCategory == .network {
@@ -16177,6 +16180,7 @@ final class AppState: ObservableObject {
 
         if combined.contains("rls") ||
             combined.contains("row level security") ||
+            combined.contains("row-level security") ||
             combined.contains("permission denied") ||
             combined.contains("unauthorized") ||
             combined.contains("forbidden") ||
@@ -27317,9 +27321,12 @@ final class AppState: ObservableObject {
         let localHasChildren = (canonicalDiagnostics.localShotCount ?? 0) > 0 ||
             (canonicalDiagnostics.localIssueObservationCount ?? 0) > 0 ||
             (canonicalDiagnostics.localGuidedCount ?? 0) > 0
-        let remoteChildrenMissing = localHasChildren &&
-            (canonicalDiagnostics.remoteShotCount ?? 0) == 0 &&
-            (canonicalDiagnostics.remoteIssueObservationCount ?? 0) == 0
+        let remoteChildrenMissing = localHasChildren && (
+            ((canonicalDiagnostics.localShotCount ?? 0) > 0 &&
+             (canonicalDiagnostics.remoteShotCount ?? 0) == 0) ||
+            ((canonicalDiagnostics.localIssueObservationCount ?? 0) > 0 &&
+             (canonicalDiagnostics.remoteIssueObservationCount ?? 0) == 0)
+        )
         if remoteChildrenMissing {
             taxonomy.append(.missingRemoteChildren)
         }

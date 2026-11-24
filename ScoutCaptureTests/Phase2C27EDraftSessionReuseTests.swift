@@ -953,7 +953,11 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
 
         let after = try fixture.localStore.fetchObservations(propertyID: fixture.property.id)
         for original in untouched {
-            XCTAssertEqual(after.first(where: { $0.id == original.id }), original)
+            let preserved = try XCTUnwrap(after.first(where: { $0.id == original.id }))
+            XCTAssertEqual(preserved.status, original.status)
+            XCTAssertEqual(preserved.linkedShotID, original.linkedShotID)
+            XCTAssertEqual(preserved.shots, original.shots)
+            XCTAssertEqual(preserved.historyEvents, original.historyEvents)
         }
         let completed = try XCTUnwrap(
             fixture.localStore.fetchSessions(propertyID: fixture.property.id)

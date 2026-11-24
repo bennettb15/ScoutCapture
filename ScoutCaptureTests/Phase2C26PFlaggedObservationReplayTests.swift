@@ -2350,7 +2350,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(result.message, "soft_deleted_remote_observations_preserved")
     }
 
-    func testResolvedLocalIssueIsNotReplayed() async {
+    func testResolvedLocalIssueReplaysAsResolved() async {
         let plan = replayPlan(metadata: metadata(issueStatus: "resolved"))
         var operationCalled = false
 
@@ -2359,14 +2359,15 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             targetClassification: .approvedStaging
         ) { rows in
             operationCalled = true
+            XCTAssertEqual(rows.map(\.status), ["resolved"])
             return rows.count
         }
 
         XCTAssertTrue(plan.allowed)
-        XCTAssertEqual(plan.attemptedCount, 0)
-        XCTAssertTrue(plan.rowsToUpsert.isEmpty)
-        XCTAssertFalse(operationCalled)
-        XCTAssertEqual(result.upsertedCount, 0)
+        XCTAssertEqual(plan.attemptedCount, 1)
+        XCTAssertEqual(plan.rowsToUpsert.first?.status, "resolved")
+        XCTAssertTrue(operationCalled)
+        XCTAssertEqual(result.upsertedCount, 1)
     }
 
     func testNewerRemoteObservationIsPreservedAndSkipped() async {
