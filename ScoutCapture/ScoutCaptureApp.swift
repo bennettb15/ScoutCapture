@@ -17781,7 +17781,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 : FastLaneCaptureIntent.guided(guidedShot.id).source
         ))
         loadFastLaneArmedReference(
-            from: fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot)
+            from: fastLaneGuidedDisplayImagePath(for: guidedShot)
         )
         fastLaneSideControlSheetMode = nil
     }
@@ -17849,7 +17849,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             captureIntentSource: intentSourceOverride ?? intent.source
         ))
         loadFastLaneArmedReference(
-            from: fastLaneIssueThumbnailPathByID[observation.id] ?? fastLaneIssueDisplayImagePath(for: observation)
+            from: fastLaneIssueDisplayImagePath(for: observation)
         )
         fastLaneSideControlSheetMode = nil
     }
@@ -18091,8 +18091,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneGuidedDisplayImagePath(for guidedShot: GuidedShot) -> String? {
-        [
-            guidedShot.shot?.imageLocalIdentifier,
+        if let shotPath = fastLaneTrimmedNonEmpty(guidedShot.shot?.imageLocalIdentifier) {
+            // A replacement may be in the cloud before its image reaches this phone.
+            // Never substitute an earlier reference for that replacement.
+            return fastLaneExistingLocalPath(shotPath)
+        }
+        return [
             guidedShot.referenceImagePath,
             guidedShot.referenceImageLocalIdentifier
         ]
@@ -18101,15 +18105,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLaneIssueDisplayImagePath(for observation: Observation) -> String? {
-        if let latestShotPath = observation.shots
-            .sorted(by: { lhs, rhs in
-                if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
-                return lhs.id.uuidString < rhs.id.uuidString
-            })
-            .lazy
-            .compactMap({ fastLaneExistingLocalPath($0.imageLocalIdentifier) })
-            .first {
-            return latestShotPath
+        if let shot = fastLaneCurrentIssueShot(for: observation) {
+            return fastLaneExistingLocalPath(shot.imageLocalIdentifier)
         }
 
         if let resolutionPath = fastLaneExistingLocalPath(observation.resolutionPhotoRef) {
@@ -18122,12 +18119,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return guidedReference
         }
 
-        if let linkedShotID = observation.linkedShotID,
-           let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
-           let path = fastLaneExistingLocalPath(linkedShot.imageLocalIdentifier) {
-            return path
-        }
         return nil
+    }
+
+    private func fastLaneCurrentIssueShot(for observation: Observation) -> Shot? {
+        FastLaneThumbnailSource.currentIssueShot(
+            in: observation.shots,
+            linkedShotID: observation.linkedShotID
+        )
     }
 
     private func scheduleFastLaneGuidedPanelMediaHydrationIfNeeded() {
@@ -18157,7 +18156,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             return
         }
         let requests = observations.compactMap { observation -> AppState.OperationalMediaHydrationRequest? in
-            guard let shot = observation.shots.max(by: { $0.capturedAt < $1.capturedAt }),
+            guard let shot = fastLaneCurrentIssueShot(for: observation),
                   fastLaneExistingLocalPath(shot.imageLocalIdentifier) == nil else {
                 return nil
             }
@@ -18359,7 +18358,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func openFastLaneGuidedImage(_ guidedShot: GuidedShot) {
-        guard let path = fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot),
+        guard let path = fastLaneGuidedDisplayImagePath(for: guidedShot),
               let asset = fastLaneReportAsset(forLocalPath: path, creationDate: guidedShot.shot?.capturedAt) else {
             showFastLaneSideControlToast("Image not available yet")
             return
@@ -18373,7 +18372,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func openFastLaneIssueImage(_ observation: Observation) {
-        guard let path = fastLaneIssueThumbnailPathByID[observation.id] ?? fastLaneIssueDisplayImagePath(for: observation),
+        guard let path = fastLaneIssueDisplayImagePath(for: observation),
               let asset = fastLaneReportAsset(
                 forLocalPath: path,
                 creationDate: observation.shots.first(where: { $0.imageLocalIdentifier == path })?.capturedAt

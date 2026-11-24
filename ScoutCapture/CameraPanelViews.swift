@@ -1576,8 +1576,8 @@ struct GuidedChecklistRow: View {
 
     private var thumbnailPath: String? {
         let shotPath = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if isCapturedInCurrentSession, !shotPath.isEmpty {
-            return shotPath
+        if !shotPath.isEmpty {
+            return FastLaneThumbnailSource.path(for: shotPath, resolvedPath: resolvedThumbnailPath)
         }
 
         let resolved = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1712,7 +1712,8 @@ struct GuidedChecklistRow: View {
 
     private var thumbnailView: some View {
         Group {
-            if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
+            if let image = (loadedID == currentThumbnailSourceID ? thumbnail : nil)
+                ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -1804,7 +1805,7 @@ struct GuidedChecklistRow: View {
     private func loadThumbnailIfNeeded() {
         let sessionIDText = currentSessionID?.uuidString ?? "NONE"
         let chosenPath = thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let sourceID = "chosen:\(sessionIDText):\(chosenPath)"
+        let sourceID = currentThumbnailSourceID
         guard sourceID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
         if sourceID != loadedID {
             thumbnail = nil
@@ -1901,6 +1902,10 @@ struct GuidedChecklistRow: View {
             return nil
         }
         return cache.cachedThumbnail(for: asset, pixelSize: pixelSize)
+    }
+
+    private var currentThumbnailSourceID: String {
+        "chosen:\(currentSessionID?.uuidString ?? "NONE"):\(thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")"
     }
 }
 
@@ -2878,6 +2883,17 @@ struct ActiveIssuesSheet: View {
         @State private var loadedID: String = ""
         @State private var isThumbnailLoading: Bool = false
 
+        private var thumbnailPath: String? {
+            let selectedShot = FastLaneThumbnailSource.currentIssueShot(
+                in: observation.shots,
+                linkedShotID: observation.linkedShotID
+            )
+            guard let selectedShot else { return resolvedThumbnailPath }
+            let shotPath = selectedShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !shotPath.isEmpty else { return nil }
+            return FastLaneThumbnailSource.path(for: shotPath, resolvedPath: resolvedThumbnailPath)
+        }
+
         private var contextLabel: String {
             let composed = ContentView.conciseContextLabel(
                 building: observation.building,
@@ -3138,6 +3154,9 @@ struct ActiveIssuesSheet: View {
             .onChange(of: observation.shots.count) { _, _ in
                 loadThumbnailIfNeeded()
             }
+            .onChange(of: thumbnailPath ?? "") { _, _ in
+                loadThumbnailIfNeeded()
+            }
             .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
                 loadedID = ""
                 thumbnail = nil
@@ -3195,7 +3214,8 @@ struct ActiveIssuesSheet: View {
 
         private var thumbnailView: some View {
             Group {
-                if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
+                if let image = (loadedID == (thumbnailPath ?? "") ? thumbnail : nil)
+                    ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
@@ -3236,7 +3256,7 @@ struct ActiveIssuesSheet: View {
             )
             let linkedIDText = observation.linkedShotID?.uuidString ?? "NONE"
             verboseLog("[FlagRow] rowID=\(observation.id.uuidString) issueID=\(observation.id.uuidString) shotID=\(linkedIDText) shotKey=\(shotKey)")
-            let chosenID = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let chosenID = thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !chosenID.isEmpty else {
                 thumbnail = nil
                 loadedID = ""
@@ -3244,6 +3264,9 @@ struct ActiveIssuesSheet: View {
                 return
             }
             guard chosenID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
+            if chosenID != loadedID {
+                thumbnail = nil
+            }
             loadedID = chosenID
 
             if let asset = ContentView.reportAsset(from: chosenID) ?? ContentView.reportAsset(fromPath: chosenID) {
@@ -3257,6 +3280,7 @@ struct ActiveIssuesSheet: View {
                 isThumbnailLoading = true
                 cache.requestThumbnail(for: asset, pixelSize: px) { image in
                     DispatchQueue.main.async {
+                        guard self.loadedID == chosenID else { return }
                         self.thumbnail = image
                         self.isThumbnailLoading = false
                     }
@@ -3291,6 +3315,7 @@ struct ActiveIssuesSheet: View {
 
                     cache.requestThumbnail(for: asset, pixelSize: px) { image in
                         DispatchQueue.main.async {
+                            guard self.loadedID == chosenID else { return }
                             self.thumbnail = image
                             self.isThumbnailLoading = false
                         }
@@ -3300,7 +3325,7 @@ struct ActiveIssuesSheet: View {
         }
 
         private func cachedThumbnailForCurrentSource(pixelSize: CGFloat) -> UIImage? {
-            let chosenID = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let chosenID = thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !chosenID.isEmpty,
                   let asset = ContentView.reportAsset(from: chosenID) ?? ContentView.reportAsset(fromPath: chosenID) else {
                 return nil
