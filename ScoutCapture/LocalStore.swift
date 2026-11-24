@@ -2533,12 +2533,19 @@ final class LocalStore {
         }
 
         var observations = try readObservations(propertyID: propertyID)
-        let sessionMetadata = sessionMetadataByIDForOperationalOverlay(propertyID: propertyID)
         var observationIndexByID = Dictionary(uniqueKeysWithValues: observations.enumerated().map { ($0.element.id, $0.offset) })
-        let locationIndex = portalPunchlistLocationIndex(
-            observations: observations,
-            sessionMetadata: sessionMetadata
-        )
+        // Most portal rows carry a stable issue ID. Their direct matches do
+        // not need a scan of every session's metadata for location fallback.
+        let needsLocationFallback = overlays.contains { overlay in
+            guard let issueID = overlay.issueID else { return true }
+            return observationIndexByID[issueID] == nil
+        }
+        let locationIndex = needsLocationFallback
+            ? portalPunchlistLocationIndex(
+                observations: observations,
+                sessionMetadata: sessionMetadataByIDForOperationalOverlay(propertyID: propertyID)
+            )
+            : [:]
 
         var appliedCount = 0
         var reconciledSubmissions: [(Observation, FieldResolutionOutcome)] = []
@@ -2738,9 +2745,15 @@ final class LocalStore {
                     .filter { $0.kind == .reclassified && $0.field == "location" }
                     .map(\.timestamp)
                     .max() ?? .distantPast
-                if locationUpdatedAt > latestLocalReclassification {
+                let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+                let locationDiffers = observations[index].building != building ||
+                    observations[index].targetElevation != normalizedElevation ||
+                    observations[index].detailType != detailType ||
+                    observations[index].targetAngleIndex != angleIndex ||
+                    (overlay.shotID != nil && observations[index].linkedShotID != overlay.shotID)
+                if locationUpdatedAt > latestLocalReclassification && locationDiffers {
                     observations[index].building = building
-                    observations[index].targetElevation = elevation
+                    observations[index].targetElevation = normalizedElevation
                     observations[index].detailType = detailType
                     observations[index].targetAngleIndex = angleIndex
                     if let shotID = overlay.shotID {
@@ -2751,7 +2764,13 @@ final class LocalStore {
                     }
                 }
             }
-            if let updatedAt = overlay.updatedAt, updatedAt > observations[index].updatedAt {
+            // The local JSON date encoder stores whole seconds. Ignore a
+            // fractional remote timestamp when the issue itself is unchanged,
+            // or every property entry rewrites the same observation again.
+            if let updatedAt = overlay.updatedAt,
+               updatedAt > observations[index].updatedAt,
+               (updatedAt.timeIntervalSince(observations[index].updatedAt) >= 1 ||
+                observations[index] != before) {
                 observations[index].updatedAt = updatedAt
             }
             if observations[index] != before {

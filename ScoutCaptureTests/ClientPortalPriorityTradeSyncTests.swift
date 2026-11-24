@@ -43,6 +43,40 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         ).appliedCount, 0)
     }
 
+    func testFractionalPortalTimestampDoesNotRewriteUnchangedIssue() throws {
+        let (store, property) = try makeStore()
+        var observation = makeObservation(propertyID: property.id)
+        observation.targetAngleIndex = 1
+        observation = try store.createObservation(observation)
+        let remoteAt = older.addingTimeInterval(0.75)
+        let unchanged = PortalPunchlistOperationalOverlay(
+            issueID: observation.id, propertyID: property.id,
+            status: .active, priority: "Medium", trade: "Paint",
+            updatedAt: remoteAt, building: "B1", targetElevation: "North",
+            detailType: "Window", angleIndex: 1, locationUpdatedAt: remoteAt
+        )
+        XCTAssertEqual(try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [unchanged]
+        ).appliedCount, 0)
+
+        let reclassified = PortalPunchlistOperationalOverlay(
+            issueID: observation.id, propertyID: property.id,
+            status: .active, priority: "Medium", trade: "Paint",
+            updatedAt: remoteAt, building: "B1", targetElevation: "North",
+            detailType: "Door", angleIndex: 1, locationUpdatedAt: remoteAt
+        )
+        XCTAssertEqual(try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [reclassified]
+        ).appliedCount, 1)
+        XCTAssertEqual(try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [reclassified]
+        ).appliedCount, 0)
+        XCTAssertEqual(
+            try store.fetchObservations(propertyID: property.id).first?.detailType,
+            "Door"
+        )
+    }
+
     private typealias PortalActivityRow = (
         id: UUID,
         propertyID: UUID?,

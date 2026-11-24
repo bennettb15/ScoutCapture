@@ -14087,6 +14087,12 @@ private enum FastLaneSideControlSheetMode: Identifiable {
     }
 }
 
+private final class FastLaneDeferredReferencePayload {
+    var pending: AppState.FastRuntimePreviewSideControlPayload?
+    var guidedIsScrolling = false
+    var requestID = UUID()
+}
+
 private struct FastLaneReferenceViewerState: Identifiable {
     let id = UUID()
     let title: String
@@ -14416,6 +14422,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneSessionActionsSummaryGeneration: UInt64 = 0
     @State private var fastLaneSideControlCounts: AppState.FastRuntimePreviewSideControlCounts = .empty
     @State private var fastLaneSideControlPayload: AppState.FastRuntimePreviewSideControlPayload = .empty
+    @State private var fastLaneDeferredReferencePayload = FastLaneDeferredReferencePayload()
     @State private var fastLaneMissingIssueAngleByID: [UUID: Int] = [:]
     @State private var isLoadingFastLaneSideControlSheet: Bool = false
     @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
@@ -14626,6 +14633,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             didCheckFastLaneGuidedPanelMedia = false
             refreshFastLaneSideControlCounts(force: true)
         }
+        .onChange(of: fastLaneSideControlSheetMode?.id) { _, newMode in
+            if newMode != FastLaneSideControlSheetMode.guided.id {
+                fastLaneDeferredReferencePayload.guidedIsScrolling = false
+                applyFastLaneDeferredReferencePayload()
+            }
+        }
         .onAppear {
             cameraViewAppearedAt = Date()
             indexFastLanePropertyLocalImages()
@@ -14712,6 +14725,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLaneMediaMapRequestID = UUID()
             fastLanePendingMediaMapPayload = nil
             isRefreshingFastLaneMediaMaps = false
+            fastLaneDeferredReferencePayload.pending = nil
+            fastLaneDeferredReferencePayload.requestID = UUID()
             focusTap = nil
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
             locationManager.stop()
@@ -14890,12 +14905,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             )
         case .guided:
-            if isFastLaneInitialReferenceSyncPending {
-                fastLaneGuidedSyncPlaceholder
-                    .onAppear {
-                        recordFastLaneReadyEvent("guided_loading_visible")
-                    }
-            } else {
             GuidedChecklistOverlay(
                 guidedShots: fastLaneSideControlPayload.guidedShots,
                 retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
@@ -14915,30 +14924,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
                 refreshToken: fastLaneGalleryRefreshToken,
                 cache: fastLaneGalleryImageCache,
+                // The opening snapshot already contains usable local rows and
+                // thumbnails. Keep Guided interactive while cloud changes
+                // reconcile; the completed refresh replaces the payload.
                 isHydrating: false,
                 compactContextAngle: true,
                 onClose: {
                     recordFastLaneReadyEvent("guided_list_closed")
                     fastLaneSideControlSheetMode = nil
-                },
-                onRefresh: {
-                    guard !isFastLaneInitialReferenceSyncPending else { return }
-                    if let orgID = appState.activeOrganizationID {
-                        _ = await appState.refreshRemoteReferencesBeforeCameraEntry(
-                            propertyID: context.propertyID,
-                            activeOrganizationID: orgID
-                        )
-                    }
-                    let payload = appState.fastRuntimePreviewSideControlPayload(
-                        propertyID: context.propertyID,
-                        sessionType: context.sessionType,
-                        currentSessionID: context.sessionID
-                    )
-                    let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
-                    fastLaneSideControlPayload = scopedPayload
-                    fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
-                    refreshFastLaneSideControlMediaMaps(for: scopedPayload)
-                    fastLaneGalleryRefreshToken = UUID()
                 },
                 onSelectGuided: { guidedShot in
                     armFastLaneGuidedShot(guidedShot)
@@ -14965,38 +14958,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         elevation: elevation,
                         detailType: detailType
                     )
+                },
+                onScrollActivityChanged: { isScrolling in
+                    fastLaneDeferredReferencePayload.guidedIsScrolling = isScrolling
+                    if !isScrolling {
+                        scheduleFastLaneDeferredReferencePayload(delayNanoseconds: 250_000_000)
+                    }
                 }
             )
             .onAppear {
-                recordFastLaneReadyEvent("guided_list_visible")
-            }
+                recordFastLaneReadyEvent(isFastLaneInitialReferenceSyncPending
+                    ? "guided_cached_sync_visible" : "guided_list_visible")
             }
         }
-    }
-
-    private var fastLaneGuidedSyncPlaceholder: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Spacer(minLength: 72)
-                Text("Guided Checklist")
-                    .font(.system(size: 18, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                Button("Done") {
-                    fastLaneSideControlSheetMode = nil
-                }
-                .font(.system(size: 18, weight: .medium))
-                .frame(width: 72, height: 42)
-                .background(Color(uiColor: .tertiarySystemFill))
-                .clipShape(Capsule())
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 14)
-            Spacer()
-            ProgressView("Syncing property photos…")
-                .font(.system(size: 16))
-            Spacer()
-        }
-        .foregroundStyle(.primary)
     }
 
     private func fastLaneCurrentSessionShotIDs() -> Set<UUID> {
@@ -15024,6 +14998,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func reloadFastLaneSideControlPayloadFromLocalStore(includeHistory: Bool = true) {
+        fastLaneDeferredReferencePayload.pending = nil
+        fastLaneDeferredReferencePayload.requestID = UUID()
         if !includeHistory {
             let payload = appState.fastRuntimePreviewSideControlPayloadFromCurrentRows(
                 propertyID: context.propertyID,
@@ -15052,6 +15028,51 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
         refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+    }
+
+    private func reloadFastLaneSideControlPayloadAfterReferenceRefresh() async {
+        let payload = await appState.fastRuntimePreviewSideControlPayloadFromCurrentRowsAsync(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType,
+            currentSessionID: context.sessionID,
+            priorPayload: fastLaneSideControlPayload
+        )
+        guard !Task.isCancelled, !isFastLaneExiting else { return }
+        let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+        guard scopedPayload != fastLaneSideControlPayload else { return }
+        if fastLaneSideControlSheetMode?.id == FastLaneSideControlSheetMode.guided.id,
+           !fastLaneSideControlPayload.guidedShots.isEmpty {
+            fastLaneDeferredReferencePayload.pending = scopedPayload
+            scheduleFastLaneDeferredReferencePayload(delayNanoseconds: 900_000_000)
+            return
+        }
+        fastLaneSideControlPayload = scopedPayload
+        fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+        refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+    }
+
+    private func scheduleFastLaneDeferredReferencePayload(delayNanoseconds: UInt64) {
+        guard fastLaneDeferredReferencePayload.pending != nil else { return }
+        let requestID = UUID()
+        fastLaneDeferredReferencePayload.requestID = requestID
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard !Task.isCancelled,
+                  fastLaneDeferredReferencePayload.requestID == requestID,
+                  !fastLaneDeferredReferencePayload.guidedIsScrolling else { return }
+            applyFastLaneDeferredReferencePayload()
+        }
+    }
+
+    private func applyFastLaneDeferredReferencePayload() {
+        guard let payload = fastLaneDeferredReferencePayload.pending,
+              !isFastLaneExiting else { return }
+        fastLaneDeferredReferencePayload.pending = nil
+        fastLaneDeferredReferencePayload.requestID = UUID()
+        guard payload != fastLaneSideControlPayload else { return }
+        fastLaneSideControlPayload = payload
+        fastLaneSideControlCounts = fastLaneSideControlCounts(from: payload)
+        refreshFastLaneSideControlMediaMaps(for: payload)
     }
 
     private func fastLaneLoadPortalNotes(
@@ -16639,7 +16660,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard !Task.isCancelled, !isFastLaneExiting else { return }
             // Keep the local badge counts until the cross-device reads finish,
             // then publish one complete replacement for both side controls.
-            reloadFastLaneSideControlPayloadFromLocalStore()
+            // The opening snapshot already scanned history. The cloud sync
+            // wrote current property rows, so avoid repeating that scan while
+            // Guided is open and the user is scrolling.
+            await reloadFastLaneSideControlPayloadAfterReferenceRefresh()
+            guard !Task.isCancelled, !isFastLaneExiting else { return }
             fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
             didSyncFastLanePortalIssueStateAfterPreview = true
@@ -18207,6 +18232,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             recordFastLaneReadyEvent("panel_media_history_ready_\(kind)")
             await MainActor.run {
                 let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+                fastLaneDeferredReferencePayload.pending = nil
+                fastLaneDeferredReferencePayload.requestID = UUID()
                 fastLaneSideControlPayload = scopedPayload
                 if fastLaneSideControlSheetMode == nil {
                     refreshFastLaneMissingIssueAngles(for: scopedPayload.activeObservations)

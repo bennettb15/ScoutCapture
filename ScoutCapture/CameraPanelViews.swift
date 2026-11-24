@@ -574,7 +574,6 @@ struct GuidedChecklistOverlay: View {
     @Environment(\.colorScheme) private var colorScheme
     private var theme: ContentView.SheetControlTheme { .forScheme(colorScheme) }
     let onClose: () -> Void
-    var onRefresh: (() async -> Void)? = nil
     let onSelectGuided: (GuidedShot) -> Void
     let onSkip: (GuidedShot, SkipReason, String?) -> Void
     let onUndoSkip: (GuidedShot) -> Void
@@ -582,6 +581,7 @@ struct GuidedChecklistOverlay: View {
     let onRetire: (GuidedShot, String) -> Void
     let onRestoreRetired: (GuidedShot) -> Void
     let onReclassify: (GuidedShot, String, String, String) -> Void
+    var onScrollActivityChanged: ((Bool) -> Void)? = nil
 
     @State private var skipTarget: GuidedShot? = nil
     @State private var showSkipReasonDialog: Bool = false
@@ -677,24 +677,24 @@ struct GuidedChecklistOverlay: View {
                         .ignoresSafeArea()
 
                     List {
-                            if isHydrating {
-                                HStack(spacing: 10) {
-                                    ProgressView()
-                                    Text("Syncing property photos…")
-                                        .foregroundColor(.secondary)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .center)
+                        if isHydrating {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                Text("Syncing property photos…")
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .listRowBackground(Color.clear)
+                        }
+                        if visibleShots.isEmpty && !guidedShots.isEmpty {
+                            Text("No photos in this area")
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity)
                                 .listRowBackground(Color.clear)
-                            } else {
-                                if visibleShots.isEmpty && !guidedShots.isEmpty {
-                                    Text("No photos in this area")
-                                        .foregroundColor(.secondary)
-                                        .frame(maxWidth: .infinity)
-                                        .listRowBackground(Color.clear)
-                                }
-                                ForEach(visibleShots) { ordered in
-                                let item = ordered.shot
-                                GuidedChecklistRow(
+                        }
+                        ForEach(visibleShots) { ordered in
+                            let item = ordered.shot
+                            GuidedChecklistRow(
                                     guidedShot: item,
                                     resolvedThumbnailPath: resolvedThumbnailPathByID[item.id],
                                     referencePath: referencePathByID[item.id],
@@ -703,6 +703,7 @@ struct GuidedChecklistOverlay: View {
                                     allowReferenceFallback: allowReferenceFallback,
                                     isCapturedInCurrentSession: ordered.captured,
                                     canRetire: canChangeShotLifecycle,
+                                    isInteractionEnabled: !isHydrating,
                                     onTapRow: {
                                         onSelectGuided(item)
                                     },
@@ -731,18 +732,18 @@ struct GuidedChecklistOverlay: View {
                                         reclassifyTarget = item
                                     },
                                     compactContextAngle: compactContextAngle
-                                )
-                                }
-                            }
+                            )
+                            .opacity(isHydrating ? 0.75 : 1)
+                        }
                     }
                     .listStyle(.insetGrouped)
+                    .onScrollPhaseChange { _, newPhase in
+                        onScrollActivityChanged?(newPhase.isScrolling)
+                    }
                     .contentMargins(.top, 0, for: .scrollContent)
                     .scrollIndicators(.hidden)
                     .scrollContentBackground(.hidden)
                     .background(Color.clear)
-                    .refreshable {
-                        await onRefresh?()
-                    }
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .top, spacing: 0) {
@@ -772,6 +773,7 @@ struct GuidedChecklistOverlay: View {
                                         )
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(isHydrating)
                             }
 
                             Spacer(minLength: 0)
@@ -1501,6 +1503,7 @@ struct GuidedChecklistRow: View {
     let allowReferenceFallback: Bool
     let isCapturedInCurrentSession: Bool
     let canRetire: Bool
+    let isInteractionEnabled: Bool
     let onTapRow: () -> Void
     let refreshToken: UUID
     @ObservedObject var cache: AssetImageCache
@@ -1587,6 +1590,47 @@ struct GuidedChecklistRow: View {
     }
 
     var body: some View {
+        Group {
+            if isInteractionEnabled {
+                interactiveRowContent
+            } else {
+                rowContent
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+        .listRowBackground(Color.clear)
+        .onAppear {
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: guidedShot.shot?.imageLocalIdentifier ?? "") { _, _ in
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: guidedShot.referenceImageLocalIdentifier ?? "") { _, _ in
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: guidedShot.referenceImagePath ?? "") { _, _ in
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: referencePath ?? "") { _, _ in
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: currentSessionID) { _, _ in
+            loadedID = ""
+            thumbnail = nil
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: isCapturedInCurrentSession) { _, _ in
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: refreshToken) { _, _ in
+            loadThumbnailIfNeeded()
+        }
+    }
+
+    private var interactiveRowContent: some View {
         rowContent
         .onTapGesture {
             guard status == .pending else { return }
@@ -1641,37 +1685,6 @@ struct GuidedChecklistRow: View {
                 }
                 .tint(.indigo)
             }
-        }
-        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-        .listRowBackground(Color.clear)
-        .onAppear {
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: guidedShot.shot?.imageLocalIdentifier ?? "") { _, _ in
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: guidedShot.referenceImageLocalIdentifier ?? "") { _, _ in
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: guidedShot.referenceImagePath ?? "") { _, _ in
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: referencePath ?? "") { _, _ in
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: currentSessionID) { _, _ in
-            loadedID = ""
-            thumbnail = nil
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: isCapturedInCurrentSession) { _, _ in
-            loadThumbnailIfNeeded()
-        }
-        .onChange(of: refreshToken) { _, _ in
-            loadThumbnailIfNeeded()
         }
     }
 
@@ -1771,7 +1784,7 @@ struct GuidedChecklistRow: View {
     private var trailingActions: some View {
         switch status {
         case .pending:
-            if !isBaselineSession {
+            if !isBaselineSession && isInteractionEnabled {
                 Button(action: onTapSkip) {
                     Text("Skip")
                         .font(.system(size: 12, weight: .semibold))

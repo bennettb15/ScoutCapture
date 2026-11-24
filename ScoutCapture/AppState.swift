@@ -12699,6 +12699,46 @@ final class AppState: ObservableObject {
                 deletedAt: record.deletedAt
             )
 
+            if let existingSession {
+                // LocalStore's ISO-8601 JSON dates have whole-second
+                // precision. A remote fractional timestamp must not rewrite
+                // the identical session and invalidate an open camera list.
+                func sameStoredSecond(_ lhs: Date, _ rhs: Date) -> Bool {
+                    Int(lhs.timeIntervalSince1970) == Int(rhs.timeIntervalSince1970)
+                }
+                var comparableSession = session
+                if sameStoredSecond(existingSession.startedAt, session.startedAt) {
+                    comparableSession.startedAt = existingSession.startedAt
+                }
+                if let old = existingSession.endedAt, let new = session.endedAt,
+                   sameStoredSecond(old, new) {
+                    comparableSession.endedAt = old
+                }
+                if let old = existingSession.exportedAt, let new = session.exportedAt,
+                   sameStoredSecond(old, new) {
+                    comparableSession.exportedAt = old
+                }
+                if let old = existingSession.firstDeliveredAt, let new = session.firstDeliveredAt,
+                   sameStoredSecond(old, new) {
+                    comparableSession.firstDeliveredAt = old
+                }
+                if let old = existingSession.reExportExpiresAt, let new = session.reExportExpiresAt,
+                   sameStoredSecond(old, new) {
+                    comparableSession.reExportExpiresAt = old
+                }
+                if comparableSession == existingSession {
+                    if remoteIsFinal {
+                        clearSessionLockDisplayState(
+                            propertyID: record.propertyID,
+                            sessionID: record.id,
+                            reason: "remote_final_state"
+                        )
+                    }
+                    skipped += 1
+                    continue
+                }
+            }
+
             do {
                 _ = try localStore.upsertSession(session)
                 if remoteIsFinal {
@@ -37714,6 +37754,9 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         reason: String
     ) {
+        guard locallyLockedPropertyIDs.contains(propertyID) ||
+                propertySessionOccupancyByPropertyID[propertyID] != nil ||
+                sessionCoordinationStateBySessionID[sessionID] != nil else { return }
         locallyLockedPropertyIDs.remove(propertyID)
         propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
         sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
@@ -55243,10 +55286,18 @@ final class AppState: ObservableObject {
                 activities: activityRows,
                 remoteShots: remoteShots
             )
-            let result = try localStore.applyPortalPunchlistOperationalOverlays(
-                propertyID: propertyID,
-                overlays: overlays
-            )
+            // Matching portal overlays scans the property's saved session
+            // metadata. Keep that disk work off the camera's main actor so
+            // an open Guided list remains scrollable during cloud refresh.
+            let store = localStore
+            let result = try await Task.detached(priority: .userInitiated) {
+                try store.performFileIOSync {
+                    try store.applyPortalPunchlistOperationalOverlays(
+                        propertyID: propertyID,
+                        overlays: overlays
+                    )
+                }
+            }.value
             if result.appliedCount > 0 ||
                 result.skippedNoMatchCount > 0 ||
                 result.skippedAmbiguousCount > 0 ||
@@ -55338,6 +55389,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID,
         awaitPolicyRefresh: Bool,
+        forCameraPreview: Bool = false,
         latestSession: RemoteSessionDeltaRecord? = nil
     ) async -> PortalPropertyOpenSyncResult {
         let startedAt = Date()
@@ -55391,7 +55443,7 @@ final class AppState: ObservableObject {
             activeOrganizationID: activeOrganizationID,
             remoteShots: remoteShots
         )
-        let recoveredGuidedCount = mergeRemoteOrdinaryGuidedReferences(
+        let recoveredGuidedCount = await mergeRemoteOrdinaryGuidedReferences(
             remoteShots,
             propertyID: propertyID,
             activeOrganizationID: activeOrganizationID
@@ -55408,9 +55460,11 @@ final class AppState: ObservableObject {
             if recoveredGuidedCount > 0 {
                 portalGuidedReferenceRevisionByPropertyID[propertyID, default: 0] += 1
             }
-            await MainActor.run {
-                self.reloadSessionCache(for: propertyID)
-                self.schedulePersistentDataCacheRefresh(reason: "portal_reference_rows_applied")
+            if !forCameraPreview {
+                await MainActor.run {
+                    self.reloadSessionCache(for: propertyID)
+                    self.schedulePersistentDataCacheRefresh(reason: "portal_reference_rows_applied")
+                }
             }
         }
         print(
@@ -55467,6 +55521,7 @@ final class AppState: ObservableObject {
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID,
                 awaitPolicyRefresh: false,
+                forCameraPreview: true,
                 latestSession: latestSession
             )
             guard !Task.isCancelled else { return false }
@@ -55477,9 +55532,9 @@ final class AppState: ObservableObject {
                 "propertyRowsMs=\(Int(portalReadyAt.timeIntervalSince(sessionReadyAt) * 1000)) " +
                 "totalMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
             )
-            await MainActor.run {
-                NotificationCenter.default.post(name: .scoutRemoteReferencesDidRefresh, object: propertyID)
-            }
+            // The fast camera publishes one refreshed side-control payload
+            // after this call returns. Its own notification would reload the
+            // same rows a second time while Guided is open.
             return portal.didFetchRemoteShots && portal.didApplyOperationalOverlay
         }
         let freshness = await reconcileLatestReferenceSessionFreshness(
@@ -55813,14 +55868,11 @@ final class AppState: ObservableObject {
         _ remoteShots: [RemoteShotMetadataRecord],
         propertyID: UUID,
         activeOrganizationID: UUID
-    ) -> Int {
+    ) async -> Int {
         guard canAccessProperty(propertyID),
               canAccessOrganization(activeOrganizationID) else {
             return 0
         }
-
-        var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-        let hadGuidedRows = !guidedRows.isEmpty
         let baselineSession = sessions(for: propertyID)
             .filter {
                 $0.deletedAt == nil && $0.status == .completed && $0.isSealed &&
@@ -55828,6 +55880,33 @@ final class AppState: ObservableObject {
             }
             .max { $0.startedAt < $1.startedAt }
         let preferredBaselineSessionID = properties.first(where: { $0.id == propertyID })?.baselineSessionID
+        let store = localStore
+        return await Task.detached(priority: .userInitiated) {
+            (try? store.performFileIOSync {
+                Self.mergeRemoteOrdinaryGuidedReferencesLocal(
+                    remoteShots,
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    store: store,
+                    baselineSession: baselineSession,
+                    preferredBaselineSessionID: preferredBaselineSessionID
+                )
+            }) ?? 0
+        }.value
+    }
+
+    private nonisolated static func mergeRemoteOrdinaryGuidedReferencesLocal(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        store: LocalStore,
+        baselineSession: Session?,
+        preferredBaselineSessionID: UUID?
+    ) -> Int {
+        // The opening snapshot already reconciled local history. Re-reading
+        // all sessions here holds the store queue while Guided is visible.
+        var guidedRows = (try? store.fetchGuidedShotsForFastCapture(propertyID: propertyID)) ?? []
+        let hadGuidedRows = !guidedRows.isEmpty
         let canonicalSelection = Self.canonicalGuidedRemoteSelection(
             remoteShots,
             preferredBaselineSessionID: preferredBaselineSessionID
@@ -55878,9 +55957,9 @@ final class AppState: ObservableObject {
             pruned = before - guidedRows.count
             if pruned > 0 {
                 do {
-                    try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+                    try store.saveGuidedShots(guidedRows, propertyID: propertyID)
                 } catch {
-                    recordDiagnosticsError(error)
+                    print("[GuidedReferenceMerge] prune save failed: \(error)")
                 }
             }
         }
@@ -55953,13 +56032,24 @@ final class AppState: ObservableObject {
                    let angleIndex = row.angleIndex,
                    !building.isEmpty, !elevation.isEmpty, !detailType.isEmpty,
                    angleIndex > 0 {
-                    guided.building = building
-                    guided.targetElevation = CanonicalElevation.normalize(elevation) ?? elevation
-                    guided.detailType = detailType
-                    guided.angleIndex = angleIndex
-                    guided.title = [building, guided.targetElevation, detailType]
-                        .compactMap { $0 }.joined(separator: " ")
-                    guided.reassignedAt = remoteAt
+                    let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+                    let title = [building, normalizedElevation, detailType].joined(separator: " ")
+                    // LocalStore's ISO 8601 JSON encoder saves whole seconds,
+                    // while portal timestamps have fractional seconds. Do not
+                    // rewrite an identical row on every property entry just
+                    // because the decoded remote timestamp is milliseconds newer.
+                    if guided.building != building ||
+                        guided.targetElevation != normalizedElevation ||
+                        guided.detailType != detailType ||
+                        guided.angleIndex != angleIndex ||
+                        guided.title != title {
+                        guided.building = building
+                        guided.targetElevation = normalizedElevation
+                        guided.detailType = detailType
+                        guided.angleIndex = angleIndex
+                        guided.title = title
+                        guided.reassignedAt = remoteAt
+                    }
                 }
                 let remoteLifecycleAt = row.lifecycleUpdatedAt ?? row.retiredAt ?? row.updatedAt
                 let localLifecycleAt = guided.retiredAt ?? .distantPast
@@ -55978,12 +56068,11 @@ final class AppState: ObservableObject {
                    row.storageBucket?.isEmpty == false,
                    row.storagePath?.isEmpty == false,
                    (row.createdAt ?? .distantPast) >= (guided.shot?.capturedAt ?? .distantPast) {
-                    let relativePath = fastRuntimeHydrationRelativePath(
-                        relativePathOverride: nil,
+                    let relativePath = Self.guidedRemoteRelativePath(
                         storagePath: row.storagePath,
                         shotID: row.id
                     )
-                    let path = localStore
+                    let path = store
                         .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
                         .appendingPathComponent(relativePath, isDirectory: false)
                         .path
@@ -56025,16 +56114,18 @@ final class AppState: ObservableObject {
             guidedRows = mergedRows
             if updated > 0 {
                 do {
-                    try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+                    try store.saveGuidedShots(guidedRows, propertyID: propertyID)
                 } catch {
-                    recordDiagnosticsError(error)
+                    print("[GuidedReferenceMerge] update save failed: \(error)")
                     return 0
                 }
             }
         }
         // Without a verified Full baseline, an existing checklist owns its
         // slots. Do not backfill unrelated historical shots from the portal.
-        if hadGuidedRows && currentGuidedIDs == nil { return updated }
+        if hadGuidedRows && currentGuidedIDs == nil {
+            return updated
+        }
         var representedShotIDs = Set(guidedRows.compactMap { $0.shot?.id })
         representedShotIDs.formUnion(guidedRows.map(\.id))
         var representedKeys = Set(guidedRows.compactMap(LocalConflictRules.guidedShotIdentityKey))
@@ -56062,7 +56153,7 @@ final class AppState: ObservableObject {
                 continue
             }
 
-            let shotMetadata = makeLocalShotMetadataShell(
+            let shotMetadata = Self.makeLocalShotMetadataShell(
                 from: row,
                 propertyID: propertyID,
                 sessionID: sessionID
@@ -56071,11 +56162,22 @@ final class AppState: ObservableObject {
                   !representedShotIDs.contains(row.id) else {
                 continue
             }
+            let identityKey = LocalConflictRules.guidedShotIdentityKey(
+                building: row.building,
+                elevation: row.elevation,
+                detailType: row.detailType,
+                angleIndex: row.angleIndex
+            )
+            // A row already represented by this checklist cannot be added.
+            // Check its key before reading historical session metadata.
+            if let identityKey, representedKeys.contains(identityKey) {
+                continue
+            }
             // A local completed snapshot with Guided rows is authoritative for
             // its captured photos. Do not resurrect a shot omitted from that
             // checklist when remote shot metadata is refreshed.
             if checkedLocalSessionIDs.insert(sessionID).inserted {
-                localMetadataBySessionID[sessionID] = try? localStore.loadSessionMetadata(
+                localMetadataBySessionID[sessionID] = try? store.loadSessionMetadata(
                     propertyID: propertyID, sessionID: sessionID
                 )
             }
@@ -56087,22 +56189,11 @@ final class AppState: ObservableObject {
                }) {
                 continue
             }
-            let identityKey = LocalConflictRules.guidedShotIdentityKey(
-                building: row.building,
-                elevation: row.elevation,
-                detailType: row.detailType,
-                angleIndex: row.angleIndex
-            )
-            if let identityKey, representedKeys.contains(identityKey) {
-                continue
-            }
-
-            let relativePath = fastRuntimeHydrationRelativePath(
-                relativePathOverride: nil,
+            let relativePath = Self.guidedRemoteRelativePath(
                 storagePath: row.storagePath,
                 shotID: row.id
             )
-            let localIdentifier = localStore
+            let localIdentifier = store
                 .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
                 .appendingPathComponent(relativePath, isDirectory: false)
                 .path
@@ -56132,14 +56223,28 @@ final class AppState: ObservableObject {
             added += 1
         }
 
-        guard added > 0 else { return updated }
+        guard added > 0 else {
+            return updated
+        }
         do {
-            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+            try store.saveGuidedShots(guidedRows, propertyID: propertyID)
             return updated + added
         } catch {
-            recordDiagnosticsError(error)
+            print("[GuidedReferenceMerge] add save failed: \(error)")
             return 0
         }
+    }
+
+    private nonisolated static func guidedRemoteRelativePath(storagePath: String?, shotID: UUID) -> String {
+        let trimmed = storagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            let filename = URL(fileURLWithPath: trimmed).lastPathComponent
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !filename.isEmpty && filename != "/" && filename != "." {
+                return "Originals/\(filename)"
+            }
+        }
+        return "Originals/\(shotID.uuidString).jpg"
     }
 
     private func hasPendingAppIssueNotes() -> Bool {
@@ -58867,7 +58972,7 @@ final class AppState: ObservableObject {
 
     // Remote reference sync has already written the current property rows. Keep
     // the camera responsive while reflecting those rows; the full history scan
-    // remains available when the checklist is explicitly refreshed.
+    // still runs when the camera first opens.
     func fastRuntimePreviewSideControlPayloadFromCurrentRows(
         propertyID: UUID,
         sessionType: SessionType,
@@ -58893,7 +58998,7 @@ final class AppState: ObservableObject {
         let otherDraftShotIDs = currentSessionID.map {
             fastRuntimeShotIDsExclusiveToOtherDrafts(propertyID: propertyID, currentSessionID: $0)
         } ?? []
-        let rows = ((try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? [])
+        let rows = ((try? localStore.fetchGuidedShotsForFastCapture(propertyID: propertyID)) ?? [])
             .filter { guided in
                 guard let shotID = guided.shot?.id else { return true }
                 return !otherDraftShotIDs.contains(shotID)
@@ -58906,13 +59011,90 @@ final class AppState: ObservableObject {
                 }
                 return lhs.id.uuidString < rhs.id.uuidString
             }
-        let retiredIDs = Set(rows.filter { $0.isRetired || $0.status == .retired }.map(\.id))
+        let previousRetiredByID = priorPayload.retiredGuidedShots.reduce(into: [UUID: GuidedShot]()) {
+            $0[$1.id] = $1
+        }
         return FastRuntimePreviewSideControlPayload(
             resolutionRequiredObservations: [],
             activeObservations: active,
             guidedShots: rows.filter { !$0.isRetired && $0.status != .retired },
-            retiredGuidedShots: priorPayload.retiredGuidedShots.filter { retiredIDs.contains($0.id) }
+            retiredGuidedShots: rows.filter { $0.isRetired || $0.status == .retired }
+                .map { current in
+                    var row = current
+                    if let previous = previousRetiredByID[current.id] {
+                        row.shot = row.shot ?? previous.shot
+                        row.referenceImagePath = row.referenceImagePath ?? previous.referenceImagePath
+                        row.referenceImageLocalIdentifier = row.referenceImageLocalIdentifier
+                            ?? previous.referenceImageLocalIdentifier
+                    }
+                    return row
+                }
         )
+    }
+
+    func fastRuntimePreviewSideControlPayloadFromCurrentRowsAsync(
+        propertyID: UUID,
+        sessionType: SessionType,
+        currentSessionID: UUID?,
+        priorPayload: FastRuntimePreviewSideControlPayload
+    ) async -> FastRuntimePreviewSideControlPayload {
+        guard canAccessProperty(propertyID) else { return .empty }
+        let otherDraftShotIDs = currentSessionID.map {
+            fastRuntimeShotIDsExclusiveToOtherDrafts(propertyID: propertyID, currentSessionID: $0)
+        } ?? []
+        let previousRetiredByID = priorPayload.retiredGuidedShots.reduce(into: [UUID: GuidedShot]()) {
+            $0[$1.id] = $1
+        }
+        let store = localStore
+        return await Task.detached(priority: .userInitiated) {
+            (try? store.performFileIOSync {
+                let observations = ((try? store.fetchObservations(propertyID: propertyID)) ?? [])
+                    .sorted { lhs, rhs in
+                        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                let active = observations.filter {
+                    $0.appearsInFieldIssueList(currentSessionID: currentSessionID)
+                }
+                guard sessionType != .punchlistVisit else {
+                    return FastRuntimePreviewSideControlPayload(
+                        resolutionRequiredObservations: [],
+                        activeObservations: active,
+                        guidedShots: [],
+                        retiredGuidedShots: []
+                    )
+                }
+                let rows = ((try? store.fetchGuidedShotsForFastCapture(propertyID: propertyID)) ?? [])
+                    .filter { guided in
+                        guard let shotID = guided.shot?.id else { return true }
+                        return !otherDraftShotIDs.contains(shotID)
+                    }
+                    .sorted { lhs, rhs in
+                        let lhsTitle = lhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let rhsTitle = rhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if lhsTitle != rhsTitle {
+                            return lhsTitle.localizedCaseInsensitiveCompare(rhsTitle) == .orderedAscending
+                        }
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                return FastRuntimePreviewSideControlPayload(
+                    resolutionRequiredObservations: [],
+                    activeObservations: active,
+                    guidedShots: rows.filter { !$0.isRetired && $0.status != .retired },
+                    retiredGuidedShots: rows.filter { $0.isRetired || $0.status == .retired }
+                        .map { current in
+                            var row = current
+                            if let previous = previousRetiredByID[current.id] {
+                                row.shot = row.shot ?? previous.shot
+                                row.referenceImagePath = row.referenceImagePath ?? previous.referenceImagePath
+                                row.referenceImageLocalIdentifier = row.referenceImageLocalIdentifier
+                                    ?? previous.referenceImageLocalIdentifier
+                            }
+                            return row
+                        }
+                )
+            }) ?? .empty
+        }.value
     }
 
     func fastRuntimePreviewSideControlPayload(
@@ -61380,7 +61562,7 @@ final class AppState: ObservableObject {
                 continue
             }
             let existing = existingShots[row.id]
-            let local = existing ?? makeLocalShotMetadataShell(from: row, propertyID: propertyID, sessionID: sessionID)
+            let local = existing ?? Self.makeLocalShotMetadataShell(from: row, propertyID: propertyID, sessionID: sessionID)
             let merged = row.merged(withLocal: local)
             try? localStore.upsertShot(propertyID: propertyID, sessionID: sessionID, shot: merged, matchMode: .append)
             guard merged.isFlagged, let issueID = merged.issueID else { continue }
@@ -61429,13 +61611,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func makeLocalShotMetadataShell(
+    private nonisolated static func makeLocalShotMetadataShell(
         from row: RemoteShotMetadataRecord,
         propertyID: UUID,
         sessionID: UUID
     ) -> ShotMetadata {
         let storageLeaf = row.storagePath
-            .flatMap { normalizedSupabaseText($0) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
             .map { URL(fileURLWithPath: $0).lastPathComponent }
         let filename = storageLeaf?.isEmpty == false ? storageLeaf! : OriginalPhotoFormat.defaultFilename(for: row.id)
         let relativePath = "Originals/\(filename)"

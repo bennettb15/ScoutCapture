@@ -904,6 +904,63 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
         XCTAssertEqual(persisted?.endedAt, Date(timeIntervalSinceReferenceDate: 180))
     }
 
+    func testDeltaApplyUnchangedSessionDoesNotRewriteFractionalRemoteDate() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try makeOrganization(fixture, id: orgID)
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: orgID,
+                folderId: "00001",
+                name: "Session Property",
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 100)
+            )
+        )
+        let startedAt = Date(timeIntervalSince1970: 1_795_000_100)
+        let completedAt = Date(timeIntervalSince1970: 1_795_000_180)
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: startedAt,
+                status: .completed,
+                endedAt: completedAt,
+                isSealed: true
+            )
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: orgID)
+
+        let result = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaSessionsForTests(
+                records: [
+                    makeSessionDelta(
+                        id: sessionID,
+                        orgID: orgID,
+                        propertyID: propertyID,
+                        status: "completed",
+                        startedAt: startedAt.addingTimeInterval(0.456),
+                        completedAt: completedAt.addingTimeInterval(0.456),
+                        updatedAt: completedAt.addingTimeInterval(0.456)
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+
+        XCTAssertEqual(result.applied, 0)
+        XCTAssertEqual(result.skipped, 1)
+        let persisted = try fixture.localStore.fetchSessions(propertyID: propertyID)
+            .first(where: { $0.id == sessionID })
+        XCTAssertEqual(persisted?.startedAt, startedAt)
+        XCTAssertEqual(persisted?.endedAt, completedAt)
+    }
+
     func testDeltaApplySessionMapsCaptureProfileAndNilPreservesExistingSnapshot() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

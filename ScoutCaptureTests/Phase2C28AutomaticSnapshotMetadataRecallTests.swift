@@ -808,7 +808,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(rows[0].shot?.id, newerID)
     }
 
-    func testCompletedSessionDoesNotReviveHistoricalPhotoOutsideItsGuidedChecklist() throws {
+    func testCompletedSessionDoesNotReviveHistoricalPhotoOutsideItsGuidedChecklist() async throws {
         let fixture = try makeFixture()
         try seedDeviceBMetadata(
             fixture: fixture,
@@ -869,16 +869,17 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: remoteData)
-        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let mergedCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 0)
+        )
+        XCTAssertEqual(mergedCount, 0)
         XCTAssertEqual(
             try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).map(\.id),
             [authoritative.id]
         )
     }
 
-    func testHistoricalRemoteGuidedPhotoDoesNotFillRetiredChecklistSlot() throws {
+    func testHistoricalRemoteGuidedPhotoDoesNotFillRetiredChecklistSlot() async throws {
         let fixture = try makeFixture()
         let active = GuidedShot(
             title: "A North Roofline", building: "A", targetElevation: "North",
@@ -907,16 +908,17 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             """.utf8
         ))
 
-        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let mergedCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 0)
+        )
+        XCTAssertEqual(mergedCount, 0)
         XCTAssertEqual(
             try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).map(\.id),
             [active.id, retired.id]
         )
     }
 
-    func testExistingGuidedChecklistReceivesRemoteRetireReclassifyAndRestore() throws {
+    func testExistingGuidedChecklistReceivesRemoteRetireReclassifyAndRestore() async throws {
         let fixture = try makeFixture()
         let first = GuidedShot(
             id: fixture.guidedID, title: "A North Overview", building: "A",
@@ -942,10 +944,11 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
                 """.utf8))
         }
 
-        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let retiredMergeCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             try remote("retired", updatedAt: "2026-11-20T12:00:00Z"),
             propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 1)
+        )
+        XCTAssertEqual(retiredMergeCount, 1)
         var rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows[0].status, .retired)
@@ -954,16 +957,57 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(rows[0].detailType, "Roofline")
         XCTAssertEqual(rows[0].angleIndex, 2)
         XCTAssertEqual(rows[1].id, other.id)
-        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let restoredMergeCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             try remote("active", updatedAt: "2026-11-20T13:00:00Z"),
             propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 1)
+        )
+        XCTAssertEqual(restoredMergeCount, 1)
         rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows[0].status, .active)
         XCTAssertFalse(rows[0].isRetired)
     }
 
-    func testGuidedReclassificationOnLaterPhotoUpdatesEarlierCheckpoint() throws {
+    func testUnchangedRemoteGuidedClassificationDoesNotRewriteLocalRow() async throws {
+        let fixture = try makeFixture()
+        let classifiedAt = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-11-20T12:30:42Z")
+        )
+        let guided = GuidedShot(
+            id: fixture.guidedID,
+            title: "B1 North Overview",
+            building: "B1",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: Shot(id: fixture.shotID, capturedAt: classifiedAt),
+            isCompleted: true,
+            reassignedAt: classifiedAt
+        )
+        try fixture.deviceBStore.saveGuidedShots([guided], propertyID: fixture.property.id)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let remote = try decoder.decode([RemoteShotMetadataRecord].self, from: Data("""
+            [{"id":"\(fixture.shotID.uuidString)","org_id":"\(fixture.orgID.uuidString)",
+              "property_id":"\(fixture.property.id.uuidString)",
+              "session_id":"\(fixture.session.id.uuidString)",
+              "updated_at":"2026-11-20T12:30:43Z",
+              "building":"B1","elevation":"North","detail_type":"Overview",
+              "angle_index":1,"is_guided":true}]
+            """.utf8))
+
+        for _ in 0..<2 {
+            let changed = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+                remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
+            )
+            XCTAssertEqual(changed, 0)
+        }
+        XCTAssertEqual(
+            try fixture.deviceBStore.fetchGuidedShotsForFastCapture(propertyID: fixture.property.id),
+            [guided]
+        )
+    }
+
+    func testGuidedReclassificationOnLaterPhotoUpdatesEarlierCheckpoint() async throws {
         let fixture = try makeFixture()
         let laterShotID = UUID()
         let earlier = GuidedShot(
@@ -992,9 +1036,10 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             ]
             """.utf8))
 
-        XCTAssertEqual(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let mergedCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 1)
+        )
+        XCTAssertEqual(mergedCount, 1)
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].shot?.id, fixture.shotID)
@@ -1002,7 +1047,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(rows[0].angleIndex, 1)
     }
 
-    func testReclassifiedReplacementDoesNotResurrectOlderGuidedCard() throws {
+    func testReclassifiedReplacementDoesNotResurrectOlderGuidedCard() async throws {
         let fixture = try makeFixture()
         let oldPoolID = UUID()
         let replacementID = UUID()
@@ -1056,9 +1101,10 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             ]
             """.utf8))
 
-        XCTAssertGreaterThan(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let mergedCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 0)
+        )
+        XCTAssertGreaterThan(mergedCount, 0)
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows.filter { $0.detailType == "Window" }.count, 1)
@@ -1067,7 +1113,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.detailType == "Entry / Porch" }?.shot?.id, fixture.shotID)
     }
 
-    func testSupersedesIdentityCollapsesGuidedCardsAcrossDifferentLabels() throws {
+    func testSupersedesIdentityCollapsesGuidedCardsAcrossDifferentLabels() async throws {
         let fixture = try makeFixture()
         let oldID = UUID()
         let newID = UUID()
@@ -1105,9 +1151,10 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             ]
             """.utf8))
 
-        XCTAssertGreaterThan(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let mergedCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 0)
+        )
+        XCTAssertGreaterThan(mergedCount, 0)
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].shot?.id, newID)
@@ -1221,7 +1268,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(selected, [originalID, replacementID, latestID])
     }
 
-    func testCanonicalCloudLineagePrunesCapturedLocalRowOutsideSourceVisit() throws {
+    func testCanonicalCloudLineagePrunesCapturedLocalRowOutsideSourceVisit() async throws {
         let fixture = try makeFixture()
         let laterSessionID = UUID()
         let entryID = UUID()
@@ -1262,14 +1309,14 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         ]
         """.utf8))
 
-        _ = fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        _ = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             rows, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
         )
         let remaining = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(Set(remaining.map(\.id)), [entryID, sidewalkID])
     }
 
-    func testCurrentBaselineRestoresMissingEntryAfterOrphanPrune() throws {
+    func testCurrentBaselineRestoresMissingEntryAfterOrphanPrune() async throws {
         let fixture = try makeFixture()
         let capturedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-22T21:30:00Z"))
         var baselineSession = fixture.session
@@ -1369,9 +1416,10 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             ]
             """.utf8))
 
-        XCTAssertGreaterThan(fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+        let mergedCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
             remote, propertyID: fixture.property.id, activeOrganizationID: fixture.orgID
-        ), 0)
+        )
+        XCTAssertGreaterThan(mergedCount, 0)
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(Set(rows.compactMap { $0.shot?.id }), Set([entryID, sidewalkID]))
         XCTAssertFalse(rows.contains { $0.shot?.id == orphanID })
@@ -1509,7 +1557,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertFalse(rows.contains { $0.shot?.id == orphanShot.shotID })
     }
 
-    func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() throws {
+    func testRemoteGuidedReferenceAppearsWithoutAnyLocalSessionSnapshot() async throws {
         let fixture = try makeFixture()
         let guidedShotID = UUID()
         let decoder = JSONDecoder()
@@ -1601,14 +1649,12 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             ),
             0
         )
-        XCTAssertEqual(
-            fixture.appState.mergeRemoteOrdinaryGuidedReferences(
-                remoteShots,
-                propertyID: fixture.property.id,
-                activeOrganizationID: fixture.orgID
-            ),
-            1
+        let initialGuidedMergeCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remoteShots,
+            propertyID: fixture.property.id,
+            activeOrganizationID: fixture.orgID
         )
+        XCTAssertEqual(initialGuidedMergeCount, 1)
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows.compactMap { $0.shot?.id }, [guidedShotID])
         let southAngles = fixture.appState.fastRuntimePropertyAngleReservations(
@@ -1634,14 +1680,12 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(requests.first?.sessionID, fixture.session.id)
         XCTAssertEqual(requests.first?.shotID, guidedShotID)
         XCTAssertEqual(requests.first?.relativePathOverride, "Originals/guided.jpg")
-        XCTAssertEqual(
-            fixture.appState.mergeRemoteOrdinaryGuidedReferences(
-                remoteShots,
-                propertyID: fixture.property.id,
-                activeOrganizationID: fixture.orgID
-            ),
-            0
+        let repeatGuidedMergeCount = await fixture.appState.mergeRemoteOrdinaryGuidedReferences(
+            remoteShots,
+            propertyID: fixture.property.id,
+            activeOrganizationID: fixture.orgID
         )
+        XCTAssertEqual(repeatGuidedMergeCount, 0)
         XCTAssertEqual(try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id).count, 1)
     }
 
