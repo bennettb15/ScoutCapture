@@ -17629,10 +17629,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             isLoadingFastLaneSideControlSheet = true
             return
         }
-        // A remote reconciliation can finish after the camera's opening snapshot.
-        // The panel must use the current durable checklist, not that older snapshot.
-        reloadFastLaneSideControlPayloadFromLocalStore()
-        recordFastLaneReadyEvent("guided_open_reloaded_\(fastLaneSideControlPayload.guidedShots.count)")
+        // Camera entry and remote reconciliation keep this payload current.
+        // A full history scan here blocks the tap before the sheet can render.
+        recordFastLaneReadyEvent("guided_open_cached_\(fastLaneSideControlPayload.guidedShots.count)")
         if !fastLaneSideControlPayload.guidedShots.isEmpty ||
             fastLaneSideControlCounts.guidedRemainingCount > 0 ||
             !didRefreshFastLaneSideControlCounts {
