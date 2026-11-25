@@ -1,8 +1,28 @@
 import {
   buildRawSessionMetadata,
   buildSnapshotPayload,
+  shouldRecordBaseline,
   validateHandoffRequest,
 } from "./index.ts";
+
+Deno.test("only a first Full capture establishes the shared baseline", () => {
+  const base = {
+    orgID: "d4ba94ff-25e1-4072-aa79-9a548fcb3008",
+    propertyID: "1ff0eb11-5d02-4d5e-a552-1a11dee26439",
+    sessionID: "028a6f82-2356-412c-a1eb-28099f240325",
+  };
+  if (!shouldRecordBaseline(validateHandoffRequest({
+    ...base, sessionType: "full_documentation", reportMode: "all",
+    fullDocumentationMode: "complete_capture",
+  }))) throw new Error("first Full capture must set the baseline");
+  if (shouldRecordBaseline(validateHandoffRequest({
+    ...base, sessionType: "full_documentation", reportMode: "all",
+    fullDocumentationMode: "follow_up",
+  }))) throw new Error("Follow-Up must preserve the original baseline");
+  if (shouldRecordBaseline(validateHandoffRequest({
+    ...base, sessionType: "punchlist_visit", reportMode: "punchlist",
+  }))) throw new Error("Punchlist must not unlock Follow-Up");
+});
 
 Deno.test("validateHandoffRequest accepts full/all and normalizes IDs", () => {
   const request = validateHandoffRequest({

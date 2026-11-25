@@ -4193,6 +4193,9 @@ struct SessionHubView: View {
         }
         if !didFreshEntryPreflight {
             Task { @MainActor in
+                let baselineCheck = Task { @MainActor in
+                    await appState.refreshRemotePropertyBaselineEvidence(propertyID: property.id)
+                }
                 let decision = await appState.evaluateFreshPropertyTapEntryPreflight(
                     propertyID: property.id,
                     context: "home_property_tap_initial"
@@ -4200,6 +4203,7 @@ struct SessionHubView: View {
                 guard tapToken == propertyTapToken else { return }
 
                 if let block = decision?.block {
+                    baselineCheck.cancel()
                     isOpeningProperty = false
                     fastLaneOpeningProperty = nil
                     propertyEntryLockPrompt = PropertyEntryLockPrompt(
@@ -4212,6 +4216,9 @@ struct SessionHubView: View {
                     }
                     return
                 }
+
+                _ = await baselineCheck.value
+                guard tapToken == propertyTapToken else { return }
 
                 continueAcceptedPropertyTap(
                     property,
@@ -4312,7 +4319,7 @@ struct SessionHubView: View {
             // A property exported on another device can have no local sessions yet.
             // Use the shared status before presenting first-property guidance.
             shouldRecommendInitialOverview = appState.sessions(for: property.id).isEmpty &&
-                property.baselineSessionID == nil &&
+                !appState.propertyHasBaseline(property.id) &&
                 appState.propertyStatusByPropertyID[property.id]?.lastExportedSessionID == nil &&
                 !badgeModel.finalizedOrExported
             showInitialPunchlistConfirmation = false
@@ -13794,7 +13801,7 @@ private func fastLaneHasPriorPropertySession(
     propertyID: UUID,
     currentSessionID: UUID
 ) -> Bool {
-    appState.properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil ||
+    appState.propertyHasBaseline(propertyID) ||
         appState.sessions(for: propertyID).contains { $0.id != currentSessionID }
 }
 
