@@ -19586,6 +19586,18 @@ final class AppState: ObservableObject {
                     propertyID: propertyID,
                     sessionID: candidate.row.sessionID
                 )
+                let hasPendingLocalContentWork = hasPendingLocalSessionContentWork(
+                    propertyID: propertyID,
+                    sessionID: candidate.row.sessionID
+                )
+                let replaceOlderFinalizedLocalMetadata = canReplaceOlderFinalizedLocalMetadata(
+                    snapshot: candidate.metadata,
+                    snapshotGeneratedAt: candidate.payload.generatedAt,
+                    localComparison: comparison,
+                    propertyID: propertyID,
+                    sessionID: candidate.row.sessionID,
+                    hasPendingLocalContentWork: hasPendingLocalContentWork
+                )
                 let readback = Self.makeSessionSnapshotReadbackResult(
                     row: candidate.row,
                     payloadData: candidate.payloadData,
@@ -19596,7 +19608,9 @@ final class AppState: ObservableObject {
                     row: candidate.row,
                     decodedPayload: candidate.payload,
                     readback: readback,
-                    localComparison: comparison
+                    localComparison: comparison,
+                    hasPendingLocalContentWork: hasPendingLocalContentWork,
+                    replaceOlderFinalizedLocalMetadata: replaceOlderFinalizedLocalMetadata
                 )
                 guard outcome.outcome == .restorableMetadataCandidate else {
                     return SessionSnapshotHydrationResult(
@@ -19615,7 +19629,8 @@ final class AppState: ObservableObject {
                 let result = try applyAutomaticPropertyOpenSnapshotMetadataRecall(
                     candidate: candidate,
                     propertyID: propertyID,
-                    checkedAt: checkedAt
+                    checkedAt: checkedAt,
+                    replaceOlderFinalizedLocalMetadata: replaceOlderFinalizedLocalMetadata
                 )
                 try await reconcileSnapshotSessionModesThroughCurrentBaseline(
                     rows: sortedRows,
@@ -19874,21 +19889,103 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func hasPendingLocalSessionContentWork(propertyID: UUID, sessionID: UUID) -> Bool {
+        if currentSession?.id == sessionID { return true }
+        let hasQueuedWork = ((try? localStore.fetchQueuedMutations()) ?? []).contains { item in
+            guard item.acknowledgedAt == nil,
+                  item.status == .pending || item.status == .failed || item.status == .inFlight else {
+                return false
+            }
+            return item.sessionID == sessionID ||
+                (item.propertyID == propertyID && item.entityType.lowercased() != "property")
+        }
+        let hasSnapshotUploadWork = ((try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? [])
+            .contains { $0.sessionID == sessionID }
+        return hasQueuedWork || hasSnapshotUploadWork
+    }
+
+    private func canReplaceOlderFinalizedLocalMetadata(
+        snapshot: SessionMetadata,
+        snapshotGeneratedAt: Date,
+        localComparison: SessionSnapshotRestoreLocalComparison,
+        propertyID: UUID,
+        sessionID: UUID,
+        hasPendingLocalContentWork: Bool
+    ) -> Bool {
+        guard localComparison.sessionExists,
+              let localKnownStateAt = localComparison.knownStateAt,
+              localKnownStateAt <= snapshotGeneratedAt,
+              snapshot.status == .completed || snapshot.isSealed ||
+                snapshot.exportedAt != nil || snapshot.firstDeliveredAt != nil,
+              let localSession = persistedSessionIncludingDeleted(
+                propertyID: propertyID,
+                sessionID: sessionID
+              ),
+              isFinalSession(localSession),
+              !hasPendingLocalContentWork else {
+            return false
+        }
+
+        let snapshotShotIDs = Set(snapshot.shots.map(\.shotID))
+        let localMetadata = try? localStore.loadSessionMetadata(
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let localShots = localMetadata?.shots ?? []
+        return !localShots.contains { shot in
+            guard !snapshotShotIDs.contains(shot.shotID),
+                  shot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+                return false
+            }
+            return localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: shot.originalRelativePath
+            ) != nil
+        }
+    }
+
     private func applyAutomaticPropertyOpenSnapshotMetadataRecall(
         candidate: VerifiedSessionSnapshotMetadataCandidate,
         propertyID: UUID,
-        checkedAt: Date
+        checkedAt: Date,
+        replaceOlderFinalizedLocalMetadata: Bool
     ) throws -> SessionSnapshotHydrationResult {
         let sessionID = candidate.row.sessionID
         let snapshotMetadata = candidate.metadata
         let existingMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        let mergedMetadata = Self.mergeAutomaticSnapshotMetadata(
-            snapshot: snapshotMetadata,
-            existing: existingMetadata,
-            snapshotGeneratedAt: candidate.payload.generatedAt,
-            propertyID: propertyID,
-            sessionID: sessionID
-        )
+        let mergedMetadata: SessionMetadata
+        if replaceOlderFinalizedLocalMetadata {
+            var canonical = snapshotMetadata
+            canonical.propertyID = propertyID
+            canonical.sessionID = sessionID
+            let localShotsByID = Dictionary(uniqueKeysWithValues: (existingMetadata?.shots ?? []).map {
+                ($0.shotID, $0)
+            })
+            canonical.shots = canonical.shots.map { snapshotShot in
+                var shot = snapshotShot
+                if let local = localShotsByID[shot.shotID],
+                   localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    relativePath: local.originalRelativePath
+                   ) != nil {
+                    shot.originalFilename = local.originalFilename
+                    shot.originalRelativePath = local.originalRelativePath
+                    shot.originalByteSize = local.originalByteSize
+                }
+                return shot
+            }
+            mergedMetadata = canonical
+        } else {
+            mergedMetadata = Self.mergeAutomaticSnapshotMetadata(
+                snapshot: snapshotMetadata,
+                existing: existingMetadata,
+                snapshotGeneratedAt: candidate.payload.generatedAt,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
         let existingSessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
         let existingSession = existingSessions.first { $0.id == sessionID }
         let snapshotSession = Session(
@@ -19948,7 +20045,9 @@ final class AppState: ObservableObject {
         row: SessionSnapshotUploadRow,
         decodedPayload: SessionSnapshotPayloadForChecksum,
         readback: SessionSnapshotReadbackResult,
-        localComparison: SessionSnapshotRestoreLocalComparison
+        localComparison: SessionSnapshotRestoreLocalComparison,
+        hasPendingLocalContentWork: Bool,
+        replaceOlderFinalizedLocalMetadata: Bool
     ) -> (outcome: SessionSnapshotRestoreDiagnosticOutcome, reason: String?) {
         guard row.snapshotSchemaVersion == 1, decodedPayload.snapshotSchemaVersion == 1 else {
             return (.unsupportedSchema, "snapshot schema version unsupported")
@@ -19965,6 +20064,9 @@ final class AppState: ObservableObject {
         guard readback.countsValid else {
             return (.unableToVerify, "snapshot row/object counts mismatch")
         }
+        if hasPendingLocalContentWork {
+            return (.localNewerConflict, "local session has unsent work")
+        }
 
         if localComparison.sessionExists,
            let localKnownStateAt = localComparison.knownStateAt,
@@ -19972,7 +20074,8 @@ final class AppState: ObservableObject {
             return (.localNewerConflict, "local session state is newer than snapshot")
         }
 
-        if localComparison.sessionExists,
+        if !replaceOlderFinalizedLocalMetadata,
+           localComparison.sessionExists,
            let localShotCount = localComparison.shotCount,
            let localIssueCount = localComparison.issueCount,
            let localGuidedCount = localComparison.guidedCount,
@@ -20134,7 +20237,6 @@ final class AppState: ObservableObject {
             session.endedAt,
             session.exportedAt,
             session.firstDeliveredAt,
-            session.reExportExpiresAt,
             session.deletedAt
         ]
         .compactMap { $0 }
@@ -20149,8 +20251,7 @@ final class AppState: ObservableObject {
             metadata.startedAt,
             metadata.endedAt,
             metadata.exportedAt,
-            metadata.firstDeliveredAt,
-            metadata.reExportExpiresAt
+            metadata.firstDeliveredAt
         ].compactMap { $0 } + itemDates)
             .max() ?? metadata.startedAt
     }
@@ -20886,7 +20987,8 @@ final class AppState: ObservableObject {
             (metadata?.startedAt, "metadata.started_at"),
             (metadata?.endedAt, "metadata.completed_at"),
             (metadata?.exportedAt, "metadata.exported_at"),
-            (metadata?.firstDeliveredAt, "metadata.first_delivered_at")
+            (metadata?.firstDeliveredAt, "metadata.first_delivered_at"),
+            (metadata.map(Self.sessionMetadataKnownStateAt), "metadata.content")
         ]
         let knownDates = knownDateCandidates.compactMap { candidate -> (date: Date, source: String)? in
             guard let date = candidate.date else { return nil }

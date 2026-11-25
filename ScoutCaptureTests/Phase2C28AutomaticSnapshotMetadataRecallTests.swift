@@ -484,6 +484,164 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertEqual(guided.first?.title, "North overview")
     }
 
+    func testFutureReExportDeadlineDoesNotMakeLocalMetadataNewerThanSnapshot() async throws {
+        let fixture = try makeFixture()
+        try seedDeviceBMetadata(
+            fixture: fixture,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 10),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 10),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 10),
+            note: "older local note",
+            guidedTitle: "Older local guided"
+        )
+        let deadline = Date(timeIntervalSinceReferenceDate: 10_000)
+        var session = fixture.session
+        session.reExportExpiresAt = deadline
+        _ = try fixture.deviceBStore.upsertSession(session)
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: session.id
+        )
+        metadata.reExportExpiresAt = deadline
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: session.id,
+            metadata: metadata
+        )
+
+        let result = await fixture.appState.hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
+            propertyID: fixture.property.id,
+            activeOrganizationID: fixture.orgID
+        )
+
+        XCTAssertTrue(result.allowed)
+        let hydrated = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: session.id
+        )
+        XCTAssertEqual(hydrated.shots.first?.noteText, "snapshot metadata hydration test")
+        XCTAssertEqual(hydrated.guidedShots.first?.title, "North overview")
+    }
+
+    func testVerifiedNewerSnapshotRemovesStaleLocalOnlyPhotoAndSessionGuidedRow() async throws {
+        let fixture = try makeFixture()
+        try seedDeviceBMetadata(
+            fixture: fixture,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "older local note",
+            guidedTitle: "Older local guided"
+        )
+        let staleShotID = UUID()
+        let staleGuidedID = UUID()
+        let staleShot = ShotMetadata(
+            shotID: staleShotID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 120),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            building: "A",
+            elevation: "South",
+            detailType: "Old photo",
+            angleIndex: 1,
+            shotKey: "a-south-old-photo-1",
+            isGuided: true,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: "stale.jpg",
+            originalRelativePath: "Originals/stale.jpg",
+            originalByteSize: 123,
+            storageBucket: "media",
+            storagePath: "remote/stale.jpg",
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+        let staleGuided = GuidedShot(
+            id: staleGuidedID,
+            title: "Old photo",
+            building: "A",
+            targetElevation: "South",
+            detailType: "Old photo",
+            angleIndex: 1,
+            shot: Shot(id: staleShotID, capturedAt: staleShot.createdAt),
+            isCompleted: true
+        )
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        metadata.shots.append(staleShot)
+        metadata.guidedShots.append(staleGuided)
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+        try fixture.deviceBStore.saveGuidedShotsForFastCapture(
+            metadata.guidedShots,
+            propertyID: fixture.property.id
+        )
+
+        let result = await fixture.appState.hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
+            propertyID: fixture.property.id,
+            activeOrganizationID: fixture.orgID
+        )
+
+        XCTAssertTrue(result.allowed)
+        let hydrated = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(hydrated.shots.map(\.shotID), [fixture.shotID])
+        XCTAssertEqual(hydrated.guidedShots.map(\.id), [fixture.guidedID])
+    }
+
+    func testPendingLocalSessionMutationPreventsSnapshotReplacement() async throws {
+        let fixture = try makeFixture()
+        try seedDeviceBMetadata(
+            fixture: fixture,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 10),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 10),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 10),
+            note: "unsent local note",
+            guidedTitle: "Unsent local guided"
+        )
+        _ = try fixture.deviceBStore.appendQueuedMutation(LocalStore.QueuedMutation(
+            entityType: "shot",
+            entityID: fixture.shotID,
+            organizationID: fixture.orgID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            operation: "upsert_shot",
+            payloadData: Data(),
+            idempotencyKey: "pending-shot-\(fixture.shotID.uuidString)"
+        ))
+
+        let result = await fixture.appState.hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
+            propertyID: fixture.property.id,
+            activeOrganizationID: fixture.orgID
+        )
+
+        XCTAssertFalse(result.allowed)
+        let metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(metadata.shots.first?.noteText, "unsent local note")
+    }
+
     func testDuplicateHydrationDoesNotDuplicateSessions() async throws {
         let fixture = try makeFixture()
 
