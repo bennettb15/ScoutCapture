@@ -85,6 +85,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
     private struct Fixture {
         var deviceBStore: LocalStore
         var appState: AppState
+        var deviceBDefaults: UserDefaults
         var orgID: UUID
         var property: Property
         var session: Session
@@ -175,9 +176,10 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         let deviceBStore = LocalStore(testStorageRootURL: try makeTempStorageRoot("B"))
         _ = try deviceBStore.createOrganization(Organization(id: orgID, name: "2C28 Org"))
         let propertyB = try deviceBStore.createProperty(Property(id: propertyID, orgId: orgID, name: "2C28 Property"))
+        let deviceBDefaults = makeDefaults()
         let appState = AppState(
             localStore: deviceBStore,
-            userDefaults: makeDefaults(),
+            userDefaults: deviceBDefaults,
             environment: environment(),
             sessionSnapshotRowsFetchOverride: { _, requestedPropertyID, requestedSessionID in
                 XCTAssertEqual(requestedPropertyID, propertyID)
@@ -200,6 +202,7 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         return Fixture(
             deviceBStore: deviceBStore,
             appState: appState,
+            deviceBDefaults: deviceBDefaults,
             orgID: orgID,
             property: propertyB,
             session: session,
@@ -606,6 +609,60 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         )
         XCTAssertEqual(hydrated.shots.map(\.shotID), [fixture.shotID])
         XCTAssertEqual(hydrated.guidedShots.map(\.id), [fixture.guidedID])
+
+        // A later ordinary shots-table refresh may still contain this older
+        // row. It must not undo the verified final snapshot's repair.
+        let staleRemoteJSON = """
+        [{
+          "id": "\(staleShotID.uuidString)",
+          "org_id": "\(fixture.orgID.uuidString)",
+          "property_id": "\(fixture.property.id.uuidString)",
+          "session_id": "\(fixture.session.id.uuidString)",
+          "created_at": "2001-01-01T00:02:00Z",
+          "updated_at": "2001-01-01T00:02:10Z",
+          "building": "A",
+          "elevation": "South",
+          "detail_type": "Old photo",
+          "angle_index": 1,
+          "is_guided": true,
+          "is_flagged": false,
+          "storage_bucket": "media",
+          "storage_path": "remote/stale.jpg"
+        }]
+        """
+        XCTAssertEqual(
+            fixture.appState._debugApplyRemoteShotMetadataJSONForTests(
+                staleRemoteJSON,
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id
+            ),
+            1
+        )
+        let afterOrdinaryRefresh = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(afterOrdinaryRefresh.shots.map(\.shotID), [fixture.shotID])
+
+        let relaunchedAppState = AppState(
+            localStore: fixture.deviceBStore,
+            userDefaults: fixture.deviceBDefaults,
+            environment: environment(),
+            disableCloudBackupForTests: true
+        )
+        XCTAssertEqual(
+            relaunchedAppState._debugApplyRemoteShotMetadataJSONForTests(
+                staleRemoteJSON,
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id
+            ),
+            1
+        )
+        let afterRelaunch = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(afterRelaunch.shots.map(\.shotID), [fixture.shotID])
     }
 
     func testPendingLocalSessionMutationPreventsSnapshotReplacement() async throws {
