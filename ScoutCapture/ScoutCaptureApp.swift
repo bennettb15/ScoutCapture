@@ -870,6 +870,21 @@ private struct AppRootView: View {
     }
 }
 
+private struct ClaimTransferAlertModifier: ViewModifier {
+    @Binding var propertyName: String?
+
+    func body(content: Content) -> some View {
+        content.alert("Session claimed by another device", isPresented: Binding(
+            get: { propertyName != nil },
+            set: { if !$0 { propertyName = nil } }
+        )) {
+            Button("OK", role: .cancel) { propertyName = nil }
+        } message: {
+            Text("\(propertyName ?? "This property") is now open on another device. This camera has closed. Any photos taken here remain on this iPhone.")
+        }
+    }
+}
+
 struct SessionHubView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
@@ -893,6 +908,7 @@ struct SessionHubView: View {
     @State private var fastLaneOpeningProperty: Property? = nil
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
+    @State private var transferredClaimPropertyName: String? = nil
     @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
     @State private var propertyEntryLockPrompt: PropertyEntryLockPrompt? = nil
     @State private var isCheckingStalePropertyLock = false
@@ -1269,6 +1285,9 @@ struct SessionHubView: View {
                     initialProfileLocked: request.initialProfileLocked,
                     isDebugMode: false,
                     onDismiss: { closeResult in
+                        if closeResult.lockAction.hasPrefix("claim_transferred") {
+                            transferredClaimPropertyName = closeResult.propertyName
+                        }
                         if closeResult.errorMessage != nil {
                             fastLaneCloseResult = closeResult
                         }
@@ -1303,6 +1322,7 @@ struct SessionHubView: View {
             } message: {
                 Text("Connect to Wi-Fi or cellular before opening a property. If a session is already open, capture can continue if the network drops.")
             }
+            .modifier(ClaimTransferAlertModifier(propertyName: $transferredClaimPropertyName))
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
@@ -14397,6 +14417,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var releaseStartedAt: Date?
     @State private var releaseFinishedAt: Date?
     @State private var isClosing: Bool = false
+    @State private var isVerifyingClaim: Bool = false
     @State private var fastLaneExitIntentActive: Bool = false
     @State private var isSavingFastCapture: Bool = false
     @State private var captureFlashVisible: Bool = false
@@ -14652,6 +14673,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
+            if oldPhase != .active, newPhase == .active, !isFastLaneExiting {
+                Task { await verifyClaimAndCloseIfTransferred() }
+            }
             guard oldPhase != .active,
                   newPhase == .active,
                   previewRunningAt != nil,
@@ -14727,6 +14751,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 recordFastLaneOpenDiagnostic()
                 scheduleFastLaneReferenceRefreshAfterPreview()
                 refreshFastLaneSideControlCountsIfNeeded()
+            }
+        }
+        .task(id: context.sessionID) {
+            while !Task.isCancelled && !isFastLaneExiting {
+                try? await Task.sleep(for: .seconds(20))
+                guard !Task.isCancelled else { break }
+                if scenePhase == .active {
+                    await verifyClaimAndCloseIfTransferred()
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -16259,6 +16292,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var canUseFastShutter: Bool {
         context.canCapture &&
+            !isVerifyingClaim &&
             camera.isPreviewRunning &&
             !camera.isCapturing &&
             !isSavingFastCapture &&
@@ -16357,6 +16391,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var canRunProductionComplete: Bool {
         fastLaneCurrentPhotoCountForDisplay > 0 &&
+            !isVerifyingClaim &&
             !hasFastLaneCompletionRemainingDebt &&
             !(context.fullDocumentationMode == .followUp && isFastLaneCaptureIntentArmed) &&
             !productionCompleteState.isRunning &&
@@ -17714,6 +17749,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             isLoadingFastLaneSideControlSheet = false
             didCheckFastLaneIssuePanelMedia = false
             scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: mode)
+            // The portal can change priority or trade while this camera stays
+            // open. Show cached rows immediately, then refresh their fields.
+            if let organizationID = appState.activeOrganizationID {
+                Task {
+                    let changed = await appState.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+                        propertyID: context.propertyID,
+                        activeOrganizationID: organizationID
+                    )
+                    guard changed, !isFastLaneExiting,
+                          fastLaneSideControlSheetMode == mode else { return }
+                    reloadFastLaneSideControlPayloadFromLocalStore(includeHistory: false)
+                }
+            }
         } else {
             showFastLaneSideControlToast(expectedEmptyText)
         }
@@ -19935,6 +19983,27 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private static let exteriorElevationOptions = ["North", "South", "East", "West"]
+
+    private func verifyClaimAndCloseIfTransferred() async {
+        guard !isVerifyingClaim, !isFastLaneExiting,
+              !isSavingFastCapture, !camera.isCapturing,
+              !productionCompleteState.isRunning else { return }
+        isVerifyingClaim = true
+        let verification = await appState.verifyFastRuntimeClaim(context: context)
+        guard verification == .transferred else {
+            isVerifyingClaim = false
+            return
+        }
+        fastLaneExitIntentActive = true
+        let closeResult = await appState.closeFastRuntimePreviewAfterClaimTransfer(
+            context: context,
+            tempStorageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+            capturedPhotoCount: capturedCount,
+            lastMetadataContext: fastLaneFreeMetadataContextIfNeeded(fastMetadataContext)
+        )
+        camera.stopPreviewAsync()
+        onDismiss(closeResult)
+    }
 
     private func closePreview() {
         guard !isClosing,

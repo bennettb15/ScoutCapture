@@ -44222,6 +44222,47 @@ final class AppState: ObservableObject {
         }
     }
 
+    enum FastRuntimeClaimVerification: Equatable {
+        case owned
+        case transferred
+        case unavailable
+    }
+
+    /// Check the server claim after a camera resumes. A read without a target
+    /// session cannot acquire a property that another device now owns.
+    func verifyFastRuntimeClaim(context: ActiveCaptureContext) async -> FastRuntimeClaimVerification {
+        guard isNetworkAvailable,
+              let status = await evaluateLightweightPropertyEntryStatus(
+                propertyID: context.propertyID,
+                targetSessionID: nil
+              ),
+              !status.requiresFallback else { return .unavailable }
+        return Self.fastRuntimeClaimVerification(
+            status: status,
+            sessionID: context.sessionID,
+            deviceID: currentDeviceIdentifier()
+        )
+    }
+
+    static func fastRuntimeClaimVerification(
+        status: LightweightPropertyEntryStatus,
+        sessionID: UUID,
+        deviceID: String
+    ) -> FastRuntimeClaimVerification {
+        guard !status.requiresFallback else { return .unavailable }
+        let deviceMatches = status.lockedByDeviceID?.caseInsensitiveCompare(deviceID) == .orderedSame
+        if status.lockSessionID == sessionID && deviceMatches &&
+            status.entryState == .lockedByCurrentUser {
+            return .owned
+        }
+        switch status.entryState {
+        case .lockedByCurrentUser, .lockedByOtherUser, .pendingExport, .unlockedAndClaimed:
+            return .transferred
+        case .staleClaimable, .unknownRequiresFallback:
+            return .unavailable
+        }
+    }
+
     @MainActor
     func releaseStalePropertyLock(propertyID: UUID) async -> (released: Bool, message: String) {
         guard isNetworkAvailable, let client = supabaseClient,
@@ -46185,6 +46226,80 @@ final class AppState: ObservableObject {
         } catch {
             print("[FastLanePanel] observation_update_failed propertyID=\(propertyID.uuidString) observationID=\(observationID.uuidString) error=\(error.localizedDescription)")
             return false
+        }
+    }
+
+    /// Preserve an interrupted capture locally without changing the property
+    /// status row, which may already belong to another device.
+    func closeFastRuntimePreviewAfterClaimTransfer(
+        context: ActiveCaptureContext,
+        tempStorageRoot: URL?,
+        capturedPhotoCount: Int,
+        lastMetadataContext: FastRuntimeCaptureMetadataContext? = nil
+    ) async -> FastRuntimePrototypeCloseResult {
+        let startedAt = Date()
+        let propertyName = (properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID }))?.name ?? context.propertyID.uuidString
+        do {
+            var draftPath: String?
+            if capturedPhotoCount > 0 {
+                let summary = try await Self.persistFastRuntimeDraftStorage(
+                    context: context,
+                    tempStorageRoot: tempStorageRoot,
+                    photoCount: capturedPhotoCount,
+                    lastMetadataContext: lastMetadataContext
+                )
+                // A transferred claim must never be republished as this device's
+                // draft. Keep the originals for manual recovery, outside normal
+                // draft resume and automatic status publishing.
+                let marker = URL(fileURLWithPath: summary.draftRootPath)
+                    .appendingPathComponent("Metadata/claim-transferred", isDirectory: false)
+                try Data(Date().ISO8601Format().utf8).write(to: marker, options: .atomic)
+                var nextDrafts = fastRuntimeDraftsByPropertyID
+                if nextDrafts[context.propertyID]?.sessionID == context.sessionID {
+                    nextDrafts.removeValue(forKey: context.propertyID)
+                }
+                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                fastRuntimeDraftsByPropertyID = nextDrafts
+                draftPath = summary.draftRootPath
+            } else if let tempStorageRoot {
+                _ = try? Self.removeFastRuntimePrototypeStorage(at: tempStorageRoot)
+            }
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: capturedPhotoCount > 0,
+                photoCount: capturedPhotoCount,
+                lockAction: "claim_transferred",
+                tempDiscarded: capturedPhotoCount == 0,
+                draftRootPath: draftPath,
+                errorMessage: nil,
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: nil,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        } catch {
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: capturedPhotoCount,
+                lockAction: "claim_transferred_persist_failed",
+                tempDiscarded: false,
+                draftRootPath: tempStorageRoot?.path,
+                errorMessage: error.localizedDescription,
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: nil,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
         }
     }
 
@@ -50143,6 +50258,7 @@ final class AppState: ObservableObject {
     ) -> FastRuntimeDraftSummary? {
         guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
               summary.photoCount > 0,
+              !Self.fastRuntimeClaimWasTransferred(summary.draftRootPath),
               !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID) else {
             return nil
         }
@@ -50176,6 +50292,7 @@ final class AppState: ObservableObject {
               supabaseClient != nil,
               let currentUserID = authenticatedSupabaseUser?.id,
               summary.photoCount > 0,
+              !Self.fastRuntimeClaimWasTransferred(summary.draftRootPath),
               !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID),
               (summary.orgID == nil || summary.orgID == activeOrganizationID),
               canAccessProperty(propertyID),
@@ -50311,6 +50428,7 @@ final class AppState: ObservableObject {
                       context.propertyID == propertyID,
                       context.orgID == orgID,
                       context.status == .draft,
+                      !Self.fastRuntimeClaimWasTransferred(root.path),
                       !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: context.sessionID),
                       fastRuntimeContextIsOwnedByCurrentActor(
                         ownerUserID: context.ownerUserID,
@@ -50432,6 +50550,7 @@ final class AppState: ObservableObject {
                     statusReason: "recovered_saved_captures"
                 )
                 let root = try Self.stableFastRuntimeDraftRoot(context: context)
+                guard !Self.fastRuntimeClaimWasTransferred(root.path) else { continue }
                 try prepareFastRuntimePrototypeStorage(at: root, context: context)
                 let originals = root.appendingPathComponent("Originals", isDirectory: true)
                 let records = try zip(captured, sourceURLs).map { shot, source -> FastRuntimePrototypeShotRecord in
@@ -51099,6 +51218,13 @@ final class AppState: ObservableObject {
         root
             .appendingPathComponent("Metadata", isDirectory: true)
             .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+    }
+
+    private static func fastRuntimeClaimWasTransferred(_ rootPath: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: URL(fileURLWithPath: rootPath)
+                .appendingPathComponent("Metadata/claim-transferred", isDirectory: false).path
+        )
     }
 
     private static func fastRuntimeDraftIndexURL() throws -> URL {

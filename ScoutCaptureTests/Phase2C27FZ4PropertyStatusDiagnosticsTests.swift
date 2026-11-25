@@ -2333,6 +2333,51 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(status?.requiresFallback ?? true)
     }
 
+    func testResumedCameraRejectsAnotherDeviceOrSessionClaim() {
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let ownStatus = AppState.LightweightPropertyEntryStatus(
+            entryState: .lockedByCurrentUser,
+            propertyID: propertyID,
+            lockSessionID: sessionID,
+            lockedByUserID: UUID(),
+            lockedByEmail: nil,
+            lockedByDeviceID: "iphone-a",
+            lockedAt: Date(),
+            updatedAt: Date(),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 0,
+            requiresFallback: false,
+            reason: "current_user_occupied"
+        )
+        XCTAssertEqual(AppState.fastRuntimeClaimVerification(
+            status: ownStatus, sessionID: sessionID, deviceID: "iphone-a"
+        ), .owned)
+        XCTAssertEqual(AppState.fastRuntimeClaimVerification(
+            status: ownStatus, sessionID: UUID(), deviceID: "iphone-a"
+        ), .transferred)
+        XCTAssertEqual(AppState.fastRuntimeClaimVerification(
+            status: ownStatus, sessionID: sessionID, deviceID: "android-b"
+        ), .transferred)
+        let otherStatus = AppState.LightweightPropertyEntryStatus(
+            entryState: .lockedByOtherUser,
+            propertyID: propertyID,
+            lockSessionID: UUID(),
+            lockedByUserID: UUID(),
+            lockedByEmail: nil,
+            lockedByDeviceID: "android-b",
+            lockedAt: Date(),
+            updatedAt: Date(),
+            serverTimestamp: Date(),
+            lockAgeSeconds: 0,
+            requiresFallback: false,
+            reason: "other_user_occupied"
+        )
+        XCTAssertEqual(AppState.fastRuntimeClaimVerification(
+            status: otherStatus, sessionID: sessionID, deviceID: "iphone-a"
+        ), .transferred)
+    }
+
     func testLightweightCurrentUserOccupiedMissingLocalShellCanRebuild() throws {
         let fixture = try makeCutoverFixture()
         let sessionID = UUID()
