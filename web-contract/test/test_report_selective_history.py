@@ -512,6 +512,25 @@ class SelectiveHistoryTests(unittest.TestCase):
         }
         self.assertEqual(report_renderer.time_window(validation), '6:00 AM to 7:00 AM')
 
+    def test_full_report_cover_time_excludes_carried_pending_review_photo(self):
+        validation = {
+            'session_id': 'session-current', 'session_type': 'full_documentation',
+            'inputs': {
+                'session': {'session_id': 'session-current',
+                            'started_at_utc': '2026-11-25T20:30:00Z',
+                            'ended_at_utc': '2026-11-25T20:40:00Z'},
+                'ordered_shots': [
+                    {'session_id': 'session-prior', 'source_shot_session_id': 'session-prior',
+                     'captured_at_utc': '2026-11-25T04:06:00Z', 'issue_status': 'pending_review'},
+                    {'session_id': 'session-current', 'source_shot_session_id': 'session-current',
+                     'captured_at_utc': '2026-11-25T20:35:00Z'},
+                    {'session_id': 'session-current', 'source_shot_session_id': 'session-current',
+                     'captured_at_utc': '2026-11-25T20:36:00Z'},
+                ],
+            },
+        }
+        self.assertEqual(report_renderer.time_window(validation), '3:35 PM to 3:36 PM')
+
     def test_multiple_visits_and_resolved_state(self):
         self.visit2['metadata']['issues'].append(issue(0, 'resolved'))
         self.visit2['payload']['rawSessionJSON'] = json.dumps(self.visit2['metadata'])
