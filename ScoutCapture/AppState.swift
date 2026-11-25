@@ -8598,6 +8598,7 @@ final class AppState: ObservableObject {
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
     private var portalOverlayRevisionByPropertyID: [UUID: Int] = [:]
     private var portalGuidedReferenceRevisionByPropertyID: [UUID: Int] = [:]
+    private var remoteGuidedPredecessorByPropertyID: [UUID: [String: UUID]] = [:]
     private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
     private let sessionArchiveAvailabilityCacheTTL: TimeInterval = 15
     private var reExportAvailabilityCache: [String: ReExportAvailabilityCacheEntry] = [:]
@@ -46847,6 +46848,22 @@ final class AppState: ObservableObject {
 
         do {
             await waitForUploadConnection()
+            if context.sessionType == .fullDocumentation,
+               context.fullDocumentationMode == .followUp,
+               dryRun.shots.contains(where: {
+                   $0.metadataContext?.isGuided == true && $0.metadataContext?.isFlagged != true
+               }),
+               remoteGuidedPredecessorByPropertyID[context.propertyID] == nil {
+                // The reference refresh normally fills this cache. A saved
+                // draft may complete before that refresh on a receiving phone.
+                let remoteShots = try await retryTransientUploadOperation {
+                    try await fetchRemotePortalPunchlistShotMetadataRows(
+                        propertyID: context.propertyID,
+                        activeOrganizationID: orgID
+                    )
+                }
+                cacheRemoteGuidedPredecessors(remoteShots, propertyID: context.propertyID)
+            }
             let localObservationByIssueID = fastRuntimeLocalObservationByIssueID(propertyID: context.propertyID)
             let priorPhotoIdentities = fastRuntimePriorPhotoIdentities(
                 propertyID: context.propertyID,
@@ -49949,6 +49966,13 @@ final class AppState: ObservableObject {
             }
             guidedShotIDs.formUnion(capturedGuidedIDs)
         }
+        // A receiving device can have current Guided checkpoints without a
+        // completed local session. The cloud reference read supplies those
+        // predecessor identities for Follow-Up counts and upload lineage.
+        if let remoteGuided = remoteGuidedPredecessorByPropertyID[propertyID] {
+            keys.formUnion(remoteGuided.keys)
+            guidedShotIDs.formUnion(remoteGuided.values)
+        }
         return (guidedShotKeys: keys, guidedShotIDs: guidedShotIDs, flaggedIssueIDs: issueIDs)
     }
 
@@ -50178,9 +50202,17 @@ final class AppState: ObservableObject {
         let issueReason = observationReason ?? metadataContext.detailNote
         let isFlagged = localObservation.map { _ in true }
             ?? (metadataContext.isFlagged ?? (metadataContext.detailNote != nil))
+        let remoteGuidedPredecessorID = context.sessionType == .fullDocumentation &&
+            context.fullDocumentationMode == .followUp &&
+            metadataContext.isGuided == true && isFlagged == false
+            ? remoteGuidedPredecessorShotID(
+                propertyID: context.propertyID,
+                shotKey: metadataContext.shotKey
+            ) : nil
         let inferredPriorGuidedUpdate = context.sessionType == .fullDocumentation &&
             context.fullDocumentationMode == .followUp &&
-            (guidedReplacementShotIDs.contains(dryRunShot.id) ||
+            (remoteGuidedPredecessorID != nil ||
+             guidedReplacementShotIDs.contains(dryRunShot.id) ||
              fastRuntimeCaptureUpdatesPriorGuidedPhoto(
                 metadataContext,
                 priorGuidedShotKeys: priorGuidedShotKeys
@@ -50240,7 +50272,7 @@ final class AppState: ObservableObject {
             accuracyMeters: embeddedGPS?.accuracyMeters,
             imageWidth: nil,
             imageHeight: nil,
-            supersedesShotID: metadataContext.supersedesShotID
+            supersedesShotID: metadataContext.supersedesShotID ?? remoteGuidedPredecessorID
         )
     }
 
@@ -56022,6 +56054,7 @@ final class AppState: ObservableObject {
               canAccessOrganization(activeOrganizationID) else {
             return 0
         }
+        cacheRemoteGuidedPredecessors(remoteShots, propertyID: propertyID)
         let baselineSession = sessions(for: propertyID)
             .filter {
                 $0.deletedAt == nil && $0.status == .completed && $0.isSealed &&
@@ -56042,6 +56075,49 @@ final class AppState: ObservableObject {
                 )
             }) ?? 0
         }.value
+    }
+
+    private func cacheRemoteGuidedPredecessors(
+        _ remoteShots: [RemoteShotMetadataRecord],
+        propertyID: UUID
+    ) {
+        let selectedIDs = Self.canonicalGuidedRemoteShotIDs(
+            remoteShots,
+            preferredBaselineSessionID: properties.first(where: { $0.id == propertyID })?.baselineSessionID
+        )
+        var byKey: [String: UUID] = [:]
+        for row in remoteShots.sorted(by: {
+            ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+        }) {
+            guard row.propertyID == propertyID,
+                  row.deletedAt == nil,
+                  row.isGuided == true,
+                  row.isFlagged != true,
+                  row.issueID == nil,
+                  row.storagePath?.isEmpty == false,
+                  selectedIDs?.contains(row.id) ?? true else { continue }
+            let key = row.shotKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                ?? LocalConflictRules.guidedShotIdentityKey(
+                    building: row.building,
+                    elevation: row.elevation,
+                    detailType: row.detailType,
+                    angleIndex: row.angleIndex
+                )
+            guard let key, !key.isEmpty, byKey[key] == nil else { continue }
+            byKey[key] = row.id
+        }
+        remoteGuidedPredecessorByPropertyID[propertyID] = byKey.isEmpty ? nil : byKey
+    }
+
+    private func remoteGuidedPredecessorShotID(propertyID: UUID, shotKey: String) -> UUID? {
+        remoteGuidedPredecessorByPropertyID[propertyID]?[shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
+    }
+
+    func fastRuntimeKnownRemoteGuidedPhotoIdentities(
+        propertyID: UUID
+    ) -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>) {
+        let byKey = remoteGuidedPredecessorByPropertyID[propertyID] ?? [:]
+        return (Set(byKey.keys), Set(byKey.values))
     }
 
     private nonisolated static func mergeRemoteOrdinaryGuidedReferencesLocal(

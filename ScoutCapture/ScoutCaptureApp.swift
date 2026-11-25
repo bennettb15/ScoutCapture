@@ -15578,7 +15578,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLanePriorPhotoIdentities() -> (guidedShotKeys: Set<String>, guidedShotIDs: Set<UUID>, flaggedIssueIDs: Set<UUID>) {
-        fastLanePriorPhotoIdentityCache.getOrLoad(
+        let local = fastLanePriorPhotoIdentityCache.getOrLoad(
             propertyID: context.propertyID,
             sessionID: context.sessionID
         ) {
@@ -15587,6 +15587,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 currentSessionID: context.sessionID
             )
         }
+        let remote = appState.fastRuntimeKnownRemoteGuidedPhotoIdentities(propertyID: context.propertyID)
+        return (
+            guidedShotKeys: local.guidedShotKeys.union(remote.guidedShotKeys),
+            guidedShotIDs: local.guidedShotIDs.union(remote.guidedShotIDs),
+            flaggedIssueIDs: local.flaggedIssueIDs
+        )
     }
 
     private var fastLaneCurrentPhotoCountForDisplay: Int {
@@ -17830,6 +17836,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func armFastLaneGuidedShot(_ guidedShot: GuidedShot) {
         if context.sessionType == .fullDocumentation && context.fullDocumentationMode == .followUp {
             let priorIdentities = fastLanePriorPhotoIdentities()
+            // A prior photo imported from another device has a persisted
+            // checkpoint even when this phone has no completed local session.
+            let persistedPredecessorID = appState.fastRuntimeGuidedPredecessorShotID(
+                propertyID: context.propertyID,
+                guidedID: guidedShot.id
+            )
+            let hasPriorCheckpointPhoto = persistedPredecessorID.map {
+                !fastLaneCurrentSessionShotIDs().contains($0)
+            } ?? false
             let candidate = AppState.FastRuntimeCaptureMetadataContext(
                 building: guidedShot.building,
                 elevation: guidedShot.targetElevation,
@@ -17839,7 +17854,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 isFlagged: false,
                 captureIntentSource: "guided"
             )
-            if priorIdentities.guidedShotIDs.contains(guidedShot.id) ||
+            if hasPriorCheckpointPhoto ||
+                priorIdentities.guidedShotIDs.contains(guidedShot.id) ||
                 guidedShot.shot.map({ priorIdentities.guidedShotIDs.contains($0.id) }) == true ||
                 appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
                     candidate,

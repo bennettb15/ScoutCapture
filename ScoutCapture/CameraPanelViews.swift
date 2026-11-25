@@ -1717,7 +1717,7 @@ struct GuidedChecklistRow: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-            } else if isThumbnailLoading {
+            } else if isThumbnailLoading || (guidedShot.shot != nil && thumbnailPath == nil) {
                 ZStack {
                     Color.white.opacity(0.08)
                     ProgressView()

@@ -1655,6 +1655,24 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
             activeOrganizationID: fixture.orgID
         )
         XCTAssertEqual(initialGuidedMergeCount, 1)
+        let priorFromOtherDevice = fixture.appState.fastRuntimeKnownRemoteGuidedPhotoIdentities(
+            propertyID: fixture.property.id
+        )
+        XCTAssertTrue(priorFromOtherDevice.guidedShotKeys.contains("a|south|overview|1"))
+        XCTAssertTrue(priorFromOtherDevice.guidedShotIDs.contains(guidedShotID))
+        XCTAssertTrue(fixture.appState.fastRuntimePriorPhotoIdentities(
+            propertyID: fixture.property.id,
+            currentSessionID: UUID()
+        ).guidedShotIDs.contains(guidedShotID))
+        let replacement = AppState.FastRuntimeCaptureMetadataContext(
+            building: "A", elevation: "South", detailType: "Overview", angleIndex: 1,
+            shotKey: "a|south|overview|1", isGuided: true, isFlagged: false,
+            captureIntentSource: "guided"
+        )
+        XCTAssertTrue(fixture.appState.fastRuntimeCaptureUpdatesPriorGuidedPhoto(
+            replacement,
+            priorGuidedShotKeys: priorFromOtherDevice.guidedShotKeys
+        ))
         let rows = try fixture.deviceBStore.fetchGuidedShots(propertyID: fixture.property.id)
         XCTAssertEqual(rows.compactMap { $0.shot?.id }, [guidedShotID])
         let southAngles = fixture.appState.fastRuntimePropertyAngleReservations(
