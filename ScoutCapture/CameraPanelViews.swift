@@ -1574,6 +1574,12 @@ struct GuidedChecklistRow: View {
         return !resolvedReferencePath.isEmpty
     }
 
+    private var expectsThumbnail: Bool {
+        guidedShot.shot != nil || guidedShot.isCompleted || hasReferenceImage ||
+            guidedShot.referenceImageLocalIdentifier?.isEmpty == false ||
+            guidedShot.referenceImagePath?.isEmpty == false
+    }
+
     private var thumbnailPath: String? {
         let shotPath = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !shotPath.isEmpty {
@@ -1717,7 +1723,7 @@ struct GuidedChecklistRow: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-            } else if isThumbnailLoading || (guidedShot.shot != nil && thumbnailPath == nil) {
+            } else if isThumbnailLoading || (expectsThumbnail && thumbnailPath == nil) {
                 ZStack {
                     Color.white.opacity(0.08)
                     ProgressView()
