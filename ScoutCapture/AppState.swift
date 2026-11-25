@@ -44803,6 +44803,25 @@ final class AppState: ObservableObject {
             nextDrafts[context.propertyID] = summary
             try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
             fastRuntimeDraftsByPropertyID = nextDrafts
+            if records.count == 1 && backendFeatureFlags.sessionCoordinationEnabled &&
+                backendFeatureFlags.supabaseEnabled && backendFeatureFlags.shadowWriteEnabled {
+                let protected = await performPropertyStatusShadowWrite(
+                    transition: .promoteLocalDraft,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    deviceID: currentDeviceIdentifier(),
+                    reason: "fast_local_draft_saved"
+                )
+                if !protected {
+                    return FastRuntimePrototypeCaptureSaveResult(
+                        success: true,
+                        shot: result.shot,
+                        storageRoot: result.storageRoot,
+                        errorMessage: "Photo saved on this iPhone, but its Draft lock could not be confirmed. Reconnect before using another device.",
+                        timings: result.timings
+                    )
+                }
+            }
             return result
         } catch {
             return FastRuntimePrototypeCaptureSaveResult(

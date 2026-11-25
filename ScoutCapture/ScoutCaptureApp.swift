@@ -872,6 +872,7 @@ private struct AppRootView: View {
 
 private struct ClaimTransferAlertModifier: ViewModifier {
     @Binding var propertyName: String?
+    let photoCount: Int
 
     func body(content: Content) -> some View {
         content.alert("Session claimed by another device", isPresented: Binding(
@@ -880,7 +881,9 @@ private struct ClaimTransferAlertModifier: ViewModifier {
         )) {
             Button("OK", role: .cancel) { propertyName = nil }
         } message: {
-            Text("\(propertyName ?? "This property") is now open on another device. This camera has closed. Any photos taken here remain on this iPhone.")
+            Text(photoCount == 0
+                ? "\(propertyName ?? "This property") is now open on another device. This camera has closed. No photos were taken in this session."
+                : "\(propertyName ?? "This property") was claimed while this phone's Draft lock was not confirmed online. This camera has closed; its local photos remain on this iPhone for recovery.")
         }
     }
 }
@@ -909,6 +912,7 @@ struct SessionHubView: View {
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
     @State private var transferredClaimPropertyName: String? = nil
+    @State private var transferredClaimPhotoCount: Int = 0
     @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
     @State private var propertyEntryLockPrompt: PropertyEntryLockPrompt? = nil
     @State private var isCheckingStalePropertyLock = false
@@ -1286,6 +1290,7 @@ struct SessionHubView: View {
                     isDebugMode: false,
                     onDismiss: { closeResult in
                         if closeResult.lockAction.hasPrefix("claim_transferred") {
+                            transferredClaimPhotoCount = closeResult.photoCount
                             transferredClaimPropertyName = closeResult.propertyName
                         }
                         if closeResult.errorMessage != nil {
@@ -1322,7 +1327,10 @@ struct SessionHubView: View {
             } message: {
                 Text("Connect to Wi-Fi or cellular before opening a property. If a session is already open, capture can continue if the network drops.")
             }
-            .modifier(ClaimTransferAlertModifier(propertyName: $transferredClaimPropertyName))
+            .modifier(ClaimTransferAlertModifier(
+                propertyName: $transferredClaimPropertyName,
+                photoCount: transferredClaimPhotoCount
+            ))
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
@@ -16571,7 +16579,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                     angleIndex: max(1, fastMetadataContext.angleIndex)
                                 )
                             }
-                            captureErrorMessage = nil
+                            captureErrorMessage = saveResult.errorMessage
                             fastLaneUnarmedMetadataSnapshot = nil
                             fastLaneCaptureIntent = .free
                             clearFastLaneArmedReferenceState()
