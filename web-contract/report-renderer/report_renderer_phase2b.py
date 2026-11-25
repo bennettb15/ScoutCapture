@@ -1859,10 +1859,15 @@ def make_plan(
 def time_window(validation: dict[str, Any]) -> str:
     session = validation.get("inputs", {}).get("session") or {}
     shots = validation.get("inputs", {}).get("ordered_shots") or []
-    session_type = validation.get("session_type") or session.get("session_type")
-    if session_type == "punchlist_visit":
-        session_id = trim(validation.get("session_id") or session.get("session_id"))
-        shots = [shot for shot in shots if (trim(shot.get("session_id")) or "").lower() == (session_id or "").lower()]
+    session_id = trim(validation.get("session_id") or session.get("session_id"))
+    if session_id and any(shot.get("source_shot_session_id") or shot.get("session_id") for shot in shots):
+        # Full and Follow-Up reports can carry older Pending Review photos.
+        # The cover window describes this visit, not every photo in the report.
+        shots = [
+            shot for shot in shots
+            if (trim(shot.get("source_shot_session_id") or shot.get("session_id")) or "").lower()
+            == session_id.lower()
+        ]
     shot_dates = [local_datetime(shot.get("captured_at_utc")) for shot in shots]
     shot_dates = [value for value in shot_dates if value is not None]
     first = min(shot_dates) if shot_dates else local_datetime(session.get("started_at_utc"))
