@@ -14916,6 +14916,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 previousSessionID: fastLanePreviousGallerySessionID,
                 previousAssets: fastLanePreviousGalleryAssets,
                 previousMetadataByAssetID: fastLanePreviousGalleryMetadataByAssetID,
+                isAwaitingPreviousSession: hasPriorPropertySession && !didFinishInitialFastLaneReferenceRefresh,
                 cache: fastLaneGalleryImageCache,
                 thumbnailRefreshToken: fastLaneGalleryRefreshToken,
                 isLoading: fastLaneGalleryIsLoading,
@@ -16805,6 +16806,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             // Guided is open and the user is scrolling.
             await reloadFastLaneSideControlPayloadAfterReferenceRefresh()
             guard !Task.isCancelled, !isFastLaneExiting else { return }
+            let latestPreviousSessionID = fastLanePreviousGallerySession()?.id
+            if latestPreviousSessionID != fastLanePreviousGallerySessionID ||
+                (latestPreviousSessionID != nil && fastLanePreviousGalleryAssets.isEmpty) {
+                reloadFastLaneGalleryAssets()
+            }
             fastLanePortalOverlayRevisionAtPrime = appState.fastRuntimePortalOverlayRevision(propertyID: context.propertyID)
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
             didSyncFastLanePortalIssueStateAfterPreview = true
@@ -19243,7 +19249,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func fastLanePreviousGallerySession() -> Session? {
-        appState.sessions(for: context.propertyID)
+        let completedSessions = appState.sessions(for: context.propertyID)
             .filter {
                 $0.id != context.sessionID &&
                 $0.status == .completed &&
@@ -19254,7 +19260,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 let r = rhs.endedAt ?? rhs.startedAt
                 return l > r
             }
-            .first
+        if let lastExportedSessionID = appState.propertyStatusRecord(for: context.propertyID)?.lastExportedSessionID {
+            // A cross-device export can update property status before its
+            // session and image metadata arrive. Keep Previous on the server's
+            // latest session instead of briefly showing an older local one.
+            return completedSessions.first { $0.id == lastExportedSessionID }
+        }
+        return completedSessions.first
     }
 
     private func fastLanePreviousGallerySnapshot(
@@ -21843,6 +21855,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
     let previousSessionID: UUID?
     let previousAssets: [ReportAsset]
     let previousMetadataByAssetID: [String: FastLaneGalleryMetadata]
+    let isAwaitingPreviousSession: Bool
     @ObservedObject var cache: AssetImageCache
     let thumbnailRefreshToken: UUID
     let isLoading: Bool
@@ -21868,7 +21881,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
     }
 
     private var canTogglePreviousSession: Bool {
-        previousSessionID != nil || !previousAssets.isEmpty
+        previousSessionID != nil || !previousAssets.isEmpty || isAwaitingPreviousSession
     }
 
     private var isLandscape: Bool {
@@ -21973,7 +21986,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
             Image(systemName: "photo.on.rectangle")
                 .font(.system(size: 32, weight: .medium))
                 .foregroundColor(.white.opacity(0.55))
-            Text(isLoading || (!viewingCurrentSession && isRestoringPrevious)
+            Text(isLoading || (!viewingCurrentSession && (isRestoringPrevious || isAwaitingPreviousSession))
                  ? "Loading photos…"
                  : (viewingCurrentSession ? "No Photos" : "No Previous Photos"))
                 .font(.system(size: 17, weight: .semibold))
