@@ -44529,7 +44529,11 @@ final class AppState: ObservableObject {
                 $0.historyEvents.contains { $0.sessionId == localDraft?.id }
             }
         } ?? false
-        if (fastRuntimeDraftsByPropertyID[propertyID]?.photoCount ?? 0) > 0 ||
+        if fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: authenticatedSupabaseUser?.id,
+            currentDeviceID: currentDeviceIdentifier()
+        ) != nil ||
             !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).isEmpty ||
             canonicalDraftSession(for: propertyID, requireCaptures: true) != nil ||
             (localDraft?.notes?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ||
@@ -50469,6 +50473,30 @@ final class AppState: ObservableObject {
         return true
     }
 
+    private func fastRuntimeDraftSessionWasFinalized(propertyID: UUID, sessionID: UUID) -> Bool {
+        if Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: sessionID) {
+            return true
+        }
+        if let status = propertyStatusByPropertyID[propertyID] {
+            if status.status == .exported && status.lastExportedSessionID == sessionID {
+                return true
+            }
+            if status.status == .pendingExport && status.pendingExportSessionID == sessionID {
+                return true
+            }
+        }
+        if let cloudStatus = sessionSnapshotCloudStatusBySessionID[sessionID],
+           cloudStatus.propertyID == propertyID,
+           cloudStatus.state == .uploaded,
+           Self.uploadedCompletionTriggerFinalizesDraft(cloudStatus.triggerSource) {
+            return true
+        }
+        guard let session = persistedSessionIncludingDeleted(propertyID: propertyID, sessionID: sessionID) else {
+            return false
+        }
+        return isFinalSession(session) || sessionHasFinalLocalStateEvidence(session)
+    }
+
     private func fastRuntimeDraftBadgeSummary(
         for propertyID: UUID,
         currentUserID: UUID?,
@@ -50477,7 +50505,7 @@ final class AppState: ObservableObject {
         guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
               summary.photoCount > 0,
               !Self.fastRuntimeClaimWasTransferred(summary.draftRootPath),
-              !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID) else {
+              !fastRuntimeDraftSessionWasFinalized(propertyID: propertyID, sessionID: summary.sessionID) else {
             return nil
         }
         if let ownerDeviceID = normalizedSupabaseText(summary.ownerDeviceID),
@@ -50511,7 +50539,7 @@ final class AppState: ObservableObject {
               let currentUserID = authenticatedSupabaseUser?.id,
               summary.photoCount > 0,
               !Self.fastRuntimeClaimWasTransferred(summary.draftRootPath),
-              !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID),
+              !fastRuntimeDraftSessionWasFinalized(propertyID: propertyID, sessionID: summary.sessionID),
               (summary.orgID == nil || summary.orgID == activeOrganizationID),
               canAccessProperty(propertyID),
               (summary.ownerUserID != nil || normalizedSupabaseText(summary.ownerDeviceID) != nil),
@@ -50565,7 +50593,7 @@ final class AppState: ObservableObject {
 
         let resolvedDraft = Self.resolvedFastRuntimeDraftStorage(for: draftSummary)
         let summary = resolvedDraft.summary
-        guard !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: summary.sessionID),
+        guard !fastRuntimeDraftSessionWasFinalized(propertyID: propertyID, sessionID: summary.sessionID),
               !fastRuntimeCompletionRecoveryCandidates(propertyID: propertyID).contains(where: {
                   $0.context.sessionID == summary.sessionID
               }) else {
@@ -50647,7 +50675,7 @@ final class AppState: ObservableObject {
                       context.orgID == orgID,
                       context.status == .draft,
                       !Self.fastRuntimeClaimWasTransferred(root.path),
-                      !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: context.sessionID),
+                      !fastRuntimeDraftSessionWasFinalized(propertyID: propertyID, sessionID: context.sessionID),
                       fastRuntimeContextIsOwnedByCurrentActor(
                         ownerUserID: context.ownerUserID,
                         ownerDeviceID: context.ownerDeviceID,
@@ -50729,7 +50757,7 @@ final class AppState: ObservableObject {
                       !metadata.isSealed,
                       metadata.propertyID == propertyID,
                       metadata.sessionID == draft.id,
-                      !Self.fastRuntimeCompletionWasRequested(propertyID: propertyID, sessionID: draft.id),
+                      !fastRuntimeDraftSessionWasFinalized(propertyID: propertyID, sessionID: draft.id),
                       metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id else {
 #if DEBUG
                     print("[FastLaneRecovery] excluded session=\(draft.id.uuidString.prefix(8)) metadata_status=\(metadata.status.rawValue) sealed=\(metadata.isSealed) identity_match=\(metadata.propertyID == propertyID && metadata.sessionID == draft.id) user_match=\(metadata.capturedByUserID == nil || metadata.capturedByUserID == authenticatedSupabaseUser?.id)")
@@ -51297,7 +51325,8 @@ final class AppState: ObservableObject {
     ) -> Int {
         let candidates = [
             storageRoot,
-            summary.map { URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) }
+            summary.map { URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) },
+            try? stableFastRuntimeDraftRoot(propertyID: context.propertyID, sessionID: context.sessionID)
         ]
         var removed = 0
         var seenPaths: Set<String> = []
@@ -58032,8 +58061,11 @@ final class AppState: ObservableObject {
             return true
         }
 
-        if let draft = fastRuntimeDraftsByPropertyID[propertyID],
-           draft.photoCount > 0 {
+        if fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: authenticatedSupabaseUser?.id,
+            currentDeviceID: currentDeviceIdentifier()
+        ) != nil {
             return true
         }
 
