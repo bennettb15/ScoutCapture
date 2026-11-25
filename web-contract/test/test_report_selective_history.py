@@ -618,9 +618,9 @@ class SelectiveHistoryTests(unittest.TestCase):
         ], [issue(1, 'pending_review'), issue(2, 'resolved')])
         current_photo = shot(3, 'new-full', 3, guided=True)
         current_photo.update(issueID=None, isFlagged=False)
-        current = source('new-full', 3, 'full_documentation', [current_photo], [
-            issue(1, 'pending_review'), issue(2, 'resolved')
-        ])
+        # A new Full Documentation snapshot includes only its new capture;
+        # the older pending item is present in property history, not here.
+        current = source('new-full', 3, 'full_documentation', [current_photo])
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'row.json').write_text(json.dumps(current['row']))

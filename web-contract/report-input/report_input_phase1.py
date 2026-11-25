@@ -1547,19 +1547,17 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         apply_operational_overlays(composition, operational_overlays, finalized_shot_ids)
         shots = composition["shots"]
     elif session_type == "full_documentation" and full_documentation_mode(metadata) == "complete_capture":
-        has_pending_review = any(
-            str(issue.get("issueStatus") or issue.get("status") or "").strip().lower() == "pending_review"
-            for issue in issues.values()
-        )
-        if has_pending_review:
-            sources = scoped_snapshot_history(args, client, row, payload, metadata)
-            prior_context = compose_punchlist_history(sources, storage)
-            issue_shots = prior_context["punchlist_shots"]
-            overlays = operational_issue_overlays(
-                client, row, [shot["issue_id"] for shot in issue_shots if shot.get("issue_id")]
-            ) if not getattr(args, "snapshot_history_only", False) else {}
-            apply_operational_overlays(prior_context, overlays)
-            shots.extend(pending_review_carry_forward_photos(shots, issue_shots))
+        # A new complete capture may contain only its new shots and their issue
+        # rows. An older Pending Review item is still property evidence even
+        # when this session's metadata has no record for that issue.
+        sources = scoped_snapshot_history(args, client, row, payload, metadata)
+        prior_context = compose_punchlist_history(sources, storage)
+        issue_shots = prior_context["punchlist_shots"]
+        overlays = operational_issue_overlays(
+            client, row, [shot["issue_id"] for shot in issue_shots if shot.get("issue_id")]
+        ) if not getattr(args, "snapshot_history_only", False) else {}
+        apply_operational_overlays(prior_context, overlays)
+        shots.extend(pending_review_carry_forward_photos(shots, issue_shots))
     punchlist_shots = composition["punchlist_shots"] if composition else shots
     media = media_validations(shots, storage)
     missing_media = [item for item in media if not item["exists"]]
