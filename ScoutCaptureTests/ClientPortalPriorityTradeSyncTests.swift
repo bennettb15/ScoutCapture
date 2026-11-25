@@ -6,6 +6,27 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
     private let newer = Date(timeIntervalSinceReferenceDate: 2_000)
     private let newest = Date(timeIntervalSinceReferenceDate: 3_000)
 
+    func testPortalFlagReasonReplacesStaleLocalReasonWithoutCreatingAnotherIssue() throws {
+        let (store, property) = try makeStore()
+        let original = try store.createObservation(makeObservation(propertyID: property.id))
+        let overlay = try XCTUnwrap(AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: property.id, observationID: original.id,
+            observationTitle: "Test 3412", observationPriority: "High",
+            observationTrade: "Foundation", activityRows: []
+        ).first)
+        XCTAssertEqual(try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [overlay]
+        ).appliedCount, 1)
+        let rows = try store.fetchObservations(propertyID: property.id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].currentReason, "Test 3412")
+        XCTAssertEqual(rows[0].priority, "High")
+        XCTAssertEqual(rows[0].trade, "Foundation")
+        XCTAssertEqual(try store.applyPortalPunchlistOperationalOverlays(
+            propertyID: property.id, overlays: [overlay]
+        ).appliedCount, 0)
+    }
+
     func testRemoteFlaggedReclassificationUpdatesExistingIssueWithoutDuplicatingIt() throws {
         let (store, property) = try makeStore()
         let originalShotID = UUID()

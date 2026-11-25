@@ -2598,6 +2598,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
     let issueID: UUID?
     let propertyID: UUID
     let status: Observation.Status?
+    let reason: String?
     let priority: String?
     let trade: String?
     let updatedAt: Date?
@@ -2615,6 +2616,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         issueID: UUID?,
         propertyID: UUID,
         status: Observation.Status? = .active,
+        reason: String? = nil,
         priority: String? = nil,
         trade: String? = nil,
         updatedAt: Date? = nil,
@@ -2631,6 +2633,7 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         self.issueID = issueID
         self.propertyID = propertyID
         self.status = status
+        self.reason = Observation.trimmedNonEmpty(reason)
         self.priority = Observation.normalizedPortalOverlayPriority(priority)
         self.trade = Observation.trimmedNonEmpty(trade)
         self.updatedAt = updatedAt

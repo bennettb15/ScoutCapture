@@ -2555,7 +2555,7 @@ final class LocalStore {
 
         for overlay in overlays {
             guard overlay.propertyID == propertyID,
-                  overlay.status != nil || overlay.priority != nil || overlay.trade != nil else {
+                  overlay.status != nil || overlay.reason != nil || overlay.priority != nil || overlay.trade != nil else {
                 continue
             }
 
@@ -2599,7 +2599,8 @@ final class LocalStore {
                 if let issueID = overlay.issueID,
                    let status = overlay.status {
                     let timestamp = overlay.fieldResolutionOutcome?.createdAt ?? overlay.updatedAt ?? Date()
-                    let statement = trimmedNonEmpty(overlay.detailType) ??
+                    let statement = trimmedNonEmpty(overlay.reason) ??
+                        trimmedNonEmpty(overlay.detailType) ??
                         trimmedNonEmpty(overlay.shotKey) ??
                         "Flagged issue"
                     var observation = Observation(
@@ -2664,6 +2665,10 @@ final class LocalStore {
             }
 
             let before = observations[index]
+            if let reason = overlay.reason {
+                observations[index].currentReason = reason
+                observations[index].note = reason
+            }
             if let outcome = overlay.fieldResolutionOutcome {
                 // Server decisions apply to the submitted issue ID, never to a location match.
                 if matchMethod == "issue_id", !isTerminalResolvedSupportingDocumentation(before),

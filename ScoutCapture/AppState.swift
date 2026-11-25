@@ -7724,6 +7724,8 @@ final class AppState: ObservableObject {
         let propertyID: UUID?
         let sessionID: UUID?
         let shotID: UUID?
+        let title: String?
+        let detail: String?
         let status: String?
         let priority: String?
         let trade: String?
@@ -7735,6 +7737,8 @@ final class AppState: ObservableObject {
             case propertyID = "property_id"
             case sessionID = "session_id"
             case shotID = "shot_id"
+            case title
+            case detail
             case status
             case priority
             case trade
@@ -55543,7 +55547,7 @@ final class AppState: ObservableObject {
             // trip instead of three sequential round trips.
             async let observationRequest: [RemotePortalPunchlistObservationRecord] = try await client
                 .from("observations")
-                .select("id, property_id, session_id, shot_id, status, priority, trade, updated_at, deleted_at")
+                .select("id, property_id, session_id, shot_id, title, detail, status, priority, trade, updated_at, deleted_at")
                 .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
                 .eq("property_id", value: propertyID.uuidString.lowercased())
                 .is("deleted_at", value: nil)
@@ -57042,6 +57046,7 @@ final class AppState: ObservableObject {
                 issueID: observation.id,
                 propertyID: propertyID,
                 status: portalPunchlistOperationalStatus(from: observation.status),
+                reason: normalizedReplayText(observation.title) ?? normalizedReplayText(observation.detail),
                 priority: observation.priority,
                 trade: observation.trade,
                 updatedAt: observation.updatedAt,
@@ -57090,6 +57095,7 @@ final class AppState: ObservableObject {
                 issueID: issueID,
                 propertyID: propertyID,
                 status: statusFromShot,
+                reason: current?.reason,
                 priority: normalizedReplayText(shot.priority) ?? current?.priority,
                 trade: normalizedReplayText(shot.trade) ?? current?.trade,
                 updatedAt: updatedAtFromShot,
@@ -57128,6 +57134,7 @@ final class AppState: ObservableObject {
                 issueID: observationID,
                 propertyID: propertyID,
                 status: statusFromUpdate,
+                reason: current?.reason,
                 priority: normalizedReplayText(update.priority) ?? current?.priority,
                 trade: normalizedReplayText(update.trade) ?? current?.trade,
                 updatedAt: updatedAtFromUpdate,
@@ -57244,6 +57251,7 @@ final class AppState: ObservableObject {
                 issueID: observationID,
                 propertyID: propertyID,
                 status: statusFromActivity,
+                reason: current?.reason,
                 priority: nextPriority,
                 trade: nextTrade,
                 updatedAt: updatedAtFromActivity,
@@ -57278,7 +57286,8 @@ final class AppState: ObservableObject {
                   let shot = currentShotsByIssueID[issueID] else { return overlay }
             return PortalPunchlistOperationalOverlay(
                 issueID: issueID, propertyID: propertyID,
-                status: overlay.status, priority: overlay.priority, trade: overlay.trade,
+                status: overlay.status, reason: overlay.reason,
+                priority: overlay.priority, trade: overlay.trade,
                 updatedAt: overlay.updatedAt, shotID: shot.id,
                 building: shot.building, targetElevation: shot.elevation,
                 detailType: shot.detailType, angleIndex: shot.angleIndex,
@@ -57609,6 +57618,8 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         observationID: UUID,
         observationStatus: String? = "active",
+        observationTitle: String? = nil,
+        observationDetail: String? = nil,
         observationPriority: String? = nil,
         observationTrade: String? = nil,
         activityRows: [(activityType: String, toValue: String?, createdAt: Date)],
@@ -57623,6 +57634,8 @@ final class AppState: ObservableObject {
                     propertyID: propertyID,
                     sessionID: fieldSubmission?.sessionID,
                     shotID: fieldSubmission?.shotID,
+                    title: observationTitle,
+                    detail: observationDetail,
                     status: observationStatus,
                     priority: observationPriority,
                     trade: observationTrade,
