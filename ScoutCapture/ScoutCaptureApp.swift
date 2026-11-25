@@ -14561,6 +14561,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneGalleryLoadGeneration = 0
     @State private var fastLaneGalleryIsLoading = false
     @State private var fastLanePreviousGalleryIsRestoring = false
+    @State private var fastLanePreviousGalleryReferenceHydrationCount = 0
     @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
@@ -14920,12 +14921,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 cache: fastLaneGalleryImageCache,
                 thumbnailRefreshToken: fastLaneGalleryRefreshToken,
                 isLoading: fastLaneGalleryIsLoading,
-                isRestoringPrevious: fastLanePreviousGalleryIsRestoring,
+                isRestoringPrevious: fastLanePreviousGalleryIsRestoring || fastLanePreviousGalleryReferenceHydrationCount > 0,
                 onRefresh: {
                     fastLaneMediaHydrationAttemptedKeys.removeAll()
                     didCheckFastLaneGuidedPanelMedia = false
                     didCheckFastLaneIssuePanelMedia = false
                     reloadFastLaneGalleryAssets()
+                    hydrateFastLanePreviousGalleryReferencesIfNeeded()
+                },
+                onPreviousSelected: {
+                    reloadFastLaneGalleryAssets()
+                    hydrateFastLanePreviousGalleryReferencesIfNeeded()
                 }
             )
         }
@@ -16815,6 +16821,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
             didSyncFastLanePortalIssueStateAfterPreview = true
             didFinishInitialFastLaneReferenceRefresh = true
+            if showFastLaneGallery {
+                hydrateFastLanePreviousGalleryReferencesIfNeeded()
+            }
             if didVerifyReferences {
                 appState.markFastRuntimeReferencesVerified(
                     propertyID: context.propertyID,
@@ -18317,6 +18326,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         scheduleFastLanePanelMediaHydration(requests, kind: .guided)
     }
 
+    private func hydrateFastLanePreviousGalleryReferencesIfNeeded() {
+        guard !isFastLaneInitialReferenceSyncPending else { return }
+        didCheckFastLaneGuidedPanelMedia = false
+        didCheckFastLaneIssuePanelMedia = false
+        scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+        scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: .activeIssues)
+    }
+
     private func scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: FastLaneSideControlSheetMode) {
         guard !didCheckFastLaneIssuePanelMedia else { return }
         didCheckFastLaneIssuePanelMedia = true
@@ -18375,6 +18392,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         guard !pending.isEmpty else { return }
         recordFastLaneReadyEvent("panel_media_hydration_started_\(kind)")
+        let isGalleryReferenceRequest = showFastLaneGallery && fastLanePreviousGalleryAssets.isEmpty
+        if isGalleryReferenceRequest {
+            fastLanePreviousGalleryReferenceHydrationCount += 1
+        }
         for request in pending {
             fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
         }
@@ -18393,7 +18414,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             }
             recordFastLaneReadyEvent("panel_media_hydration_finished_\(kind)")
-            guard didStart else { return }
+            guard didStart else {
+                await MainActor.run {
+                    if isGalleryReferenceRequest {
+                        fastLanePreviousGalleryReferenceHydrationCount = max(0, fastLanePreviousGalleryReferenceHydrationCount - 1)
+                    }
+                }
+                return
+            }
             recordFastLaneReadyEvent("panel_media_history_started_\(kind)")
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
@@ -18411,6 +18439,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                if showFastLaneGallery {
+                    reloadFastLaneGalleryAssets()
+                }
+                if isGalleryReferenceRequest {
+                    fastLanePreviousGalleryReferenceHydrationCount = max(0, fastLanePreviousGalleryReferenceHydrationCount - 1)
+                }
             }
         }
     }
@@ -21861,6 +21895,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
     let isLoading: Bool
     let isRestoringPrevious: Bool
     let onRefresh: () -> Void
+    let onPreviousSelected: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
@@ -22087,6 +22122,9 @@ private struct FastLanePhotoLibraryFullscreen: View {
             Button {
                 viewingCurrentSession.toggle()
                 viewerState = nil
+                if !viewingCurrentSession {
+                    onPreviousSelected()
+                }
             } label: {
                 Text(viewingCurrentSession ? "Current" : "Previous")
                     .font(.system(size: 17, weight: .medium))
