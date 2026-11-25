@@ -1810,6 +1810,9 @@ struct SessionHubView: View {
                 address: propertyAddressLine(property) ?? property.address,
                 hasDraft: rowDraftBadges[property.id] == true,
                 isLocked: rowLockBadges[property.id] == true && uploadProgressLabel == nil && !uploadingElsewhere,
+                isDraftLocked: rowLockBadges[property.id] == true &&
+                    appState.propertyStatusByPropertyID[property.id]?.status == .draft &&
+                    uploadProgressLabel == nil && !uploadingElsewhere,
                 isArchived: property.isArchived,
                 cloudGlyph: cloudGlyph,
                 pendingUploadCount: uploadingElsewhere ? 0 : pendingUploadCount,
@@ -1896,8 +1899,9 @@ struct SessionHubView: View {
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil || pendingUploadCount > 0 || uploadProgressLabel != nil
         let showLock = badgeModel.showLock
+        let isDraftLocked = showLock && appState.propertyStatusByPropertyID[property.id]?.status == .draft
+        let hasStatusRow = hasDraft || showLock || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil || pendingUploadCount > 0 || uploadProgressLabel != nil
         Button {
             handlePropertyTap(property)
         } label: {
@@ -1950,6 +1954,9 @@ struct SessionHubView: View {
                             HStack(spacing: 8) {
                                 if hasDraft {
                                     chipLabel("Draft", tint: .orange)
+                                }
+                                if showLock {
+                                    chipLabel(isDraftLocked ? "Draft Locked" : "Locked", tint: .red)
                                 }
 
                                 if hasPendingExport {
@@ -5898,6 +5905,7 @@ private struct PropertyListTableRowModel: Identifiable {
     let address: String?
     let hasDraft: Bool
     let isLocked: Bool
+    let isDraftLocked: Bool
     let isArchived: Bool
     let cloudGlyph: AppState.PropertyRowCloudGlyphState?
     let pendingUploadCount: Int
@@ -5920,6 +5928,7 @@ extension PropertyListTableRowModel: Equatable {
             lhs.address == rhs.address &&
             lhs.hasDraft == rhs.hasDraft &&
             lhs.isLocked == rhs.isLocked &&
+            lhs.isDraftLocked == rhs.isDraftLocked &&
             lhs.isArchived == rhs.isArchived &&
             lhs.cloudGlyph == rhs.cloudGlyph &&
             lhs.pendingUploadCount == rhs.pendingUploadCount &&
@@ -6214,7 +6223,7 @@ private final class PropertyListTableCell: UITableViewCell {
     private let addressLabel = UILabel()
     private let draftLabel = UILabel()
     private let uploadRetryLabel = PropertyStatusPillLabel()
-    private let lockLabel = UILabel()
+    private let lockLabel = PropertyStatusPillLabel()
     private let archivedLabel = UILabel()
     private let textStack = UIStackView()
     private let rootStack = UIStackView()
@@ -6247,6 +6256,7 @@ private final class PropertyListTableCell: UITableViewCell {
         addressLabel.text = row.address?.trimmingCharacters(in: .whitespacesAndNewlines)
         addressLabel.isHidden = (addressLabel.text ?? "").isEmpty
         lockLabel.isHidden = !row.isLocked
+        lockLabel.text = row.isDraftLocked ? "Draft Locked" : "Locked"
         archivedLabel.isHidden = !row.isArchived
         draftLabel.isHidden = row.isLocked || row.isArchived || !row.hasDraft || row.uploadProgressLabel != nil
         uploadRetryLabel.text = row.uploadProgressLabel ?? "\(row.pendingUploadCount) to upload"
