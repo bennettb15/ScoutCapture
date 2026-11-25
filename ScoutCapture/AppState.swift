@@ -8667,6 +8667,13 @@ final class AppState: ObservableObject {
     private var lastOccupancyHeartbeatAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceReconcileAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
+    // A verified final snapshot is the authority for shots created before it.
+    // The ordinary shots table can still contain older historical rows.
+    private struct VerifiedSnapshotShotSet: Codable {
+        let generatedAt: Date
+        let shotIDs: Set<UUID>
+    }
+    private var verifiedSnapshotShotIDsBySessionID: [UUID: VerifiedSnapshotShotSet] = [:]
     private var portalOverlayRevisionByPropertyID: [UUID: Int] = [:]
     private var portalGuidedReferenceRevisionByPropertyID: [UUID: Int] = [:]
     private var remoteGuidedPredecessorByPropertyID: [UUID: [String: UUID]] = [:]
@@ -20027,6 +20034,14 @@ final class AppState: ObservableObject {
             metadata: mergedMetadata
         )
         reloadSessionCache(for: propertyID)
+        let verifiedShotSet = VerifiedSnapshotShotSet(
+            generatedAt: candidate.payload.generatedAt,
+            shotIDs: Set(snapshotMetadata.shots.map(\.shotID))
+        )
+        verifiedSnapshotShotIDsBySessionID[sessionID] = verifiedShotSet
+        if let encoded = try? JSONEncoder().encode(verifiedShotSet) {
+            userDefaults.set(encoded, forKey: "verified_snapshot_shot_set_\(sessionID.uuidString)")
+        }
 
         return SessionSnapshotHydrationResult(
             hydratedAt: checkedAt,
@@ -57147,7 +57162,9 @@ final class AppState: ObservableObject {
                 .execute()
                 .value
             rows.append(contentsOf: page)
-            guard page.count == pageSize else { return rows }
+            guard page.count == pageSize else {
+                return rows.filter { remoteShotIsAllowedByVerifiedSnapshot($0, scopedSessionID: nil) }
+            }
             offset += pageSize
         }
     }
@@ -57973,7 +57990,7 @@ final class AppState: ObservableObject {
         guard let client = supabaseClient else {
             throw RemotePropertyFetchError.missingClient
         }
-        return try await client
+        let rows: [RemoteShotMetadataRecord] = try await client
             .from("shots")
             .select("id, org_id, property_id, session_id, created_at, updated_at, updated_by, revision, deleted_at, building, elevation, detail_type, angle_index, shot_key, logical_shot_identity, capture_kind, first_capture_kind, is_guided, is_flagged, issue_id, issue_status, trade, reason, priority, capture_mode, lens, latitude, longitude, accuracy_meters, image_width, image_height, lifecycle_state, retired_at, retired_reason, retired_by, superseded_by_shot_id, supersedes_shot_id, replacement_reason, hidden_from_reports, hidden_from_gallery, lifecycle_updated_at, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state, upload_attempts, last_upload_error")
             .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
@@ -57981,7 +57998,8 @@ final class AppState: ObservableObject {
             .eq("session_id", value: sessionID.uuidString.lowercased())
             .is("deleted_at", value: nil)
             .execute()
-            .value as [RemoteShotMetadataRecord]
+            .value
+        return rows.filter { remoteShotIsAllowedByVerifiedSnapshot($0, scopedSessionID: sessionID) }
     }
 
     nonisolated static func evaluatePropertyOpenFreshness(
@@ -62063,11 +62081,14 @@ final class AppState: ObservableObject {
                     .is("deleted_at", value: nil)
                     .execute()
                     .value as [RemoteShotMetadataRecord]
-                applyRemoteShotMetadataRows(rows, propertyID: propertyID, sessionID: session.id)
+                let currentRows = rows.filter {
+                    remoteShotIsAllowedByVerifiedSnapshot($0, scopedSessionID: session.id)
+                }
+                applyRemoteShotMetadataRows(currentRows, propertyID: propertyID, sessionID: session.id)
                 _ = await applyPortalPunchlistOperationalOverlaysIfAvailable(
                     propertyID: propertyID,
                     activeOrganizationID: orgID,
-                    remoteShots: rows
+                    remoteShots: currentRows
                 )
             } catch {
                 recordDiagnosticsError(error)
@@ -62077,6 +62098,28 @@ final class AppState: ObservableObject {
             "[ReferenceMetadataRefresh] propertyID=\(propertyID.uuidString) " +
             "sessionCount=\(targetSessions.count) elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         )
+    }
+
+    private func verifiedSnapshotShotSet(for sessionID: UUID) -> VerifiedSnapshotShotSet? {
+        if let cached = verifiedSnapshotShotIDsBySessionID[sessionID] { return cached }
+        guard let data = userDefaults.data(forKey: "verified_snapshot_shot_set_\(sessionID.uuidString)"),
+              let verified = try? JSONDecoder().decode(VerifiedSnapshotShotSet.self, from: data) else {
+            return nil
+        }
+        verifiedSnapshotShotIDsBySessionID[sessionID] = verified
+        return verified
+    }
+
+    private func remoteShotIsAllowedByVerifiedSnapshot(
+        _ row: RemoteShotMetadataRecord,
+        scopedSessionID: UUID?
+    ) -> Bool {
+        guard let sessionID = row.sessionID ?? scopedSessionID,
+              let verified = verifiedSnapshotShotSet(for: sessionID),
+              !verified.shotIDs.contains(row.id) else {
+            return true
+        }
+        return (row.createdAt ?? .distantPast) > verified.generatedAt
     }
 
     private func applyRemoteShotMetadataRows(
@@ -62094,6 +62137,9 @@ final class AppState: ObservableObject {
                 continue
             }
             if let rowSessionID = row.sessionID, rowSessionID != sessionID {
+                continue
+            }
+            if !remoteShotIsAllowedByVerifiedSnapshot(row, scopedSessionID: sessionID) {
                 continue
             }
             let existing = existingShots[row.id]
