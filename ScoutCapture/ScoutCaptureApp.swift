@@ -4309,7 +4309,12 @@ struct SessionHubView: View {
         if !hasDraft {
             isOpeningProperty = false
             fastLaneOpeningProperty = nil
-            shouldRecommendInitialOverview = appState.sessions(for: property.id).isEmpty
+            // A property exported on another device can have no local sessions yet.
+            // Use the shared status before presenting first-property guidance.
+            shouldRecommendInitialOverview = appState.sessions(for: property.id).isEmpty &&
+                property.baselineSessionID == nil &&
+                appState.propertyStatusByPropertyID[property.id]?.lastExportedSessionID == nil &&
+                !badgeModel.finalizedOrExported
             showInitialPunchlistConfirmation = false
             showFullDocumentationModeChoices = false
             initialSessionTypePickerProperty = property
