@@ -7967,6 +7967,7 @@ final class AppState: ObservableObject {
             refreshPropertyRowStatusChipCache()
         }
     }
+    @Published private(set) var verifiedRemoteBaselinePropertyIDs: Set<UUID> = []
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var fastRuntimeOriginalUploadProgressByPropertyID: [UUID: FastRuntimeOriginalUploadProgress] = [:]
     private var activeFastRuntimeCompletionUploadSessionIDs: Set<UUID> = []
@@ -59250,6 +59251,9 @@ final class AppState: ObservableObject {
 
     func propertyHasBaseline(_ propertyID: UUID) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
+        if verifiedRemoteBaselinePropertyIDs.contains(propertyID) {
+            return true
+        }
         if properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil {
             return true
         }
@@ -59258,6 +59262,41 @@ final class AppState: ObservableObject {
                 session.isSealed &&
                 session.sessionType == .fullDocumentation &&
                 session.fullDocumentationMode == .completeCapture
+        }
+    }
+
+    @MainActor
+    func refreshRemotePropertyBaselineEvidence(propertyID: UUID) async -> Bool {
+        guard canAccessProperty(propertyID),
+              let orgID = activeOrganizationID,
+              let client = supabaseClient,
+              backendFeatureFlags.supabaseEnabled else { return false }
+        if propertyHasBaseline(propertyID) { return true }
+
+        struct BaselineRecord: Decodable {
+            let baselineSessionID: UUID?
+            enum CodingKeys: String, CodingKey {
+                case baselineSessionID = "baseline_session_id"
+            }
+        }
+
+        do {
+            let rows: [BaselineRecord] = try await client
+                .from("properties")
+                .select("baseline_session_id")
+                .eq("id", value: propertyID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .limit(1)
+                .execute()
+                .value
+            guard activeOrganizationID == orgID,
+                  canAccessProperty(propertyID),
+                  rows.first?.baselineSessionID != nil else { return false }
+            verifiedRemoteBaselinePropertyIDs.insert(propertyID)
+            return true
+        } catch {
+            return false
         }
     }
 

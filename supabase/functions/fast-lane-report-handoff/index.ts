@@ -182,6 +182,31 @@ function nullableString(value: unknown): string | null {
   return text ? text : null;
 }
 
+export function shouldRecordBaseline(request: HandoffRequest): boolean {
+  return request.sessionType === "full_documentation" &&
+    request.fullDocumentationMode === "complete_capture";
+}
+
+async function recordBaselineIfFirst(
+  config: RuntimeConfig,
+  request: HandoffRequest,
+  effectiveMode = request.fullDocumentationMode,
+): Promise<void> {
+  if (!shouldRecordBaseline({ ...request, fullDocumentationMode: effectiveMode })) return;
+  const query = new URLSearchParams({
+    id: `eq.${request.propertyID}`,
+    org_id: `eq.${request.orgID}`,
+    baseline_session_id: "is.null",
+    deleted_at: "is.null",
+  });
+  const result = await supabaseFetch(config, `/rest/v1/properties?${query}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ baseline_session_id: request.sessionID }),
+  });
+  if (!result.ok) throw new Error(`baseline_session_write_failed:${result.status}`);
+}
+
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
@@ -888,7 +913,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
 
     const existingSnapshotResponse = async (): Promise<Response | null> => {
       const existing = await selectRows<JsonRecord>(config, "session_snapshots", new URLSearchParams({
-        select: "id,payload_storage_path,payload_storage_bucket,snapshot_payload_sha256,raw_session_json_sha256,shot_count",
+        select: "id,payload_storage_path,payload_storage_bucket,snapshot_payload_sha256,raw_session_json_sha256,shot_count,manifest",
         session_id: `eq.${handoff.sessionID}`, snapshot_kind: "eq.completed",
         trigger: `eq.${TRIGGER}`, deleted_at: "is.null", order: "created_at.desc", limit: "1",
       }));
@@ -900,6 +925,12 @@ export async function handleHandoff(request: Request): Promise<Response> {
         });
         if (!update.ok) throw new Error(`upload_intent_completion_failed:${update.status}`);
       }
+      const existingManifest = existing[0].manifest as JsonRecord | undefined;
+      await recordBaselineIfFirst(
+        config, handoff,
+        lowerString(existingManifest?.fullDocumentationMode) as HandoffRequest["fullDocumentationMode"] ||
+          handoff.fullDocumentationMode,
+      );
       // A prior call can insert the sealed snapshot and then fail while
       // dispatching GitHub Actions. Reusing that snapshot must retry dispatch;
       // otherwise the client reports processing forever with no worker run.
@@ -1097,6 +1128,7 @@ export async function handleHandoff(request: Request): Promise<Response> {
         uploadedBy: snapshot.payload.uploadedBy ?? null,
         sessionType: handoff.sessionType,
         session_type: handoff.sessionType,
+        fullDocumentationMode: snapshot.payload.fullDocumentationMode ?? null,
         reportMode: handoff.reportMode,
         fieldResolutionSubmissions: submissions,
       },
@@ -1127,6 +1159,10 @@ export async function handleHandoff(request: Request): Promise<Response> {
         throw new Error(`upload_intent_completion_failed:${intentUpdate.status}`);
       }
     }
+    await recordBaselineIfFirst(
+      config, handoff,
+      lowerString(snapshot.payload.fullDocumentationMode) as HandoffRequest["fullDocumentationMode"],
+    );
     const dispatch = await dispatchReportWorker(config, snapshotID, handoff.sessionID, handoff.orgID, handoff.propertyID);
 
     return jsonResponse(200, {
