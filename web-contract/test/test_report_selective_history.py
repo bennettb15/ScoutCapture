@@ -611,6 +611,38 @@ class SelectiveHistoryTests(unittest.TestCase):
         self.assertEqual(validation['source_provenance']['guided_baseline']['snapshot_id'], 'snapshot-full')
         self.assertEqual(validation['inputs']['ordered_shots'][0]['shot_id'], 'photo-0-full')
 
+    def test_new_full_capture_keeps_pending_review_evidence_only(self):
+        pending = source('pending', 2, 'punchlist_visit', [
+            shot(1, 'pending', 2, status='pending_review', kind='resolved_capture'),
+            shot(2, 'pending', 2, status='resolved', kind='resolved_capture'),
+        ], [issue(1, 'pending_review'), issue(2, 'resolved')])
+        current_photo = shot(3, 'new-full', 3, guided=True)
+        current_photo.update(issueID=None, isFlagged=False)
+        current = source('new-full', 3, 'full_documentation', [current_photo], [
+            issue(1, 'pending_review'), issue(2, 'resolved')
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'row.json').write_text(json.dumps(current['row']))
+            (root / 'payload.json').write_text(json.dumps(current['payload']))
+            (root / 'history.json').write_text(json.dumps([
+                {'row': item['row'], 'payload': item['payload']}
+                for item in (self.baseline, pending, current)
+            ]))
+            (root / 'storage.json').write_text(json.dumps({'objects': [
+                {'bucket': 'scoutcapture-originals', 'path': photo['storagePath']}
+                for item in (self.baseline, pending, current) for photo in item['metadata']['shots']
+            ]}))
+            args = SimpleNamespace(snapshot_row_fixture=str(root / 'row.json'),
+                snapshot_payload_fixture=str(root / 'payload.json'), history_fixture=str(root / 'history.json'),
+                storage_fixture=str(root / 'storage.json'), canonical_fixture=None,
+                include_runtime=False, session_id=None, snapshot_id=None)
+            validation = report_input.build_validation(args)
+        report_ids = [entry['shot_id'] for entry in validation['inputs']['property_report_entries']
+                      if entry['kind'] == 'photo']
+        self.assertEqual(set(report_ids), {'photo-3-new-full', 'photo-1-pending'})
+        self.assertEqual(validation['reports']['property_report']['photo_entry_count'], 2)
+
     def test_validation_uses_prior_property_and_flags_for_photo_only_follow_up(self):
         added = {
             'shotID': 'property-added', 'sessionID': 'session-follow',

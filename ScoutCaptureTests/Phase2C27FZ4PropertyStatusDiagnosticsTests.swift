@@ -48,6 +48,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             var issue = Observation(
                 propertyID: fixture.property.id, sessionID: originalSession.id,
                 statement: "Original wording", status: .active, linkedShotID: originalShot.id,
+                priority: "Medium", trade: "Masonry",
                 currentReason: "Original wording", shots: [originalShot]
             )
             _ = try fixture.localStore.createObservation(issue)
@@ -56,13 +57,16 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
                 observation: issue, shotID: originalShot.id, trade: nil, activeCaptureKind: "captured"
             )
             let followUpSession = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
-            XCTAssertTrue(fixture.appState.updateFlagReason(
+            XCTAssertTrue(fixture.appState.updateFlagDetails(
                 propertyID: fixture.property.id, observationID: issue.id,
-                sessionID: followUpSession.id, reason: captureReason
+                sessionID: followUpSession.id, reason: captureReason,
+                priority: "High", trade: "Roofing"
             ))
             issue = try XCTUnwrap(fixture.localStore.fetchObservations(propertyID: fixture.property.id).first { $0.id == issue.id })
             XCTAssertEqual(issue.status, .active)
             XCTAssertEqual(issue.linkedShotID, originalShot.id)
+            XCTAssertEqual(issue.priority, "High")
+            XCTAssertEqual(issue.trade, "Roofing")
             let followUpMetadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: followUpSession.id)
             let followUpShot = Shot(
                 id: followUpMetadata.shots[0].shotID, capturedAt: Date(),

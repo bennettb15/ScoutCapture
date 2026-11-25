@@ -15448,6 +15448,29 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             onDetailNoteTapped: {
                 shutterHaptic.impactOccurred(intensity: 0.55)
                 shutterHaptic.prepare()
+                if let issueID = fastLaneCaptureIntent.issueID,
+                   let issue = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) {
+                    let current = fastMetadataContext
+                    applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                        captureProfile: current.captureProfile,
+                        locationMode: current.locationMode,
+                        building: current.building,
+                        elevation: current.elevation,
+                        detailType: current.detailType,
+                        trade: issue.trade,
+                        detailNote: Observation.inferredCurrentReason(
+                            note: issue.currentReason ?? issue.note,
+                            statement: issue.statement
+                        ) ?? current.detailNote,
+                        priority: issue.priority ?? current.priority,
+                        angleIndex: current.angleIndex,
+                        isGuided: current.isGuided,
+                        isFlagged: true,
+                        issueID: issueID,
+                        issueStatus: current.issueStatus,
+                        captureIntentSource: current.captureIntentSource
+                    ))
+                }
                 showFastLaneDetailNoteOverlay = true
             },
             onLocationModeChanged: { mode in
@@ -16100,19 +16123,33 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             },
             onSave: { newValue in
                 let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let stagedPriority = fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
                 if let issueID = fastLaneCaptureIntent.issueID {
-                    guard appState.updateFlagReason(
+                    let prior = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID })
+                    guard appState.updateFlagDetails(
                         propertyID: context.propertyID, observationID: issueID,
-                        sessionID: context.sessionID, reason: trimmed
+                        sessionID: context.sessionID, reason: trimmed,
+                        priority: stagedPriority, trade: fastMetadataContext.trade
                     ) else {
-                        showFastLaneSideControlToast("Could not save reason")
+                        showFastLaneSideControlToast("Could not save flag details")
                         return
                     }
                     if let updated = updatedFastLaneObservation(issueID: issueID) {
                         showUpdatedFastLaneObservation(updated)
                     }
+                    let propertyID = context.propertyID
+                    let selectedTrade = fastMetadataContext.trade
+                    Task {
+                        let synced = await appState.syncFlagDetailsToPortal(
+                            propertyID: propertyID, observationID: issueID,
+                            reason: trimmed, priority: stagedPriority, trade: selectedTrade,
+                            previousPriority: prior?.priority, previousTrade: prior?.trade
+                        )
+                        if !synced {
+                            showFastLaneSideControlToast("Flag details did not sync. Reopen and save to retry.", duration: 4.0)
+                        }
+                    }
                 }
-                let stagedPriority = fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
                 applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
                     locationMode: fastMetadataContext.locationMode,
                     building: fastMetadataContext.building,

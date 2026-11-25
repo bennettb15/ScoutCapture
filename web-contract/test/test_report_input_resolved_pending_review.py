@@ -65,6 +65,18 @@ class ReportInputResolvedPendingReviewTests(unittest.TestCase):
 
         self.assertIs(True, shot["is_resolved_in_session"])
 
+    def test_complete_capture_carries_pending_review_only_once(self) -> None:
+        current = [{"shot_id": "current-1"}]
+        history = [
+            {"shot_id": "prior-pending", "issue_id": "issue-a", "issue_status": "pending_review"},
+            {"shot_id": "prior-resolved", "issue_id": "issue-b", "issue_status": "resolved"},
+            {"shot_id": "current-1", "issue_id": "issue-c", "issue_status": "pending_review"},
+            {"shot_id": "prior-replaced", "issue_id": "issue-d", "issue_status": "pending_review"},
+        ]
+        current.append({"shot_id": "current-replacement", "issue_id": "issue-d"})
+        carried = report_input.pending_review_carry_forward_photos(current, history)
+        self.assertEqual([shot["shot_id"] for shot in carried], ["prior-pending"])
+
 
 if __name__ == "__main__":
     unittest.main()

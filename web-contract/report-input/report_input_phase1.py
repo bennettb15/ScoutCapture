@@ -1389,6 +1389,20 @@ def apply_operational_overlays(
             shot["normalized_priority"] = normalized_priority(priority)
 
 
+def pending_review_carry_forward_photos(
+    current_shots: list[dict[str, Any]], issue_shots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep unresolved review evidence in a new complete capture without reviving resolved issues."""
+    current_ids = {str(shot.get("shot_id") or "").lower() for shot in current_shots}
+    current_issues = {str(shot.get("issue_id") or "").lower() for shot in current_shots
+                      if shot.get("issue_id")}
+    return [shot for shot in issue_shots
+            if str(shot.get("issue_id") or "").strip()
+            and str(shot.get("issue_status") or "").strip().lower() == "pending_review"
+            and str(shot.get("issue_id") or "").lower() not in current_issues
+            and str(shot.get("shot_id") or "").lower() not in current_ids]
+
+
 def operational_guided_shots(
     client: SupabaseReadClient | None, row: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
@@ -1532,6 +1546,20 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         }
         apply_operational_overlays(composition, operational_overlays, finalized_shot_ids)
         shots = composition["shots"]
+    elif session_type == "full_documentation" and full_documentation_mode(metadata) == "complete_capture":
+        has_pending_review = any(
+            str(issue.get("issueStatus") or issue.get("status") or "").strip().lower() == "pending_review"
+            for issue in issues.values()
+        )
+        if has_pending_review:
+            sources = scoped_snapshot_history(args, client, row, payload, metadata)
+            prior_context = compose_punchlist_history(sources, storage)
+            issue_shots = prior_context["punchlist_shots"]
+            overlays = operational_issue_overlays(
+                client, row, [shot["issue_id"] for shot in issue_shots if shot.get("issue_id")]
+            ) if not getattr(args, "snapshot_history_only", False) else {}
+            apply_operational_overlays(prior_context, overlays)
+            shots.extend(pending_review_carry_forward_photos(shots, issue_shots))
     punchlist_shots = composition["punchlist_shots"] if composition else shots
     media = media_validations(shots, storage)
     missing_media = [item for item in media if not item["exists"]]

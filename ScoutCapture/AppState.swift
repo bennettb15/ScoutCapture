@@ -6831,6 +6831,73 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct SupabaseAppFlagDetailsPayload: Encodable {
+        let title: String
+        let detail: String
+        let priority: String
+        let trade: String?
+        let updatedAt: String
+        let updatedBy: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case title, detail, priority, trade
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(title, forKey: .title)
+            try container.encode(detail, forKey: .detail)
+            try container.encode(priority, forKey: .priority)
+            if let trade {
+                try container.encode(trade, forKey: .trade)
+            } else {
+                try container.encodeNil(forKey: .trade)
+            }
+            try container.encode(updatedAt, forKey: .updatedAt)
+            try container.encode(updatedBy, forKey: .updatedBy)
+        }
+    }
+
+    private struct SupabaseAppFlagActivityPayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let observationID: UUID
+        let activityType: String
+        let fromValue: String?
+        let toValue: String?
+        let createdBy: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case observationID = "observation_id"
+            case activityType = "activity_type"
+            case fromValue = "from_value"
+            case toValue = "to_value"
+            case createdBy = "created_by"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(id, forKey: .id)
+            try container.encode(orgID, forKey: .orgID)
+            try container.encode(propertyID, forKey: .propertyID)
+            try container.encode(observationID, forKey: .observationID)
+            try container.encode(activityType, forKey: .activityType)
+            try container.encodeIfPresent(fromValue, forKey: .fromValue)
+            if let toValue {
+                try container.encode(toValue, forKey: .toValue)
+            } else {
+                try container.encodeNil(forKey: .toValue)
+            }
+            try container.encode(createdBy, forKey: .createdBy)
+        }
+    }
+
     private struct SupabaseObservationLineageUpdatePayload: Encodable {
         let status: String
         let title: String?
@@ -46174,6 +46241,102 @@ final class AppState: ObservableObject {
             return true
         } catch {
             print("[FlagReason] update_failed issueID=\(observationID) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func updateFlagDetails(
+        propertyID: UUID,
+        observationID: UUID,
+        sessionID: UUID?,
+        reason: String,
+        priority: String,
+        trade: String?
+    ) -> Bool {
+        let reason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let priority = priority.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canAccessProperty(propertyID), !reason.isEmpty, !priority.isEmpty else { return false }
+        do {
+            guard var observation = try localStore.fetchObservations(propertyID: propertyID)
+                .first(where: { $0.id == observationID }) else { return false }
+            _ = observation.updateCurrentReason(reason, sessionID: sessionID)
+            observation.priority = priority
+            let trimmedTrade = trade?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            observation.trade = trimmedTrade.isEmpty ? nil : trimmedTrade
+            observation.updatedAt = Date()
+            observation.updatedInSessionID = sessionID
+            _ = try localStore.updateObservation(observation)
+            return true
+        } catch {
+            print("[FlagDetails] update_failed issueID=\(observationID) error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func syncFlagDetailsToPortal(
+        propertyID: UUID,
+        observationID: UUID,
+        reason: String,
+        priority: String,
+        trade: String?,
+        previousPriority: String?,
+        previousTrade: String?
+    ) async -> Bool {
+        guard canAccessProperty(propertyID),
+              let orgID = activeOrganizationID,
+              canAccessOrganization(orgID),
+              let actorID = authenticatedSupabaseUser?.id,
+              let client = supabaseClient else { return false }
+        let normalizedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPriority = priority.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedTrade = trade?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalizedReason.isEmpty, !normalizedPriority.isEmpty else { return false }
+        do {
+            var activities: [SupabaseAppFlagActivityPayload] = []
+            if previousPriority?.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(normalizedPriority) != .orderedSame {
+                activities.append(SupabaseAppFlagActivityPayload(
+                    id: UUID(), orgID: orgID, propertyID: propertyID,
+                    observationID: observationID, activityType: "priority_changed",
+                    fromValue: previousPriority, toValue: normalizedPriority,
+                    createdBy: actorID
+                ))
+            }
+            if (previousTrade ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(normalizedTrade) != .orderedSame {
+                activities.append(SupabaseAppFlagActivityPayload(
+                    id: UUID(), orgID: orgID, propertyID: propertyID,
+                    observationID: observationID, activityType: "trade_changed",
+                    fromValue: previousTrade,
+                    toValue: normalizedTrade.isEmpty ? nil : normalizedTrade,
+                    createdBy: actorID
+                ))
+            }
+            if !activities.isEmpty {
+                try await client.from("punchlist_activity")
+                    .insert(activities, returning: .minimal)
+                    .execute()
+            }
+            let payload = SupabaseAppFlagDetailsPayload(
+                title: normalizedReason,
+                detail: normalizedReason,
+                priority: normalizedPriority,
+                trade: normalizedTrade.isEmpty ? nil : normalizedTrade,
+                updatedAt: supabaseTimestampString(Date()),
+                updatedBy: actorID
+            )
+            let updatedRows: [RemoteAppIssueIDRow] = try await client.from("observations")
+                .update(payload, returning: .representation)
+                .eq("id", value: observationID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .execute().value
+            return updatedRows.count == 1 && updatedRows[0].id == observationID
+        } catch {
+            recordDiagnosticsError(error)
+            print("[FlagDetails] sync_failed issueID=\(observationID) error=\(error.localizedDescription)")
             return false
         }
     }
