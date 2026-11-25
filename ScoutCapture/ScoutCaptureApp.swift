@@ -21147,7 +21147,7 @@ private struct FastLaneIssueListRow: View {
     }
 
     private var tradeText: String {
-        FastLaneMetadataOptions.canonicalTradeLabel(observation.trade)
+        fastLaneCapitalizedLeading(FastLaneMetadataOptions.canonicalTradeLabel(observation.trade))
     }
 
     var body: some View {
@@ -23505,7 +23505,7 @@ private struct FastLaneDetailNoteModal: View {
                         isTradePickerPresented = true
                     } label: {
                         HStack(spacing: 8) {
-                            Text(selectedTrade.isEmpty ? "Optional" : selectedTrade)
+                            Text(selectedTrade.isEmpty ? "Optional" : fastLaneCapitalizedLeading(selectedTrade))
                                 .foregroundColor(.white.opacity(selectedTrade.isEmpty ? 0.75 : 0.95))
                                 .lineLimit(1)
                             Spacer(minLength: 0)
@@ -23597,7 +23597,7 @@ private struct FastLaneDetailNoteModal: View {
                             isTradePickerPresented = false
                         } label: {
                             HStack {
-                                Text(option.isEmpty ? "None" : option)
+                                Text(option.isEmpty ? "None" : fastLaneCapitalizedLeading(option))
                                 Spacer()
                                 if selectedTrade == option {
                                     Image(systemName: "checkmark")
@@ -23624,6 +23624,12 @@ private struct FastLaneDetailNoteModal: View {
 
 private func normalizedFastLaneDetailPriority(_ value: String?) -> String {
     AppState.normalizedFastRuntimePriority(value)
+}
+
+private func fastLaneCapitalizedLeading(_ value: String) -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let first = trimmed.first else { return "" }
+    return first.uppercased() + String(trimmed.dropFirst())
 }
 
 private func fastLaneTrimmedNonEmpty(_ value: String?) -> String? {
