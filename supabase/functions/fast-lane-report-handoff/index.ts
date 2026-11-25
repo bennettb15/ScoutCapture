@@ -900,6 +900,16 @@ export async function handleHandoff(request: Request): Promise<Response> {
         });
         if (!update.ok) throw new Error(`upload_intent_completion_failed:${update.status}`);
       }
+      // A prior call can insert the sealed snapshot and then fail while
+      // dispatching GitHub Actions. Reusing that snapshot must retry dispatch;
+      // otherwise the client reports processing forever with no worker run.
+      const dispatch = await dispatchReportWorker(
+        config,
+        normalizeUuid(existing[0].id),
+        handoff.sessionID,
+        handoff.orgID,
+        handoff.propertyID,
+      );
       return jsonResponse(200, {
         ok: true, reused: true, snapshot_id: existing[0].id,
         snapshot_path: existing[0].payload_storage_path,
@@ -909,7 +919,8 @@ export async function handleHandoff(request: Request): Promise<Response> {
         session_id: handoff.sessionID, session_type: handoff.sessionType,
         report_mode: handoff.reportMode, shot_count: existing[0].shot_count,
         idempotency_key: `fast-lane-report-handoff:${handoff.sessionID}`,
-        dispatch_expected: true, dispatch_status: "existing_snapshot",
+        dispatch_expected: dispatch.expected,
+        dispatch_status: `existing_snapshot_${dispatch.status}`,
       });
     };
     const existingResponse = await existingSnapshotResponse();
