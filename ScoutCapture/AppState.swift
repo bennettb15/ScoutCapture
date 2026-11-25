@@ -37393,9 +37393,9 @@ final class AppState: ObservableObject {
         guard let lockedByUserID else {
             return deviceDescription ?? "Another user"
         }
-        if let localName = localOwnerDisplayName(for: lockedByUserID) {
+        if let email = localOwnerEmail(for: lockedByUserID) {
             return combineOwnerAndDeviceDescription(
-                owner: localName,
+                owner: email,
                 device: deviceDescription
             )
         }
@@ -37429,15 +37429,15 @@ final class AppState: ObservableObject {
             rows = []
         }
         if let first = rows.first {
-            if let fullName = normalizedSupabaseText(first.fullName) {
-                return combineOwnerAndDeviceDescription(
-                    owner: fullName,
-                    device: deviceDescription
-                )
-            }
             if let email = normalizedSupabaseText(first.email) {
                 return combineOwnerAndDeviceDescription(
                     owner: email,
+                    device: deviceDescription
+                )
+            }
+            if let fullName = normalizedSupabaseText(first.fullName) {
+                return combineOwnerAndDeviceDescription(
+                    owner: fullName,
                     device: deviceDescription
                 )
             }
@@ -51816,9 +51816,9 @@ final class AppState: ObservableObject {
         let resolvedOwnerDescription: String
         if record.status == .pendingExport {
             resolvedOwnerDescription = await pendingExportOwnerDescription(for: record)
-        } else if record.ownerUserID != nil {
+        } else if record.ownerUserID != nil || (record.status == .draft && record.updatedBy != nil) {
             resolvedOwnerDescription = await ownerDescription(
-                for: record.ownerUserID,
+                for: record.ownerUserID ?? record.updatedBy,
                 lockedByDeviceID: record.ownerDeviceID
             )
         } else {
