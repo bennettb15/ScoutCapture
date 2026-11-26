@@ -6883,6 +6883,9 @@ struct ContentView: View {
                     priorityOptions: Self.priorityOptions,
                     selectedTrade: selectedTradeBinding(),
                     selectedPriority: $selectedPriority,
+                    onManageTrades: {
+                        showManageTradesSheet = true
+                    },
                     onCancel: {
                         showDetailOverlay = false
                     },
@@ -7617,10 +7620,11 @@ struct ContentView: View {
                     x: 0,
                     y: 0
                 )
-            let tradeTrimmed = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
-            if !tradeTrimmed.isEmpty {
+            let armedTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+            if (isDetailNoteEnabledForCapture || armedUpdateObservationID != nil || resolutionTargetObservation != nil),
+               !armedTrade.isEmpty {
                 separatorToken()
-                Text(tradeTrimmed)
+                Text(armedTrade)
                     .font(.system(size: 15, weight: .heavy))
                     .foregroundColor(accentColor)
                     .shadow(
@@ -8071,13 +8075,7 @@ struct ContentView: View {
     }
 
     private func clearArmedIssueTradeScope() {
-        guard armedIssueScopedTrade != nil || preArmedStickyTrade != nil else { return }
-        selectedTrade = Self.restoredStickyTradeAfterClearingArmedIssueScope(
-            currentTrade: selectedTrade,
-            previousStickyTrade: preArmedStickyTrade,
-            armedIssueTradeManuallyChanged: armedIssueTradeManuallyChanged,
-            preferredOptions: tradeOptions
-        )
+        selectedTrade = ""
         armedIssueScopedTrade = nil
         preArmedStickyTrade = nil
         armedIssueTradeManuallyChanged = false
@@ -8160,15 +8158,6 @@ struct ContentView: View {
                         manageDestination: locationMode == .interior ? .interior : .exterior
                     )
 
-                    metadataSelectorRow(
-                        title: "Trade",
-                        value: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions).isEmpty
-                            ? "None"
-                            : Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        context: makeTradeSelectionContext(),
-                        titleColor: .blue,
-                        manageDestination: .trades
-                    )
                 }
             }
             .navigationDestination(item: $metadataSelectionContext) { context in
@@ -10638,7 +10627,9 @@ extension ContentView {
             )
             let captureLocation = locationManager.currentLocationForCapture()
             let capturedExifOrientationRaw = ReportLibraryModel.sourceExifOrientationRaw(from: data)
-            let captureTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+            let captureTrade = (isFlaggedCaptureIntent || captureDescriptionNote != nil)
+                ? Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+                : ""
             let capturePriority = Self.normalizedPriority(selectedPriority)
             print("[SavePhoto] capture source exifRaw=\(capturedExifOrientationRaw.map(String.init) ?? "nil")")
             let captureMetadataContext = ReportLibraryModel.EmbeddedMetadataContext(
@@ -10808,6 +10799,9 @@ extension ContentView {
                         } else {
                             showFlaggedActionToastNow("Photo saved locally; session metadata needs recovery.")
                             refreshGuidedShots()
+                        }
+                        if captureIsFlagged && armedFlaggedIDAtCapture == nil {
+                            selectedTrade = ""
                         }
                         scheduleHudAngleIndexRefresh()
                         if wasGuidedRetakeCapture {
@@ -11136,7 +11130,7 @@ extension ContentView {
             elevation: normalizedElevation,
             detailType: detailTypeValue,
             angleIndex: max(1, angleIndexValue),
-            trade: tradeValue.isEmpty ? nil : tradeValue,
+            trade: (isFlagged && !tradeValue.isEmpty) ? tradeValue : nil,
             priority: (isFlagged && !priorityValue.isEmpty) ? priorityValue : nil,
             shotKey: shotKey,
             isGuided: isGuided,
@@ -17623,6 +17617,7 @@ extension ContentView {
         let priorityOptions: [String]
         @Binding var selectedTrade: String
         @Binding var selectedPriority: String
+        let onManageTrades: () -> Void
         
         let onCancel: () -> Void
         let onSave: (String) -> Void
@@ -17639,6 +17634,7 @@ extension ContentView {
             priorityOptions: [String],
             selectedTrade: Binding<String>,
             selectedPriority: Binding<String>,
+            onManageTrades: @escaping () -> Void,
             onCancel: @escaping () -> Void,
             onSave: @escaping (String) -> Void
         ) {
@@ -17650,6 +17646,7 @@ extension ContentView {
             self.priorityOptions = priorityOptions
             self._selectedTrade = selectedTrade
             self._selectedPriority = selectedPriority
+            self.onManageTrades = onManageTrades
             self.onCancel = onCancel
             self.onSave = onSave
             _draft = State(initialValue: existingNote)
@@ -17728,7 +17725,7 @@ extension ContentView {
                         Text("Priority")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
+                            .frame(width: 86, alignment: .leading)
 
                         Menu {
                             ForEach(priorityOptions, id: \.self) { option in
@@ -17761,10 +17758,23 @@ extension ContentView {
                     }
 
                     HStack(spacing: 10) {
-                        Text("Trade")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
+                        HStack(spacing: 2) {
+                            Text("Trade")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.white.opacity(0.90))
+                            Button {
+                                isFocused = false
+                                onManageTrades()
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundColor(.blue)
+                                    .frame(width: 26, height: 42)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Manage Trades")
+                        }
+                        .frame(width: 86, alignment: .leading)
 
                         Menu {
                             Button("None") {

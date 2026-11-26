@@ -14496,6 +14496,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneManageTradesSheet: Bool = false
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
     @State private var showFastLaneDetailNoteOverlay: Bool = false
+    @State private var fastLaneDetailNoteOriginalContext: AppState.FastRuntimeCaptureMetadataContext?
     @State private var showFastLaneSessionActionsSheet: Bool = false
     @State private var fastLaneSessionActionsSummarySnapshot: FastLaneSessionActionsSummary?
     @State private var fastLaneSessionActionsSummaryGeneration: UInt64 = 0
@@ -14561,6 +14562,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneGalleryLoadGeneration = 0
     @State private var fastLaneGalleryIsLoading = false
     @State private var fastLanePreviousGalleryIsRestoring = false
+    @State private var fastLanePreviousGalleryReferenceHydrationCount = 0
     @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
@@ -14852,7 +14854,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 profile: fastLaneCaptureProfile,
                 context: fastMetadataContext,
                 buildingOptions: $fastBuildingOptions,
-                tradeOptions: $fastTradeOptions,
                 detailTypesModel: fastDetailTypesModel,
                 onCancel: {
                     isShowingFastMetadataPicker = false
@@ -14920,12 +14921,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 cache: fastLaneGalleryImageCache,
                 thumbnailRefreshToken: fastLaneGalleryRefreshToken,
                 isLoading: fastLaneGalleryIsLoading,
-                isRestoringPrevious: fastLanePreviousGalleryIsRestoring,
+                isRestoringPrevious: fastLanePreviousGalleryIsRestoring || fastLanePreviousGalleryReferenceHydrationCount > 0,
                 onRefresh: {
                     fastLaneMediaHydrationAttemptedKeys.removeAll()
                     didCheckFastLaneGuidedPanelMedia = false
                     didCheckFastLaneIssuePanelMedia = false
                     reloadFastLaneGalleryAssets()
+                    hydrateFastLanePreviousGalleryReferencesIfNeeded()
+                },
+                onPreviousSelected: {
+                    reloadFastLaneGalleryAssets()
+                    hydrateFastLanePreviousGalleryReferencesIfNeeded()
                 }
             )
         }
@@ -15336,7 +15342,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 orientationDotColor: isFastLaneElevationHeadingAligned ? .green : .white,
                 detailType: fastLaneShortShotTypeLabel(fastMetadataContext.detailType),
                 angle: "A\(max(1, fastMetadataContext.angleIndex))",
-                trade: fastMetadataContext.trade,
+                trade: (fastLaneCaptureIntent.issueID != nil || fastMetadataContext.isFlagged == true || fastMetadataContext.detailNote != nil)
+                    ? FastLaneMetadataOptions.canonicalTradeLabel(fastMetadataContext.trade, preferredOptions: fastTradeOptions)
+                    : nil,
                 isFilterAvailable: !isFastLaneCaptureIntentArmed
             ),
             previewStatusTitle: previewStatusTitle,
@@ -15479,6 +15487,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         captureIntentSource: current.captureIntentSource
                     ))
                 }
+                fastLaneDetailNoteOriginalContext = fastMetadataContext
                 showFastLaneDetailNoteOverlay = true
             },
             onLocationModeChanged: { mode in
@@ -16089,10 +16098,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             detailType: fastMetadataContext.detailType,
             existingNote: fastMetadataContext.detailNote ?? "",
             isNoteEditable: true,
-            tradeOptions: FastLaneMetadataOptions.canonicalTradeOptions(
-                fastTradeOptions,
-                selectedTrade: fastMetadataContext.trade
-            ),
+            canRemoveFlag: fastMetadataContext.isFlagged == true && fastLaneCaptureIntent.issueID == nil,
+            tradeOptions: $fastTradeOptions,
             priorityOptions: Self.priorityOptions,
             selectedTrade: Binding(
                 get: { fastMetadataContext.trade ?? "" },
@@ -16127,6 +16134,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             ),
             onCancel: {
+                if let original = fastLaneDetailNoteOriginalContext {
+                    applyFastLaneMetadataContext(original)
+                }
+                fastLaneDetailNoteOriginalContext = nil
                 showFastLaneDetailNoteOverlay = false
             },
             onSave: { newValue in
@@ -16163,11 +16174,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     building: fastMetadataContext.building,
                     elevation: fastMetadataContext.elevation,
                     detailType: fastMetadataContext.detailType,
-                    trade: fastMetadataContext.trade,
+                    trade: trimmed.isEmpty ? nil : fastMetadataContext.trade,
                     detailNote: trimmed.isEmpty ? nil : trimmed,
                     priority: trimmed.isEmpty ? nil : stagedPriority,
-                    angleIndex: fastMetadataContext.angleIndex
+                    angleIndex: fastMetadataContext.angleIndex,
+                    isFlagged: !trimmed.isEmpty
                 ))
+                fastLaneDetailNoteOriginalContext = nil
                 showFastLaneDetailNoteOverlay = false
             }
         )
@@ -16529,7 +16542,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                 lens: shutterLens
                             ),
                             intent: fastLaneCaptureIntent,
-                            normalTrade: fastLaneRestoredUnarmedTrade(fallback: fastMetadataContext.trade),
                             retakeGuidedID: fastLaneRetakeGuidedID,
                             retakeIssueID: fastLaneRetakeIssueID
                         )
@@ -16626,7 +16638,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                     building: savedContext.building,
                                     elevation: savedContext.elevation,
                                     detailType: savedContext.detailType,
-                                    trade: capturePreparation.normalTrade,
+                                    trade: nil,
                                     detailNote: nil,
                                     priority: nil,
                                     angleIndex: max(1, savedContext.angleIndex)
@@ -16639,7 +16651,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                     building: fastMetadataContext.building,
                                     elevation: fastMetadataContext.elevation,
                                     detailType: fastMetadataContext.detailType,
-                                    trade: capturePreparation.normalTrade,
+                                    trade: nil,
                                     detailNote: nil,
                                     priority: nil,
                                     angleIndex: max(1, fastMetadataContext.angleIndex)
@@ -16815,6 +16827,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             fastLanePortalGuidedRevisionAtPrime = appState.fastRuntimePortalGuidedReferenceRevision(propertyID: context.propertyID)
             didSyncFastLanePortalIssueStateAfterPreview = true
             didFinishInitialFastLaneReferenceRefresh = true
+            if showFastLaneGallery {
+                hydrateFastLanePreviousGalleryReferencesIfNeeded()
+            }
             if didVerifyReferences {
                 appState.markFastRuntimeReferencesVerified(
                     propertyID: context.propertyID,
@@ -18115,7 +18130,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             building: current.building,
             elevation: current.elevation,
             detailType: current.detailType,
-            trade: current.trade,
+            trade: isFlagged ? current.trade : nil,
             detailNote: current.detailNote,
             priority: current.priority,
             angleIndex: angleIndex,
@@ -18317,6 +18332,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         scheduleFastLanePanelMediaHydration(requests, kind: .guided)
     }
 
+    private func hydrateFastLanePreviousGalleryReferencesIfNeeded() {
+        guard !isFastLaneInitialReferenceSyncPending else { return }
+        didCheckFastLaneGuidedPanelMedia = false
+        didCheckFastLaneIssuePanelMedia = false
+        scheduleFastLaneGuidedPanelMediaHydrationIfNeeded()
+        scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: .activeIssues)
+    }
+
     private func scheduleFastLaneIssuePanelMediaHydrationIfNeeded(mode: FastLaneSideControlSheetMode) {
         guard !didCheckFastLaneIssuePanelMedia else { return }
         didCheckFastLaneIssuePanelMedia = true
@@ -18375,6 +18398,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         guard !pending.isEmpty else { return }
         recordFastLaneReadyEvent("panel_media_hydration_started_\(kind)")
+        let isGalleryReferenceRequest = showFastLaneGallery && fastLanePreviousGalleryAssets.isEmpty
+        if isGalleryReferenceRequest {
+            fastLanePreviousGalleryReferenceHydrationCount += 1
+        }
         for request in pending {
             fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
         }
@@ -18393,7 +18420,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             }
             recordFastLaneReadyEvent("panel_media_hydration_finished_\(kind)")
-            guard didStart else { return }
+            guard didStart else {
+                await MainActor.run {
+                    if isGalleryReferenceRequest {
+                        fastLanePreviousGalleryReferenceHydrationCount = max(0, fastLanePreviousGalleryReferenceHydrationCount - 1)
+                    }
+                }
+                return
+            }
             recordFastLaneReadyEvent("panel_media_history_started_\(kind)")
             let payload = appState.fastRuntimePreviewSideControlPayload(
                 propertyID: context.propertyID,
@@ -18411,6 +18445,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
                 fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
                 refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                if showFastLaneGallery {
+                    reloadFastLaneGalleryAssets()
+                }
+                if isGalleryReferenceRequest {
+                    fastLanePreviousGalleryReferenceHydrationCount = max(0, fastLanePreviousGalleryReferenceHydrationCount - 1)
+                }
             }
         }
     }
@@ -18683,11 +18723,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
-    private func fastLaneRestoredUnarmedTrade(fallback: String?) -> String? {
-        guard let fastLaneUnarmedMetadataSnapshot else { return fallback }
-        return fastLaneUnarmedMetadataSnapshot.context.trade
-    }
-
     private func clearFastLaneArmedCapture() {
         fastLaneCaptureIntent = .free
         fastLaneRetakeGuidedID = nil
@@ -18724,7 +18759,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             building: context.building,
             elevation: context.elevation,
             detailType: context.detailType,
-            trade: fastLaneRestoredUnarmedTrade(fallback: context.trade),
+            trade: nil,
             detailNote: nil,
             priority: nil,
             angleIndex: max(1, context.angleIndex)
@@ -21861,6 +21896,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
     let isLoading: Bool
     let isRestoringPrevious: Bool
     let onRefresh: () -> Void
+    let onPreviousSelected: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
@@ -22087,6 +22123,9 @@ private struct FastLanePhotoLibraryFullscreen: View {
             Button {
                 viewingCurrentSession.toggle()
                 viewerState = nil
+                if !viewingCurrentSession {
+                    onPreviousSelected()
+                }
             } label: {
                 Text(viewingCurrentSession ? "Current" : "Previous")
                     .font(.system(size: 17, weight: .medium))
@@ -22662,14 +22701,12 @@ private enum FastLaneMetadataSelectionKind: Hashable {
     case building
     case elevation
     case detailType
-    case trade
 }
 
 private enum FastLanePendingManageDestination {
     case buildings
     case interior
     case exterior
-    case trades
 }
 
 private struct FastLaneMetadataSelectionContext: Identifiable, Hashable {
@@ -22682,7 +22719,6 @@ private struct FastLaneMetadataFilterSheet: View {
     let profile: CaptureProfile
     let context: AppState.FastRuntimeCaptureMetadataContext
     @Binding var buildingOptions: [String]
-    @Binding var tradeOptions: [String]
     @ObservedObject var detailTypesModel: FastLaneDetailTypesModel
     let onCancel: () -> Void
     let onConfirm: (AppState.FastRuntimeCaptureMetadataContext) -> Void
@@ -22690,10 +22726,8 @@ private struct FastLaneMetadataFilterSheet: View {
     @State private var selectedBuilding: String
     @State private var selectedElevation: String
     @State private var selectedDetailType: String
-    @State private var selectedTrade: String
     @State private var selectionContext: FastLaneMetadataSelectionContext?
     @State private var showManageBuildingsSheet = false
-    @State private var showManageTradesSheet = false
     @State private var manageDetailMode: CameraChromeLocationMode?
     @Environment(\.colorScheme) private var colorScheme
     private var sheetTheme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
@@ -22702,7 +22736,6 @@ private struct FastLaneMetadataFilterSheet: View {
         profile: CaptureProfile,
         context: AppState.FastRuntimeCaptureMetadataContext,
         buildingOptions: Binding<[String]>,
-        tradeOptions: Binding<[String]>,
         detailTypesModel: FastLaneDetailTypesModel,
         onCancel: @escaping () -> Void,
         onConfirm: @escaping (AppState.FastRuntimeCaptureMetadataContext) -> Void
@@ -22711,24 +22744,18 @@ private struct FastLaneMetadataFilterSheet: View {
         self.profile = profile
         self.context = normalized
         self._buildingOptions = buildingOptions
-        self._tradeOptions = tradeOptions
         self.detailTypesModel = detailTypesModel
         self.onCancel = onCancel
         self.onConfirm = onConfirm
         _selectedBuilding = State(initialValue: normalized.building)
         _selectedElevation = State(initialValue: normalized.elevation)
         _selectedDetailType = State(initialValue: normalized.detailType)
-        _selectedTrade = State(initialValue: FastLaneMetadataOptions.canonicalTradeLabel(normalized.trade, preferredOptions: tradeOptions.wrappedValue))
     }
 
     private var selectedLocationMode: CameraChromeLocationMode {
         selectedElevation.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Interior") == .orderedSame
             ? .interior
             : .exterior
-    }
-
-    private var tradePickerOptions: [String] {
-        FastLaneMetadataOptions.canonicalTradeOptions(tradeOptions, selectedTrade: selectedTrade)
     }
 
     private var buildingSelectionLabel: String {
@@ -22774,13 +22801,6 @@ private struct FastLaneMetadataFilterSheet: View {
                         manageDestination: selectedLocationMode == .interior ? .interior : .exterior
                     )
 
-                    metadataSelectorRow(
-                        title: "Trade",
-                        value: selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "None" : selectedTrade,
-                        context: FastLaneMetadataSelectionContext(kind: .trade, title: "Trade"),
-                        titleColor: .blue,
-                        manageDestination: .trades
-                    )
                 }
             }
             .navigationDestination(item: $selectionContext) { context in
@@ -22807,7 +22827,7 @@ private struct FastLaneMetadataFilterSheet: View {
                             building: selectedBuilding,
                             elevation: selectedLocationMode == .interior ? "Interior" : selectedElevation,
                             detailType: selectedDetailType,
-                            trade: selectedTrade,
+                            trade: context.trade,
                             detailNote: context.detailNote,
                             priority: context.priority,
                             angleIndex: context.angleIndex,
@@ -22844,17 +22864,9 @@ private struct FastLaneMetadataFilterSheet: View {
             .sheet(item: $manageDetailMode, onDismiss: normalizeDetailSelection) { mode in
                 FastLaneManageDetailTypesView(mode: mode, profile: profile, model: detailTypesModel)
             }
-            .sheet(isPresented: $showManageTradesSheet, onDismiss: normalizeTradeOptions) {
-                FastLaneManageTradesSheet(
-                    options: $tradeOptions,
-                    selectedTrade: $selectedTrade,
-                    onClose: { showManageTradesSheet = false }
-                )
-            }
             .onAppear {
                 normalizeBuildingSelection()
                 normalizeDetailSelection()
-                normalizeTradeOptions()
             }
             .onChange(of: selectedElevation) { _, _ in normalizeDetailSelection() }
             .onChange(of: buildingOptions) { _, _ in normalizeBuildingSelection() }
@@ -22878,8 +22890,6 @@ private struct FastLaneMetadataFilterSheet: View {
                         manageDetailMode = .interior
                     case .exterior:
                         manageDetailMode = .exterior
-                    case .trades:
-                        showManageTradesSheet = true
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -22934,8 +22944,6 @@ private struct FastLaneMetadataFilterSheet: View {
                 guard !name.isEmpty else { return nil }
                 return (name.caseInsensitiveCompare("General Elevation") == .orderedSame ? "General" : name, name)
             }
-        case .trade:
-            return [("None", "")] + tradePickerOptions.map { ($0, $0) }
         }
     }
 
@@ -22944,7 +22952,6 @@ private struct FastLaneMetadataFilterSheet: View {
         case .building: return selectedBuilding
         case .elevation: return selectedElevation
         case .detailType: return selectedDetailType
-        case .trade: return selectedTrade
         }
     }
 
@@ -22957,8 +22964,6 @@ private struct FastLaneMetadataFilterSheet: View {
         case .detailType:
             selectedDetailType = value
             detailTypesModel.setSelected(value, for: selectedLocationMode, profile: profile)
-        case .trade:
-            selectedTrade = FastLaneMetadataOptions.canonicalTradeLabel(value, preferredOptions: tradeOptions)
         }
     }
 
@@ -22968,10 +22973,6 @@ private struct FastLaneMetadataFilterSheet: View {
         selectedBuilding = buildingOptions.contains(where: { FastLaneMetadataOptions.buildingCode(from: $0) == code })
             ? code
             : (buildingOptions.first.map(FastLaneMetadataOptions.buildingCode(from:)) ?? "B1")
-    }
-
-    private func normalizeTradeOptions() {
-        FastLaneMetadataOptions.persistTradeOptions(&tradeOptions, selectedTrade: &selectedTrade)
     }
 
     private func normalizeDetailSelection() {
@@ -23430,7 +23431,8 @@ private struct FastLaneDetailNoteModal: View {
     let detailType: String
     let existingNote: String
     let isNoteEditable: Bool
-    let tradeOptions: [String]
+    let canRemoveFlag: Bool
+    @Binding var tradeOptions: [String]
     let priorityOptions: [String]
     @Binding var selectedTrade: String
     @Binding var selectedPriority: String
@@ -23440,6 +23442,7 @@ private struct FastLaneDetailNoteModal: View {
 
     @State private var draft: String
     @State private var isTradePickerPresented = false
+    @State private var isManageTradesPresented = false
     @FocusState private var isFocused: Bool
 
     init(
@@ -23447,7 +23450,8 @@ private struct FastLaneDetailNoteModal: View {
         detailType: String,
         existingNote: String,
         isNoteEditable: Bool,
-        tradeOptions: [String],
+        canRemoveFlag: Bool,
+        tradeOptions: Binding<[String]>,
         priorityOptions: [String],
         selectedTrade: Binding<String>,
         selectedPriority: Binding<String>,
@@ -23458,7 +23462,8 @@ private struct FastLaneDetailNoteModal: View {
         self.detailType = detailType
         self.existingNote = existingNote
         self.isNoteEditable = isNoteEditable
-        self.tradeOptions = tradeOptions
+        self.canRemoveFlag = canRemoveFlag
+        self._tradeOptions = tradeOptions
         self.priorityOptions = priorityOptions
         self._selectedTrade = selectedTrade
         self._selectedPriority = selectedPriority
@@ -23540,7 +23545,7 @@ private struct FastLaneDetailNoteModal: View {
                     Text("Priority")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.white.opacity(0.90))
-                        .frame(width: 62, alignment: .leading)
+                        .frame(width: 86, alignment: .leading)
 
                     Menu {
                         ForEach(priorityOptions, id: \.self) { option in
@@ -23573,10 +23578,23 @@ private struct FastLaneDetailNoteModal: View {
                 }
 
                 HStack(spacing: 10) {
-                    Text("Trade")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.90))
-                        .frame(width: 62, alignment: .leading)
+                    HStack(spacing: 2) {
+                        Text("Trade")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.90))
+                        Button {
+                            isFocused = false
+                            isManageTradesPresented = true
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundColor(.blue)
+                                .frame(width: 26, height: 42)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Manage Trades")
+                    }
+                    .frame(width: 86, alignment: .leading)
 
                     Button {
                         isFocused = false
@@ -23649,6 +23667,20 @@ private struct FastLaneDetailNoteModal: View {
                     .contentShape(Rectangle())
                     .disabled(!canSave)
                 }
+                if canRemoveFlag && hasExistingNote {
+                    Button {
+                        isFocused = false
+                        onSave("")
+                    } label: {
+                        Text("Remove Flag")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Remove this flag before taking a photo")
+                }
             }
             .padding(16)
             .background(.ultraThinMaterial)
@@ -23696,6 +23728,13 @@ private struct FastLaneDetailNoteModal: View {
                 }
             }
             .presentationDetents([.large])
+        }
+        .sheet(isPresented: $isManageTradesPresented) {
+            FastLaneManageTradesSheet(
+                options: $tradeOptions,
+                selectedTrade: $selectedTrade,
+                onClose: { isManageTradesPresented = false }
+            )
         }
     }
 }
