@@ -14496,6 +14496,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneManageTradesSheet: Bool = false
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
     @State private var showFastLaneDetailNoteOverlay: Bool = false
+    @State private var fastLaneDetailNoteOriginalContext: AppState.FastRuntimeCaptureMetadataContext?
     @State private var showFastLaneSessionActionsSheet: Bool = false
     @State private var fastLaneSessionActionsSummarySnapshot: FastLaneSessionActionsSummary?
     @State private var fastLaneSessionActionsSummaryGeneration: UInt64 = 0
@@ -15486,6 +15487,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         captureIntentSource: current.captureIntentSource
                     ))
                 }
+                fastLaneDetailNoteOriginalContext = fastMetadataContext
                 showFastLaneDetailNoteOverlay = true
             },
             onLocationModeChanged: { mode in
@@ -16096,6 +16098,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             detailType: fastMetadataContext.detailType,
             existingNote: fastMetadataContext.detailNote ?? "",
             isNoteEditable: true,
+            canRemoveFlag: fastMetadataContext.isFlagged == true && fastLaneCaptureIntent.issueID == nil,
             tradeOptions: $fastTradeOptions,
             priorityOptions: Self.priorityOptions,
             selectedTrade: Binding(
@@ -16131,6 +16134,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 }
             ),
             onCancel: {
+                if let original = fastLaneDetailNoteOriginalContext {
+                    applyFastLaneMetadataContext(original)
+                }
+                fastLaneDetailNoteOriginalContext = nil
                 showFastLaneDetailNoteOverlay = false
             },
             onSave: { newValue in
@@ -16170,8 +16177,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     trade: trimmed.isEmpty ? nil : fastMetadataContext.trade,
                     detailNote: trimmed.isEmpty ? nil : trimmed,
                     priority: trimmed.isEmpty ? nil : stagedPriority,
-                    angleIndex: fastMetadataContext.angleIndex
+                    angleIndex: fastMetadataContext.angleIndex,
+                    isFlagged: !trimmed.isEmpty
                 ))
+                fastLaneDetailNoteOriginalContext = nil
                 showFastLaneDetailNoteOverlay = false
             }
         )
@@ -23422,6 +23431,7 @@ private struct FastLaneDetailNoteModal: View {
     let detailType: String
     let existingNote: String
     let isNoteEditable: Bool
+    let canRemoveFlag: Bool
     @Binding var tradeOptions: [String]
     let priorityOptions: [String]
     @Binding var selectedTrade: String
@@ -23440,6 +23450,7 @@ private struct FastLaneDetailNoteModal: View {
         detailType: String,
         existingNote: String,
         isNoteEditable: Bool,
+        canRemoveFlag: Bool,
         tradeOptions: Binding<[String]>,
         priorityOptions: [String],
         selectedTrade: Binding<String>,
@@ -23451,6 +23462,7 @@ private struct FastLaneDetailNoteModal: View {
         self.detailType = detailType
         self.existingNote = existingNote
         self.isNoteEditable = isNoteEditable
+        self.canRemoveFlag = canRemoveFlag
         self._tradeOptions = tradeOptions
         self.priorityOptions = priorityOptions
         self._selectedTrade = selectedTrade
@@ -23654,6 +23666,20 @@ private struct FastLaneDetailNoteModal: View {
                     )
                     .contentShape(Rectangle())
                     .disabled(!canSave)
+                }
+                if canRemoveFlag && hasExistingNote {
+                    Button {
+                        isFocused = false
+                        onSave("")
+                    } label: {
+                        Text("Remove Flag")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Remove this flag before taking a photo")
                 }
             }
             .padding(16)
