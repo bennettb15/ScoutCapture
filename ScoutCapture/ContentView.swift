@@ -17725,7 +17725,7 @@ extension ContentView {
                         Text("Priority")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
+                            .frame(width: 86, alignment: .leading)
 
                         Menu {
                             ForEach(priorityOptions, id: \.self) { option in
@@ -17758,22 +17758,23 @@ extension ContentView {
                     }
 
                     HStack(spacing: 10) {
-                        Text("Trade")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(width: 62, alignment: .leading)
-
-                        Button {
-                            isFocused = false
-                            onManageTrades()
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundColor(.blue)
-                                .frame(width: 28, height: 42)
+                        HStack(spacing: 2) {
+                            Text("Trade")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.white.opacity(0.90))
+                            Button {
+                                isFocused = false
+                                onManageTrades()
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundColor(.blue)
+                                    .frame(width: 26, height: 42)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Manage Trades")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Manage Trades")
+                        .frame(width: 86, alignment: .leading)
 
                         Menu {
                             Button("None") {
