@@ -7620,6 +7620,20 @@ struct ContentView: View {
                     x: 0,
                     y: 0
                 )
+            let armedTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+            if (isDetailNoteEnabledForCapture || armedUpdateObservationID != nil || resolutionTargetObservation != nil),
+               !armedTrade.isEmpty {
+                separatorToken()
+                Text(armedTrade)
+                    .font(.system(size: 15, weight: .heavy))
+                    .foregroundColor(accentColor)
+                    .shadow(
+                        color: .black.opacity(isLandscapeStyle ? 0.78 : 0.45),
+                        radius: isLandscapeStyle ? 1.4 : 0.8,
+                        x: 0,
+                        y: 0
+                    )
+            }
         }
         .lineLimit(1)
         .truncationMode(.tail)
@@ -8061,13 +8075,7 @@ struct ContentView: View {
     }
 
     private func clearArmedIssueTradeScope() {
-        guard armedIssueScopedTrade != nil || preArmedStickyTrade != nil else { return }
-        selectedTrade = Self.restoredStickyTradeAfterClearingArmedIssueScope(
-            currentTrade: selectedTrade,
-            previousStickyTrade: preArmedStickyTrade,
-            armedIssueTradeManuallyChanged: armedIssueTradeManuallyChanged,
-            preferredOptions: tradeOptions
-        )
+        selectedTrade = ""
         armedIssueScopedTrade = nil
         preArmedStickyTrade = nil
         armedIssueTradeManuallyChanged = false
@@ -10791,6 +10799,9 @@ extension ContentView {
                         } else {
                             showFlaggedActionToastNow("Photo saved locally; session metadata needs recovery.")
                             refreshGuidedShots()
+                        }
+                        if captureIsFlagged && armedFlaggedIDAtCapture == nil {
+                            selectedTrade = ""
                         }
                         scheduleHudAngleIndexRefresh()
                         if wasGuidedRetakeCapture {

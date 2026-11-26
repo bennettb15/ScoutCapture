@@ -15341,7 +15341,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 orientationDotColor: isFastLaneElevationHeadingAligned ? .green : .white,
                 detailType: fastLaneShortShotTypeLabel(fastMetadataContext.detailType),
                 angle: "A\(max(1, fastMetadataContext.angleIndex))",
-                trade: nil,
+                trade: (fastLaneCaptureIntent.issueID != nil || fastMetadataContext.isFlagged == true || fastMetadataContext.detailNote != nil)
+                    ? FastLaneMetadataOptions.canonicalTradeLabel(fastMetadataContext.trade, preferredOptions: fastTradeOptions)
+                    : nil,
                 isFilterAvailable: !isFastLaneCaptureIntentArmed
             ),
             previewStatusTitle: previewStatusTitle,
