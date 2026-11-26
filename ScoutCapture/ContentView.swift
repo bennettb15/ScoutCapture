@@ -6883,6 +6883,9 @@ struct ContentView: View {
                     priorityOptions: Self.priorityOptions,
                     selectedTrade: selectedTradeBinding(),
                     selectedPriority: $selectedPriority,
+                    onManageTrades: {
+                        showManageTradesSheet = true
+                    },
                     onCancel: {
                         showDetailOverlay = false
                     },
@@ -7617,19 +7620,6 @@ struct ContentView: View {
                     x: 0,
                     y: 0
                 )
-            let tradeTrimmed = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
-            if !tradeTrimmed.isEmpty {
-                separatorToken()
-                Text(tradeTrimmed)
-                    .font(.system(size: 15, weight: .heavy))
-                    .foregroundColor(accentColor)
-                    .shadow(
-                        color: .black.opacity(isLandscapeStyle ? 0.78 : 0.45),
-                        radius: isLandscapeStyle ? 1.4 : 0.8,
-                        x: 0,
-                        y: 0
-                    )
-            }
         }
         .lineLimit(1)
         .truncationMode(.tail)
@@ -8160,15 +8150,6 @@ struct ContentView: View {
                         manageDestination: locationMode == .interior ? .interior : .exterior
                     )
 
-                    metadataSelectorRow(
-                        title: "Trade",
-                        value: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions).isEmpty
-                            ? "None"
-                            : Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        context: makeTradeSelectionContext(),
-                        titleColor: .blue,
-                        manageDestination: .trades
-                    )
                 }
             }
             .navigationDestination(item: $metadataSelectionContext) { context in
@@ -10638,7 +10619,9 @@ extension ContentView {
             )
             let captureLocation = locationManager.currentLocationForCapture()
             let capturedExifOrientationRaw = ReportLibraryModel.sourceExifOrientationRaw(from: data)
-            let captureTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+            let captureTrade = (isFlaggedCaptureIntent || captureDescriptionNote != nil)
+                ? Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+                : ""
             let capturePriority = Self.normalizedPriority(selectedPriority)
             print("[SavePhoto] capture source exifRaw=\(capturedExifOrientationRaw.map(String.init) ?? "nil")")
             let captureMetadataContext = ReportLibraryModel.EmbeddedMetadataContext(
@@ -11136,7 +11119,7 @@ extension ContentView {
             elevation: normalizedElevation,
             detailType: detailTypeValue,
             angleIndex: max(1, angleIndexValue),
-            trade: tradeValue.isEmpty ? nil : tradeValue,
+            trade: (isFlagged && !tradeValue.isEmpty) ? tradeValue : nil,
             priority: (isFlagged && !priorityValue.isEmpty) ? priorityValue : nil,
             shotKey: shotKey,
             isGuided: isGuided,
@@ -17623,6 +17606,7 @@ extension ContentView {
         let priorityOptions: [String]
         @Binding var selectedTrade: String
         @Binding var selectedPriority: String
+        let onManageTrades: () -> Void
         
         let onCancel: () -> Void
         let onSave: (String) -> Void
@@ -17639,6 +17623,7 @@ extension ContentView {
             priorityOptions: [String],
             selectedTrade: Binding<String>,
             selectedPriority: Binding<String>,
+            onManageTrades: @escaping () -> Void,
             onCancel: @escaping () -> Void,
             onSave: @escaping (String) -> Void
         ) {
@@ -17650,6 +17635,7 @@ extension ContentView {
             self.priorityOptions = priorityOptions
             self._selectedTrade = selectedTrade
             self._selectedPriority = selectedPriority
+            self.onManageTrades = onManageTrades
             self.onCancel = onCancel
             self.onSave = onSave
             _draft = State(initialValue: existingNote)
@@ -17765,6 +17751,18 @@ extension ContentView {
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.90))
                             .frame(width: 62, alignment: .leading)
+
+                        Button {
+                            isFocused = false
+                            onManageTrades()
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundColor(.blue)
+                                .frame(width: 28, height: 42)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Manage Trades")
 
                         Menu {
                             Button("None") {
