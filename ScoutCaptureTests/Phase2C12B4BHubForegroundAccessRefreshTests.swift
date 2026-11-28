@@ -580,7 +580,8 @@ final class Phase2C12B4BHubForegroundAccessRefreshTests: XCTestCase {
             restoreRefresh: {
                 refreshCallCount += 1
                 return true
-            }
+            },
+            recentlyDeletedFetch: { _ in [] }
         )
 
         let succeeded = await fixture.appState.remoteRestoreProperty(id: property.id)

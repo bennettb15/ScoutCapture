@@ -6620,6 +6620,24 @@ final class AppState: ObservableObject {
             self.updatedBy = updatedBy
         }
 
+        var propertyWriteRecord: PropertyWriteRecord {
+            PropertyWriteRecord(
+                id: id,
+                organizationID: orgID,
+                captureProfile: captureProfile,
+                clientName: clientName,
+                clientEmail: clientEmail,
+                clientPhone: clientPhone,
+                name: name,
+                addressLine1: addressLine1,
+                city: city,
+                state: state,
+                postalCode: postalCode,
+                isArchived: isArchived,
+                updatedBy: updatedBy
+            )
+        }
+
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
@@ -6634,14 +6652,6 @@ final class AppState: ObservableObject {
             case postalCode = "postal_code"
             case isArchived = "is_archived"
             case updatedBy = "updated_by"
-        }
-    }
-
-    private struct SoftDeletePropertyRPCPayload: Encodable {
-        let targetPropertyID: UUID
-
-        enum CodingKeys: String, CodingKey {
-            case targetPropertyID = "target_property_id"
         }
     }
 
@@ -6667,14 +6677,6 @@ final class AppState: ObservableObject {
 
         enum CodingKeys: String, CodingKey {
             case targetOrgID = "target_org_id"
-            case targetPropertyID = "target_property_id"
-        }
-    }
-
-    private struct RestorePropertyRPCPayload: Encodable {
-        let targetPropertyID: UUID
-
-        enum CodingKeys: String, CodingKey {
             case targetPropertyID = "target_property_id"
         }
     }
@@ -8549,6 +8551,11 @@ final class AppState: ObservableObject {
     private let injectedLocalStore: LocalStore?
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
+    private let propertyWriteRepositoryOverride: (any PropertyWriteRepository)?
+    private var propertyWriteRepository: (any PropertyWriteRepository)? {
+        if let propertyWriteRepositoryOverride { return propertyWriteRepositoryOverride }
+        return supabaseClient.map { SupabasePropertyWriteRepository(client: $0) }
+    }
     private let propertyListRepositoryOverride: (any PropertyListRepository)?
     private let userDefaults: UserDefaults
     private let cachedDeviceIdentifier: String
@@ -8960,6 +8967,7 @@ final class AppState: ObservableObject {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundle: Bundle = .main,
         propertyListRepository: (any PropertyListRepository)? = nil,
+        propertyWriteRepository: (any PropertyWriteRepository)? = nil,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride? = nil,
@@ -8996,6 +9004,7 @@ final class AppState: ObservableObject {
         #endif
         self.cloudBackupStatus = cloudBackupManager?.status ?? Self.unavailableCloudBackupStatus
         self.propertyListRepositoryOverride = propertyListRepository
+        self.propertyWriteRepositoryOverride = propertyWriteRepository
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.propertyStatusBootstrapOverride = propertyStatusBootstrapOverride
@@ -12394,7 +12403,7 @@ final class AppState: ObservableObject {
     private func requiresRemotePropertyCreate(for orgID: UUID) -> Bool {
         backendFeatureFlags.supabaseEnabled &&
         backendFeatureFlags.supabasePropertyReadEnabled &&
-        supabaseClient != nil &&
+        propertyWriteRepository != nil &&
         isOrganizationContextReady &&
         activeOrganizationID == orgID
     }
@@ -13716,7 +13725,7 @@ final class AppState: ObservableObject {
 
     private func remotePropertyCreatePathAvailable(for orgID: UUID) -> Bool {
         guard requiresRemotePropertyCreate(for: orgID),
-              supabaseClient != nil,
+              propertyWriteRepository != nil,
               isOrganizationContextReady,
               activeOrganizationID == orgID else {
             return false
@@ -34902,6 +34911,7 @@ final class AppState: ObservableObject {
 
             let canAttemptRemoteWrite =
                 self.propertyShadowWriteOverride != nil ||
+                self.propertyWriteRepositoryOverride != nil ||
                 self.remoteMutationPathAvailable(for: orgID)
             guard canAttemptRemoteWrite else {
                 self.enqueueOfflineMutation(queuedMutation, reason: "remote_unavailable")
@@ -36198,14 +36208,14 @@ final class AppState: ObservableObject {
         orgID: UUID,
         profile: CaptureProfile
     ) async throws {
-        guard let client = supabaseClient else { return }
-        let payload = makeCaptureProfileUpdatePayload(profile: profile)
-        try await client
-            .from("properties")
-            .update(payload, returning: .minimal)
-            .eq("id", value: propertyID.uuidString.lowercased())
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .execute()
+        guard let repository = propertyWriteRepository else { return }
+        _ = try await repository.updateCaptureProfile(
+            propertyID: propertyID,
+            organizationID: orgID,
+            profile: profile.rawValue,
+            updatedBy: authenticatedSupabaseUser?.id,
+            verify: false
+        )
     }
 
     private func backfillPropertyCaptureProfileInSupabase(
@@ -36213,19 +36223,27 @@ final class AppState: ObservableObject {
         orgID: UUID,
         profile: CaptureProfile
     ) async throws -> SupabaseCaptureProfileUpdateResult {
-        guard let client = supabaseClient else {
+        guard let repository = propertyWriteRepository else {
             throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 0, userInfo: [
-                NSLocalizedDescriptionKey: "Missing Supabase client for property capture_profile backfill."
+                NSLocalizedDescriptionKey: "Missing property writer for capture_profile backfill."
             ])
         }
-        let payload = makeCaptureProfileUpdatePayload(profile: profile)
-        let rows = try await client
-            .from("properties")
-            .update(payload, returning: .representation)
-            .eq("id", value: propertyID.uuidString.lowercased())
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .execute()
-            .value as [SupabaseCaptureProfileUpdateResult]
+        let results = try await repository.updateCaptureProfile(
+            propertyID: propertyID,
+            organizationID: orgID,
+            profile: profile.rawValue,
+            updatedBy: authenticatedSupabaseUser?.id,
+            verify: true
+        )
+        let rows = results.map {
+            SupabaseCaptureProfileUpdateResult(
+                id: $0.id,
+                orgID: $0.organizationID,
+                propertyID: nil,
+                captureProfile: $0.captureProfile,
+                updatedBy: $0.updatedBy
+            )
+        }
         return try validateCaptureProfileUpdateResult(
             rows,
             table: "properties",
@@ -36300,7 +36318,7 @@ final class AppState: ObservableObject {
     }
 
     private func upsertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
-        guard let client = supabaseClient else {
+        guard let repository = propertyWriteRepository else {
             let diagnosticParts = [
                 "[PropertyUpsertDiag] event=upsert_skipped ",
                 "reason=missing_client ",
@@ -36322,7 +36340,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        let clientAuth = await supabaseClientAuthDiagnostic(client)
+        let clientAuth = await supabaseClientAuthDiagnostic(supabaseClient)
         let attemptDiagnosticParts = [
             "[PropertyUpsertDiag] event=upsert_attempt ",
             "propertyID=\(payload.id.uuidString) ",
@@ -36345,10 +36363,7 @@ final class AppState: ObservableObject {
         print(attemptDiagnosticParts.joined())
 
         do {
-            try await client
-                .from("properties")
-                .upsert(payload, onConflict: "id", returning: .minimal)
-                .execute()
+            try await repository.upsert(payload.propertyWriteRecord)
             print(
                 "[PropertyUpsertDiag] event=upsert_success " +
                 "propertyID=\(payload.id.uuidString) " +
@@ -36383,7 +36398,7 @@ final class AppState: ObservableObject {
     }
 
     private func insertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
-        guard let client = supabaseClient else {
+        guard let repository = propertyWriteRepository else {
             print(
                 "[PropertyInsertDiag] event=insert_skipped " +
                 "reason=missing_client " +
@@ -36403,7 +36418,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        let clientAuth = await supabaseClientAuthDiagnostic(client)
+        let clientAuth = await supabaseClientAuthDiagnostic(supabaseClient)
         print(
             "[PropertyInsertDiag] event=insert_attempt " +
             "propertyID=\(payload.id.uuidString) " +
@@ -36424,10 +36439,7 @@ final class AppState: ObservableObject {
         )
 
         do {
-            try await client
-                .from("properties")
-                .insert(payload, returning: .minimal)
-                .execute()
+            try await repository.insert(payload.propertyWriteRecord)
             print(
                 "[PropertyInsertDiag] event=insert_success " +
                 "propertyID=\(payload.id.uuidString) " +
@@ -59340,6 +59352,7 @@ final class AppState: ObservableObject {
                 )
                 let canAttemptRemoteWrite =
                     self.propertyShadowWriteOverride != nil ||
+                    self.propertyWriteRepositoryOverride != nil ||
                     self.remoteMutationPathAvailable(for: orgID)
                 guard canAttemptRemoteWrite else {
                     print(
@@ -60377,7 +60390,7 @@ final class AppState: ObservableObject {
               let existing = allProperties.first(where: { $0.id == id }) ?? properties.first(where: { $0.id == id }) else {
             throw PropertySoftDeleteError.propertyNotFound
         }
-        guard supabaseClient != nil,
+        guard propertyWriteRepository != nil,
               let orgID = activeOrganizationID,
               authenticatedSupabaseUser != nil,
               isOrganizationContextReady else {
@@ -60487,12 +60500,11 @@ final class AppState: ObservableObject {
             return
         }
 #endif
-        guard let client = supabaseClient else {
+        guard let repository = propertyWriteRepository else {
             throw PropertySoftDeleteError.missingAuthenticatedContext
         }
-        let params = SoftDeletePropertyRPCPayload(targetPropertyID: propertyID)
         do {
-            _ = try await (try client.rpc("soft_delete_property", params: params)).execute()
+            try await repository.softDelete(propertyID: propertyID)
         } catch {
             throw normalizedSoftDeleteRPCError(error)
         }
@@ -60999,7 +61011,7 @@ final class AppState: ObservableObject {
     }
 
     private func performRemoteRestoreProperty(id: UUID) async throws {
-        guard supabaseClient != nil,
+        guard propertyWriteRepository != nil,
               activeOrganizationID != nil,
               authenticatedSupabaseUser != nil,
               isOrganizationContextReady else {
@@ -61024,11 +61036,10 @@ final class AppState: ObservableObject {
     }
 
     private func callRestorePropertyRPC(propertyID: UUID) async throws {
-        guard let client = supabaseClient else {
+        guard let repository = propertyWriteRepository else {
             throw PropertySoftDeleteError.missingAuthenticatedContext
         }
-        let params = RestorePropertyRPCPayload(targetPropertyID: propertyID)
-        _ = try await (try client.rpc("restore_property", params: params)).execute()
+        try await repository.restore(propertyID: propertyID)
     }
 
     @discardableResult
