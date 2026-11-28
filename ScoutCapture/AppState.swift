@@ -7400,50 +7400,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct RemotePropertyRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let folderID: String?
-        let captureProfile: String?
-        let clientName: String?
-        let clientEmail: String?
-        let clientPhone: String?
-        let name: String
-        let addressLine1: String
-        let city: String
-        let state: String
-        let postalCode: String
-        let baselineSessionID: UUID?
-        let isArchived: Bool
-        let deletedAt: Date?
-        let createdAt: Date?
-        let updatedAt: Date
-        let updatedBy: UUID?
-        let revision: Int64?
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case folderID = "folder_id"
-            case captureProfile = "capture_profile"
-            case clientName = "client_name"
-            case clientEmail = "client_email"
-            case clientPhone = "client_phone"
-            case name
-            case addressLine1 = "address_line1"
-            case city
-            case state
-            case postalCode = "postal_code"
-            case baselineSessionID = "baseline_session_id"
-            case isArchived = "is_archived"
-            case deletedAt = "deleted_at"
-            case createdAt = "created_at"
-            case updatedAt = "updated_at"
-            case updatedBy = "updated_by"
-            case revision
-        }
-    }
-
     private struct RemotePropertyFreshnessRecord: Decodable {
         let id: UUID
         let orgID: UUID
@@ -8593,6 +8549,7 @@ final class AppState: ObservableObject {
     private let injectedLocalStore: LocalStore?
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
+    private let propertyListRepositoryOverride: (any PropertyListRepository)?
     private let userDefaults: UserDefaults
     private let cachedDeviceIdentifier: String
     private let cloudBackupManager: CloudBackupManager?
@@ -9002,6 +8959,7 @@ final class AppState: ObservableObject {
         userDefaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundle: Bundle = .main,
+        propertyListRepository: (any PropertyListRepository)? = nil,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride? = nil,
@@ -9037,6 +8995,7 @@ final class AppState: ObservableObject {
         self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
         #endif
         self.cloudBackupStatus = cloudBackupManager?.status ?? Self.unavailableCloudBackupStatus
+        self.propertyListRepositoryOverride = propertyListRepository
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.propertyStatusBootstrapOverride = propertyStatusBootstrapOverride
@@ -42040,43 +41999,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func fetchRemotePropertyList(activeOrganizationID: UUID) async throws -> [RemotePropertyRecord] {
-        guard let client = supabaseClient else {
+    private func fetchRemotePropertyList(activeOrganizationID: UUID) async throws -> [PropertyListRecord] {
+        let repository: any PropertyListRepository
+        if let propertyListRepositoryOverride {
+            repository = propertyListRepositoryOverride
+        } else if let client = supabaseClient {
+            repository = SupabasePropertyListRepository(client: client)
+        } else {
             throw RemotePropertyFetchError.missingClient
         }
 
-        return try await withThrowingTaskGroup(of: [RemotePropertyRecord].self) { group in
+        return try await withThrowingTaskGroup(of: [PropertyListRecord].self) { group in
             group.addTask {
-                try await client
-                    .from("properties")
-                    .select(
-                        """
-                        id,
-                        org_id,
-                        folder_id,
-                        capture_profile,
-                        client_name,
-                        client_email,
-                        client_phone,
-                        name,
-                        address_line1,
-                        city,
-                        state,
-                        postal_code,
-                        baseline_session_id,
-                        is_archived,
-                        deleted_at,
-                        created_at,
-                        updated_at,
-                        updated_by,
-                        revision
-                        """
-                    )
-                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                    .execute()
-                    .value as [RemotePropertyRecord]
+                try await repository.fetchProperties(organizationID: activeOrganizationID)
             }
-
             group.addTask {
                 try await Task.sleep(nanoseconds: 3_000_000_000)
                 throw RemotePropertyFetchError.timedOut
@@ -42091,10 +42027,10 @@ final class AppState: ObservableObject {
     }
 
     private func validateRemotePropertyResponse(
-        records: [RemotePropertyRecord],
+        records: [PropertyListRecord],
         localCacheCount: Int,
         activeOrganizationID: UUID
-    ) throws -> [RemotePropertyRecord] {
+    ) throws -> [PropertyListRecord] {
         if localCacheCount > 0 &&
             records.isEmpty &&
             !isPropertyScopedOrganization(activeOrganizationID) {
@@ -42290,7 +42226,7 @@ final class AppState: ObservableObject {
     }
 
     private func makeRemotePropertyRefreshPayload(
-        validatedRecords: [RemotePropertyRecord],
+        validatedRecords: [PropertyListRecord],
         requestedOrganizationID: UUID
     ) throws -> PropertyRefreshPayload {
         let normalizedRecords = try normalizedRemotePropertyRecordsForPayload(
@@ -42341,9 +42277,9 @@ final class AppState: ObservableObject {
     }
 
     private func normalizedRemotePropertyRecordsForPayload(
-        _ records: [RemotePropertyRecord],
+        _ records: [PropertyListRecord],
         requestedOrganizationID: UUID
-    ) throws -> [RemotePropertyRecord] {
+    ) throws -> [PropertyListRecord] {
         let sortedRecords = records.sorted { lhs, rhs in
             lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
         }
@@ -42398,7 +42334,7 @@ final class AppState: ObservableObject {
         return value >= minimum && value <= maximum
     }
 
-    private func resolvedRemotePropertyCreatedAt(for record: RemotePropertyRecord) throws -> Date {
+    private func resolvedRemotePropertyCreatedAt(for record: PropertyListRecord) throws -> Date {
         if let createdAt = record.createdAt {
             return createdAt
         }
@@ -42439,7 +42375,7 @@ final class AppState: ObservableObject {
     }
 
     private func remotePropertyFingerprint(
-        for records: [RemotePropertyRecord],
+        for records: [PropertyListRecord],
         activeOrganizationID: UUID
     ) throws -> String {
         let formatter = ISO8601DateFormatter()
@@ -64299,13 +64235,18 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    func _debugFetchRemotePropertyListForTests(organizationID: UUID) async throws -> [PropertyListRecord] {
+        try await fetchRemotePropertyList(activeOrganizationID: organizationID)
+    }
+
+    @MainActor
     func _debugMakeRemotePropertyRefreshPayloadForTests(
         records: [DebugRemotePropertyRecordInput],
         orgID: UUID
     ) throws -> [Property] {
         try makeRemotePropertyRefreshPayload(
             validatedRecords: records.map {
-                RemotePropertyRecord(
+                PropertyListRecord(
                     id: $0.id,
                     orgID: $0.orgID,
                     folderID: $0.folderID,
