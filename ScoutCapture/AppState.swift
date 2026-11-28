@@ -6655,22 +6655,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SoftDeleteSessionRPCPayload: Encodable {
-        let targetSessionID: UUID
-
-        enum CodingKeys: String, CodingKey {
-            case targetSessionID = "target_session_id"
-        }
-    }
-
-    private struct RestoreSessionRPCPayload: Encodable {
-        let targetSessionID: UUID
-
-        enum CodingKeys: String, CodingKey {
-            case targetSessionID = "target_session_id"
-        }
-    }
-
     private struct FetchRecentlyDeletedSessionsRPCPayload: Encodable {
         let targetOrgID: UUID
         let targetPropertyID: UUID?
@@ -6718,6 +6702,28 @@ final class AppState: ObservableObject {
         let lockedAt: String?
         let coordinationTier1Snapshot: String?
 
+        var sessionWriteRecord: SessionWriteRecord {
+            SessionWriteRecord(
+                id: id,
+                organizationID: orgID,
+                propertyID: propertyID,
+                title: title,
+                status: status,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                exportedAt: exportedAt,
+                isSealed: isSealed,
+                firstDeliveredAt: firstDeliveredAt,
+                reExportExpiresAt: reExportExpiresAt,
+                captureProfile: captureProfile,
+                updatedBy: updatedBy,
+                lockedByUserID: lockedByUserID,
+                lockedByDeviceID: lockedByDeviceID,
+                lockedAt: lockedAt,
+                coordinationTier1Snapshot: coordinationTier1Snapshot
+            )
+        }
+
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
@@ -6736,36 +6742,6 @@ final class AppState: ObservableObject {
             case lockedByDeviceID = "locked_by_device_id"
             case lockedAt = "locked_at"
             case coordinationTier1Snapshot = "coordination_tier1_snapshot"
-        }
-    }
-
-    private struct SupabaseSessionLifecycleReplayPayload: Encodable {
-        let status: String
-        let completedAt: String?
-        let exportedAt: String?
-        let firstDeliveredAt: String?
-
-        enum CodingKeys: String, CodingKey {
-            case status
-            case completedAt = "completed_at"
-            case exportedAt = "exported_at"
-            case firstDeliveredAt = "first_delivered_at"
-        }
-    }
-
-    private struct SupabaseSessionLifecycleReplayUpdateResult: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String?
-        let updatedAt: Date?
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case updatedAt = "updated_at"
         }
     }
 
@@ -6794,28 +6770,6 @@ final class AppState: ObservableObject {
             case reExportExpiresAt = "re_export_expires_at"
             case updatedAt = "updated_at"
             case deletedAt = "deleted_at"
-        }
-    }
-
-    private struct SupabaseSessionEnsureInsertPayload: Encodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let title: String?
-        let status: String
-        let startedAt: String
-        let completedAt: String?
-        let updatedBy: UUID
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case title
-            case status
-            case startedAt = "started_at"
-            case completedAt = "completed_at"
-            case updatedBy = "updated_by"
         }
     }
 
@@ -8551,6 +8505,11 @@ final class AppState: ObservableObject {
     private let injectedLocalStore: LocalStore?
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
+    private let sessionWriteRepositoryOverride: (any SessionWriteRepository)?
+    private var sessionWriteRepository: (any SessionWriteRepository)? {
+        if let sessionWriteRepositoryOverride { return sessionWriteRepositoryOverride }
+        return supabaseClient.map { SupabaseSessionWriteRepository(client: $0) }
+    }
     private let propertyWriteRepositoryOverride: (any PropertyWriteRepository)?
     private var propertyWriteRepository: (any PropertyWriteRepository)? {
         if let propertyWriteRepositoryOverride { return propertyWriteRepositoryOverride }
@@ -8968,6 +8927,7 @@ final class AppState: ObservableObject {
         bundle: Bundle = .main,
         propertyListRepository: (any PropertyListRepository)? = nil,
         propertyWriteRepository: (any PropertyWriteRepository)? = nil,
+        sessionWriteRepository: (any SessionWriteRepository)? = nil,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride? = nil,
@@ -9005,6 +8965,7 @@ final class AppState: ObservableObject {
         self.cloudBackupStatus = cloudBackupManager?.status ?? Self.unavailableCloudBackupStatus
         self.propertyListRepositoryOverride = propertyListRepository
         self.propertyWriteRepositoryOverride = propertyWriteRepository
+        self.sessionWriteRepositoryOverride = sessionWriteRepository
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.propertyStatusBootstrapOverride = propertyStatusBootstrapOverride
@@ -28170,12 +28131,12 @@ final class AppState: ObservableObject {
     static func normalizedSessionLifecycleReplayPayloadKeysTestOnly(
         row: NormalizedSessionLifecycleReplayRow
     ) throws -> Set<String> {
-        let payload = SupabaseSessionLifecycleReplayPayload(
+        let payload = SupabaseSessionLifecyclePayload(lifecycle: SessionLifecycleWrite(
             status: row.status,
             completedAt: row.completedAt?.ISO8601Format(),
             exportedAt: row.exportedAt?.ISO8601Format(),
             firstDeliveredAt: row.firstDeliveredAt?.ISO8601Format()
-        )
+        ))
         let data = try JSONEncoder().encode(payload)
         let object = try JSONSerialization.jsonObject(with: data)
         guard let dictionary = object as? [String: Any] else { return [] }
@@ -34996,7 +34957,10 @@ final class AppState: ObservableObject {
                 return
             }
 
-            guard self.remoteMutationPathAvailable(for: orgID) else {
+            let canAttemptRemoteWrite =
+                self.remoteMutationPathAvailable(for: orgID) ||
+                (self.sessionWriteRepositoryOverride != nil && self.propertyWriteRepository != nil)
+            guard canAttemptRemoteWrite else {
                 self.enqueueOfflineMutation(queuedMutation, reason: "remote_unavailable")
                 return
             }
@@ -35612,10 +35576,12 @@ final class AppState: ObservableObject {
         )
 
         do {
-            try await client
-                .from("sessions")
-                .insert(insertPayload, returning: .minimal)
-                .execute()
+            guard let repository = sessionWriteRepository else {
+                throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 5, userInfo: [
+                    NSLocalizedDescriptionKey: "Missing session writer for parent-row insertion."
+                ])
+            }
+            try await repository.insert(insertPayload)
             print(
                 "[SupabaseSessionEnsure] result=success " +
                 "strategy=insert " +
@@ -36141,10 +36107,10 @@ final class AppState: ObservableObject {
         property: Property?,
         metadata: SessionMetadata,
         updatedBy: UUID
-    ) -> SupabaseSessionEnsureInsertPayload {
-        SupabaseSessionEnsureInsertPayload(
+    ) -> SessionInsertRecord {
+        SessionInsertRecord(
             id: sessionID,
-            orgID: orgID,
+            organizationID: orgID,
             propertyID: propertyID,
             title: normalizedSupabaseText(metadata.propertyNameAtCapture ?? property?.name),
             status: metadata.status.rawValue,
@@ -36260,20 +36226,27 @@ final class AppState: ObservableObject {
         orgID: UUID,
         profile: CaptureProfile
     ) async throws -> SupabaseCaptureProfileUpdateResult {
-        guard let client = supabaseClient else {
+        guard let repository = sessionWriteRepository else {
             throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 0, userInfo: [
-                NSLocalizedDescriptionKey: "Missing Supabase client for session capture_profile update."
+                NSLocalizedDescriptionKey: "Missing session writer for capture_profile update."
             ])
         }
-        let payload = makeCaptureProfileUpdatePayload(profile: profile)
-        let rows = try await client
-            .from("sessions")
-            .update(payload, returning: .representation)
-            .eq("id", value: sessionID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .execute()
-            .value as [SupabaseCaptureProfileUpdateResult]
+        let results = try await repository.updateCaptureProfile(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            organizationID: orgID,
+            profile: profile.rawValue,
+            updatedBy: authenticatedSupabaseUser?.id
+        )
+        let rows = results.map {
+            SupabaseCaptureProfileUpdateResult(
+                id: $0.id,
+                orgID: $0.organizationID,
+                propertyID: $0.propertyID,
+                captureProfile: $0.captureProfile,
+                updatedBy: $0.updatedBy
+            )
+        }
         return try validateCaptureProfileUpdateResult(
             rows,
             table: "sessions",
@@ -36472,11 +36445,8 @@ final class AppState: ObservableObject {
     }
 
     private func upsertSessionRowToSupabase(_ payload: SupabaseSessionPayload) async throws {
-        guard let client = supabaseClient else { return }
-        try await client
-            .from("sessions")
-            .upsert(payload, onConflict: "id", returning: .minimal)
-            .execute()
+        guard let repository = sessionWriteRepository else { return }
+        try await repository.upsert(payload.sessionWriteRecord)
     }
 
     private func updateSessionRowToSupabase(
@@ -36484,14 +36454,12 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         orgID: UUID
     ) async throws {
-        guard let client = supabaseClient else { return }
-        try await client
-            .from("sessions")
-            .update(payload, returning: .minimal)
-            .eq("id", value: payload.id.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .execute()
+        guard let repository = sessionWriteRepository else { return }
+        try await repository.update(
+            payload.sessionWriteRecord,
+            propertyID: propertyID,
+            organizationID: orgID
+        )
     }
 
     @MainActor
@@ -36718,9 +36686,9 @@ final class AppState: ObservableObject {
     private func updateSessionLifecycleRowToSupabaseFailClosed(
         _ row: NormalizedSessionLifecycleReplayRow
     ) async throws -> NormalizedSessionLifecycleReplayWriteSummary {
-        guard let client = supabaseClient else {
+        guard let repository = sessionWriteRepository else {
             throw NSError(domain: "ScoutCapture.SessionLifecycleReplay", code: 0, userInfo: [
-                NSLocalizedDescriptionKey: "Missing Supabase client for session lifecycle replay."
+                NSLocalizedDescriptionKey: "Missing session writer for lifecycle replay."
             ])
         }
         guard let latestRemoteSession = await fetchRemoteSessionLifecycleReplayRowIfAvailable(
@@ -36740,24 +36708,21 @@ final class AppState: ObservableObject {
         ) {
             return preflightResult
         }
-        let payload = SupabaseSessionLifecycleReplayPayload(
+        let lifecycle = SessionLifecycleWrite(
             status: row.status,
             completedAt: row.completedAt?.ISO8601Format(),
             exportedAt: row.exportedAt?.ISO8601Format(),
             firstDeliveredAt: row.firstDeliveredAt?.ISO8601Format()
         )
-        let rows = try await client
-            .from("sessions")
-            .update(payload, returning: .representation)
-            .eq("id", value: row.sessionID.uuidString.lowercased())
-            .eq("org_id", value: row.orgID.uuidString.lowercased())
-            .eq("property_id", value: row.propertyID.uuidString.lowercased())
-            .is("deleted_at", value: nil)
-            .execute()
-            .value as [SupabaseSessionLifecycleReplayUpdateResult]
+        let rows = try await repository.updateLifecycle(
+            lifecycle,
+            sessionID: row.sessionID,
+            propertyID: row.propertyID,
+            organizationID: row.orgID
+        )
         guard rows.count == 1,
               rows[0].id == row.sessionID,
-              rows[0].orgID == row.orgID,
+              rows[0].organizationID == row.orgID,
               rows[0].propertyID == row.propertyID,
               Self.normalizedReplayStatus(rows[0].status) == Self.normalizedReplayStatus(row.status) else {
             throw NSError(domain: "ScoutCapture.SessionLifecycleReplay", code: 1, userInfo: [
@@ -60586,7 +60551,7 @@ final class AppState: ObservableObject {
                 .first(where: { $0.id == sessionID }) else {
             throw SessionSoftDeleteError.sessionNotFound
         }
-        guard supabaseClient != nil,
+        guard sessionWriteRepository != nil,
               let orgID = activeOrganizationID,
               authenticatedSupabaseUser != nil,
               isOrganizationContextReady else {
@@ -60823,12 +60788,11 @@ final class AppState: ObservableObject {
             return
         }
 #endif
-        guard let client = supabaseClient else {
+        guard let repository = sessionWriteRepository else {
             throw SessionSoftDeleteError.missingAuthenticatedContext
         }
-        let params = SoftDeleteSessionRPCPayload(targetSessionID: sessionID)
         do {
-            _ = try await (try client.rpc("soft_delete_session", params: params)).execute()
+            try await repository.softDelete(sessionID: sessionID)
         } catch {
             throw normalizedSoftDeleteSessionRPCError(error)
         }
@@ -60907,7 +60871,7 @@ final class AppState: ObservableObject {
     }
 
     private func performRemoteRestoreSession(_ deletedSession: RecentlyDeletedSession) async throws {
-        guard supabaseClient != nil,
+        guard sessionWriteRepository != nil,
               activeOrganizationID == deletedSession.orgID,
               authenticatedSupabaseUser != nil,
               isOrganizationContextReady else {
@@ -60936,11 +60900,10 @@ final class AppState: ObservableObject {
     }
 
     private func callRestoreSessionRPC(sessionID: UUID) async throws {
-        guard let client = supabaseClient else {
+        guard let repository = sessionWriteRepository else {
             throw SessionSoftDeleteError.missingAuthenticatedContext
         }
-        let params = RestoreSessionRPCPayload(targetSessionID: sessionID)
-        _ = try await (try client.rpc("restore_session", params: params)).execute()
+        try await repository.restore(sessionID: sessionID)
     }
 
     private func applyRemoteRestoredSessionLocally(_ deletedSession: RecentlyDeletedSession) {
@@ -63216,7 +63179,7 @@ final class AppState: ObservableObject {
             metadata: metadata,
             updatedBy: updatedBy
         )
-        return try Self.debugJSONObject(payload)
+        return try Self.debugJSONObject(SupabaseSessionInsertPayload(record: payload))
     }
 
     func _debugEncodeCaptureProfileSessionEnsurePayloadForTests(
@@ -63241,7 +63204,7 @@ final class AppState: ObservableObject {
             metadata: ensureMetadata,
             updatedBy: updatedBy
         )
-        return try Self.debugJSONObject(payload)
+        return try Self.debugJSONObject(SupabaseSessionInsertPayload(record: payload))
     }
 
     func _debugEncodeSessionUpsertPayloadForTests(
