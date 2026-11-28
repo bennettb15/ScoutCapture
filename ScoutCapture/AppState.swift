@@ -4531,43 +4531,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    struct RecentlyDeletedSession: Equatable, Identifiable, Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String
-        let startedAt: Date
-        let endedAt: Date?
-        let exportedAt: Date?
-        let isSealed: Bool
-        let firstDeliveredAt: Date?
-        let reExportExpiresAt: Date?
-        let notes: String?
-        var captureProfile: String? = nil
-        let deletedAt: Date
-        let updatedAt: Date
-        let updatedBy: UUID?
-        let revision: Int64
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case startedAt = "started_at"
-            case endedAt = "ended_at"
-            case exportedAt = "exported_at"
-            case isSealed = "is_sealed"
-            case firstDeliveredAt = "first_delivered_at"
-            case reExportExpiresAt = "re_export_expires_at"
-            case notes
-            case captureProfile = "capture_profile"
-            case deletedAt = "deleted_at"
-            case updatedAt = "updated_at"
-            case updatedBy = "updated_by"
-            case revision
-        }
-    }
+    typealias RecentlyDeletedSession = SessionRecentlyDeletedRecord
 
     struct PendingSupabaseMediaBackfillCandidate: Equatable {
         let propertyID: UUID
@@ -6337,17 +6301,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabaseActivitySessionLookupRecord: Decodable {
-        let id: UUID
-        let propertyID: UUID
-        let title: String?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case propertyID = "property_id"
-            case title
-        }
-    }
 
     private struct SessionIDOnlyRecord: Decodable {
         let id: UUID
@@ -6655,15 +6609,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct FetchRecentlyDeletedSessionsRPCPayload: Encodable {
-        let targetOrgID: UUID
-        let targetPropertyID: UUID?
 
-        enum CodingKeys: String, CodingKey {
-            case targetOrgID = "target_org_id"
-            case targetPropertyID = "target_property_id"
-        }
-    }
 
     private struct FetchRecentlyDeletedPropertiesRPCPayload: Encodable {
         let targetOrgID: UUID
@@ -6745,33 +6691,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct RemoteSessionLifecycleReplayRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String?
-        let completedAt: Date?
-        let exportedAt: Date?
-        let isSealed: Bool?
-        let firstDeliveredAt: Date?
-        let reExportExpiresAt: Date?
-        let updatedAt: Date?
-        let deletedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case completedAt = "completed_at"
-            case exportedAt = "exported_at"
-            case isSealed = "is_sealed"
-            case firstDeliveredAt = "first_delivered_at"
-            case reExportExpiresAt = "re_export_expires_at"
-            case updatedAt = "updated_at"
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct SupabaseObservationPayload: Encodable {
         let id: UUID
@@ -6976,39 +6896,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct RemoteSessionCoordinationRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String?
-        let completedAt: Date?
-        let exportedAt: Date?
-        let isSealed: Bool?
-        let firstDeliveredAt: Date?
-        let reExportExpiresAt: Date?
-        let lockedByUserID: UUID?
-        let lockedByDeviceID: String?
-        let lockedAt: String?
-        let coordinationTier1Snapshot: String?
-        let updatedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case completedAt = "completed_at"
-            case exportedAt = "exported_at"
-            case isSealed = "is_sealed"
-            case firstDeliveredAt = "first_delivered_at"
-            case reExportExpiresAt = "re_export_expires_at"
-            case lockedByUserID = "locked_by_user_id"
-            case lockedByDeviceID = "locked_by_device_id"
-            case lockedAt = "locked_at"
-            case coordinationTier1Snapshot = "coordination_tier1_snapshot"
-            case updatedAt = "updated_at"
-        }
-    }
 
     private struct PropertySessionOccupancyPayload: Codable {
         let propertyID: UUID
@@ -7044,53 +6932,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct RemotePropertySessionLockRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String?
-        let completedAt: Date?
-        let exportedAt: Date?
-        let isSealed: Bool?
-        let firstDeliveredAt: Date?
-        let lockedByUserID: UUID?
-        let lockedByDeviceID: String?
-        let lockedAt: String?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case completedAt = "completed_at"
-            case exportedAt = "exported_at"
-            case isSealed = "is_sealed"
-            case firstDeliveredAt = "first_delivered_at"
-            case lockedByUserID = "locked_by_user_id"
-            case lockedByDeviceID = "locked_by_device_id"
-            case lockedAt = "locked_at"
-        }
-    }
 
-    private struct RemoteSessionDeletePreflightRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let deletedAt: Date?
-        let lockedByUserID: UUID?
-        let lockedByDeviceID: String?
-        let lockedAt: String?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case deletedAt = "deleted_at"
-            case lockedByUserID = "locked_by_user_id"
-            case lockedByDeviceID = "locked_by_device_id"
-            case lockedAt = "locked_at"
-        }
-    }
 
     struct PropertyDeletePreflightSnapshot: Equatable {
         let occupancyCount: Int
@@ -7204,37 +7048,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct FastRuntimeReportRemoteSessionRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let title: String?
-        let status: String?
-        let startedAt: Date?
-        let completedAt: Date?
-        let exportedAt: Date?
-        let isSealed: Bool?
-        let firstDeliveredAt: Date?
-        let captureProfile: String?
-        let updatedBy: UUID?
-        let deletedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case title
-            case status
-            case startedAt = "started_at"
-            case completedAt = "completed_at"
-            case exportedAt = "exported_at"
-            case isSealed = "is_sealed"
-            case firstDeliveredAt = "first_delivered_at"
-            case captureProfile = "capture_profile"
-            case updatedBy = "updated_by"
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct DivergenceRemotePropertyRecord: Decodable {
         let id: UUID
@@ -7252,23 +7066,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct DivergenceRemoteSessionRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let captureProfile: String?
-        let updatedAt: Date?
-        let deletedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case captureProfile = "capture_profile"
-            case updatedAt = "updated_at"
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct DivergenceRemoteShotRecord: Decodable {
         let id: UUID
@@ -7430,85 +7228,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabaseSessionIdentityRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let title: String?
-        let status: String
-        let startedAt: String
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case title
-            case status
-            case startedAt = "started_at"
-        }
-    }
 
-    private struct RemoteSessionDeltaRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let title: String?
-        let status: String
-        let startedAt: String
-        let completedAt: String?
-        let exportedAt: Date?
-        let isSealed: Bool?
-        let firstDeliveredAt: Date?
-        let reExportExpiresAt: Date?
-        let captureProfile: String?
-        let updatedAt: Date
-        let updatedBy: UUID?
-        let revision: Int64?
-        let deletedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case title
-            case status
-            case startedAt = "started_at"
-            case completedAt = "completed_at"
-            case exportedAt = "exported_at"
-            case isSealed = "is_sealed"
-            case firstDeliveredAt = "first_delivered_at"
-            case reExportExpiresAt = "re_export_expires_at"
-            case captureProfile = "capture_profile"
-            case updatedAt = "updated_at"
-            case updatedBy = "updated_by"
-            case revision
-            case deletedAt = "deleted_at"
-        }
-    }
 
-    private struct RemoteOnlySessionDetailSessionRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String
-        let startedAt: String
-        let completedAt: String?
-        let captureProfile: String?
-        let updatedAt: Date?
-        let deletedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case startedAt = "started_at"
-            case completedAt = "completed_at"
-            case captureProfile = "capture_profile"
-            case updatedAt = "updated_at"
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct RemoteOnlySessionDetailShotRecord: Decodable {
         let id: UUID
@@ -7565,25 +7289,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct CanonicalReadRemoteSessionRecord: Decodable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
-        let status: String?
-        let updatedAt: Date?
-        let revision: Int64?
-        let deletedAt: Date?
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-            case status
-            case updatedAt = "updated_at"
-            case revision
-            case deletedAt = "deleted_at"
-        }
-    }
 
     private struct CanonicalReadRemoteShotRecord: Decodable {
         let id: UUID
@@ -8505,6 +8211,11 @@ final class AppState: ObservableObject {
     private let injectedLocalStore: LocalStore?
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
+    private let sessionReadRepositoryOverride: (any SessionReadRepository)?
+    private var sessionReadRepository: (any SessionReadRepository)? {
+        if let sessionReadRepositoryOverride { return sessionReadRepositoryOverride }
+        return supabaseClient.map { SupabaseSessionReadRepository(client: $0) }
+    }
     private let sessionWriteRepositoryOverride: (any SessionWriteRepository)?
     private var sessionWriteRepository: (any SessionWriteRepository)? {
         if let sessionWriteRepositoryOverride { return sessionWriteRepositoryOverride }
@@ -8928,6 +8639,7 @@ final class AppState: ObservableObject {
         propertyListRepository: (any PropertyListRepository)? = nil,
         propertyWriteRepository: (any PropertyWriteRepository)? = nil,
         sessionWriteRepository: (any SessionWriteRepository)? = nil,
+        sessionReadRepository: (any SessionReadRepository)? = nil,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride? = nil,
@@ -8966,6 +8678,7 @@ final class AppState: ObservableObject {
         self.propertyListRepositoryOverride = propertyListRepository
         self.propertyWriteRepositoryOverride = propertyWriteRepository
         self.sessionWriteRepositoryOverride = sessionWriteRepository
+        self.sessionReadRepositoryOverride = sessionReadRepository
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.propertyStatusBootstrapOverride = propertyStatusBootstrapOverride
@@ -10321,15 +10034,9 @@ final class AppState: ObservableObject {
 
         let sessionIDFilterValues: [String]
         if let propertyID {
-            let propertySessionIDs = try await client
-                .from("sessions")
-                .select("id")
-                .eq("org_id", value: orgValue)
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .execute()
-                .value as [SessionIDOnlyRecord]
+            let propertySessionIDs = try await sessionReadRepository!.ids(organizationID: orgID, propertyID: propertyID, sessionID: nil)
 
-            sessionIDFilterValues = propertySessionIDs.map { $0.id.uuidString.lowercased() }
+            sessionIDFilterValues = propertySessionIDs.map { $0.uuidString.lowercased() }
         } else {
             sessionIDFilterValues = []
         }
@@ -10391,10 +10098,7 @@ final class AppState: ObservableObject {
         }
 
         let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID) + localRecords.compactMap(\.sessionID)))
-        let sessionLookupByID = try await fetchActivitySessionLookupByID(
-            sessionIDs: eventSessionIDs,
-            client: client
-        )
+        let sessionLookupByID = try await fetchActivitySessionLookupByID(sessionIDs: eventSessionIDs)
 
         let remoteItems = eventRecords.map { record in
             makeActivityFeedItem(
@@ -10623,17 +10327,12 @@ final class AppState: ObservableObject {
     }
 
     private func fetchActivitySessionLookupByID(
-        sessionIDs: [UUID],
-        client: SupabaseClient
-    ) async throws -> [UUID: SupabaseActivitySessionLookupRecord] {
+        sessionIDs: [UUID]
+    ) async throws -> [UUID: SessionActivityLookupRecord] {
         guard !sessionIDs.isEmpty else { return [:] }
 
-        let rows = try await client
-            .from("sessions")
-            .select("id, property_id, title")
-            .in("id", values: sessionIDs.map(\.uuidString))
-            .execute()
-            .value as [SupabaseActivitySessionLookupRecord]
+        guard let reader = sessionReadRepository else { return [:] }
+        let rows = try await reader.activityLookup(ids: sessionIDs)
 
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
     }
@@ -10647,7 +10346,7 @@ final class AppState: ObservableObject {
         eventType: String,
         payload: [String: AnyJSON],
         createdAt: Date,
-        sessionLookup: SupabaseActivitySessionLookupRecord?
+        sessionLookup: SessionActivityLookupRecord?
     ) -> ActivityFeedItem {
         let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
             ?? propertyID.flatMap { activityPropertyName(for: $0) }
@@ -12484,20 +12183,10 @@ final class AppState: ObservableObject {
                 .value as [RemotePropertyDeltaRecord]
         }()
 
-        async let sessionFetch: [RemoteSessionDeltaRecord] = {
-            var query = client
-                .from("sessions")
-                .select("id, org_id, property_id, title, status, started_at, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, capture_profile, updated_at, updated_by, revision, deleted_at")
-                .eq("org_id", value: orgValue)
-            if let sessionCursor {
-                query = query.gt("updated_at", value: supabaseTimestampString(sessionCursor))
-            }
-            return try await query
-                .order("updated_at", ascending: true)
-                .limit(500)
-                .execute()
-                .value as [RemoteSessionDeltaRecord]
-        }()
+        async let sessionFetch: [RemoteSessionDeltaRecord] = sessionReadRepository!.delta(
+            organizationID: orgID,
+            updatedAfter: sessionCursor
+        )
 
         return try await (propertyFetch, sessionFetch)
     }
@@ -13492,21 +13181,17 @@ final class AppState: ObservableObject {
         orgID: UUID,
         localUpdatedAt: Date
     ) async {
-        guard let client = supabaseClient else { return }
+        guard let reader = sessionReadRepository else { return }
 
         do {
-            let rows = try await client
-                .from("sessions")
-                .select("id, updated_at")
-                .eq("id", value: sessionID.uuidString.lowercased())
-                .eq("org_id", value: orgID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value as [SupabaseRowUpdatedAtRecord]
+            let remoteUpdatedAt = try await reader.updatedAt(
+                sessionID: sessionID,
+                propertyID: propertyID,
+                organizationID: orgID
+            )
 
-            if let remote = rows.first,
-               remote.updatedAt < localUpdatedAt {
+            if let remoteUpdatedAt,
+               remoteUpdatedAt < localUpdatedAt {
                 print("[SyncApply] conflictsDetected=1 reason=post_write_divergence")
             }
         } catch {
@@ -13970,13 +13655,7 @@ final class AppState: ObservableObject {
                 .execute()
                 .value
 
-            async let sessions: [DivergenceRemoteSessionRecord] = client
-                .from("sessions")
-                .select("id, org_id, property_id, capture_profile, updated_at, deleted_at")
-                .eq("org_id", value: orgValue)
-                .limit(1_000)
-                .execute()
-                .value
+            async let sessions: [DivergenceRemoteSessionRecord] = sessionReadRepository!.divergence(organizationID: activeOrganizationID)
 
             async let shots: [DivergenceRemoteShotRecord] = client
                 .from("shots")
@@ -14032,13 +13711,7 @@ final class AppState: ObservableObject {
                 .execute()
                 .value
 
-            async let sessions: [RemoteOnlySessionDetailSessionRecord] = client
-                .from("sessions")
-                .select("id, org_id, property_id, status, started_at, completed_at, capture_profile, updated_at, deleted_at")
-                .eq("org_id", value: orgValue)
-                .limit(1_000)
-                .execute()
-                .value
+            async let sessions: [RemoteOnlySessionDetailSessionRecord] = sessionReadRepository!.remoteOnlyDetails(organizationID: activeOrganizationID)
 
             async let shots: [RemoteOnlySessionDetailShotRecord] = client
                 .from("shots")
@@ -14094,20 +13767,11 @@ final class AppState: ObservableObject {
                 .execute()
                 .value
 
-            async let sessions: [CanonicalReadRemoteSessionRecord] = {
-                var query = client
-                    .from("sessions")
-                    .select("id, org_id, property_id, status, updated_at, revision, deleted_at")
-                    .eq("org_id", value: orgValue)
-                    .eq("property_id", value: propertyValue)
-                if let sessionValue {
-                    query = query.eq("id", value: sessionValue)
-                }
-                return try await query
-                    .limit(25)
-                    .execute()
-                    .value as [CanonicalReadRemoteSessionRecord]
-            }()
+            async let sessions: [CanonicalReadRemoteSessionRecord] = sessionReadRepository!.canonical(
+                organizationID: activeOrganizationID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
 
             async let shots: [CanonicalReadRemoteShotRecord] = {
                 guard let sessionValue else { return [] }
@@ -16893,17 +16557,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SessionSnapshotRemoteSessionPreflightRow: Codable {
-        let id: UUID
-        let orgID: UUID
-        let propertyID: UUID
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case orgID = "org_id"
-            case propertyID = "property_id"
-        }
-    }
 
     private func sessionSnapshotRemoteParentPreflightStatus(
         orgID: UUID,
@@ -16927,17 +16581,9 @@ final class AppState: ObservableObject {
             .limit(1)
             .execute()
             .value
-        let sessions: [SessionSnapshotRemoteSessionPreflightRow] = try await client
-            .from("sessions")
-            .select("id, org_id, property_id")
-            .eq("id", value: sessionID.uuidString.lowercased())
-            .is("deleted_at", value: nil)
-            .limit(1)
-            .execute()
-            .value
+        let session = try await sessionReadRepository!.activeParent(sessionID: sessionID)
 
         let property = properties.first
-        let session = sessions.first
         let sessionPropertyIDMatches = session?.propertyID == propertyID
         return SessionSnapshotAuthPreflightRemoteParentStatus(
             propertyExists: property != nil,
@@ -35536,15 +35182,7 @@ final class AppState: ObservableObject {
         )
 
         do {
-            let existingRows = try await client
-                .from("sessions")
-                .select("id")
-                .eq("id", value: sessionID.uuidString.lowercased())
-                .eq("org_id", value: orgID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value as [SessionIDOnlyRecord]
+            let existingRows = try await sessionReadRepository!.ids(organizationID: orgID, propertyID: propertyID, sessionID: sessionID)
 
             if !existingRows.isEmpty {
                 print(
@@ -36650,20 +36288,15 @@ final class AppState: ObservableObject {
     ) async -> NormalizedSessionLifecycleRemoteRow? {
         guard backendFeatureFlags.supabaseEnabled,
               isOrganizationContextReady,
-              let client = supabaseClient else {
+              let reader = sessionReadRepository else {
             return nil
         }
         do {
-            let rows = try await client
-                .from("sessions")
-                .select("id, org_id, property_id, status, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, updated_at, deleted_at")
-                .eq("org_id", value: orgID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .eq("id", value: sessionID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value as [RemoteSessionLifecycleReplayRecord]
-            guard let row = rows.first else { return nil }
+            guard let row = try await reader.lifecycle(
+                sessionID: sessionID,
+                propertyID: propertyID,
+                organizationID: orgID
+            ) else { return nil }
             return NormalizedSessionLifecycleRemoteRow(
                 id: row.id,
                 orgID: row.orgID,
@@ -36764,13 +36397,7 @@ final class AppState: ObservableObject {
             if sessionValues.isEmpty {
                 sessionRecords = []
             } else {
-                sessionRecords = try await client
-                    .from("sessions")
-                    .select("id, org_id, property_id, status, updated_at, revision, deleted_at")
-                    .in("id", values: sessionValues)
-                    .limit(sessionValues.count)
-                    .execute()
-                    .value as [CanonicalReadRemoteSessionRecord]
+                sessionRecords = try await sessionReadRepository!.canonical(ids: sessionValues.compactMap(UUID.init(uuidString:)))
             }
             let sessionsByID = Dictionary(uniqueKeysWithValues: sessionRecords.map { ($0.id, $0) })
             return observationRecords.map { record in
@@ -37287,19 +36914,13 @@ final class AppState: ObservableObject {
             return nil
         }
 #endif
-        guard let client = supabaseClient else { return nil }
+        guard let reader = sessionReadRepository else { return nil }
 
-        let rows = try await client
-            .from("sessions")
-            .select("id, org_id, property_id, status, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, locked_by_user_id, locked_by_device_id, locked_at, coordination_tier1_snapshot, updated_at")
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .eq("id", value: sessionID.uuidString.lowercased())
-            .limit(1)
-            .execute()
-            .value as [RemoteSessionCoordinationRecord]
-
-        return rows.first
+        return try await reader.coordination(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            organizationID: orgID
+        )
     }
 
     private func fetchRemotePropertySessionOccupancyRecord(
@@ -37383,19 +37004,13 @@ final class AppState: ObservableObject {
             )
         }
 #endif
-        guard let client = supabaseClient else { return nil }
+        guard let reader = sessionReadRepository else { return nil }
 
-        let rows = try await client
-            .from("sessions")
-            .select("id, org_id, property_id, deleted_at, locked_by_user_id, locked_by_device_id, locked_at")
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .eq("id", value: sessionID.uuidString.lowercased())
-            .limit(1)
-            .execute()
-            .value as [RemoteSessionDeletePreflightRecord]
-
-        return rows.first
+        return try await reader.deletePreflight(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            organizationID: orgID
+        )
     }
 
     private func fetchRemotePropertySessionLockRecords(
@@ -37463,16 +37078,9 @@ final class AppState: ObservableObject {
             return []
         }
 #endif
-        guard let client = supabaseClient else { return [] }
+        guard let reader = sessionReadRepository else { return [] }
 
-        return try await client
-            .from("sessions")
-            .select("id, org_id, property_id, status, completed_at, exported_at, is_sealed, first_delivered_at, locked_by_user_id, locked_by_device_id, locked_at")
-            .eq("org_id", value: orgID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .is("deleted_at", value: nil)
-            .execute()
-            .value
+        return try await reader.activePropertySessions(propertyID: propertyID, organizationID: orgID)
     }
 
     @MainActor
@@ -39186,7 +38794,7 @@ final class AppState: ObservableObject {
 
     private struct RemoteLegacyMigrationSnapshot {
         let properties: [SupabasePropertyIdentityRecord]
-        let sessions: [SupabaseSessionIdentityRecord]
+        let sessions: [SessionIdentityRecord]
         let shots: [SupabaseShotIdentityRecord]
     }
 
@@ -39575,12 +39183,7 @@ final class AppState: ObservableObject {
             .execute()
             .value as [SupabasePropertyIdentityRecord]
 
-        let sessions = try await client
-            .from("sessions")
-            .select("id, org_id, property_id, title, status, started_at")
-            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-            .execute()
-            .value as [SupabaseSessionIdentityRecord]
+        let sessions = try await sessionReadRepository!.identities(organizationID: activeOrganizationID)
 
         let shots = try await client
             .from("shots")
@@ -41196,17 +40799,11 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID
     ) async throws -> Bool {
-        let rows = try await client
-            .from("sessions")
-            .select("id, org_id, property_id, title, status, started_at")
-            .eq("id", value: sessionID.uuidString.lowercased())
-            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .limit(1)
-            .execute()
-            .value as [SupabaseSessionIdentityRecord]
-
-        guard let row = rows.first else { return false }
+        guard let row = try await sessionReadRepository!.identity(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            organizationID: activeOrganizationID
+        ) else { return false }
         return row.id == sessionID && row.orgID == activeOrganizationID && row.propertyID == propertyID
     }
 
@@ -49190,14 +48787,8 @@ final class AppState: ObservableObject {
         var shotResults: [FastRuntimeReportPackageDryRunShot] = []
 
         do {
-            let sessions: [FastRuntimeReportRemoteSessionRecord] = try await client
-                .from("sessions")
-                .select("id, org_id, property_id, title, status, started_at, completed_at, exported_at, is_sealed, first_delivered_at, capture_profile, updated_by, deleted_at")
-                .eq("id", value: sessionID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value
+            let remoteSession = try await sessionReadRepository!.reportSession(sessionID: sessionID, propertyID: propertyID)
+            let sessions = remoteSession.map { [$0] } ?? []
             let statusRows: [PropertyStatusRecord] = try await client
                 .from("property_status")
                 .select(
@@ -57881,20 +57472,10 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         activeOrganizationID: UUID
     ) async throws -> RemoteSessionDeltaRecord? {
-        guard let client = supabaseClient else {
+        guard let reader = sessionReadRepository else {
             throw RemotePropertyFetchError.missingClient
         }
-        let records = try await client
-            .from("sessions")
-            .select("id, org_id, property_id, title, status, started_at, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, capture_profile, updated_at, updated_by, revision, deleted_at")
-            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-            .eq("property_id", value: propertyID.uuidString.lowercased())
-            .eq("status", value: "completed")
-            .is("deleted_at", value: nil)
-            .order("updated_at", ascending: false)
-            .limit(5)
-            .execute()
-            .value as [RemoteSessionDeltaRecord]
+        let records = try await reader.finalizedCandidates(propertyID: propertyID, organizationID: activeOrganizationID)
 
         return records
             .filter {
@@ -58988,15 +58569,19 @@ final class AppState: ObservableObject {
 
         var sessionRows: [SupabaseCaptureProfileUpdateResult] = []
         if let sessionID {
-            sessionRows = try await client
-                .from("sessions")
-                .select("id, org_id, property_id, capture_profile")
-                .eq("id", value: sessionID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .eq("org_id", value: orgID.uuidString.lowercased())
-                .limit(1)
-                .execute()
-                .value as [SupabaseCaptureProfileUpdateResult]
+            if let row = try await sessionReadRepository!.captureProfile(
+                sessionID: sessionID,
+                propertyID: propertyID,
+                organizationID: orgID
+            ) {
+                sessionRows = [SupabaseCaptureProfileUpdateResult(
+                    id: row.id,
+                    orgID: row.organizationID,
+                    propertyID: row.propertyID,
+                    captureProfile: row.captureProfile,
+                    updatedBy: row.updatedBy
+                )]
+            }
         }
 
         return CaptureProfileBackfillRemoteState(
@@ -60835,7 +60420,7 @@ final class AppState: ObservableObject {
 
     func fetchRecentlyDeletedSessionsRemote(propertyID: UUID? = nil) async throws -> [RecentlyDeletedSession] {
         guard let orgID = activeOrganizationID,
-              supabaseClient != nil,
+              sessionReadRepository != nil,
               authenticatedSupabaseUser != nil,
               isOrganizationContextReady else {
             throw SessionSoftDeleteError.missingAuthenticatedContext
@@ -60845,16 +60430,10 @@ final class AppState: ObservableObject {
             return try await recentlyDeletedSessionsFetchOverride(orgID, propertyID)
         }
 #endif
-        guard let client = supabaseClient else {
+        guard let repository = sessionReadRepository else {
             throw SessionSoftDeleteError.missingAuthenticatedContext
         }
-        let params = FetchRecentlyDeletedSessionsRPCPayload(
-            targetOrgID: orgID,
-            targetPropertyID: propertyID
-        )
-        return try await (try client.rpc("fetch_recently_deleted_sessions", params: params))
-            .execute()
-            .value as [RecentlyDeletedSession]
+        return try await repository.recentlyDeleted(organizationID: orgID, propertyID: propertyID)
     }
 
     @discardableResult
@@ -63573,7 +63152,7 @@ final class AppState: ObservableObject {
             createdAt: event.createdAt,
             sessionLookup: propertyID.flatMap { propertyID in
                 guard let sessionID = event.sessionID else { return nil }
-                return SupabaseActivitySessionLookupRecord(
+                return SessionActivityLookupRecord(
                     id: sessionID,
                     propertyID: propertyID,
                     title: sessionTitle
