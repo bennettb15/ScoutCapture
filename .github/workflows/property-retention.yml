@@ -24,8 +24,8 @@ jobs:
     timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && vars.PROPERTY_RETENTION_ENABLED == 'true')
     env:
-      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV2_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY }}
       RETENTION_EXECUTE: ${{ github.event_name == 'schedule' && vars.PROPERTY_RETENTION_ENABLED == 'true' || inputs.execute }}
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +33,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${SUPABASE_URL%/}" != "https://crcylkfymmbtlmnomjwd.supabase.co" ]]; then
+            echo "::error::This 2.0 workflow requires the Scout dev 2 Supabase URL."
+            exit 1
+          fi
           if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
             echo "::error::Supabase service configuration is missing."
             exit 1

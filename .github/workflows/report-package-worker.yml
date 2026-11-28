@@ -54,13 +54,13 @@ jobs:
     timeout-minutes: 20
     if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && vars.PDF_REPORT_PACKAGE_WORKER_ENABLED == 'true')
     env:
-      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
-      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-      REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
-      REPORTS_PORTAL_BASE_URL: ${{ secrets.REPORTS_PORTAL_BASE_URL }}
-      REPORT_EMAIL_REPLY_TO: ${{ secrets.REPORT_EMAIL_REPLY_TO }}
-      REPORT_EMAIL_NOTIFICATIONS_ENABLED: ${{ inputs.suppress_report_email == true && 'false' || vars.REPORT_EMAIL_NOTIFICATIONS_ENABLED || 'true' }}
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV2_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY }}
+      RESEND_API_KEY: ${{ secrets.SCOUT_DEV2_RESEND_API_KEY }}
+      REPORT_EMAIL_FROM: ${{ secrets.SCOUT_DEV2_REPORT_EMAIL_FROM }}
+      REPORTS_PORTAL_BASE_URL: ${{ secrets.SCOUT_DEV2_REPORTS_PORTAL_BASE_URL }}
+      REPORT_EMAIL_REPLY_TO: ${{ secrets.SCOUT_DEV2_REPORT_EMAIL_REPLY_TO }}
+      REPORT_EMAIL_NOTIFICATIONS_ENABLED: 'false'
       REPORT_EMAIL_ALLOWLIST: ${{ vars.REPORT_EMAIL_ALLOWLIST || '' }}
       REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
       REVIEWED_REPORT_REQUEST_ID: ${{ inputs.reviewed_report_request_id || '' }}
@@ -77,8 +77,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${SUPABASE_URL%/}" != "https://crcylkfymmbtlmnomjwd.supabase.co" ]]; then
+            echo "::error::This 2.0 workflow requires the Scout dev 2 Supabase URL."
+            exit 1
+          fi
           if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
-            echo "::error::SCOUT_DEV_SUPABASE_URL and SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY secrets are required."
+            echo "::error::SCOUT_DEV2_SUPABASE_URL and SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY secrets are required."
             exit 1
           fi
 
@@ -106,7 +110,7 @@ jobs:
           set -euo pipefail
           worker_args=(
             --allow-remote-validation
-            --expected-project-ref chlvazmtucoszicehtnm
+            --expected-project-ref crcylkfymmbtlmnomjwd
             --retention-mode dry-run
             --pretty
           )

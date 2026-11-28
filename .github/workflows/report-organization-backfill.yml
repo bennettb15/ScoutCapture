@@ -27,14 +27,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV2_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - name: Validate required secrets
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${SUPABASE_URL%/}" != "https://crcylkfymmbtlmnomjwd.supabase.co" ]]; then
+            echo "::error::This 2.0 workflow requires the Scout dev 2 Supabase URL."
+            exit 1
+          fi
           [[ -n "${SUPABASE_URL:-}" && -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]
       - name: Build report worker image
         run: docker build -f web-contract/report-production/Dockerfile -t scoutcapture-report-worker:organization-backfill .

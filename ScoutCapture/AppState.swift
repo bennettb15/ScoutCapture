@@ -32,6 +32,7 @@ struct SupabaseRuntimeConfiguration {
     }
 
     static let approvedSessionSnapshotStagingProjectRef = "hpekjqqiyurrewfjvjmn"
+    static let v2BackendProjectRef = "crcylkfymmbtlmnomjwd"
     static let productionSnapshotValidationProjectRef = "chlvazmtucoszicehtnm"
     static let productionSnapshotValidationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
     static let productionSnapshotHydrationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_HYDRATION_ALLOWED"
@@ -56,6 +57,20 @@ struct SupabaseRuntimeConfiguration {
         url != nil && !(anonKey?.isEmpty ?? true)
     }
 
+    // The 2.0 build can contact only its dedicated Supabase project or a local test server.
+    var isApprovedV2BackendTarget: Bool {
+        guard isConfigured, let url else { return false }
+        if targetClassification == .localDev { return true }
+        return url.scheme?.lowercased() == "https"
+            && url.host?.lowercased() == "\(Self.v2BackendProjectRef).supabase.co"
+            && url.port == nil
+            && url.user == nil
+            && url.password == nil
+            && url.query == nil
+            && url.fragment == nil
+            && (url.path.isEmpty || url.path == "/")
+    }
+
     var isOverrideActive: Bool {
         source == .environmentOverride || source == .invalidEnvironmentOverride
     }
@@ -68,7 +83,8 @@ struct SupabaseRuntimeConfiguration {
         if host == "127.0.0.1" || host == "localhost" || host == "::1" {
             return .localDev
         }
-        if host == "\(Self.approvedSessionSnapshotStagingProjectRef).supabase.co" {
+        if host == "\(Self.approvedSessionSnapshotStagingProjectRef).supabase.co"
+            || host == "\(Self.v2BackendProjectRef).supabase.co" {
             return .approvedStaging
         }
         if host == "\(Self.productionSnapshotValidationProjectRef).supabase.co",
@@ -9386,12 +9402,12 @@ final class AppState: ObservableObject {
             return
         }
 
-        guard supabaseConfiguration.isConfigured else {
+        guard supabaseConfiguration.isConfigured, supabaseConfiguration.isApprovedV2BackendTarget else {
             stopAllObservers()
             supabaseClient = nil
             isAuthenticationReady = true
             isOrganizationContextReady = true
-            print("[Supabase] bootstrap skipped because configuration is missing or invalid")
+            print("[Supabase] bootstrap skipped because configuration is missing or targets an unapproved backend")
             return
         }
 
@@ -11790,7 +11806,8 @@ final class AppState: ObservableObject {
                 return
             }
 #endif
-            guard let url = supabaseConfiguration.url,
+            guard supabaseConfiguration.isApprovedV2BackendTarget,
+                  let url = supabaseConfiguration.url,
                   let anonKey = supabaseConfiguration.anonKey else { return }
 
             let recoveryClient = SupabaseClient(
@@ -47381,7 +47398,8 @@ final class AppState: ObservableObject {
             }
 
             let uploader = FastRuntimeBackgroundOriginalUploader.shared
-            guard let baseURL = supabaseConfiguration.url,
+            guard supabaseConfiguration.isApprovedV2BackendTarget,
+                  let baseURL = supabaseConfiguration.url,
                   let anonKey = supabaseConfiguration.anonKey else {
                 throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 26, userInfo: [
                     NSLocalizedDescriptionKey: "Upload service configuration is unavailable."

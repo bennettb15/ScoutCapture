@@ -169,6 +169,11 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
             anonKey: "staging-anon-key",
             source: .environmentOverride
         )
+        let v2Backend = SupabaseRuntimeConfiguration(
+            url: URL(string: "https://\(SupabaseRuntimeConfiguration.v2BackendProjectRef).supabase.co"),
+            anonKey: "v2-publishable-key",
+            source: .infoPlist
+        )
         let remote = SupabaseRuntimeConfiguration(
             url: URL(string: "https://remote.example.supabase.co"),
             anonKey: "remote-anon-key",
@@ -187,17 +192,24 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         )
 
         XCTAssertEqual(local.targetClassification, .localDev)
+        XCTAssertTrue(local.isApprovedV2BackendTarget)
+        XCTAssertEqual(v2Backend.targetClassification, .approvedStaging)
+        XCTAssertTrue(v2Backend.isApprovedV2BackendTarget)
         XCTAssertTrue(local.isSafeLocalDevOverride)
         XCTAssertTrue(local.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertEqual(staging.targetClassification, .approvedStaging)
+        XCTAssertFalse(staging.isApprovedV2BackendTarget)
         XCTAssertFalse(staging.isSafeLocalDevOverride)
         XCTAssertTrue(staging.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertEqual(remote.targetClassification, .remote)
+        XCTAssertFalse(remote.isApprovedV2BackendTarget)
         XCTAssertFalse(remote.isSafeLocalDevOverride)
         XCTAssertFalse(remote.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertEqual(productionWithoutGate.targetClassification, .remote)
         XCTAssertFalse(productionWithoutGate.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertEqual(productionWithGate.targetClassification, .approvedProductionValidation)
+        XCTAssertFalse(productionWithoutGate.isApprovedV2BackendTarget)
+        XCTAssertFalse(productionWithGate.isApprovedV2BackendTarget)
         XCTAssertTrue(productionWithGate.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertTrue(productionWithGate.isProductionSnapshotValidationManualOnly)
     }

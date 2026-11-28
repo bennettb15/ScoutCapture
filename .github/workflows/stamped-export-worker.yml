@@ -19,8 +19,8 @@ jobs:
     timeout-minutes: 15
     if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.STAMPED_EXPORT_WORKER_ENABLED == 'true')
     env:
-      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV2_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -29,8 +29,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${SUPABASE_URL%/}" != "https://crcylkfymmbtlmnomjwd.supabase.co" ]]; then
+            echo "::error::This 2.0 workflow requires the Scout dev 2 Supabase URL."
+            exit 1
+          fi
           if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
-            echo "::error::SCOUT_DEV_SUPABASE_URL and SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY secrets are required."
+            echo "::error::SCOUT_DEV2_SUPABASE_URL and SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY secrets are required."
             exit 1
           fi
 
@@ -48,7 +52,7 @@ jobs:
             scoutcapture-report-worker:stamped-export \
               --stamped-zip-poll-once \
               --allow-remote-validation \
-              --expected-project-ref chlvazmtucoszicehtnm \
+              --expected-project-ref crcylkfymmbtlmnomjwd \
               --allow-org-property d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e \
               --allow-org-property 399ee6e7-3355-48d0-8a75-8c46059f7f11:719f06c5-9e43-4888-82b0-c12d9dff3f5c \
               --allow-org-property 399ee6e7-3355-48d0-8a75-8c46059f7f11:1e1fbe04-b351-496a-aa46-405425b5a067 \

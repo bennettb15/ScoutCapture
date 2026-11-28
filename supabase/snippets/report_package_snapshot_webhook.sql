@@ -25,7 +25,7 @@ when (
   and new.deleted_at is null
 )
 execute function supabase_functions.http_request(
-  'https://chlvazmtucoszicehtnm.functions.supabase.co/report-package-dispatch',
+  'https://crcylkfymmbtlmnomjwd.functions.supabase.co/report-package-dispatch',
   'POST',
   '{"Content-Type":"application/json","x-scoutcapture-report-trigger-secret":"__REPORT_PACKAGE_DISPATCH_SECRET__"}',
   '{}',

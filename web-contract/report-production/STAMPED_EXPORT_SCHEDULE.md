@@ -47,8 +47,8 @@ Manual `workflow_dispatch` runs are allowed even while the schedule is disabled.
 Set these as GitHub Actions repository secrets:
 
 ```text
-SCOUT_DEV_SUPABASE_URL=https://chlvazmtucoszicehtnm.supabase.co
-SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY=[scout-dev service-role key]
+SCOUT_DEV2_SUPABASE_URL=https://crcylkfymmbtlmnomjwd.supabase.co
+SCOUT_DEV2_SUPABASE_SERVICE_ROLE_KEY=[scout-dev service-role key]
 ```
 
 Do not use a `VITE_` prefix. Do not print or commit the service-role key.
@@ -77,7 +77,7 @@ docker run --rm \
   scoutcapture-report-worker:stamped-export \
     --stamped-zip-poll-once \
     --allow-remote-validation \
-    --expected-project-ref chlvazmtucoszicehtnm \
+    --expected-project-ref crcylkfymmbtlmnomjwd \
     --allow-org-property d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e \
     --stamped-zip-limit 5 \
     --pretty
@@ -121,12 +121,12 @@ Local equivalent:
 docker build -f web-contract/report-production/Dockerfile -t scoutcapture-report-worker:stamped-export .
 docker run --rm scoutcapture-report-worker:stamped-export --runtime-check --pretty --require-heif
 docker run --rm \
-  -e SUPABASE_URL=https://chlvazmtucoszicehtnm.supabase.co \
+  -e SUPABASE_URL=https://crcylkfymmbtlmnomjwd.supabase.co \
   -e SUPABASE_SERVICE_ROLE_KEY=[redacted] \
   scoutcapture-report-worker:stamped-export \
     --stamped-zip-poll-once \
     --allow-remote-validation \
-    --expected-project-ref chlvazmtucoszicehtnm \
+    --expected-project-ref crcylkfymmbtlmnomjwd \
     --allow-org-property d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e \
     --stamped-zip-limit 5 \
     --pretty
